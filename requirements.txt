@@ -10,3 +10,4 @@ python-dateutil
 python-dotenv
 ccxt
 streamlit-autorefresh
+pandas-ta
