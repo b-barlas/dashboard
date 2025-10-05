@@ -9,3 +9,4 @@ requests
 python-dateutil
 python-dotenv
 ccxt
+streamlit-autorefresh
