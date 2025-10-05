@@ -145,16 +145,82 @@ st.markdown(
 
 
 # Exchange set up with caching
+#
+# In the UK, direct access to Binance can be restricted.  To ensure the
+# dashboard operates smoothly on Streamlit Cloud or in regions where
+# Binance isn’t available, the default exchange provider is set to
+# Bybit.  The function can be extended to support additional
+# providers (e.g. 'okx', 'kucoin', 'bitget', etc.) if necessary.  A
+# fallback mechanism tries each provider in sequence until one
+# successfully loads markets.  This avoids hard dependency on any
+# single exchange and keeps the app functional when a particular
+# provider is blocked.
 @st.cache_resource(show_spinner=False)
-def get_exchange():
-    return ccxt.binance({
-        "enableRateLimit": True,
-        "options": {
-            "adjustForTimeDifference": True 
-        }
-    })
+def get_exchange(provider: str = "bybit"):
+    """Return a ccxt exchange instance using the specified provider.
 
-EXCHANGE = get_exchange()
+    If the requested provider fails to initialise (e.g. not
+    available), a list of fallback providers is tried in order.  The
+    returned exchange uses rate limiting and time adjustment options
+    similar to the previous Binance setup.  If no providers can be
+    initialised, an exception is raised.
+
+    Parameters
+    ----------
+    provider: str
+        The primary exchange identifier (e.g. 'bybit', 'okx').  This can
+        be customised via an environment variable or secrets if
+        desired.  Defaults to "bybit" for UK compliance.
+
+    Returns
+    -------
+    ccxt.Exchange
+        A configured exchange instance ready to fetch tickers and OHLCV.
+    """
+    # Determine the list of providers to try.  Always include the
+    # requested provider first, followed by sensible defaults.  Order
+    # matters: providers at the front are tried before those at the end.
+    fallback_providers = [provider.lower()] + [
+        p for p in ["bybit", "okx", "kucoin", "bitget", "kraken", "coinbasepro"]
+        if p.lower() != provider.lower()
+    ]
+    last_error = None
+    for exch_id in fallback_providers:
+        try:
+            # Dynamically get the exchange class from ccxt
+            exchange_class = getattr(ccxt, exch_id)
+            # Instantiate with rate limit and time adjustment options
+            exchange = exchange_class({
+                "enableRateLimit": True,
+                "options": {
+                    "adjustForTimeDifference": True
+                }
+            })
+            # Try loading markets to verify connectivity
+            exchange.load_markets()
+            return exchange
+        except Exception as e:
+            last_error = e
+            continue
+    # If all providers failed, raise the last error for debugging
+    raise RuntimeError(f"No available exchanges could be initialised. Last error: {last_error}")
+
+# Initialise the global exchange using the default provider.  If you wish to
+# change the provider without modifying code, set an environment
+# variable STREAMLIT_EXCHANGE_PROVIDER to one of the supported
+# identifiers (e.g. 'bybit', 'okx').  The call below reads that
+# variable; if unset, it defaults to "bybit".  This makes deployment to
+# Streamlit Cloud in regions with Binance restrictions straightforward.
+import os
+_provider_env = os.environ.get("STREAMLIT_EXCHANGE_PROVIDER", "bybit")
+try:
+    EXCHANGE = get_exchange(_provider_env)
+except Exception as e:
+    # Log and fall back to a safe value of None so that downstream
+    # functions handle missing exchange gracefully.  In practice this
+    # should seldom occur because the fallback list is robust.
+    st.warning(f"Exchange provider initialisation failed: {e}")
+    EXCHANGE = None
 
 # Fetch BTC and ETH prices in USD from CoinGecko
 @st.cache_data(ttl=120, show_spinner=False)
@@ -261,6 +327,13 @@ def get_social_sentiment(symbol: str) -> tuple[int, str]:
 
 @st.cache_resource(show_spinner=False)
 def get_markets() -> dict:
+    """
+    Load and return the market symbols from the configured exchange.
+
+    Returns an empty dictionary if the exchange is not initialised.
+    """
+    if EXCHANGE is None:
+        return {}
     try:
         return EXCHANGE.load_markets()
     except Exception as e:
@@ -273,6 +346,14 @@ MARKETS = get_markets()
 # Fetch price change percentage for a given symbol via ccxt
 @st.cache_data(ttl=60, show_spinner=False)
 def get_price_change(symbol: str) -> float | None:
+    """
+    Return the 24h percentage change for the given trading pair.
+
+    If no exchange is initialised or the ticker cannot be fetched,
+    returns None.  The percentage is rounded to two decimal places.
+    """
+    if EXCHANGE is None:
+        return None
     try:
         ticker = EXCHANGE.fetch_ticker(symbol)
         percent = ticker.get("percentage")
@@ -283,6 +364,16 @@ def get_price_change(symbol: str) -> float | None:
 # Fetch OHLCV data for a symbol and timeframe
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 120) -> pd.DataFrame | None:
+    """
+    Fetch OHLCV data for a trading pair and timeframe.
+
+    If the configured exchange cannot retrieve data for the symbol or
+    timeframe, None is returned.  Data is returned as a DataFrame with
+    timestamp converted to pandas datetime.  The function gracefully
+    handles the case where no exchange is configured.
+    """
+    if EXCHANGE is None:
+        return None
     try:
         data = EXCHANGE.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
