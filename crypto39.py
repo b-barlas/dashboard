@@ -1295,7 +1295,7 @@ def render_market_tab():
     with m5:
         st.markdown(
             f"<div class='metric-card'>"
-            f"  <div class='metric-label'>Market Prediction</div>"
+            f"  <div class='metric-label'>AI Market Prediction</div>"
             f"  <div class='metric-value'>{mkt_prob*100:.1f}%</div>"
             f"  <div style='color:{mkt_color};font-size:0.9rem;'>{mkt_label}</div>"
             f"</div>",
