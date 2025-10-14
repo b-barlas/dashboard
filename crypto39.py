@@ -137,6 +137,26 @@ st.markdown(
     table.dataframe tbody tr:hover {{
         background-color: rgba(255, 255, 255, 0.03);
     }}
+
+    /* Force dark theme on Streamlit's interactive dataframes (st.dataframe) */
+    [data-testid="stDataFrame"] div[role="grid"] {{
+        background-color: {PRIMARY_BG} !important;
+        color: {TEXT_LIGHT} !important;
+    }}
+    [data-testid="stDataFrame"] .row-header,
+    [data-testid="stDataFrame"] .cell,
+    [data-testid="stDataFrame"] th,
+    [data-testid="stDataFrame"] td {{
+        background-color: {PRIMARY_BG} !important;
+        color: {TEXT_LIGHT} !important;
+        border-color: rgba(255, 255, 255, 0.08) !important;
+    }}
+    /* Override default table (st.table) background */
+    [data-testid="stTable"] table {{
+        background-color: {PRIMARY_BG} !important;
+        color: {TEXT_LIGHT} !important;
+        border-color: rgba(255, 255, 255, 0.08) !important;
+    }}
     </style>
     """,
     unsafe_allow_html=True
@@ -1131,17 +1151,33 @@ def get_scalping_entry_target(
 # === Machine Learning Prediction ===
 def ml_predict_direction(df: pd.DataFrame) -> tuple[float, str]:
     """
-    Train an advanced machine‑learning classifier (XGBoost) on recent candles to estimate whether
-    the next candle's close will be higher (bullish) or lower (bearish).  This function generates
-    a range of technical indicators and statistical features, fits an XGBoost classifier to the
-    historical data, and returns the probability of an upward move along with a directional label.
+    Train a lightweight machine‑learning classifier on recent candles to estimate the
+    probability that the next candle's close will be higher (bullish).  A suite of
+    technical indicators is computed and shifted to avoid look‑ahead bias.  A
+    deterministic LogisticRegression model is then fit.  The function returns
+    the probability of an up move and a directional label (LONG/SHORT/NEUTRAL)
+    using fixed thresholds of 60%/40% respectively.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        A DataFrame containing columns ['open','high','low','close','volume'].
+
+    Returns
+    -------
+    tuple[float, str]
+        (probability_up, direction), where probability_up is in [0, 1].
     """
+    # Require a minimum number of candles to build a sensible feature set
     if df is None or len(df) < 60:
         return 0.5, "NEUTRAL"
 
+    # Copy the input to avoid modifying external data and reset index for consistency
     df = df.copy().reset_index(drop=True)
 
-    # Calculate features
+    # Compute a set of technical indicators.  We avoid look‑ahead by shifting
+    # features later.  Each indicator is computed on the 'close' series or
+    # appropriate OHLC fields.
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
     df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
     df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
@@ -1153,14 +1189,17 @@ def ml_predict_direction(df: pd.DataFrame) -> tuple[float, str]:
     df['obv'] = ta.volume.on_balance_volume(df['close'], df['volume'])
     df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
 
-    # Target: 1 if next close > current close, else 0
+    # Define the prediction target: 1 if the next close is greater than the current close
     df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
 
-    # Features: select numeric columns and shift by 1 to avoid look-ahead
-    feature_cols = ['ema5','ema9','ema21','rsi','macd','macd_signal','macd_diff','obv','atr']
+    # Specify the feature columns and shift by one row to ensure only historical
+    # information is used to predict the next candle.  Concatenate with the target
+    # and drop any rows with missing values introduced by shifting/indicators.
+    feature_cols = ['ema5', 'ema9', 'ema21', 'rsi', 'macd', 'macd_signal', 'macd_diff', 'obv', 'atr']
     df_features = df[feature_cols].shift(1)
     df_model = pd.concat([df_features, df['target']], axis=1).dropna()
 
+    # If there are not enough rows after dropping NA, return a neutral signal
     if len(df_model) < 50:
         return 0.5, "NEUTRAL"
 
@@ -1168,13 +1207,25 @@ def ml_predict_direction(df: pd.DataFrame) -> tuple[float, str]:
     y = df_model['target'].astype(int).values
 
     try:
-        model = LogisticRegression(max_iter=1000)
+        # Instantiate a deterministic Logistic Regression model.  Setting
+        # random_state ensures the coefficients are reproducible across runs and
+        # environments (e.g. local vs Streamlit Cloud).
+        model = LogisticRegression(max_iter=1000, random_state=42)
+        # Fit on all but the last observation, reserving the final row for prediction
         model.fit(X[:-1], y[:-1])
-        prob_up = float(model.predict_proba(X[-1:].reshape(1, -1))[0][1])
+        # Predict probability of class 1 (next candle up) on the most recent row
+        prob_up = float(model.predict_proba(X[-1].reshape(1, -1))[0][1])
     except Exception:
+        # In case of any unexpected training error, fall back to a neutral probability
         return 0.5, "NEUTRAL"
 
-    direction = "LONG" if prob_up >= 0.6 else ("SHORT" if prob_up <= 0.4 else "NEUTRAL")
+    # Translate probability into a directional label using fixed thresholds
+    if prob_up >= 0.6:
+        direction = "LONG"
+    elif prob_up <= 0.4:
+        direction = "SHORT"
+    else:
+        direction = "NEUTRAL"
     return prob_up, direction
 
 
@@ -1295,7 +1346,7 @@ def render_market_tab():
     with m5:
         st.markdown(
             f"<div class='metric-card'>"
-            f"  <div class='metric-label'>AI Market Prediction</div>"
+            f"  <div class='metric-label'>Market Prediction</div>"
             f"  <div class='metric-value'>{mkt_prob*100:.1f}%</div>"
             f"  <div style='color:{mkt_color};font-size:0.9rem;'>{mkt_label}</div>"
             f"</div>",
@@ -1331,19 +1382,29 @@ def render_market_tab():
             ada_prob, _ = ml_predict_direction(ada_df_behav)
         if xrp_df_behav is not None and not xrp_df_behav.empty:
             xrp_prob, _ = ml_predict_direction(xrp_df_behav)
-        # Compute a weighted probability across all assets.  Dominance values
-        # reflect each coin's share of the total crypto market.  If the sum of
-        # dominances is zero (unlikely), default to 1 to avoid division by zero.
-        dom_sum = btc_dom + eth_dom + bnb_dom + sol_dom + ada_dom + xrp_dom
-        dom_sum = dom_sum if dom_sum > 0 else 1.0
-        behaviour_prob = (
-            btc_prob * btc_dom
-            + eth_prob * eth_dom
-            + bnb_prob * bnb_dom
-            + sol_prob * sol_dom
-            + ada_prob * ada_dom
-            + xrp_prob * xrp_dom
-        ) / dom_sum
+        # Compute a weighted probability across all assets.  Each asset's
+        # predicted probability is weighted by its current dominance.  Only
+        # include assets that have a non‑zero dominance and a defined
+        # probability; this avoids skewing the result with neutral priors
+        # associated with coins that are absent or extremely small.  If the
+        # aggregate weight is zero (very unlikely), fall back to a neutral value.
+        probs_dict = {
+            'BTC': (btc_prob, btc_dom),
+            'ETH': (eth_prob, eth_dom),
+            'BNB': (bnb_prob, bnb_dom),
+            'SOL': (sol_prob, sol_dom),
+            'ADA': (ada_prob, ada_dom),
+            'XRP': (xrp_prob, xrp_dom),
+        }
+        weighted_sum = 0.0
+        weight_total = 0.0
+        for name, (prob, dom) in probs_dict.items():
+            # Skip entries with zero dominance; treat missing probabilities as neutral (0.5)
+            if dom and dom > 0:
+                p = prob if prob is not None else 0.5
+                weighted_sum += p * dom
+                weight_total += dom
+        behaviour_prob = weighted_sum / weight_total if weight_total > 0 else 0.5
     except Exception:
         behaviour_prob = 0.5
     # Determine behaviour direction from the combined probability
@@ -2743,17 +2804,26 @@ def render_ml_tab():
                             xrp_prob_tf, _ = ml_predict_direction(xrp_df_tf)
                         # Fetch dominance percentages to weight the probabilities
                         btc_dom_tf, eth_dom_tf, _, _, _, bnb_dom_tf, sol_dom_tf, ada_dom_tf, xrp_dom_tf = get_market_indices()
-                        # Compute the sum of all dominances and prevent division by zero
-                        dom_sum_tf = btc_dom_tf + eth_dom_tf + bnb_dom_tf + sol_dom_tf + ada_dom_tf + xrp_dom_tf
-                        dom_sum_tf = dom_sum_tf if dom_sum_tf > 0 else 1.0
-                        mkt_prob_tf = (
-                            btc_prob_tf * btc_dom_tf
-                            + eth_prob_tf * eth_dom_tf
-                            + bnb_prob_tf * bnb_dom_tf
-                            + sol_prob_tf * sol_dom_tf
-                            + ada_prob_tf * ada_dom_tf
-                            + xrp_prob_tf * xrp_dom_tf
-                        ) / dom_sum_tf
+                        # Compute a dominance‑weighted probability.  Only coins with
+                        # positive dominance contribute to the combined market
+                        # outlook.  Probabilities default to 0.5 when data is
+                        # missing.  If the total weight is zero, fall back to 0.5.
+                        probs_tf = {
+                            'BTC': (btc_prob_tf, btc_dom_tf),
+                            'ETH': (eth_prob_tf, eth_dom_tf),
+                            'BNB': (bnb_prob_tf, bnb_dom_tf),
+                            'SOL': (sol_prob_tf, sol_dom_tf),
+                            'ADA': (ada_prob_tf, ada_dom_tf),
+                            'XRP': (xrp_prob_tf, xrp_dom_tf),
+                        }
+                        weighted_sum_tf = 0.0
+                        weight_total_tf = 0.0
+                        for name, (p, dom) in probs_tf.items():
+                            if dom and dom > 0:
+                                prob_val = p if p is not None else 0.5
+                                weighted_sum_tf += prob_val * dom
+                                weight_total_tf += dom
+                        mkt_prob_tf = weighted_sum_tf / weight_total_tf if weight_total_tf > 0 else 0.5
                     except Exception:
                         mkt_prob_tf = 0.5
                     # Determine combined market direction based on probability
