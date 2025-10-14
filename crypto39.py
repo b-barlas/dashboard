@@ -73,7 +73,7 @@ st.markdown(
 
     /* Card styling */
     .metric-card {{
-        background-color: {PRIMARY_BG};
+        background-color: {CARD_BG};
         border: 1px solid rgba(255, 255, 255, 0.06);
         border-radius: 14px;
         padding: 24px 20px;
@@ -101,7 +101,7 @@ st.markdown(
 
     /* Panel boxes for larger sections */
     .panel-box {{
-        background-color: {PRIMARY_BG};
+        background-color: {CARD_BG};
         border-radius: 16px;
         padding: 28px;
         margin-bottom: 32px;
@@ -389,15 +389,55 @@ def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 120) -> pd.DataFrame |
 
     If the configured exchange cannot retrieve data for the symbol or
     timeframe, None is returned.  Data is returned as a DataFrame with
-    timestamp converted to pandas datetime.  The function gracefully
-    handles the case where no exchange is configured.
+    timestamps converted to UTC pandas datetime.  The function also
+    discards the last candle if it has not yet closed based on the
+    timeframe.  This prevents partial candles from skewing indicators
+    and ensures consistency across different environments.
+
+    Parameters
+    ----------
+    symbol : str
+        Trading pair (e.g. "BTC/USDT").
+    timeframe : str
+        Timeframe string recognised by the exchange (e.g. '1m','5m','1h','4h').
+    limit : int, optional
+        Maximum number of candles to retrieve.  Defaults to 120.
+
+    Returns
+    -------
+    pd.DataFrame | None
+        A DataFrame with columns [timestamp, open, high, low, close, volume] in UTC,
+        or None if retrieval fails.
     """
     if EXCHANGE is None:
         return None
     try:
         data = EXCHANGE.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        # Convert to UTC datetime
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+        # Drop the last row if it represents an incomplete (still forming) candle.  We
+        # derive the candle duration from the timeframe string.  For example,
+        # '5m' -> 5 minutes, '1h' -> 60 minutes.  If the current time is
+        # earlier than the end of the last candle, we remove it.
+        tf = timeframe.lower()
+        duration_ms = None
+        try:
+            if tf.endswith('m'):
+                duration_ms = int(tf[:-1]) * 60 * 1000
+            elif tf.endswith('h'):
+                duration_ms = int(tf[:-1]) * 60 * 60 * 1000
+            elif tf.endswith('d'):
+                duration_ms = int(tf[:-1]) * 24 * 60 * 60 * 1000
+        except Exception:
+            duration_ms = None
+        if duration_ms and not df.empty:
+            last_ts = df["timestamp"].iloc[-1]
+            end_ts = last_ts + pd.to_timedelta(duration_ms, unit='ms')
+            # Use UTC now for consistency
+            now_ts = pd.Timestamp.utcnow().tz_localize('UTC')
+            if now_ts < end_ts:
+                df = df.iloc[:-1].copy()
         return df
     except Exception:
         return None
@@ -1232,6 +1272,20 @@ def ml_predict_direction(df: pd.DataFrame) -> tuple[float, str]:
 def render_market_tab():
     """Render the Market Dashboard tab containing top‑level crypto metrics and scanning."""
 
+    # Optionally provide a cache refresh button.  This allows users to force
+    # reloading of external data sources when desired.  Clearing both
+    # st.cache_data and st.cache_resource ensures all cached functions
+    # refetch their data on the next run.
+    with st.expander("Refresh & Diagnostics", expanded=False):
+        if st.button("Force refresh data", key="force_refresh_market"):
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            st.success("Caches cleared.  Data will be refreshed on the next run.")
+        # Show a small diagnostics summary: current provider and update time
+        provider_id = EXCHANGE.id.upper() if EXCHANGE else "N/A"
+        update_time = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        st.caption(f"Data Provider: {provider_id} | Last Update: {update_time}")
+
     # Fetch global market data
     # Unpack market indices.  The function returns BTC/ETH dominance, market caps,
     # 24h change and dominance values for BNB, SOL, ADA and XRP.  We keep the
@@ -1346,7 +1400,7 @@ def render_market_tab():
     with m5:
         st.markdown(
             f"<div class='metric-card'>"
-            f"  <div class='metric-label'>AI Market Prediction</div>"
+            f"  <div class='metric-label'>Market Prediction</div>"
             f"  <div class='metric-value'>{mkt_prob*100:.1f}%</div>"
             f"  <div style='color:{mkt_color};font-size:0.9rem;'>{mkt_label}</div>"
             f"</div>",
@@ -1668,6 +1722,18 @@ def render_market_tab():
                 volume_spike,
                 strict_mode=strict_toggle_market
             )
+            # If a scalp setup exists but the risk/reward ratio is below the
+            # acceptable threshold (1.5), discard the setup.  This ensures
+            # that only trades with a favourable reward relative to risk are
+            # considered.  Reset the direction and entry/exit levels to
+            # effectively disable the scalp recommendation.  rr_ratio may be
+            # None if computation failed; treat it as invalid in that case.
+            if scalp_direction and (rr_ratio is None or rr_ratio < 1.5):
+                scalp_direction = None
+                entry_s = 0.0
+                target_s = 0.0
+                stop_s = 0.0
+                rr_ratio = 0.0
             entry_price = entry_s if scalp_direction else 0.0
             target_price = target_s if scalp_direction else 0.0
 
@@ -2337,7 +2403,12 @@ def render_position_tab():
                     )
                 
                     # === Display Scalping Result ===
-                    if scalp_direction:
+                    # Only display the scalping trade if the risk/reward ratio
+                    # meets the minimum threshold (≥ 1.5).  Otherwise, treat
+                    # the setup as invalid.  This prevents low‑reward trades
+                    # from being suggested.  When no valid scalp exists, use
+                    # the breakout note or a generic message.
+                    if scalp_direction and rr_ratio is not None and rr_ratio >= 1.5:
                         color = POSITIVE if scalp_direction == "LONG" else NEGATIVE
                         icon = "🟢" if scalp_direction == "LONG" else "🔴"
                         st.markdown(
@@ -2347,13 +2418,17 @@ def render_position_tab():
                               Entry: <b>${entry_s:,.4f}</b><br>
                               Stop Loss: <b>${stop_s:,.4f}</b><br>
                               Target: <b>${target_s:,.4f}</b><br>
-                              Risk/Reward: <b>{rr_ratio:.2f}</b> — {'✅ Good' if rr_ratio >= 1.5 else '⚠️ Too low (ideal ≥ 1.5)'}
+                              Risk/Reward: <b>{rr_ratio:.2f}</b> — ✅ Good
                             </div>
                             """,
                             unsafe_allow_html=True
                         )
                     else:
-                        msg = breakout_note or ("No valid scalping setup with current filters." if strict_toggle_position else "No valid scalping setup (soft mode).")
+                        # Provide a context‑aware message when the setup is invalid.
+                        if scalp_direction and rr_ratio is not None and rr_ratio < 1.5:
+                            msg = f"Scalping setup discarded: risk/reward {rr_ratio:.2f} too low (ideal ≥ 1.5)."
+                        else:
+                            msg = breakout_note or ("No valid scalping setup with current filters." if strict_toggle_position else "No valid scalping setup (soft mode).")
                         st.info(msg)
                 
                     st.markdown(scalping_snapshot_html, unsafe_allow_html=True)
@@ -2734,10 +2809,18 @@ def render_ml_tab():
                             volume_spike,
                             strict_mode=False
                         )
-                        # Only use the scalping result if it matches the ML direction.  This avoids
-                        # showing long entries for short predictions or vice versa.  Also skip
-                        # entries when the prediction is neutral.
-                        if (scalp_direction and scalp_direction == direction and direction != "NEUTRAL"):
+                        # Only adopt the scalping setup when it matches the ML direction,
+                        # the prediction is not neutral, and the risk/reward ratio is
+                        # sufficiently high (≥ 1.5).  This avoids presenting low
+                        # quality or mismatched trades.  If rr_ratio is None, treat
+                        # the setup as invalid.
+                        if (
+                            scalp_direction
+                            and scalp_direction == direction
+                            and direction != "NEUTRAL"
+                            and rr_ratio is not None
+                            and rr_ratio >= 1.5
+                        ):
                             entry_price = entry_s
                             exit_price = target_s
                             entry_source = 'ai'
