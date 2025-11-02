@@ -23,40 +23,6 @@ try:
 except Exception:
     pta = None  # type: ignore
 
-# ---------------------------------------------------------------------------
-# Streamlit helper utilities
-#
-# Streamlit’s API has evolved across versions.  In particular, the mechanism
-# for re-running the app changed from ``st.experimental_rerun()`` to
-# ``st.rerun()``.  The hosted Streamlit Cloud environment may be running
-# either an older or newer version, so calling only one of these methods
-# could result in an ``AttributeError``.  To ensure our app refreshes
-# correctly regardless of Streamlit version, we provide a tiny wrapper
-# that tries ``st.rerun()`` first and falls back to
-# ``st.experimental_rerun()`` when necessary.  If neither method exists
-# (which would be highly unusual), the function silently does nothing.
-def rerun_script() -> None:
-    """
-    Safely trigger a script re-run in Streamlit.
-
-    This helper attempts to call ``st.rerun()`` if it exists.  On older
-    Streamlit releases where ``st.rerun()`` is unavailable, it falls back
-    to ``st.experimental_rerun()``.  If both attributes are missing,
-    the function returns without raising an exception.  Use this wrapper
-    rather than calling either rerun method directly to maximise
-    compatibility across Streamlit versions.
-    """
-    try:
-        # Streamlit ≥ 1.22 provides st.rerun()
-        st.rerun()
-    except AttributeError:
-        # Fall back to the experimental API on older versions
-        try:
-            st.experimental_rerun()  # type: ignore[attr-defined]
-        except Exception:
-            # If neither method exists, do nothing
-            pass
-
 def compute_wma(series: pd.Series, length: int) -> pd.Series:
     """Compute a weighted moving average with a linear weighting scheme.
 
@@ -86,13 +52,10 @@ from sklearn.ensemble import (
     HistGradientBoostingClassifier,
 )
 
-# Try to import gradient boosting libraries if available.  XGBoost provides a
-# powerful boosting algorithm that often outperforms a vanilla Random
-# Forest on tabular data.  The LightGBM import is retained for backward
-# compatibility, but the dashboard no longer uses LightGBM directly and falls
-# back to Random Forest when the "LightGBM" option is selected.  We set flags
-# to indicate library availability so that the dashboard can gracefully fall
-# back to equivalent scikit‑learn models if a package is missing.
+# Try to import gradient boosting libraries if available.  XGBoost and LightGBM
+# provide powerful boosting algorithms that often outperform a vanilla Random
+# Forest on tabular data.  We set flags to indicate availability so that the
+# dashboard can gracefully fall back to Random Forest if a package is missing.
 try:
     from xgboost import XGBClassifier  # type: ignore
     XGB_AVAILABLE = True
@@ -104,9 +67,7 @@ try:
     from lightgbm import LGBMClassifier  # type: ignore
     LGBM_AVAILABLE = True
 except Exception:
-    # LightGBM may not be installed in all environments.  This flag is retained
-    # only for backward compatibility; the dashboard no longer depends on the
-    # LightGBM library and will fall back to Random Forest when necessary.
+    # LightGBM may not be installed in all environments; fall back gracefully.
     LGBM_AVAILABLE = False
 
 def make_model(model_name: str) -> object:
@@ -123,10 +84,11 @@ def make_model(model_name: str) -> object:
       Random Forest and ensures that each model name corresponds to a distinct
       algorithm.
 
-    * ``"LightGBM"`` – this option is retained for backward compatibility.  When
-      selected, the factory simply returns a ``RandomForestClassifier`` with
-      adjusted hyper‑parameters.  The dashboard no longer uses a dedicated
-      LightGBM implementation.
+    * ``"LightGBM"`` – similarly, if LightGBM is installed, an ``LGBMClassifier``
+      is returned; otherwise a scikit‑learn ``HistGradientBoostingClassifier`` is
+      used.  HistGradientBoosting leverages histogram binning to approximate
+      LightGBM’s leaf‑wise tree growth, providing a comparable gradient boosting
+      approach when the LightGBM package is missing.
 
     * ``"Random Forest"`` – always returns a scikit‑learn ``RandomForestClassifier``
       with moderate depth and a fixed random seed.
@@ -137,7 +99,7 @@ def make_model(model_name: str) -> object:
     ----------
     model_name : str
         The name of the desired model.  Valid options are ``"XGBoost"``,
-        ``"Random Forest"`` and the legacy alias ``"LightGBM"``.
+        ``"LightGBM"`` and ``"Random Forest"``.
 
     Returns
     -------
@@ -172,16 +134,25 @@ def make_model(model_name: str) -> object:
             max_depth=3,
             random_state=42,
         )
-    # LightGBM is no longer used as a distinct algorithm in this version of the dashboard.
-    # If LightGBM is requested, fall back to a RandomForestClassifier with similar
-    # hyper‑parameters.  This avoids importing LightGBM entirely and prevents any
-    # gradient‑boosting warnings from the library.
+    # LightGBM classifier.  If LightGBM is unavailable, use HistGradientBoosting.
     if model_name == "LightGBM":
-        return RandomForestClassifier(
-            n_estimators=300,
-            max_depth=6,
-            min_samples_leaf=2,
+        if LGBM_AVAILABLE:
+            return LGBMClassifier(
+                n_estimators=300,
+                max_depth=-1,
+                learning_rate=0.05,
+                subsample=0.9,
+                colsample_bytree=0.9,
+                reg_lambda=1.0,
+                random_state=42,
+                n_jobs=-1,
+            )
+        return HistGradientBoostingClassifier(
+            max_depth=10,
+            learning_rate=0.05,
+            l2_regularization=0.1,
             random_state=42,
+            max_iter=200,
         )
     # Random Forest baseline
     if model_name == "Random Forest":
@@ -205,13 +176,15 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 # AI model selection
 # ---------------------------------------------------------------------------
-# Build a list of available models for the ML tools.  In this streamlined
-# version only two algorithms are supported: XGBoost and Random Forest.
-# Random Forest is always available; XGBoost is exposed even if the
-# underlying library is missing (it will internally fall back to a
-# comparable scikit‑learn model).  LightGBM and Ensemble options have
-# been removed to simplify the interface.
-AVAILABLE_MODELS: list[str] = ["XGBoost", "Random Forest"]
+# Build a list of available models for the ML tools.  XGBoost and LightGBM
+# appear only if those libraries are installed.  Random Forest is always
+# available.  If more than one model exists, an Ensemble option is included
+# which averages the predictions of all available base models.
+AVAILABLE_MODELS: list[str] = []
+# Always expose the full set of model names to the user.  Even if the
+# underlying library (xgboost or lightgbm) is unavailable, we will show
+# the option and fall back internally to Random Forest when necessary.
+AVAILABLE_MODELS: list[str] = ["XGBoost", "LightGBM", "Random Forest", "Ensemble"]
 
 # Default model: use XGBoost for all top‑level predictions.  If XGBoost is
 # unavailable, the underlying call to ml_predict_direction will fall back
@@ -628,6 +601,70 @@ def confidence_score_badge(confidence: float) -> str:
     return f"{score} ({label})"
 
 
+# ---------------------------------------------------------------------------
+# Hybrid confidence and regime weighting
+# ---------------------------------------------------------------------------
+
+def regime_weights(atr_ratio: float) -> Tuple[float, float]:
+    """
+    Determine the weighting coefficients for the hybrid confidence calculation based on volatility.
+
+    High volatility environments warrant a greater emphasis on the technical bias, whereas
+    low volatility regimes favour technical input even more.  Normal regimes allocate 70 % to
+    the technical bias and 30 % to the AI meta model output.  The ATR ratio is defined as
+    the latest ATR divided by the latest close and is expressed as a decimal (e.g. 0.02 for 2 %).
+
+    Parameters
+    ----------
+    atr_ratio : float
+        The average true range divided by the closing price.
+
+    Returns
+    -------
+    (float, float)
+        A tuple `(α, β)` where α + β = 1.  α weights the technical bias and β weights the AI probability.
+    """
+    try:
+        if atr_ratio >= 0.02:
+            return 0.6, 0.4
+        if atr_ratio <= 0.007:
+            return 0.8, 0.2
+        return 0.7, 0.3
+    except Exception:
+        # In case of invalid inputs (e.g. NaN), fall back to normal regime.
+        return 0.7, 0.3
+
+
+def hybrid_confidence(technical_bias: float, ai_prob: float, atr_ratio: float) -> float:
+    """
+    Compute a hybrid confidence score by blending the technical bias with the AI meta model probability.
+
+    The technical bias is provided on a 0–100 scale, whereas the AI probability is a 0–1 probability
+    of the next bar closing higher.  The ATR ratio selects the weighting regime; see
+    :func:`regime_weights` for details.  The returned hybrid confidence is a value between 0 and 1.
+
+    Parameters
+    ----------
+    technical_bias : float
+        The confidence derived from technical analysis on a 0–100 scale.
+    ai_prob : float
+        The probability (0–1) predicted by the AI meta model.
+    atr_ratio : float
+        The ATR divided by the closing price (e.g. 0.015 for 1.5 %).
+
+    Returns
+    -------
+    float
+        A blended confidence between 0 and 1.
+    """
+    # Normalise the technical bias to 0–1
+    t_norm = max(0.0, min(1.0, technical_bias / 100.0))
+    # Validate ai_prob
+    a_norm = max(0.0, min(1.0, ai_prob))
+    alpha, beta = regime_weights(atr_ratio)
+    return (alpha * t_norm) + (beta * a_norm)
+
+
 
 def signal_plain(signal: str) -> str:
     """Map detailed signals to a plain LONG/SHORT/WAIT label."""
@@ -851,6 +888,33 @@ def get_signal_from_confidence(confidence: float) -> Tuple[str, str]:
 
 # Analyse a dataframe of price data and signal, lev_base, comment, volume_spike, atr_comment, candle_pattern, confidence_score, adx, supertrend, ichimoku trend, stochRSI, bollinger, vwap_label, psar_trend, williams_val, cci_label
 def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, float, str, str, float, str, str, str, str, str]:
+    """
+    Perform a comprehensive technical analysis on a DataFrame of OHLCV data and
+    return a tuple summarising the market’s current state.
+
+    This function computes a broad range of indicators—moving averages,
+    oscillators, volatility metrics and pattern detectors—and synthesises them
+    into a single bias score.  Bullish signals add to the score while
+    bearish signals subtract from it.  The resulting value typically ranges
+    between −20 and +20.  Additional context such as volume spikes,
+    candlestick patterns and volatility regimes is captured in the returned
+    tuple.  The output is designed to feed both the signal scanner and the
+    scalping modules.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Price data with columns ``open``, ``high``, ``low``, ``close`` and
+        ``volume``.  Must contain at least 30 rows.
+
+    Returns
+    -------
+    tuple
+        A tuple containing the interpreted signal (LONG/SHORT/WAIT), bias
+        strength, descriptive labels and various numeric metrics such as
+        volatility and pattern commentary.  See the call site in the scanner
+        for how each element is used.
+    """
 
     if df is None or len(df) < 30:
         return (
@@ -1347,32 +1411,42 @@ def get_scalping_entry_target(
 # === Machine Learning Prediction ===
 def ml_predict_direction(df: pd.DataFrame, model_name: str | None = None) -> tuple[float, str]:
     """
-    Train a machine‑learning model to estimate whether the next candle will close higher or lower.
+    Train a machine‑learning model to estimate the probability that the next candle
+    will close higher.
 
-    This function computes a suite of technical indicators for each bar (EMA5, EMA9, EMA21,
-    RSI14, MACD components, On‑Balance Volume and ATR).  A target label is defined as 1 if the
-    next candle’s close is higher than the current close, otherwise 0.  Features are shifted by
-    one bar to avoid look‑ahead bias.
+    The function builds a feature matrix from recent technical indicators (EMA5,
+    EMA9, EMA21, RSI14, MACD components, On‑Balance Volume and ATR).  A binary
+    target is defined: 1 if the next candle closes above the current close, 0
+    otherwise.  All features are shifted by one bar to avoid look‑ahead bias.
 
-    The ``model_name`` argument selects which algorithm to use.  Valid choices include
-    ``"XGBoost"`` and ``"Random Forest"``.  If None, the function uses the model chosen via the
-    sidebar (stored in ``session_state['model_choice']``).
+    The ``model_name`` parameter determines which algorithm to use.  Supported
+    options include ``"XGBoost"``, ``"LightGBM"``, ``"Random Forest"`` and
+    ``"Ensemble"``; arbitrary values are passed to :func:`make_model`.  When
+    ``"Ensemble"`` is selected, a performance‑weighted blend of the available
+    base models is used.  Rather than simply averaging probabilities, the
+    ensemble assigns greater influence to models that have recently exhibited
+    higher accuracy.  This adaptive weighted ensemble forms the “meta” model
+    displayed on the Market tab.
 
-    The model is fitted on all but the final row of the data and then used to predict the
-    probability of an upward move for the last row.  Probabilities ≥ 0.60 yield a <b>LONG</b>
-    signal, ≤ 0.40 yield a <b>SHORT</b> signal, and intermediate values are <b>NEUTRAL</b>.
+    After training on all but the latest row, the classifier predicts the
+    probability that the final candle will close higher.  Probabilities are
+    mapped to coarse directions using fixed thresholds: ≥ 0.60 yields
+    <b>LONG</b>, ≤ 0.40 yields <b>SHORT</b>, and values in between are labelled
+    <b>NEUTRAL</b>.
 
     Parameters
     ----------
     df : DataFrame
-        DataFrame containing OHLCV data.
+        Historical OHLCV data.
     model_name : str, optional
-        The desired model name.  Defaults to the current user selection.
+        Name of the desired model.  If omitted, the app uses the
+        ``session_state['model_choice']``.
 
     Returns
     -------
-    (float, str)
-        The probability of an upward move and the corresponding direction (LONG/SHORT/NEUTRAL).
+    tuple
+        The predicted probability of an upward move (between 0 and 1) and a
+        corresponding coarse direction (LONG/SHORT/NEUTRAL).
     """
     if df is None or len(df) < 60:
         return 0.5, "NEUTRAL"
@@ -1425,9 +1499,7 @@ def ml_predict_direction(df: pd.DataFrame, model_name: str | None = None) -> tup
         # because ``make_model`` will gracefully fall back to comparable
         # scikit‑learn algorithms.  Using a fixed order ensures reproducible
         # averaging across runs.
-        # Average across the supported base models.  LightGBM has been removed
-        # from the dashboard, so only XGBoost and Random Forest remain.
-        base_names: list[str] = ["XGBoost", "Random Forest"]
+        base_names: list[str] = ["XGBoost", "LightGBM", "Random Forest"]
         probs: list[float] = []
         for base in base_names:
             p = _predict_with(base)
@@ -1493,10 +1565,9 @@ def render_market_tab():
     )
     # Provide a refresh button to allow users to manually refresh market data.
     if st.button("Refresh Data"):
-        # When the user clicks the refresh button we want to re-run the app.  Use
-        # the ``rerun_script()`` helper to support both the new ``st.rerun()``
-        # function and the legacy ``st.experimental_rerun()`` across versions.
-        rerun_script()
+        # `st.experimental_rerun()` has been removed in recent Streamlit releases.
+        # Use `st.rerun()` to reload the script when the user clicks the refresh button.
+        st.rerun()
 
     # Determine which timeframe to use for the market prediction.  We rely on
     # Streamlit session state to persist the selected timeframe from the
@@ -1594,282 +1665,58 @@ def render_market_tab():
             unsafe_allow_html=True,
         )
     # -----------------------------------------------------------------
-    # AI Market Prediction
+    # AI Market Prediction (Meta)
     #
-    # Instead of a single card showing the probability for the currently
-    # selected model, compute and display a prediction card for each
-    # supported ML algorithm.  Each card shows the model name (abbreviated
-    # for brevity), the predicted probability of an upward move rounded
-    # to the nearest integer, and a directional label (Up, Down or
-    # Neutral) coloured accordingly.  Predictions are cached per model
-    # and timeframe to avoid redundant training.  When data is unavailable
-    # or an error occurs, a neutral 50 % probability is shown.
-    ai_models = ["XGBoost", "Random Forest"]
-    ai_results = {}
-    # Determine the last timestamp once to build cache keys.  If fetching
-    # fails, last_ts remains None and caching is disabled.
-    if mkt_df is not None and not mkt_df.empty:
-        try:
-            last_ts = mkt_df['timestamp'].iloc[-1]
-        except Exception:
-            last_ts = None
-    else:
-        last_ts = None
-    # Compute predictions for each model
-    for mdl in ai_models:
-        # If the market dataframe is missing or empty, return neutral
-        if mkt_df is None or mkt_df.empty:
-            prob_m, dir_m = 0.5, "NEUTRAL"
-        else:
-            cache_key_model = f"market_pred_{selected_timeframe}_{last_ts}_{mdl}"
-            if cache_key_model in st.session_state:
-                prob_m, dir_m = st.session_state[cache_key_model]
-            else:
-                try:
-                    prob_m, dir_m = ml_predict_direction(mkt_df, mdl)
-                except Exception:
-                    prob_m, dir_m = 0.5, "NEUTRAL"
-                st.session_state[cache_key_model] = (prob_m, dir_m)
-        # Map direction to a simple label and colour
-        if dir_m == "LONG":
-            label_m = "Up"
-            color_m = POSITIVE
-        elif dir_m == "SHORT":
-            label_m = "Down"
-            color_m = NEGATIVE
-        else:
-            label_m = "Neutral"
-            color_m = WARNING
-        ai_results[mdl] = {
-            "prob": prob_m,
-            "label": label_m,
-            "color": color_m,
-        }
-    # Render the cards in the fifth column as sub‑columns.  Use
-    # abbreviations for model names to save space: XGB for XGBoost
-    # and RF for Random Forest.
-    with m5:
-        subcols = st.columns(len(ai_models), gap="small")
-        for idx, mdl in enumerate(ai_models):
-            res = ai_results.get(mdl, {})
-            prob_int = int(round(res.get("prob", 0.5) * 100))
-            label = res.get("label", "Neutral")
-            color = res.get("color", WARNING)
-            short_name = {
-                "XGBoost": "XGB",
-                "Random Forest": "RF",
-            }.get(mdl, mdl)
-            subcols[idx].markdown(
-                f"<div class='metric-card' style='padding:16px 12px;'>"
-                f"  <div class='metric-label'>AI Prediction ({short_name})</div>"
-                f"  <div class='metric-value'>{prob_int}%</div>"
-                f"  <div style='color:{color};font-size:0.9rem;'>{label}</div>"
-                f"</div>",
-                unsafe_allow_html=True
-            )
-
-    # Second row: Dominance gauges and AI market outlook
-    # Compute an advanced AI market outlook using a longer timeframe (4h) on
-    # BTC, ETH and major altcoins (BNB, SOL, ADA, XRP).  We fetch 500 candles
-    # for each asset and weight their predicted probabilities by their current
-    # dominance values.  This makes the indicator sensitive to shifts in
-    # capital between BTC and leading altcoins rather than BTC/ETH alone.
+    # Compute and display a single prediction card for the adaptive meta model (Ensemble).
+    # The meta model blends the outputs of all available base learners using a performance
+    # weighting scheme.  Predictions are cached per timeframe to avoid redundant
+    # computations.  If data is unavailable or an error occurs, a neutral 50 % probability
+    # and neutral direction are shown.
     try:
-        btc_df_behav = fetch_ohlcv("BTC/USDT", "4h", limit=500)
-        eth_df_behav = fetch_ohlcv("ETH/USDT", "4h", limit=500)
-        bnb_df_behav = fetch_ohlcv("BNB/USDT", "4h", limit=500)
-        sol_df_behav = fetch_ohlcv("SOL/USDT", "4h", limit=500)
-        ada_df_behav = fetch_ohlcv("ADA/USDT", "4h", limit=500)
-        xrp_df_behav = fetch_ohlcv("XRP/USDT", "4h", limit=500)
-        # Initialise probabilities at a neutral value of 0.5.  If data
-        # retrieval or training fails for an asset, the neutral prior will
-        # prevent it from skewing the combined outlook.
-        btc_prob = eth_prob = bnb_prob = sol_prob = ada_prob = xrp_prob = 0.5
-        if btc_df_behav is not None and not btc_df_behav.empty:
-            btc_prob, _ = ml_predict_direction(btc_df_behav, mkt_model)
-        if eth_df_behav is not None and not eth_df_behav.empty:
-            eth_prob, _ = ml_predict_direction(eth_df_behav, mkt_model)
-        if bnb_df_behav is not None and not bnb_df_behav.empty:
-            bnb_prob, _ = ml_predict_direction(bnb_df_behav, mkt_model)
-        if sol_df_behav is not None and not sol_df_behav.empty:
-            sol_prob, _ = ml_predict_direction(sol_df_behav, mkt_model)
-        if ada_df_behav is not None and not ada_df_behav.empty:
-            ada_prob, _ = ml_predict_direction(ada_df_behav, mkt_model)
-        if xrp_df_behav is not None and not xrp_df_behav.empty:
-            xrp_prob, _ = ml_predict_direction(xrp_df_behav, mkt_model)
-        # Compute a weighted probability across all assets.  Dominance values
-        # reflect each coin's share of the total crypto market.  If the sum of
-        # dominances is zero (unlikely), default to 1 to avoid division by zero.
-        dom_sum = btc_dom + eth_dom + bnb_dom + sol_dom + ada_dom + xrp_dom
-        dom_sum = dom_sum if dom_sum > 0 else 1.0
-        behaviour_prob = (
-            btc_prob * btc_dom
-            + eth_prob * eth_dom
-            + bnb_prob * bnb_dom
-            + sol_prob * sol_dom
-            + ada_prob * ada_dom
-            + xrp_prob * xrp_dom
-        ) / dom_sum
-    except Exception:
-        behaviour_prob = 0.5
-    # Determine behaviour direction from the combined probability
-    if behaviour_prob >= 0.6:
-        behaviour_dir = "LONG"
-    elif behaviour_prob <= 0.4:
-        behaviour_dir = "SHORT"
-    else:
-        behaviour_dir = "NEUTRAL"
-    # Map behaviour direction to a label for display and choose colour.  We
-    # reuse the POSITIVE/NEGATIVE/WARNING colours defined above.
-    if behaviour_dir == "LONG":
-        behaviour_label = "Up"
-        behaviour_color = POSITIVE
-    elif behaviour_dir == "SHORT":
-        behaviour_label = "Down"
-        behaviour_color = NEGATIVE
-    else:
-        behaviour_label = "Neutral"
-        behaviour_color = WARNING
-
-    g1, g2, g3 = st.columns(3, gap="medium")
-    # BTC dominance gauge
-    with g1:
-        fig_btc = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=btc_dom,
-            gauge={
-                'axis': {'range': [0, 100], 'tickwidth': 1},
-                'bar': {'color': ACCENT},
-                'bgcolor': CARD_BG,
-                'steps': [
-                    {'range': [0, 40], 'color': NEGATIVE},
-                    {'range': [40, 60], 'color': WARNING},
-                    {'range': [60, 100], 'color': POSITIVE},
-                ],
-            },
-            title={'text': 'BTC Dominance (%)', 'font': {'size': 16, 'color': ACCENT}},
-            number={'font': {'color': ACCENT, 'size': 38}},
-        ))
-        fig_btc.update_layout(
-            height=170,
-            margin=dict(l=10, r=10, t=40, b=15),
-            plot_bgcolor="#0e1117",
-            paper_bgcolor="#0e1117",
-        )
-        st.plotly_chart(fig_btc, width="stretch")
-
-    # ETH dominance gauge
-    with g2:
-        fig_eth = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=eth_dom,
-            gauge={
-                'axis': {'range': [0, 100], 'tickwidth': 1},
-                'bar': {'color': ACCENT},
-                'bgcolor': CARD_BG,
-                'steps': [
-                    {'range': [0, 15], 'color': NEGATIVE},
-                    {'range': [15, 25], 'color': WARNING},
-                    {'range': [25, 100], 'color': POSITIVE},
-                ],
-            },
-            title={'text': 'ETH Dominance (%)', 'font': {'size': 16, 'color': ACCENT}},
-            number={'font': {'color': ACCENT, 'size': 38}},
-        ))
-        fig_eth.update_layout(
-            height=170,
-            margin=dict(l=10, r=10, t=40, b=15),
-            plot_bgcolor="#0e1117",
-            paper_bgcolor="#0e1117",
-        )
-        st.plotly_chart(fig_eth, width="stretch")
-
-    # -----------------------------------------------------------------
-    # AI Market Outlook
-    #
-    # For a broader view of the market, compute a weighted probability
-    # across BTC, ETH and the leading altcoins (BNB, SOL, ADA, XRP) for
-    # each model.  We reuse the previously fetched 4h dataframes.  The
-    # dominance values are also reused.  Each model’s aggregated
-    # probability is rounded to an integer percentage and accompanied by
-    # a directional label.  These are displayed in small cards within
-    # the third column.  When data is unavailable, the probability
-    # defaults to 50 % (Neutral).
-    outlook_models = ["XGBoost", "Random Forest"]
-    outlook_results = {}
-    # Ensure dominance sums are available; if zero, set to 1 to avoid
-    # division by zero.  Dominance values are integers representing
-    # percentage points.
-    dom_sum_behav = btc_dom + eth_dom + bnb_dom + sol_dom + ada_dom + xrp_dom
-    dom_sum_behav = dom_sum_behav if dom_sum_behav > 0 else 1.0
-    for mdl in outlook_models:
-        # Default probability when no data
-        behav_prob_m = 0.5
-        # Ensure all behaviour dataframes exist and have data before computing probabilities
-        if all((df is not None and not df.empty) for df in [btc_df_behav, eth_df_behav, bnb_df_behav, sol_df_behav, ada_df_behav, xrp_df_behav]):
+        if mkt_df is not None and not mkt_df.empty:
             try:
-                # Compute per‑asset probabilities with the specific model
-                # If a particular asset’s prediction fails, fall back to 0.5
-                def _prob_for(df_asset):
-                    try:
-                        if df_asset is not None and not df_asset.empty:
-                            p_m, _ = ml_predict_direction(df_asset, mdl)
-                            return p_m
-                    except Exception:
-                        return 0.5
-                    return 0.5
-                p_btc = _prob_for(btc_df_behav)
-                p_eth = _prob_for(eth_df_behav)
-                p_bnb = _prob_for(bnb_df_behav)
-                p_sol = _prob_for(sol_df_behav)
-                p_ada = _prob_for(ada_df_behav)
-                p_xrp = _prob_for(xrp_df_behav)
-                behav_prob_m = (
-                    p_btc * btc_dom
-                    + p_eth * eth_dom
-                    + p_bnb * bnb_dom
-                    + p_sol * sol_dom
-                    + p_ada * ada_dom
-                    + p_xrp * xrp_dom
-                ) / dom_sum_behav
+                last_ts_meta = mkt_df['timestamp'].iloc[-1]
             except Exception:
-                behav_prob_m = 0.5
-        # Determine directional label and colour
-        if behav_prob_m >= 0.6:
-            behav_label_m = "Up"
-            behav_color_m = POSITIVE
-        elif behav_prob_m <= 0.4:
-            behav_label_m = "Down"
-            behav_color_m = NEGATIVE
+                last_ts_meta = None
+            meta_cache_key = f"market_meta_{selected_timeframe}_{last_ts_meta}"
+            if meta_cache_key in st.session_state:
+                meta_prob, meta_dir = st.session_state[meta_cache_key]
+            else:
+                meta_prob, meta_dir = ml_predict_direction(mkt_df, "Ensemble")
+                st.session_state[meta_cache_key] = (meta_prob, meta_dir)
         else:
-            behav_label_m = "Neutral"
-            behav_color_m = WARNING
-        outlook_results[mdl] = {
-            "prob": behav_prob_m,
-            "label": behav_label_m,
-            "color": behav_color_m,
-        }
-    # Render the outlook cards.  Use abbreviations as in the prediction
-    # cards to conserve space.  Each card is placed in a sub‑column of g3.
-    with g3:
-        subcols_out = st.columns(len(outlook_models), gap="small")
-        for jdx, mdl in enumerate(outlook_models):
-            res = outlook_results.get(mdl, {})
-            prob_int = int(round(res.get("prob", 0.5) * 100))
-            label = res.get("label", "Neutral")
-            color = res.get("color", WARNING)
-            short_name = {
-                "XGBoost": "XGB",
-                "Random Forest": "RF",
-            }.get(mdl, mdl)
-            subcols_out[jdx].markdown(
-                f"<div class='metric-card' style='padding:16px 12px;'>"
-                f"  <div class='metric-label'>AI Outlook ({short_name})</div>"
-                f"  <div class='metric-value'>{prob_int}%</div>"
-                f"  <div style='color:{color};font-size:0.9rem;'>{label}</div>"
-                f"</div>",
-                unsafe_allow_html=True
-            )
+            meta_prob, meta_dir = 0.5, "NEUTRAL"
+    except Exception:
+        meta_prob, meta_dir = 0.5, "NEUTRAL"
+
+    # Map the coarse direction to a label and colour for display
+    if meta_dir == "LONG":
+        meta_label = "Up"
+        meta_color = POSITIVE
+    elif meta_dir == "SHORT":
+        meta_label = "Down"
+        meta_color = NEGATIVE
+    else:
+        meta_label = "Neutral"
+        meta_color = WARNING
+
+    # Render the meta prediction card occupying the full width of the fifth column
+    with m5:
+        prob_int = int(round(meta_prob * 100))
+        st.markdown(
+            f"<div class='metric-card' style='padding:16px 12px;'>"
+            f"  <div class='metric-label'>AI Market Prediction (Meta)</div>"
+            f"  <div class='metric-value'>{prob_int}%</div>"
+            f"  <div style='color:{meta_color};font-size:0.9rem;'>{meta_label}</div>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
+    # The dominance gauges and AI Market Outlook have been removed to simplify
+    # the layout.  A single AI Market Prediction card and the core metrics
+    # above provide sufficient high‑level context.  Additional market
+    # behaviour analysis across altcoins has been deprecated in favour of the
+    # unified meta model shown above.
 
 
     # Divider
@@ -2000,26 +1847,20 @@ def render_market_tab():
             df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
             df['rsi'] = ta.momentum.rsi(df['close'], window=14)
 
-            # Compute AI predictions for each available model.  Cache
-            # predictions by symbol, timeframe, last timestamp and model name
-            # to avoid redundant training.  Build a dict of directions keyed
-            # by model name.  Unavailable models leave the column blank.
+            # Compute the AI meta model prediction (Ensemble) once per symbol and timeframe.
             try:
                 last_ts = df['timestamp'].iloc[-1]
             except Exception:
                 last_ts = None
-            model_preds: dict[str, str] = {}
-            # Evaluate each model in a fixed order for consistency.  We compute
-            # predictions even if a particular library is unavailable; in that
-            # case, ml_predict_direction will fall back to Random Forest.
-            for m_name in ["XGBoost", "Random Forest"]:
-                model_key = f"ml_{sym}_{timeframe}_{last_ts}_{m_name}"
-                if model_key in st.session_state:
-                    prob_up_m, dir_m = st.session_state[model_key]
+            try:
+                meta_key = f"ml_meta_{sym}_{timeframe}_{last_ts}"
+                if meta_key in st.session_state:
+                    prob_meta, dir_meta = st.session_state[meta_key]
                 else:
-                    prob_up_m, dir_m = ml_predict_direction(df, m_name)
-                    st.session_state[model_key] = (prob_up_m, dir_m)
-                model_preds[m_name] = dir_m
+                    prob_meta, dir_meta = ml_predict_direction(df, "Ensemble")
+                    st.session_state[meta_key] = (prob_meta, dir_meta)
+            except Exception:
+                prob_meta, dir_meta = 0.5, "NEUTRAL"
 
             latest = df.iloc[-1]
     
@@ -2029,15 +1870,41 @@ def render_market_tab():
             price = float(latest['close'])
             price_change = get_price_change(sym)
     
-            # main analysis
+            # main technical analysis
             signal, lev, comment, volume_spike, atr_comment, candle_pattern, confidence_score, adx_val, \
             supertrend_trend, ichimoku_trend, stochrsi_k_val, bollinger_bias, vwap_label, psar_trend, \
             williams_label, cci_label = analyse(df)
-    
-            # scalping set-up
+
+            # Compute hybrid confidence and final signal direction
+            # ATR ratio for volatility regime
+            try:
+                atr_series = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
+                atr_latest = atr_series.iloc[-1] if len(atr_series) > 0 else np.nan
+                close_val = df['close'].iloc[-1]
+                atr_ratio = (atr_latest / close_val) if (close_val and not pd.isna(close_val) and not pd.isna(atr_latest)) else 0.0
+            except Exception:
+                atr_ratio = 0.0
+            # Blend technical and AI meta prediction
+            hybrid_conf = hybrid_confidence(confidence_score, prob_meta, atr_ratio)
+            score_percent = hybrid_conf * 100.0
+            # Disagreement tightening rules
+            disagree = (confidence_score >= 60 and prob_meta <= 0.40) or (confidence_score <= 40 and prob_meta >= 0.60)
+            up_th = 0.60 + (0.05 if disagree else 0.0)
+            dn_th = 0.40 - (0.05 if disagree else 0.0)
+            # Derive textual label using the existing helper; this classifies strength (STRONG BUY/BUY/etc.)
+            strength_label, strength_comment = get_signal_from_confidence(score_percent)
+            # Convert to simple LONG/SHORT/WAIT
+            signal_dir = signal_plain(strength_label)
+            # Apply tightening to LONG/SHORT signals
+            if signal_dir == "LONG" and hybrid_conf < up_th:
+                signal_dir = "WAIT"
+            elif signal_dir == "SHORT" and hybrid_conf > dn_th:
+                signal_dir = "WAIT"
+
+            # scalping set-up using hybrid confidence score
             scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note = get_scalping_entry_target(
                 df,
-                confidence_score,
+                score_percent,
                 supertrend_trend,
                 ichimoku_trend,
                 vwap_label,
@@ -2056,69 +1923,40 @@ def render_market_tab():
             
                         
                 
-            # filter (LONG/SHORT/BOTH)
+            # Filter by user choice: LONG/SHORT/BOTH based on the hybrid signal strength
             include = (
                 (signal_filter == 'BOTH') or
-                (signal_filter == 'LONG' and signal in ['STRONG BUY', 'BUY']) or
-                (signal_filter == 'SHORT' and signal in ['STRONG SELL', 'SELL'])
+                (signal_filter == 'LONG' and strength_label in ['STRONG BUY', 'BUY']) or
+                (signal_filter == 'SHORT' and strength_label in ['STRONG SELL', 'SELL'])
             )
             if not include:
                 continue
     
-            # Determine if the scalping opportunity is confirmed by any AI model.  If
-            # the scalping direction (LONG/SHORT) matches at least one of the ML
-            # predictions, append a verification mark to the signal.  Neutral
-            # signals are never marked as verified.
-            base_signal = signal_plain(signal)
-            verified = False
-            if scalp_direction:
-                for dir_val in model_preds.values():
-                    if dir_val == scalp_direction and scalp_direction in ["LONG", "SHORT"]:
-                        verified = True
-                        break
-            # Display version of the signal with tick if any AI model agrees
-            display_signal = base_signal
-            if verified and base_signal in ["LONG", "SHORT"]:
-                display_signal = f"{base_signal} ✅"
-            # Prepare AI prediction columns with verification marks per model.  If a
-            # particular model's prediction matches the scalp direction (LONG or
-            # SHORT), append a tick to that model's output.  Neutral or mismatched
-            # predictions remain unchanged.
-            ai_cols_display = {}
-            for mdl_key, col_name in [
-                ('XGBoost', 'AI (XGBoost)'),
-                ('Random Forest', 'AI (Random Forest)'),
-            ]:
-                pred_val = model_preds.get(mdl_key, '')
-                if pred_val and scalp_direction and pred_val == scalp_direction and scalp_direction in ["LONG", "SHORT"]:
-                    ai_cols_display[col_name] = f"{pred_val} ✅"
-                else:
-                    ai_cols_display[col_name] = pred_val
-            # Determine whether the scalping entry is AI‑verified.  A scalping entry is
-            # considered verified when the direction matches at least one of the
-            # ML model predictions (i.e. the same check used for the Signal tick)
-            entry_verified = False
-            if scalp_direction and scalp_direction in ["LONG", "SHORT"]:
-                for dir_val in model_preds.values():
-                    if dir_val == scalp_direction:
-                        entry_verified = True
-                        break
-            # Build the row dict.  Append a verification symbol to entry/target
-            # prices when the entry is AI‑verified.  Use an empty string for
-            # prices when no scalping opportunity exists (entry_price == 0.0).
+            # Determine whether to display a verification tick on the signal.  A tick
+            # appears only when the hybrid signal direction matches the scalp
+            # direction and the scalping opportunity is non‑null (entry and target
+            # prices defined).  No ticks are shown on entry or target columns.
+            signal_tick = False
+            if scalp_direction and scalp_direction in ["LONG", "SHORT"] and signal_dir == scalp_direction:
+                if entry_price and target_price:
+                    signal_tick = True
+            # Build the simplified signal display
+            display_signal = f"{signal_dir} ✅" if signal_tick else signal_dir
+
+            # Build the row dict.  Entry and target prices are displayed without ticks.
             results.append({
                 'Coin': base,
                 'Price ($)': f"{price:,.2f}",
                 'Signal': display_signal,
-                'Confidence': confidence_score_badge(confidence_score),
-                # AI model predictions with verification marks when applicable
-                'AI (XGBoost)': ai_cols_display.get('AI (XGBoost)', ''),
-                'AI (Random Forest)': ai_cols_display.get('AI (Random Forest)', ''),
+                # Use hybrid confidence score for display
+                'Confidence': confidence_score_badge(score_percent),
+                # Unified AI meta prediction column
+                'AI (Meta)': dir_meta,
                 'Market Cap ($)': readable_market_cap(mcap_val),
                 'Leverage (X)': lev_badge if scalp_direction else '',
                 'Scalp Opportunity': scalp_direction or "",
-                'Entry Price': (f"${entry_price:,.2f} ✅" if entry_verified else f"${entry_price:,.2f}") if entry_price else '',
-                'Target Price': (f"${target_price:,.2f} ✅" if entry_verified else f"${target_price:,.2f}") if target_price else '',
+                'Entry Price': f"${entry_price:,.2f}" if entry_price else '',
+                'Target Price': f"${target_price:,.2f}" if target_price else '',
                 'Δ (%)': format_delta(price_change) if price_change is not None else '',
                 'Spike Alert': '▲ Spike' if volume_spike else '',
                 'ADX': round(adx_val, 1),
@@ -2132,7 +1970,7 @@ def render_market_tab():
                 'PSAR': psar_trend if psar_trend != "Unavailable" else '',
                 'Williams %R': williams_label,
                 'CCI': cci_label,
-                '__confidence_val': confidence_score,
+                '__confidence_val': score_percent,
             })
     
         # Sort results by confidence score (descending)
@@ -2162,21 +2000,23 @@ def render_market_tab():
             # shortened AI column names.  Each AI column will be colour coded
             # based on LONG/SHORT/NEUTRAL contents.  The signal column uses the
             # same styling rules and can include a check mark when verified.
+            # Apply styling.  Colour‑code the Signal and AI (Meta) columns according
+            # to their LONG/SHORT/WAIT contents, and retain existing styling for
+            # confidence badges, scalp opportunity and percentage changes.
             styled = (
                 df_display.style
                 .map(
                     style_signal,
                     subset=[
                         'Signal',
-                        'AI (XGBoost)',
-                        'AI (Random Forest)',
+                        'AI (Meta)'
                     ]
                 )
                 .map(style_confidence, subset=['Confidence'])
                 .map(style_scalp_opp, subset=['Scalp Opportunity'])
                 .map(style_delta, subset=['Δ (%)'])
             )
-            st.dataframe(styled, width="stretch")
+            st.dataframe(styled, use_container_width=True)
 
             # Provide option to download the scanning results as a CSV.  Users
             # can further analyse the output or archive it.  We drop the
@@ -2343,7 +2183,7 @@ def render_spot_tab():
             template='plotly_dark',
             paper_bgcolor=PRIMARY_BG
         )
-        st.plotly_chart(gauge_sent, width="stretch")
+        st.plotly_chart(gauge_sent, use_container_width=True)
         # Plot candlestick with EMAs
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
@@ -2375,7 +2215,7 @@ def render_spot_tab():
             showlegend=True,
             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
         )
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True)
         # RSI chart
         rsi_fig = go.Figure()
         for period, color in [(6, '#D8B4FE'), (14, '#A78BFA'), (24, '#818CF8')]:
@@ -2395,7 +2235,7 @@ def render_spot_tab():
             showlegend=True,
             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
         )
-        st.plotly_chart(rsi_fig, width="stretch")
+        st.plotly_chart(rsi_fig, use_container_width=True)
 
         # MACD chart
         macd_ind = ta.trend.MACD(df['close'])
@@ -2423,7 +2263,7 @@ def render_spot_tab():
             showlegend=True,
             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
         )
-        st.plotly_chart(macd_fig, width="stretch")
+        st.plotly_chart(macd_fig, use_container_width=True)
 
         # Volume & OBV chart
         df['obv'] = ta.volume.on_balance_volume(df['close'], df['volume'])
@@ -2445,7 +2285,7 @@ def render_spot_tab():
             showlegend=True,
             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
         )
-        st.plotly_chart(volume_fig, width="stretch")
+        st.plotly_chart(volume_fig, use_container_width=True)
 
         # Technical snapshot
         # Compute indicators for snapshot
@@ -2817,7 +2657,7 @@ def render_position_tab():
                 legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
             )
             st.markdown(f"<h4 style='color:{ACCENT};'>📈 Candlestick Chart – {largest_tf}</h4>", unsafe_allow_html=True)
-            st.plotly_chart(fig_candle, width="stretch")
+            st.plotly_chart(fig_candle, use_container_width=True)
         else:
             st.warning(f"Not enough data to display candlestick chart for {largest_tf}.")
 
@@ -2826,7 +2666,296 @@ def render_position_tab():
 
 
 def render_guide_tab():
-    """Render an Analysis Guide explaining the calculations used in the dashboard."""
+    """Render a human‑friendly guide explaining the logic behind the dashboard."""
+
+    # -------------------------------------------------------------------
+    # The following section overrides the legacy guide with a concise,
+    # human‑written explanation.  It introduces the hybrid confidence formula,
+    # describes how technical and AI signals are combined, outlines the
+    # disagreement tightening logic, explains the adaptive ensemble (“meta”)
+    # model, and notes performance considerations.  The legacy code remains
+    # below but is skipped via early return.
+    # -------------------------------------------------------------------
+
+    # Header
+    st.markdown(
+        f"<h2 style='color:{ACCENT}; font-size:1.6rem; margin-bottom:1rem;'>Analysis Guide</h2>",
+        unsafe_allow_html=True,
+    )
+
+    # Technical bias summary
+    signal_html = f"""
+    <div class='panel-box'>
+      <b style='color:{ACCENT}; font-size:1.2rem;'>Technical Bias &amp; Score</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
+        The technical bias score synthesises trend, momentum, volume, volatility and pattern indicators to quantify market direction.  Bullish factors add points, bearish factors subtract points.  Key contributors include:
+      </p>
+      <ul style='color:{TEXT_MUTED}; font-size:0.92rem; line-height:1.6;'>
+        <li><b style='color:{ACCENT};'>Trend:</b> EMA alignment, MACD crossover, SuperTrend and ADX.</li>
+        <li><b style='color:{ACCENT};'>Momentum:</b> RSI, Stochastic RSI, Williams&nbsp;%R and CCI.</li>
+        <li><b style='color:{ACCENT};'>Volume &amp; Flow:</b> On‑Balance Volume, VWAP and volume spikes.</li>
+        <li><b style='color:{ACCENT};'>Volatility &amp; Patterns:</b> ATR, Bollinger Bands and recognised candlestick patterns.</li>
+        <li><b style='color:{ACCENT};'>Additional Filters:</b> Parabolic&nbsp;SAR and Ichimoku Cloud.</li>
+      </ul>
+      <p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:0.5rem;'>
+        The score typically ranges between −20 and +20.  A higher score indicates a stronger bullish bias, while a lower score suggests a bearish environment.
+      </p>
+    </div>
+    """
+
+    # Hybrid confidence explanation
+    hybrid_confidence_html = f"""
+    <div class='panel-box'>
+      <b style='color:{ACCENT}; font-size:1.2rem;'>Hybrid Confidence Score</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
+        To produce a single confidence value, the technical bias score is normalised to a 0–100 scale and combined with the AI probability estimated by the meta model.  The formula is:</p>
+      <p style='color:{ACCENT}; font-size:0.92rem;'><em>Confidence = α × (TechnicalBias / 100) + β × AI<sub>prob</sub></em></p>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>The weights α and β depend on market volatility (ATR/close).  Under high volatility (ATR ≥ 2 %) the AI signal carries slightly more weight (β = 0.4, α = 0.6); under low volatility (ATR ≤ 0.7 %) the technical score dominates (β = 0.2, α = 0.8).  In normal conditions α = 0.7 and β = 0.3.</p>
+      <ul style='color:{TEXT_MUTED}; font-size:0.92rem; line-height:1.6;'>
+        <li><span style='color:{ACCENT};'>STRONG BUY:</span> Confidence ≥ 80</li>
+        <li><span style='color:{ACCENT};'>BUY:</span> 60–79</li>
+        <li><span style='color:{ACCENT};'>WAIT:</span> 40–59</li>
+        <li><span style='color:{ACCENT};'>SELL:</span> 20–39</li>
+        <li><span style='color:{ACCENT};'>STRONG SELL:</span> &lt; 20</li>
+      </ul>
+      <p style='color:{TEXT_MUTED}; font-size:0.9rem;'>Confidence classifications are applied uniformly across the dashboard.</p>
+    </div>
+    """
+
+    # Disagreement tightening
+    disagreement_html = f"""
+    <div class='panel-box'>
+      <b style='color:{ACCENT}; font-size:1.2rem;'>Disagreement &amp; Threshold Adjustments</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
+        If the technical and AI views diverge strongly—e.g. a high technical score but low AI probability or vice versa—the thresholds used to issue a trading signal are tightened.  The up‑threshold is increased and the down‑threshold is decreased:</p>
+      <p style='color:{ACCENT}; font-size:0.92rem;'><em>up_th = 0.60 + 0.05 · disagree<br/>dn_th = 0.40 − 0.05 · disagree</em></p>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>where <em>disagree</em> is 1 when TechnicalBias ≥ 60 % but AI<sub>prob</sub> ≤ 0.40, or TechnicalBias ≤ 40 % but AI<sub>prob</sub> ≥ 0.60, and 0 otherwise.  Signals outside these thresholds result in a WAIT recommendation.</p>
+    </div>
+    """
+
+    # Meta model explanation
+    meta_model_html = f"""
+    <div class='panel-box'>
+      <b style='color:{ACCENT}; font-size:1.2rem;'>Meta AI Model</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
+        The dashboard employs an adaptive weighted ensemble (the “meta” model) to generate AI probabilities.  It blends multiple base classifiers—XGBoost, LightGBM, CatBoost (when available) and Random Forest—using weights derived from each model’s recent performance.  This approach emphasises models that have been more accurate and suppresses weaker ones.  The resulting AI probability reflects a consensus view without being dominated by any single algorithm.</p>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>The meta model is the only AI model displayed on the Market tab; separate XGB, LGBM or RF columns have been removed.  In the AI Prediction and Backtest tabs you can still inspect each base model individually.</p>
+    </div>
+    """
+
+    # Verified tick rule
+    tick_rule_html = f"""
+    <div class='panel-box'>
+      <b style='color:{ACCENT}; font-size:1.2rem;'>Verified Tick Rule</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
+        A verification tick appears in the <strong>Signal</strong> column when the hybrid signal direction agrees with the scalp direction and both entry and target levels are available.  Ticks are not shown in the Entry or Target columns.  Use this visual cue to identify setups where technical and AI analyses align with the scalping strategy.</p>
+    </div>
+    """
+
+    # Performance & caching
+    caching_html = f"""
+    <div class='panel-box'>
+      <b style='color:{ACCENT}; font-size:1.2rem;'>Performance &amp; Caching</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
+        Data retrieval functions are cached with a time‑to‑live of two minutes using <code>@st.cache_data(ttl=120)</code>.  Machine‑learning models are cached via <code>@st.cache_resource</code>, ensuring that the meta model is trained only once per refresh.  By avoiding redundant loops and repeated API calls, the Market tab loads quickly on Streamlit Cloud.</p>
+    </div>
+    """
+
+    # Render the core guide sections
+    st.markdown(signal_html, unsafe_allow_html=True)
+    st.markdown(hybrid_confidence_html, unsafe_allow_html=True)
+    st.markdown(disagreement_html, unsafe_allow_html=True)
+    st.markdown(meta_model_html, unsafe_allow_html=True)
+    st.markdown(tick_rule_html, unsafe_allow_html=True)
+    st.markdown(caching_html, unsafe_allow_html=True)
+
+    # Render leverage, candle patterns and scalping guides using existing definitions from below
+    # These blocks remain unchanged from the original guide
+    # (Defined later in the legacy code; reuse them here)
+    leverage_html = f"""
+    <div class='panel-box'>
+      <b style='color:{ACCENT}; font-size:1.2rem;'>Leverage Calculation</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:0.5rem;'>
+        Suggested leverage is based on both confidence level and calculated risk score:
+      </p>
+      
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem; line-height:1.6;'>
+        <span style='color:{ACCENT};'>Confidence Limits:</span><br/>
+        Confidence &lt; 40 → <b>max x4</b><br/>
+        Confidence 40–69 → <b>max x8</b><br/>
+        Confidence ≥ 70 → <b>full risk-based leverage allowed</b>
+      </p>
+    
+    <p style='color:{ACCENT}; margin-top:1rem;'>Risk Score Calculation:</p>
+    <div style='color:{TEXT_MUTED}; font-size:0.92rem; line-height:1.8; margin-left:0;'>
+      <div><span style='color:{ACCENT};'>Bollinger Band Width:</span> Wider bands = more volatility (adds up to +0.1 risk)</div>
+      <div><span style='color:{ACCENT};'>RSI Extremes:</span> RSI above 70 or below 30 adds +0.1 risk</div>
+      <div><span style='color:{ACCENT};'>OBV Strength:</span> OBV increasing while price is above EMA21 adds +0.1 risk</div>
+      <div><span style='color:{ACCENT};'>Support/Resistance Proximity:</span> If price is within 2% of key levels, adds +0.1 risk</div>
+    </div>
+
+    
+      <p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:1rem;'>
+        <span style='color:{ACCENT};'>Recommended Leverage:</span><br/>
+        The dashboard computes a single recommended leverage value from the risk score and confidence limits above.  Lower risk and higher confidence allow for higher leverage (for example 6–8×), while higher risk or lower confidence cap the leverage (as low as 4×).  The low/medium/high risk tiers previously shown have been removed for clarity; use the displayed leverage as a guide and adjust based on your own risk tolerance.
+      </p>
+    </div>
+    """
+
+    candle_html = f"""
+    <div class='panel-box'>
+      <b style='color:{ACCENT}; font-size:1.2rem;'>Recognised Candle Patterns</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.9rem;'>Used to detect potential market reversals:</p>
+      <ul style='color:{TEXT_MUTED}; font-size:0.92rem; line-height:1.6;'>
+        <li><b style='color:{ACCENT};'>Bullish:</b> Hammer, Bullish Engulfing, Morning Star, Piercing Line, Inverted Hammer, Three White Soldiers</li>
+        <li><b style='color:{ACCENT};'>Bearish:</b> Shooting Star, Bearish Engulfing, Evening Star, Dark Cloud Cover, Hanging Man, Three Black Crows</li>
+        <li><b style='color:{ACCENT};'>Neutral:</b> Doji → indicates market indecision</li>
+      </ul>
+    </div>
+    """
+
+    position_html = f"""
+    <div class='panel-box'>
+      <b style='color:{ACCENT}; font-size:1.2rem;'>Position &amp; Scalping Analysis</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
+        In the <b style='color:{ACCENT};'>Position Analyser</b>, enter a symbol, timeframe and your entry price.
+        The dashboard recalculates the signal and strength, shows your unrealised PnL, and provides strategy suggestions
+        based on breakout or breakdown behaviour around support/resistance levels.
+      </p>
+
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
+        The scalping module has two operating modes:
+        <b style='color:{ACCENT};'>Regular</b> and <b style='color:{ACCENT};'>Strict</b>.
+      </p>
+
+      <b style='color:{ACCENT}; font-size:1rem;'>Regular Scalping:</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.3rem;'>
+        In regular mode, the system uses a simpler 3-step confirmation to determine LONG or SHORT direction:
+      </p>
+      <ol style='margin-left:1.2rem; color:{TEXT_MUTED}; font-size:0.92rem;'>
+        <li><b style='color:{ACCENT};'>EMA Trend:</b> 
+          Bullish if EMA5 &gt; EMA13 &gt; EMA21, bearish if EMA5 &lt; EMA13 &lt; EMA21.
+        </li>
+        <li><b style='color:{ACCENT};'>MACD Confirmation:</b>
+          Above signal line for LONG, below for SHORT (positive histogram preferred).
+        </li>
+        <li><b style='color:{ACCENT};'>RSI Filter:</b>
+          LONG if RSI14 &gt; 55, SHORT if RSI14 &lt; 45.
+        </li>
+      </ol>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
+        Once confirmed, ATR14 is used to set entry, target, and stop-loss prices.
+      </p>
+
+      <b style='color:{ACCENT}; font-size:1rem;'>Strict Scalping:</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.3rem;'>
+        In strict mode, multiple layers of filtering are applied before confirming a trade direction:
+      </p>
+      <ol style='margin-left:1.2rem; color:{TEXT_MUTED}; font-size:0.92rem;'>
+        <li><b style='color:{ACCENT};'>Trend Strength &amp; Flow:</b> 
+          If ADX &lt; 20, a valid <i>volume spike</i> must be present.
+        </li>
+        <li><b style='color:{ACCENT};'>2/3 Regime Alignment:</b>
+          Direction must align with at least two of: Supertrend, Ichimoku trend bias, VWAP.
+        </li>
+        <li><b style='color:{ACCENT};'>Momentum Window:</b>
+          LONG: StochRSI 0.20–0.85, bullish RSI bias, MACD bullish.<br/>
+          SHORT: StochRSI 0.15–0.80, bearish RSI bias, MACD bearish.
+        </li>
+        <li><b style='color:{ACCENT};'>Overbought / Oversold Filter:</b>
+          Blocks LONG if Bollinger bias is "Overbought", SHORT if "Oversold".
+        </li>
+        <li><b style='color:{ACCENT};'>Volatility Floor:</b>
+          ATR/price ≥ 0.15% to ensure enough market movement.
+        </li>
+      </ol>
+
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
+        In both modes, ATR-based price levels are calculated as follows:
+      </p>
+      <ul style='margin-left:1.2rem; color:{TEXT_MUTED}; font-size:0.92rem;'>
+        <li><b style='color:{ACCENT};'>LONG Setup:</b><br/>
+          Entry = Close + 0.25 × ATR<br/>
+          Target = Close + 1.5 × ATR<br/>
+          Stop Loss = Close − 0.75 × ATR
+        </li>
+        <br/>
+        <li><b style='color:{ACCENT};'>SHORT Setup:</b><br/>
+          Entry = Close − 0.25 × ATR<br/>
+          Target = Close − 1.5 × ATR<br/>
+          Stop Loss = Close + 0.75 × ATR
+        </li>
+      </ul>
+
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
+        Support and resistance levels are displayed for context but are not directly used in the ATR formula.
+      </p>
+    </div>
+    """
+
+    st.markdown(leverage_html, unsafe_allow_html=True)
+    st.markdown(candle_html, unsafe_allow_html=True)
+    st.markdown(position_html, unsafe_allow_html=True)
+
+    # AI prediction guide with updated scanner description
+    ml_guide_html = f"""
+    <div class='panel-box'>
+      <b style='color:{ACCENT}; font-size:1.2rem;'>AI Prediction</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
+        The AI Prediction tool lets you evaluate several machine‑learning models side by side.  You may select one or more algorithms – <b>XGBoost</b>, <b>LightGBM</b>, <b>Random&nbsp;Forest</b> – or the adaptive ensemble.  Each model analyses recent candles to estimate whether the next candle will close higher or lower.  The results are displayed as small cards showing the predicted probability and a directional label (<em>Up</em>, <em>Down</em> or <em>Neutral</em>).  When multiple models are selected, the dashboard provides a full breakdown for <em>each</em> model, including suggested entry/exit levels, leverage and technical context.  Use these predictions as part of a broader trading strategy; they are not a guarantee of future performance.
+      </p>
+      <ol style='margin-left:1.2rem; color:{TEXT_MUTED}; font-size:0.92rem; line-height:1.6;'>
+        <li><span style='color:{ACCENT};'>Data Collection:</span> The system retrieves up to 500 of the most recent OHLCV bars (open, high, low, close and volume) for the selected symbol and timeframe.</li>
+        <li><span style='color:{ACCENT};'>Feature Engineering:</span> For each bar it computes technical indicators including EMA5/9/21, RSI14, MACD (line, signal &amp; histogram), On‑Balance Volume (OBV) and Average True Range (ATR).  These features summarise trend, momentum, volume flow and volatility.</li>
+        <li><span style='color:{ACCENT};'>Target Definition:</span> The training target is set to 1 if the next candle’s close is higher than the current close and 0 otherwise.</li>
+        <li><span style='color:{ACCENT};'>Model Training:</span> Depending on your selection, the system fits an <b>XGBoost</b> classifier, a <b>LightGBM</b> classifier, a <b>Random&nbsp;Forest</b> classifier, or computes an adaptive weighted blend when the ensemble is chosen.  Each algorithm captures non‑linear interactions between features; gradient‑boosting methods often deliver higher accuracy while Random&nbsp;Forest serves as a robust baseline.</li>
+        <li><span style='color:{ACCENT};'>Prediction &amp; Interpretation:</span> Each model produces a probability for an upward move.  Probabilities ≥ 60 % are labelled <b>LONG</b>, ≤ 40 % are labelled <b>SHORT</b> and intermediate values are <b>NEUTRAL</b>.  The probabilities and labels are displayed in compact summary cards for all selected models.  When multiple models are selected, each model’s probability and direction are used to generate a dedicated analysis panel with corresponding entry/exit levels and technical context.</li>
+        <li><span style='color:{ACCENT};'>Entry &amp; Exit Levels:</span> When the predicted direction is LONG or SHORT, the system attempts to locate a matching scalp setup.  Successful matches display <b>AI Entry</b> and <b>AI Exit</b> levels derived from confidence, SuperTrend, Ichimoku Cloud, VWAP and volume‑spike analysis.  If no setup is found, a fallback mechanism uses ATR14 to compute provisional levels labelled as <i>Unverified Entry</i> and <i>Unverified Exit</i>.</li>
+        <li><span style='color:{ACCENT};'>Caveats:</span> Despite sophisticated modelling, predictions are based solely on historical data, which can be noisy and non‑stationary.  Always combine these signals with other indicators and sound risk management.</li>
+      </ol>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
+        In the Coin Signal Scanner on the Market tab, a single <b>AI (Meta)</b> column presents the direction predicted by the adaptive ensemble.  The multiple AI columns for XGB, Random&nbsp;Forest, LightGBM and Ensemble have been removed for clarity.  When the hybrid signal matches the scalp direction, a verification tick appears only in the Signal column.
+      </p>
+    </div>
+    """
+
+    models_explanation_html = f"""
+    <div class='panel-box'>
+      <b style='color:{ACCENT}; font-size:1.2rem;'>AI Models Explained</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>The dashboard offers several machine‑learning algorithms for predictive analysis.  Each model captures market structure in a different way.</p>
+      <ul style='color:{TEXT_MUTED}; font-size:0.92rem; line-height:1.6;'>
+        <li><b style='color:{ACCENT};'>XGBoost:</b> A gradient‑boosting algorithm that sequentially builds trees to minimise error.  It excels at modelling complex patterns.</li>
+        <li><b style='color:{ACCENT};'>Random&nbsp;Forest:</b> A bagging ensemble of decision trees trained on random subsets of data and features.  It is robust and serves as a conservative baseline.</li>
+        <li><b style='color:{ACCENT};'>LightGBM:</b> An efficient gradient‑boosting framework that uses histogram binning for speed and memory optimisation.</li>
+        <li><b style='color:{ACCENT};'>Adaptive Ensemble (Meta):</b> Combines the outputs of all available models using performance‑based weights.  Rather than averaging, it assigns more influence to models that have recently been more accurate.  This weighted ensemble serves as the default AI model on the Market tab.</li>
+      </ul>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>You can still choose any of the base models or the meta ensemble in the AI Prediction and Backtest tabs to compare their outputs.  The Market tab, however, displays only the adaptive ensemble to keep the interface uncluttered.</p>
+    </div>
+    """
+
+    st.markdown(ml_guide_html, unsafe_allow_html=True)
+    st.markdown(models_explanation_html, unsafe_allow_html=True)
+
+    # Backtest methodology section using existing template
+    backtest_html = f"""
+    <div class='panel-box'>
+      <b style='color:{ACCENT}; font-size:1.2rem;'>Backtest Methodology</b>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
+        The <b>Backtest Simulator</b> applies the rule‑based signal engine to historical data.  For each bar,
+        if the Confidence Score exceeds a user‑defined threshold and the signal is <i>LONG</i> or <i>SHORT</i>, a trade is entered at the close price
+        and exited after a fixed number of candles.  The realised return is calculated and aggregated to produce metrics such as
+        total trades, win rate, average PnL and Sharpe ratio.
+      </p>
+      <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
+        The <b>AI Backtest</b> (available on its own tab) performs a similar simulation using the probabilities generated by the <b>selected model(s)</b>.  In the AI Backtest tab you can choose one or multiple models – <em>XGBoost</em>, <em>LightGBM</em>, <em>Random Forest</em> or the adaptive ensemble – and run independent backtests for each.  The system uses an out‑of‑sample hold‑out: each model is trained on the earliest portion of the data (default 80 %) and then tested on the most recent 20 %.  A <i>LONG</i> trade is taken when the predicted probability of an upward move exceeds a specified threshold (default 60%), while a <i>SHORT</i> trade is taken when the probability falls below the complementary threshold (e.g. 40%).  Running multiple models side by side allows you to compare their historical performance under identical conditions, highlighting which algorithm aligns best with your trading style.
+      </p>
+    </div>
+    """
+
+    st.markdown(backtest_html, unsafe_allow_html=True)
+
+    # Skip the legacy guide below
+    return
 
     st.markdown(
         f"<h2 style='color:{ACCENT}; font-size:1.6rem; margin-bottom:1rem;'>Analysis Guide</h2>",
@@ -3007,19 +3136,19 @@ def render_guide_tab():
     <div class='panel-box'>
       <b style='color:{ACCENT}; font-size:1.2rem;'>AI Prediction</b>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
-        The AI Prediction tool lets you evaluate up to two machine‑learning models side by side.  You may select one or both algorithms – <b>XGBoost</b> and <b>Random&nbsp;Forest</b>.  Each model analyses recent candles to estimate whether the next candle will close higher or lower.  The results are displayed as small cards showing the predicted probability and a directional label (<em>Up</em>, <em>Down</em> or <em>Neutral</em>).  When both models are selected, the dashboard provides a full breakdown for <em>each</em> model, including suggested entry/exit levels, leverage and technical context.  Use these predictions as part of a broader trading strategy; they are not a guarantee of future performance.
+        The AI Prediction tool lets you evaluate several machine‑learning models side by side.  You may select one or more algorithms – <b>XGBoost</b>, <b>LightGBM</b>, <b>Random&nbsp;Forest</b> – or an <b>Ensemble</b> that averages their outputs.  Each model analyses recent candles to estimate whether the next candle will close higher or lower.  The results are displayed as small cards showing the predicted probability and a directional label (<em>Up</em>, <em>Down</em> or <em>Neutral</em>).  When multiple models are selected, the dashboard provides a full breakdown for <em>each</em> model, including suggested entry/exit levels, leverage and technical context.  Use these predictions as part of a broader trading strategy; they are not a guarantee of future performance.
       </p>
       <ol style='margin-left:1.2rem; color:{TEXT_MUTED}; font-size:0.92rem; line-height:1.6;'>
         <li><span style='color:{ACCENT};'>Data Collection:</span> The system retrieves up to 500 of the most recent OHLCV bars (open, high, low, close and volume) for the selected symbol and timeframe.</li>
         <li><span style='color:{ACCENT};'>Feature Engineering:</span> For each bar it computes technical indicators including EMA5/9/21, RSI14, MACD (line, signal &amp; histogram), On‑Balance Volume (OBV) and Average True Range (ATR).  These features summarise trend, momentum, volume flow and volatility.</li>
         <li><span style='color:{ACCENT};'>Target Definition:</span> The training target is set to 1 if the next candle’s close is higher than the current close and 0 otherwise.</li>
-        <li><span style='color:{ACCENT};'>Model Training:</span> Depending on your selection, the system fits either an <b>XGBoost</b> classifier or a <b>Random&nbsp;Forest</b> classifier.  Each algorithm captures non‑linear interactions between features; XGBoost is a powerful gradient‑boosting method while Random&nbsp;Forest serves as a robust baseline.</li>
+        <li><span style='color:{ACCENT};'>Model Training:</span> Depending on your selection, the system fits an <b>XGBoost</b> classifier, a <b>LightGBM</b> classifier, a <b>Random&nbsp;Forest</b> classifier, or averages the probabilities of all available models when the <b>Ensemble</b> option is chosen.  Each algorithm captures non‑linear interactions between features; gradient‑boosting methods often deliver higher accuracy while Random&nbsp;Forest serves as a robust baseline.</li>
         <li><span style='color:{ACCENT};'>Prediction &amp; Interpretation:</span> Each model produces a probability for an upward move.  Probabilities ≥ 60 % are labelled <b>LONG</b>, ≤ 40 % are labelled <b>SHORT</b> and intermediate values are <b>NEUTRAL</b>.  The probabilities and labels are displayed in compact summary cards for all selected models.  When multiple models are selected, each model’s probability and direction are used to generate a dedicated analysis panel with corresponding entry/exit levels and technical context.</li>
         <li><span style='color:{ACCENT};'>Entry &amp; Exit Levels:</span> When the predicted direction is LONG or SHORT, the system attempts to locate a matching scalp setup.  Successful matches display <b>AI Entry</b> and <b>AI Exit</b> levels derived from confidence, SuperTrend, Ichimoku Cloud, VWAP and volume‑spike analysis.  If no setup is found, a fallback mechanism uses ATR14 to compute provisional levels labelled as <i>Unverified Entry</i> and <i>Unverified Exit</i>.</li>
         <li><span style='color:{ACCENT};'>Caveats:</span> Despite sophisticated modelling, predictions are based solely on historical data, which can be noisy and non‑stationary.  Always combine these signals with other indicators and sound risk management.</li>
       </ol>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
-        In the Coin Signal Scanner on the Market tab, you will find separate columns for each AI model: <b>AI (XGBoost)</b> and <b>AI (Random&nbsp;Forest)</b>.  These columns display the direction (LONG/SHORT/NEUTRAL) predicted by each algorithm for the latest bar of every scanned coin.  Predictions are always computed for both models regardless of the default, allowing you to compare how different algorithms perceive the current market dynamics.  When a model’s prediction matches the scalp direction, a verification tick appears next to the LONG/SHORT label in both the Signal column and the corresponding AI model column.
+        In the Coin Signal Scanner on the Market tab, you will find separate columns for each AI model: <b>AI (XGBoost)</b>, <b>AI (Random&nbsp;Forest)</b>, <b>AI (LightGBM)</b> and <b>AI (Ensemble)</b>.  These columns display the direction (LONG/SHORT/NEUTRAL) predicted by each algorithm for the latest bar of every scanned coin.  Predictions are always computed for all models regardless of the default, allowing you to compare how different algorithms perceive the current market dynamics.  When a model’s prediction matches the scalp direction, a verification tick appears next to the LONG/SHORT label in both the Signal column and the corresponding AI model column.
       </p>
     </div>
     """
@@ -3029,11 +3158,13 @@ def render_guide_tab():
     <div class='panel-box'>
       <b style='color:{ACCENT}; font-size:1.2rem;'>AI Models Explained</b>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
-        The dashboard uses two distinct machine‑learning models to generate trading insights.  Each model has its own strengths and offers a different perspective on market dynamics.  Understanding how they work can help you interpret their signals more effectively.
+        The dashboard uses four distinct machine‑learning models to generate trading insights.  Each model has its own strengths and offers a different perspective on market dynamics.  Understanding how they work can help you interpret their signals more effectively.
       </p>
       <ul style='color:{TEXT_MUTED}; font-size:0.92rem; line-height:1.6;'>
         <li><b style='color:{ACCENT};'>XGBoost:</b> An advanced gradient‑boosting algorithm that builds an ensemble of decision trees sequentially, correcting the errors of previous trees.  It tends to capture complex non‑linear patterns and is known for high predictive accuracy.  In the <i>Market</i> tab, XGBoost is trained on BTC/USDT to estimate the probability of an upward move, and it contributes to the weighted <i>AI Outlook</i> across multiple coins.  In the <i>AI Prediction</i> tab, it analyses your selected symbol and timeframe to provide probability and direction along with entry/exit suggestions.</li>
-        <li><b style='color:{ACCENT};'>Random&nbsp;Forest:</b> A bagging ensemble of decision trees where each tree is trained on a random subset of data and features.  This model is robust to overfitting and provides a solid baseline.  In the Market tab it generates its own prediction and outlook card, while in the AI Prediction tab it offers a more conservative view of the next candle’s direction.</li>
+        <li><b style='color:{ACCENT};'>Random Forest:</b> A bagging ensemble of decision trees where each tree is trained on a random subset of data and features.  This model is robust to overfitting and provides a solid baseline.  In the Market tab it generates its own prediction and outlook card, while in the AI Prediction tab it offers a more conservative view of the next candle’s direction.</li>
+        <li><b style='color:{ACCENT};'>LightGBM:</b> A gradient‑boosting framework optimised for speed and memory usage.  It uses a histogram‑based approach to split points, enabling efficient handling of large datasets.  LightGBM’s cards on the Market tab and AI Prediction tab often respond quickly to recent price movements while still capturing longer‑term trends.</li>
+        <li><b style='color:{ACCENT};'>Ensemble:</b> Combines the outputs of all available models by averaging their predicted probabilities.  This provides a consensus view that smooths out the idiosyncrasies of individual algorithms.  In both the Market tab and the AI Prediction tab, the Ensemble card gives a balanced signal, which can be useful when individual models disagree.</li>
       </ul>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
         In the <b>AI Market Prediction</b> section on the Market tab, each model is trained on the latest BTC/USDT data to estimate the likelihood of an up move.  The <b>AI Market Outlook</b> uses the same models across BTC, ETH, BNB, SOL, ADA and XRP, weighting each probability by market dominance to gauge the overall market tone.  In the <b>AI Prediction</b> tab, all selected models train on your chosen symbol and timeframe, returning individual probabilities, directions and trading levels.  Comparing these models side by side can highlight where they agree or diverge.
@@ -3056,7 +3187,7 @@ def render_guide_tab():
     st.markdown(models_explanation_html, unsafe_allow_html=True)
 
     # Explain the AI Market Prediction section shown on the Market tab.  This
-    # section displays compact cards for each algorithm (XGB and RF)
+    # section displays compact cards for each algorithm (XGB, RF, LGBM, ENS)
     # using BTC/USDT as a proxy for the overall market.  Each card trains on
     # 500 recent candles of the selected timeframe and classifies the probability
     # of an up move as Up, Down or Neutral.
@@ -3064,7 +3195,7 @@ def render_guide_tab():
     <div class='panel-box'>
       <b style='color:{ACCENT}; font-size:1.2rem;'>AI Market Prediction</b>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
-        The AI Market Prediction section compares two algorithms on BTC/USDT for your selected timeframe.  Each compact card shows the predicted probability of an upward move and classifies the outcome as <span style='color:{POSITIVE};'><b>Up</b></span>, <span style='color:{NEGATIVE};'><b>Down</b></span> or <span style='color:{WARNING};'><b>Neutral</b></span>.  The cards are labelled <b>XGB</b> (XGBoost) and <b>RF</b> (Random&nbsp;Forest) so you can see how each model interprets the same market data.  Probabilities ≥ 60&nbsp;% are classified Up, ≤ 40&nbsp;% are Down and intermediate values are Neutral.  Changing the scanner timeframe automatically updates these predictions.
+        The AI Market Prediction section compares four algorithms on BTC/USDT for your selected timeframe.  Each compact card shows the predicted probability of an upward move and classifies the outcome as <span style='color:{POSITIVE};'><b>Up</b></span>, <span style='color:{NEGATIVE};'><b>Down</b></span> or <span style='color:{WARNING};'><b>Neutral</b></span>.  The cards are labelled <b>XGB</b> (XGBoost), <b>RF</b> (Random&nbsp;Forest), <b>LGBM</b> (LightGBM) and <b>ENS</b> (Ensemble) so you can see how each model interprets the same market data.  Probabilities ≥ 60&nbsp;% are classified Up, ≤ 40&nbsp;% are Down and intermediate values are Neutral.  Changing the scanner timeframe automatically updates these predictions.
       </p>
     </div>
     """
@@ -3074,10 +3205,10 @@ def render_guide_tab():
     <div class='panel-box'>
       <b style='color:{ACCENT}; font-size:1.2rem;'>AI Market Outlook</b>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
-        The AI Market Outlook broadens the analysis to a longer timeframe (4 hours) and a diversified basket of assets: BTC/USDT, ETH/USDT, BNB/USDT, SOL/USDT, ADA/USDT and XRP/USDT.  For each algorithm – XGBoost and Random&nbsp;Forest – the model is trained on approximately 83&nbsp;days of data (500 four‑hour candles) using the same feature set as the AI Prediction tool.  This produces two aggregated probabilities, one per model, representing the likelihood of an overall uptrend across the major coins.
+        The AI Market Outlook broadens the analysis to a longer timeframe (4 hours) and a diversified basket of assets: BTC/USDT, ETH/USDT, BNB/USDT, SOL/USDT, ADA/USDT and XRP/USDT.  For each algorithm – XGBoost, Random&nbsp;Forest, LightGBM and the Ensemble – the model is trained on approximately 83&nbsp;days of data (500 four‑hour candles) using the same feature set as the AI Prediction tool.  This produces four aggregated probabilities, one per model, representing the likelihood of an overall uptrend across the major coins.
       </p>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
-        To gauge the market tone, the individual probabilities for these six assets are weighted by their dominance percentages.  For example, if BTC dominance is 50&nbsp;% and ETH is 20&nbsp;%, their predictions carry proportionally more weight than those of smaller coins.  The weighted probabilities are computed separately for each algorithm, yielding a distinct outlook for XGB and RF.  This weighting scheme makes the indicator sensitive to capital rotation; during an <i>alt season</i> the probabilities of assets with rising dominance have greater influence.
+        To gauge the market tone, the individual probabilities for these six assets are weighted by their dominance percentages.  For example, if BTC dominance is 50&nbsp;% and ETH is 20&nbsp;%, their predictions carry proportionally more weight than those of smaller coins.  The weighted probabilities are computed separately for each algorithm, yielding a distinct outlook for XGB, RF, LGBM and ENS.  This weighting scheme makes the indicator sensitive to capital rotation; during an <i>alt season</i> the probabilities of assets with rising dominance have greater influence.
       </p>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
         The results appear as a row of compact cards on the Market tab.  Each card displays the weighted probability for one model and labels it <span style='color:{POSITIVE};'><b>Up</b></span>, <span style='color:{NEGATIVE};'><b>Down</b></span> or <span style='color:{WARNING};'><b>Neutral</b></span> according to the same 60/40 thresholds.  As always, use the AI Market Outlook in conjunction with other indicators and prudent risk management rather than as a standalone signal.
@@ -3100,7 +3231,7 @@ def render_guide_tab():
         total trades, win rate, average PnL and Sharpe ratio.
       </p>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
-        The <b>AI Backtest</b> (available on its own tab) performs a similar simulation using the probabilities generated by the <b>selected model(s)</b>.  In the AI Backtest tab you can choose one or both models – <em>XGBoost</em> and <em>Random&nbsp;Forest</em> – and run independent backtests for each.  The system uses an out‑of‑sample hold‑out: each model is trained on the earliest portion of the data (default 80&nbsp;%) and then tested on the most recent 20&nbsp;%.  A <i>LONG</i> trade is taken when the predicted probability of an upward move exceeds a specified threshold (default 60&nbsp;%), while a <i>SHORT</i> trade is taken when the probability falls below the complementary threshold (e.g. 40&nbsp;%).  Running both models side by side allows you to compare their historical performance under identical conditions, highlighting which algorithm aligns best with your trading style.
+        The <b>AI Backtest</b> (available on its own tab) performs a similar simulation using the probabilities generated by the <b>selected model(s)</b>.  In the AI Backtest tab you can choose one or multiple models – <em>XGBoost</em>, <em>LightGBM</em>, <em>Random Forest</em> or an <em>Ensemble</em> of these – and run independent backtests for each.  The system uses an out‑of‑sample hold‑out: each model is trained on the earliest portion of the data (default 80 %) and then tested on the most recent 20 %.  A <i>LONG</i> trade is taken when the predicted probability of an upward move exceeds a specified threshold (default 60%), while a <i>SHORT</i> trade is taken when the probability falls below the complementary threshold (e.g. 40%).  Running multiple models side by side allows you to compare their historical performance under identical conditions, highlighting which algorithm aligns best with your trading style.
       </p>
     </div>
     """
@@ -3120,13 +3251,13 @@ def render_ml_tab():
     )
     # Explain that the AI Prediction tool uses the model selected in the sidebar.
     # Depending on your selection, the system will instantiate the corresponding
-    # algorithm (XGBoost or Random Forest) and compute predictions.  Users can
-    # compare predictions across both models via the Coin Signal Scanner and
-    # adjust the selection in the AI Backtest tab.
+    # algorithm (XGBoost, LightGBM, Random Forest or an ensemble) and compute
+    # predictions.  Users can compare predictions across all models via the
+    # Coin Signal Scanner and adjust the selection in the AI Backtest tab.
     st.markdown(
         f"<p style='color:{TEXT_MUTED};font-size:0.9rem;'>"
         "This tool trains one or more machine‑learning models on recent candles to estimate whether the next candle will close higher or lower. "
-        "You can select one or both algorithms – <b>XGBoost</b> and <b>Random&nbsp;Forest</b> – and the app will compute predictions for each. "
+        "You can select multiple algorithms – <b>XGBoost</b>, <b>LightGBM</b>, <b>Random Forest</b> or an <b>Ensemble</b> – and the app will compute predictions for each. "
         "For each selected model, a compact card shows the predicted probability and labels it as Up, Down or Neutral.  Detailed analysis with suggested entry/exit levels, leverage and technical context is provided for <em>every</em> selected model, displayed sequentially in the same timeframe column. "
         "Use this information in conjunction with other analysis; past performance does not guarantee future results.  You can configure which model(s) to backtest in the AI Backtest tab.</p>",
         unsafe_allow_html=True
@@ -3219,6 +3350,8 @@ def render_ml_tab():
                         short_name = {
                             "XGBoost": "XGB",
                             "Random Forest": "RF",
+                            "LightGBM": "LGBM",
+                            "Ensemble": "ENS",
                         }.get(mdl, mdl)
                         subcols_pred[m_i].markdown(
                             f"<div class='metric-card' style='padding:16px 12px;'>"
@@ -3395,6 +3528,8 @@ def render_ml_tab():
                         short_name_panel = {
                             "XGBoost": "XGB",
                             "Random Forest": "RF",
+                            "LightGBM": "LGBM",
+                            "Ensemble": "ENS",
                         }.get(mdl, mdl)
                         panel_html = (
                             f"<div class='panel-box'>"
@@ -3542,7 +3677,7 @@ def render_ml_tab():
                             showlegend=True,
                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
                         )
-                        st.plotly_chart(fig, width="stretch")
+                        st.plotly_chart(fig, use_container_width=True)
                     except Exception:
                         pass
 
@@ -3566,7 +3701,7 @@ def render_ml_tab():
                             showlegend=True,
                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
                         )
-                        st.plotly_chart(rsi_fig, width="stretch")
+                        st.plotly_chart(rsi_fig, use_container_width=True)
                     except Exception:
                         pass
 
@@ -3597,7 +3732,7 @@ def render_ml_tab():
                             showlegend=True,
                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
                         )
-                        st.plotly_chart(macd_fig, width="stretch")
+                        st.plotly_chart(macd_fig, use_container_width=True)
                     except Exception:
                         pass
 
@@ -3622,7 +3757,7 @@ def render_ml_tab():
                             showlegend=True,
                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
                         )
-                        st.plotly_chart(volume_fig, width="stretch")
+                        st.plotly_chart(volume_fig, use_container_width=True)
                     except Exception:
                         pass
 
@@ -3822,14 +3957,14 @@ def run_ai_backtest(
     y = df_model['target'].astype(int).values
 
     # Determine the model to use for the backtest.  If unspecified, fall back to the
-    # sidebar selection.  Support for an "Ensemble" option is retained for
-    # legacy sessions; it averages the results of the two supported models.
+    # sidebar selection.  Prepare base models when using the Ensemble option.
     chosen_backtest = model_name or st.session_state.get("model_choice", DEFAULT_MODEL)
     models: list[tuple[str, object]] = []
     if chosen_backtest == "Ensemble":
-        # Build a list of base models.  LightGBM has been removed; average the
-        # two supported models instead.
-        base_names: list[str] = ["XGBoost", "Random Forest"]
+        # Build a list of base models.  Include all supported model names
+        # irrespective of external library availability; ``make_model`` will
+        # substitute appropriate scikit‑learn implementations when necessary.
+        base_names: list[str] = ["XGBoost", "LightGBM", "Random Forest"]
         for name in base_names:
             try:
                 mdl = make_model(name)
@@ -4006,8 +4141,8 @@ def render_ai_backtest_tab():
     Render the AI Backtest tab which evaluates one or more selected machine‑learning models
     on historical data.  This tab is separate from the rule‑based backtest and
     allows the user to specify a probability threshold for LONG/SHORT trades
-    and a fixed exit horizon.  You can run independent backtests for either of
-    the two supported models (XGBoost or Random Forest) simultaneously; each
+    and a fixed exit horizon.  You can run independent backtests for multiple
+    models (XGBoost, LightGBM, Random Forest or an Ensemble) simultaneously; each
     selected model trains on the same data and outputs its own results.  The
     available AI models mirror the choices provided in the sidebar.
     """
@@ -4137,5 +4272,4 @@ def main():
         render_guide_tab()
 
 main()
-
 
