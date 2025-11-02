@@ -47,6 +47,15 @@ def compute_wma(series: pd.Series, length: int) -> pd.Series:
 # LogisticRegression was previously used here, but we now import RandomForestClassifier
 # to capture nonlinear relationships and improve predictive power.  See ml_predict_direction below.
 from sklearn.ensemble import (
+try:
+    from datetime import datetime, UTC
+    def utc_now():
+        return datetime.now(UTC)
+except Exception:  # Python < 3.11
+    from datetime import datetime, timezone
+    def utc_now():
+        return datetime.now(timezone.utc)
+
     RandomForestClassifier,
     GradientBoostingClassifier,
     HistGradientBoostingClassifier,
@@ -1450,7 +1459,7 @@ def render_market_tab():
     # Show data source and last update time.  This helps users understand
     # where the numbers originate and when they were fetched.  The timestamp
     # uses UTC for consistency across time zones.
-    last_update = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    last_update = datetime.utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
     st.markdown(
         f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:0.5rem;'>"
         f"Data from CCXT (Bybit → OKX → KuCoin fallback; using {EXCHANGE_ID.upper() if EXCHANGE_ID else 'None'}) &amp; CoinGecko. Last updated: {last_update}."
@@ -4102,4 +4111,3 @@ def main():
         render_guide_tab()
 
 main()
-
