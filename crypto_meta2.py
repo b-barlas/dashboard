@@ -23,6 +23,85 @@ try:
 except Exception:
     pta = None  # type: ignore
 
+
+# === BEGIN PERFORMANCE INJECTION (I/O only; no logic/design changes) ===
+# Optimised HTTP session with connection pooling + retries and a very short-lived in-memory cache
+try:
+    import requests
+    from requests.adapters import HTTPAdapter
+    try:
+        from urllib3.util.retry import Retry  # urllib3 >=1.26
+    except Exception:
+        Retry = None  # If missing, we'll skip retry logic
+
+    # Build a shared session with larger pools
+    _HTTP_SESSION = requests.Session()
+    _UA = "crypto-dashboard/1.0 (+performance-patch)"
+    _HTTP_SESSION.headers.update({"User-Agent": _UA})
+
+    # Configure retries if available
+    if Retry is not None:
+        _retry = Retry(
+            total=3,
+            backoff_factor=0.25,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=frozenset(["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"]),
+            raise_on_status=False,
+        )
+        _adapter = HTTPAdapter(max_retries=_retry, pool_connections=64, pool_maxsize=64)
+    else:
+        _adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64)
+
+    _HTTP_SESSION.mount("https://", _adapter)
+    _HTTP_SESSION.mount("http://", _adapter)
+
+    # Very small TTL cache to prevent duplicate GETs within ~30s
+    _GET_CACHE = {}
+    _GET_TTL = 30.0
+
+    def _cache_key(url, params=None, headers=None):
+        # Make a stable key from URL + sorted params + minimal header bits
+        p = tuple(sorted((params or {}).items()))
+        h = None
+        # Avoid large headers; include only a couple of common fields if present
+        if headers:
+            h = tuple(sorted((k.lower(), headers[k]) for k in headers if k.lower() in ("accept", "content-type")))
+        return (url, p, h)
+
+    _orig_request = requests.request
+    _orig_get = requests.get
+
+    def _patched_request(method, url, **kwargs):
+        # Route all requests through our shared session
+        return _HTTP_SESSION.request(method=method, url=url, **kwargs)
+
+    def _patched_get(url, **kwargs):
+        # Short-lived GET cache to reduce duplicate calls during a single run
+        now = time.time()
+        key = _cache_key(url, kwargs.get("params"), kwargs.get("headers"))
+        entry = _GET_CACHE.get(key)
+        if entry is not None:
+            ts, resp = entry
+            if (now - ts) <= _GET_TTL:
+                return resp
+        resp = _HTTP_SESSION.get(url, **kwargs)
+        # Only cache successful (200) responses
+        try:
+            if resp.status_code == 200:
+                _GET_CACHE[key] = (now, resp)
+        except Exception:
+            pass
+        return resp
+
+    # Monkeypatch
+    requests.request = _patched_request
+    requests.get = _patched_get
+
+except Exception as _perf_ex:
+    # Fail-safe: never break the app if optimisation can't load
+    pass
+# === END PERFORMANCE INJECTION ===
+
 def compute_wma(series: pd.Series, length: int) -> pd.Series:
     """Compute a weighted moving average with a linear weighting scheme.
 
@@ -1565,7 +1644,7 @@ def render_market_tab():
     # Show data source and last update time.  This helps users understand
     # where the numbers originate and when they were fetched.  The timestamp
     # uses UTC for consistency across time zones.
-    last_update = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    last_update = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     st.markdown(
         f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:0.5rem;'>"
         f"Data from CCXT (Bybit → OKX → KuCoin fallback; using {EXCHANGE_ID.upper() if EXCHANGE_ID else 'None'}) &amp; CoinGecko. Last updated: {last_update}."
@@ -4287,4 +4366,3 @@ def main():
         render_guide_tab()
 
 main()
-
