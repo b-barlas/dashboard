@@ -84,22 +84,23 @@ def make_model(model_name: str) -> object:
       Random Forest and ensures that each model name corresponds to a distinct
       algorithm.
 
-    * ``"LightGBM"`` – similarly, if LightGBM is installed, an ``LGBMClassifier``
-      is returned; otherwise a scikit‑learn ``HistGradientBoostingClassifier`` is
-      used.  HistGradientBoosting leverages histogram binning to approximate
-      LightGBM’s leaf‑wise tree growth, providing a comparable gradient boosting
-      approach when the LightGBM package is missing.
-
     * ``"Random Forest"`` – always returns a scikit‑learn ``RandomForestClassifier``
       with moderate depth and a fixed random seed.
+
+    The legacy option ``"LightGBM"`` is retained for backwards compatibility – if
+    ``model_name`` is set to ``"LightGBM"`` and the LightGBM package is available, an
+    ``LGBMClassifier`` is returned; otherwise a scikit‑learn ``HistGradientBoostingClassifier``
+    is used.  However, LightGBM is no longer offered in the user interface of the
+    dashboard.
 
     Any other value will raise a ``ValueError`` to avoid ambiguous fallbacks.
 
     Parameters
     ----------
     model_name : str
-        The name of the desired model.  Valid options are ``"XGBoost"``,
-        ``"LightGBM"`` and ``"Random Forest"``.
+        The name of the desired model.  Valid options are ``"XGBoost"`` and
+        ``"Random Forest"``.  ``"LightGBM"`` may still be passed programmatically but is
+        not exposed to end users.
 
     Returns
     -------
@@ -176,15 +177,15 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 # AI model selection
 # ---------------------------------------------------------------------------
-# Build a list of available models for the ML tools.  XGBoost and LightGBM
-# appear only if those libraries are installed.  Random Forest is always
-# available.  If more than one model exists, an Ensemble option is included
-# which averages the predictions of all available base models.
-AVAILABLE_MODELS: list[str] = []
-# Always expose the full set of model names to the user.  Even if the
-# underlying library (xgboost or lightgbm) is unavailable, we will show
-# the option and fall back internally to Random Forest when necessary.
-AVAILABLE_MODELS: list[str] = ["XGBoost", "LightGBM", "Random Forest", "Ensemble"]
+# Build a list of available models for the ML tools.  Only XGBoost and Random Forest
+# are supported in the simplified version of the app.  LightGBM and the Ensemble
+# have been removed to reduce compute time and complexity.
+AVAILABLE_MODELS: list[str] = ["XGBoost", "Random Forest"]
+
+# Note: The model names exposed to the UI are fixed; if XGBoost is not
+# installed the underlying ``make_model`` function will fall back to a
+# gradient boosting classifier, but the choice presented to the user
+# remains "XGBoost".  Random Forest is always available.
 
 # Default model: use XGBoost for all top‑level predictions.  If XGBoost is
 # unavailable, the underlying call to ml_predict_direction will fall back
@@ -1327,10 +1328,12 @@ def ml_predict_direction(df: pd.DataFrame, model_name: str | None = None) -> tup
     next candle’s close is higher than the current close, otherwise 0.  Features are shifted by
     one bar to avoid look‑ahead bias.
 
-    The ``model_name`` argument selects which algorithm to use.  Valid choices include
-    ``"XGBoost"``, ``"LightGBM"``, ``"Random Forest"`` and ``"Ensemble"``.  If None, the function
-    uses the model chosen via the sidebar (stored in ``session_state['model_choice']``).  When
-    ``"Ensemble"`` is selected, the probabilities from all available base models are averaged.
+    The ``model_name`` argument selects which algorithm to use.  Valid choices are limited to
+    ``"XGBoost"`` and ``"Random Forest"`` in this streamlined version of the application.  If
+    ``None`` is passed, the function falls back to the model selected in the sidebar
+    (stored in ``session_state['model_choice']``).  Internally, an ensemble option is still
+    supported for backward compatibility, but it is not exposed to the user; the ensemble
+    simply averages the probabilities from the XGBoost and Random Forest models.
 
     The model is fitted on all but the final row of the data and then used to predict the
     probability of an upward move for the last row.  Probabilities ≥ 0.60 yield a <b>LONG</b>
@@ -1394,12 +1397,10 @@ def ml_predict_direction(df: pd.DataFrame, model_name: str | None = None) -> tup
 
     prob_up_val: float | None = None
     if chosen == "Ensemble":
-        # Compose a list of base models to average.  Include all defined
-        # model names regardless of whether external libraries are installed
-        # because ``make_model`` will gracefully fall back to comparable
-        # scikit‑learn algorithms.  Using a fixed order ensures reproducible
-        # averaging across runs.
-        base_names: list[str] = ["XGBoost", "LightGBM", "Random Forest"]
+        # Compose a list of base models to average.  The simplified app
+        # supports only XGBoost and Random Forest, so those are the only
+        # algorithms averaged in the ensemble.  LightGBM has been removed.
+        base_names: list[str] = ["XGBoost", "Random Forest"]
         probs: list[float] = []
         for base in base_names:
             p = _predict_with(base)
@@ -1575,7 +1576,9 @@ def render_market_tab():
     # Neutral) coloured accordingly.  Predictions are cached per model
     # and timeframe to avoid redundant training.  When data is unavailable
     # or an error occurs, a neutral 50 % probability is shown.
-    ai_models = ["XGBoost", "Random Forest", "LightGBM", "Ensemble"]
+    # Only XGBoost and Random Forest are used for AI prediction; LightGBM and
+    # the Ensemble have been removed for efficiency.
+    ai_models = ["XGBoost", "Random Forest"]
     ai_results = {}
     # Determine the last timestamp once to build cache keys.  If fetching
     # fails, last_ts remains None and caching is disabled.
@@ -1617,8 +1620,9 @@ def render_market_tab():
             "color": color_m,
         }
     # Render the cards in the fifth column as sub‑columns.  Use
-    # abbreviations for model names to save space: XGB for XGBoost,
-    # RF for Random Forest, LGBM for LightGBM and Ensemble for the ensemble.
+    # abbreviations for model names to save space: XGB for XGBoost
+    # and RF for Random Forest.  LightGBM and Ensemble have been
+    # removed from this streamlined version of the app.
     with m5:
         subcols = st.columns(len(ai_models), gap="small")
         for idx, mdl in enumerate(ai_models):
@@ -1626,11 +1630,11 @@ def render_market_tab():
             prob_int = int(round(res.get("prob", 0.5) * 100))
             label = res.get("label", "Neutral")
             color = res.get("color", WARNING)
+            # Map full model names to compact labels.  Only XGBoost and Random Forest
+            # remain in this version of the app.
             short_name = {
                 "XGBoost": "XGB",
                 "Random Forest": "RF",
-                "LightGBM": "LGBM",
-                "Ensemble": "ENS"
             }.get(mdl, mdl)
             subcols[idx].markdown(
                 f"<div class='metric-card' style='padding:16px 12px;'>"
@@ -1768,7 +1772,8 @@ def render_market_tab():
     # a directional label.  These are displayed in small cards within
     # the third column.  When data is unavailable, the probability
     # defaults to 50 % (Neutral).
-    outlook_models = ["XGBoost", "Random Forest", "LightGBM", "Ensemble"]
+    # Limit outlook to the supported models only (XGBoost and Random Forest).
+    outlook_models = ["XGBoost", "Random Forest"]
     outlook_results = {}
     # Ensure dominance sums are available; if zero, set to 1 to avoid
     # division by zero.  Dominance values are integers representing
@@ -1831,11 +1836,10 @@ def render_market_tab():
             prob_int = int(round(res.get("prob", 0.5) * 100))
             label = res.get("label", "Neutral")
             color = res.get("color", WARNING)
+            # Map model names to compact labels; only XGBoost and Random Forest remain.
             short_name = {
                 "XGBoost": "XGB",
                 "Random Forest": "RF",
-                "LightGBM": "LGBM",
-                "Ensemble": "ENS"
             }.get(mdl, mdl)
             subcols_out[jdx].markdown(
                 f"<div class='metric-card' style='padding:16px 12px;'>"
@@ -1987,7 +1991,7 @@ def render_market_tab():
             # Evaluate each model in a fixed order for consistency.  We compute
             # predictions even if a particular library is unavailable; in that
             # case, ml_predict_direction will fall back to Random Forest.
-            for m_name in ["XGBoost", "Random Forest", "LightGBM", "Ensemble"]:
+            for m_name in ["XGBoost", "Random Forest"]:
                 model_key = f"ml_{sym}_{timeframe}_{last_ts}_{m_name}"
                 if model_key in st.session_state:
                     prob_up_m, dir_m = st.session_state[model_key]
@@ -2060,11 +2064,11 @@ def render_market_tab():
             # SHORT), append a tick to that model's output.  Neutral or mismatched
             # predictions remain unchanged.
             ai_cols_display = {}
+            # Prepare display values for each supported AI model.  LightGBM and Ensemble
+            # have been removed to reduce compute overhead.
             for mdl_key, col_name in [
                 ('XGBoost', 'AI (XGBoost)'),
                 ('Random Forest', 'AI (Random Forest)'),
-                ('LightGBM', 'AI (LightGBM)'),
-                ('Ensemble', 'AI (Ensemble)'),
             ]:
                 pred_val = model_preds.get(mdl_key, '')
                 if pred_val and scalp_direction and pred_val == scalp_direction and scalp_direction in ["LONG", "SHORT"]:
@@ -2091,8 +2095,6 @@ def render_market_tab():
                 # AI model predictions with verification marks when applicable
                 'AI (XGBoost)': ai_cols_display.get('AI (XGBoost)', ''),
                 'AI (Random Forest)': ai_cols_display.get('AI (Random Forest)', ''),
-                'AI (LightGBM)': ai_cols_display.get('AI (LightGBM)', ''),
-                'AI (Ensemble)': ai_cols_display.get('AI (Ensemble)', ''),
                 'Market Cap ($)': readable_market_cap(mcap_val),
                 'Leverage (X)': lev_badge if scalp_direction else '',
                 'Scalp Opportunity': scalp_direction or "",
@@ -2149,8 +2151,6 @@ def render_market_tab():
                         'Signal',
                         'AI (XGBoost)',
                         'AI (Random Forest)',
-                        'AI (LightGBM)',
-                        'AI (Ensemble)'
                     ]
                 )
                 .map(style_confidence, subset=['Confidence'])
@@ -2988,19 +2988,19 @@ def render_guide_tab():
     <div class='panel-box'>
       <b style='color:{ACCENT}; font-size:1.2rem;'>AI Prediction</b>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
-        The AI Prediction tool lets you evaluate several machine‑learning models side by side.  You may select one or more algorithms – <b>XGBoost</b>, <b>LightGBM</b>, <b>Random&nbsp;Forest</b> – or an <b>Ensemble</b> that averages their outputs.  Each model analyses recent candles to estimate whether the next candle will close higher or lower.  The results are displayed as small cards showing the predicted probability and a directional label (<em>Up</em>, <em>Down</em> or <em>Neutral</em>).  When multiple models are selected, the dashboard provides a full breakdown for <em>each</em> model, including suggested entry/exit levels, leverage and technical context.  Use these predictions as part of a broader trading strategy; they are not a guarantee of future performance.
+        The AI Prediction tool lets you evaluate two machine‑learning models side by side.  You may select one or both – <b>XGBoost</b> and <b>Random&nbsp;Forest</b>.  Each model analyses recent candles to estimate whether the next candle will close higher or lower.  The results are displayed as small cards showing the predicted probability and a directional label (<em>Up</em>, <em>Down</em> or <em>Neutral</em>).  When both models are selected, the dashboard provides a full breakdown for <em>each</em> model, including suggested entry/exit levels, leverage and technical context.  Use these predictions as part of a broader trading strategy; they are not a guarantee of future performance.
       </p>
       <ol style='margin-left:1.2rem; color:{TEXT_MUTED}; font-size:0.92rem; line-height:1.6;'>
         <li><span style='color:{ACCENT};'>Data Collection:</span> The system retrieves up to 500 of the most recent OHLCV bars (open, high, low, close and volume) for the selected symbol and timeframe.</li>
         <li><span style='color:{ACCENT};'>Feature Engineering:</span> For each bar it computes technical indicators including EMA5/9/21, RSI14, MACD (line, signal &amp; histogram), On‑Balance Volume (OBV) and Average True Range (ATR).  These features summarise trend, momentum, volume flow and volatility.</li>
         <li><span style='color:{ACCENT};'>Target Definition:</span> The training target is set to 1 if the next candle’s close is higher than the current close and 0 otherwise.</li>
-        <li><span style='color:{ACCENT};'>Model Training:</span> Depending on your selection, the system fits an <b>XGBoost</b> classifier, a <b>LightGBM</b> classifier, a <b>Random&nbsp;Forest</b> classifier, or averages the probabilities of all available models when the <b>Ensemble</b> option is chosen.  Each algorithm captures non‑linear interactions between features; gradient‑boosting methods often deliver higher accuracy while Random&nbsp;Forest serves as a robust baseline.</li>
+        <li><span style='color:{ACCENT};'>Model Training:</span> Depending on your selection, the system fits an <b>XGBoost</b> classifier or a <b>Random&nbsp;Forest</b> classifier.  Both algorithms capture non‑linear interactions between features; XGBoost tends to deliver higher accuracy while Random&nbsp;Forest provides a robust baseline.</li>
         <li><span style='color:{ACCENT};'>Prediction &amp; Interpretation:</span> Each model produces a probability for an upward move.  Probabilities ≥ 60 % are labelled <b>LONG</b>, ≤ 40 % are labelled <b>SHORT</b> and intermediate values are <b>NEUTRAL</b>.  The probabilities and labels are displayed in compact summary cards for all selected models.  When multiple models are selected, each model’s probability and direction are used to generate a dedicated analysis panel with corresponding entry/exit levels and technical context.</li>
         <li><span style='color:{ACCENT};'>Entry &amp; Exit Levels:</span> When the predicted direction is LONG or SHORT, the system attempts to locate a matching scalp setup.  Successful matches display <b>AI Entry</b> and <b>AI Exit</b> levels derived from confidence, SuperTrend, Ichimoku Cloud, VWAP and volume‑spike analysis.  If no setup is found, a fallback mechanism uses ATR14 to compute provisional levels labelled as <i>Unverified Entry</i> and <i>Unverified Exit</i>.</li>
         <li><span style='color:{ACCENT};'>Caveats:</span> Despite sophisticated modelling, predictions are based solely on historical data, which can be noisy and non‑stationary.  Always combine these signals with other indicators and sound risk management.</li>
       </ol>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
-        In the Coin Signal Scanner on the Market tab, you will find separate columns for each AI model: <b>AI (XGBoost)</b>, <b>AI (Random&nbsp;Forest)</b>, <b>AI (LightGBM)</b> and <b>AI (Ensemble)</b>.  These columns display the direction (LONG/SHORT/NEUTRAL) predicted by each algorithm for the latest bar of every scanned coin.  Predictions are always computed for all models regardless of the default, allowing you to compare how different algorithms perceive the current market dynamics.  When a model’s prediction matches the scalp direction, a verification tick appears next to the LONG/SHORT label in both the Signal column and the corresponding AI model column.
+        In the Coin Signal Scanner on the Market tab, you will find separate columns for each AI model: <b>AI (XGBoost)</b> and <b>AI (Random&nbsp;Forest)</b>.  These columns display the direction (LONG/SHORT/NEUTRAL) predicted by each algorithm for the latest bar of every scanned coin.  Predictions are always computed for both models regardless of the default, allowing you to compare how the algorithms perceive current market dynamics.  When a model’s prediction matches the scalp direction, a verification tick appears next to the LONG/SHORT label in both the Signal column and the corresponding AI model column.
       </p>
     </div>
     """
@@ -3010,16 +3010,14 @@ def render_guide_tab():
     <div class='panel-box'>
       <b style='color:{ACCENT}; font-size:1.2rem;'>AI Models Explained</b>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
-        The dashboard uses four distinct machine‑learning models to generate trading insights.  Each model has its own strengths and offers a different perspective on market dynamics.  Understanding how they work can help you interpret their signals more effectively.
+        The dashboard incorporates two distinct machine‑learning models to generate trading insights.  Each algorithm has its own strengths and offers a slightly different perspective on market dynamics.  Understanding how they work can help you interpret their signals more effectively.
       </p>
       <ul style='color:{TEXT_MUTED}; font-size:0.92rem; line-height:1.6;'>
-        <li><b style='color:{ACCENT};'>XGBoost:</b> An advanced gradient‑boosting algorithm that builds an ensemble of decision trees sequentially, correcting the errors of previous trees.  It tends to capture complex non‑linear patterns and is known for high predictive accuracy.  In the <i>Market</i> tab, XGBoost is trained on BTC/USDT to estimate the probability of an upward move, and it contributes to the weighted <i>AI Outlook</i> across multiple coins.  In the <i>AI Prediction</i> tab, it analyses your selected symbol and timeframe to provide probability and direction along with entry/exit suggestions.</li>
-        <li><b style='color:{ACCENT};'>Random Forest:</b> A bagging ensemble of decision trees where each tree is trained on a random subset of data and features.  This model is robust to overfitting and provides a solid baseline.  In the Market tab it generates its own prediction and outlook card, while in the AI Prediction tab it offers a more conservative view of the next candle’s direction.</li>
-        <li><b style='color:{ACCENT};'>LightGBM:</b> A gradient‑boosting framework optimised for speed and memory usage.  It uses a histogram‑based approach to split points, enabling efficient handling of large datasets.  LightGBM’s cards on the Market tab and AI Prediction tab often respond quickly to recent price movements while still capturing longer‑term trends.</li>
-        <li><b style='color:{ACCENT};'>Ensemble:</b> Combines the outputs of all available models by averaging their predicted probabilities.  This provides a consensus view that smooths out the idiosyncrasies of individual algorithms.  In both the Market tab and the AI Prediction tab, the Ensemble card gives a balanced signal, which can be useful when individual models disagree.</li>
+        <li><b style='color:{ACCENT};'>XGBoost:</b> An advanced gradient‑boosting algorithm that builds an ensemble of decision trees sequentially, correcting the errors of previous trees.  It excels at capturing complex non‑linear patterns and is known for high predictive accuracy.  In the <i>Market</i> tab, XGBoost is trained on BTC/USDT to estimate the probability of an upward move and contributes to the weighted <i>AI Market Outlook</i> across multiple coins.  In the <i>AI Prediction</i> tab, it analyses your selected symbol and timeframe to provide a probability and direction along with entry/exit suggestions.</li>
+        <li><b style='color:{ACCENT};'>Random Forest:</b> A bagging ensemble of decision trees where each tree is trained on a random subset of data and features.  This model is robust to overfitting and provides a solid baseline.  In the Market tab it generates its own prediction and outlook card, while in the AI Prediction tab it offers a more conservative view of the next candle’s direction, often smoothing out short‑term noise.</li>
       </ul>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
-        In the <b>AI Market Prediction</b> section on the Market tab, each model is trained on the latest BTC/USDT data to estimate the likelihood of an up move.  The <b>AI Market Outlook</b> uses the same models across BTC, ETH, BNB, SOL, ADA and XRP, weighting each probability by market dominance to gauge the overall market tone.  In the <b>AI Prediction</b> tab, all selected models train on your chosen symbol and timeframe, returning individual probabilities, directions and trading levels.  Comparing these models side by side can highlight where they agree or diverge.
+        In the <b>AI Market Prediction</b> section on the Market tab, each model is trained on the latest BTC/USDT data to estimate the likelihood of an up move.  The <b>AI Market Outlook</b> uses the same models across BTC, ETH, BNB, SOL, ADA and XRP, weighting each probability by market dominance to gauge the overall market tone.  In the <b>AI Prediction</b> tab, both models train on your chosen symbol and timeframe, returning individual probabilities, directions and trading levels.  Comparing these two algorithms side by side can highlight where they agree or diverge.
       </p>
     </div>
     """
@@ -3039,15 +3037,15 @@ def render_guide_tab():
     st.markdown(models_explanation_html, unsafe_allow_html=True)
 
     # Explain the AI Market Prediction section shown on the Market tab.  This
-    # section displays compact cards for each algorithm (XGB, RF, LGBM, ENS)
-    # using BTC/USDT as a proxy for the overall market.  Each card trains on
+    # section displays compact cards for each algorithm (XGB, RF) using
+    # BTC/USDT as a proxy for the overall market.  Each card trains on
     # 500 recent candles of the selected timeframe and classifies the probability
     # of an up move as Up, Down or Neutral.
     market_prediction_guide_html = f"""
     <div class='panel-box'>
       <b style='color:{ACCENT}; font-size:1.2rem;'>AI Market Prediction</b>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
-        The AI Market Prediction section compares four algorithms on BTC/USDT for your selected timeframe.  Each compact card shows the predicted probability of an upward move and classifies the outcome as <span style='color:{POSITIVE};'><b>Up</b></span>, <span style='color:{NEGATIVE};'><b>Down</b></span> or <span style='color:{WARNING};'><b>Neutral</b></span>.  The cards are labelled <b>XGB</b> (XGBoost), <b>RF</b> (Random&nbsp;Forest), <b>LGBM</b> (LightGBM) and <b>ENS</b> (Ensemble) so you can see how each model interprets the same market data.  Probabilities ≥ 60&nbsp;% are classified Up, ≤ 40&nbsp;% are Down and intermediate values are Neutral.  Changing the scanner timeframe automatically updates these predictions.
+        The AI Market Prediction section compares two algorithms on BTC/USDT for your selected timeframe.  Each compact card shows the predicted probability of an upward move and classifies the outcome as <span style='color:{POSITIVE};'><b>Up</b></span>, <span style='color:{NEGATIVE};'><b>Down</b></span> or <span style='color:{WARNING};'><b>Neutral</b></span>.  The cards are labelled <b>XGB</b> (XGBoost) and <b>RF</b> (Random&nbsp;Forest) so you can see how each model interprets the same market data.  Probabilities ≥ 60&nbsp;% are classified Up, ≤ 40&nbsp;% are Down and intermediate values are Neutral.  Changing the scanner timeframe automatically updates these predictions.
       </p>
     </div>
     """
@@ -3057,10 +3055,10 @@ def render_guide_tab():
     <div class='panel-box'>
       <b style='color:{ACCENT}; font-size:1.2rem;'>AI Market Outlook</b>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:0.5rem;'>
-        The AI Market Outlook broadens the analysis to a longer timeframe (4 hours) and a diversified basket of assets: BTC/USDT, ETH/USDT, BNB/USDT, SOL/USDT, ADA/USDT and XRP/USDT.  For each algorithm – XGBoost, Random&nbsp;Forest, LightGBM and the Ensemble – the model is trained on approximately 83&nbsp;days of data (500 four‑hour candles) using the same feature set as the AI Prediction tool.  This produces four aggregated probabilities, one per model, representing the likelihood of an overall uptrend across the major coins.
+        The AI Market Outlook broadens the analysis to a longer timeframe (4 hours) and a diversified basket of assets: BTC/USDT, ETH/USDT, BNB/USDT, SOL/USDT, ADA/USDT and XRP/USDT.  For each algorithm – XGBoost and Random&nbsp;Forest – the model is trained on approximately 83&nbsp;days of data (500 four‑hour candles) using the same feature set as the AI Prediction tool.  This produces two aggregated probabilities, one per model, representing the likelihood of an overall uptrend across the major coins.
       </p>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
-        To gauge the market tone, the individual probabilities for these six assets are weighted by their dominance percentages.  For example, if BTC dominance is 50&nbsp;% and ETH is 20&nbsp;%, their predictions carry proportionally more weight than those of smaller coins.  The weighted probabilities are computed separately for each algorithm, yielding a distinct outlook for XGB, RF, LGBM and ENS.  This weighting scheme makes the indicator sensitive to capital rotation; during an <i>alt season</i> the probabilities of assets with rising dominance have greater influence.
+        To gauge the market tone, the individual probabilities for these six assets are weighted by their dominance percentages.  For example, if BTC dominance is 50&nbsp;% and ETH is 20&nbsp;%, their predictions carry proportionally more weight than those of smaller coins.  The weighted probabilities are computed separately for each algorithm, yielding a distinct outlook for XGB and RF.  This weighting scheme makes the indicator sensitive to capital rotation; during an <i>alt season</i> the probabilities of assets with rising dominance have greater influence.
       </p>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
         The results appear as a row of compact cards on the Market tab.  Each card displays the weighted probability for one model and labels it <span style='color:{POSITIVE};'><b>Up</b></span>, <span style='color:{NEGATIVE};'><b>Down</b></span> or <span style='color:{WARNING};'><b>Neutral</b></span> according to the same 60/40 thresholds.  As always, use the AI Market Outlook in conjunction with other indicators and prudent risk management rather than as a standalone signal.
@@ -3083,7 +3081,7 @@ def render_guide_tab():
         total trades, win rate, average PnL and Sharpe ratio.
       </p>
       <p style='color:{TEXT_MUTED}; font-size:0.92rem;'>
-        The <b>AI Backtest</b> (available on its own tab) performs a similar simulation using the probabilities generated by the <b>selected model(s)</b>.  In the AI Backtest tab you can choose one or multiple models – <em>XGBoost</em>, <em>LightGBM</em>, <em>Random Forest</em> or an <em>Ensemble</em> of these – and run independent backtests for each.  The system uses an out‑of‑sample hold‑out: each model is trained on the earliest portion of the data (default 80 %) and then tested on the most recent 20 %.  A <i>LONG</i> trade is taken when the predicted probability of an upward move exceeds a specified threshold (default 60%), while a <i>SHORT</i> trade is taken when the probability falls below the complementary threshold (e.g. 40%).  Running multiple models side by side allows you to compare their historical performance under identical conditions, highlighting which algorithm aligns best with your trading style.
+        The <b>AI Backtest</b> (available on its own tab) performs a similar simulation using the probabilities generated by the <b>selected model(s)</b>.  In the AI Backtest tab you can choose one or both models – <em>XGBoost</em> or <em>Random Forest</em> – and run independent backtests for each.  The system uses an out‑of‑sample hold‑out: each model is trained on the earliest portion of the data (default 80 %) and then tested on the most recent 20 %.  A <i>LONG</i> trade is taken when the predicted probability of an upward move exceeds a specified threshold (default 60%), while a <i>SHORT</i> trade is taken when the probability falls below the complementary threshold (e.g. 40%).  Running the two models side by side allows you to compare their historical performance under identical conditions and highlight which algorithm aligns best with your trading style.
       </p>
     </div>
     """
@@ -3103,13 +3101,15 @@ def render_ml_tab():
     )
     # Explain that the AI Prediction tool uses the model selected in the sidebar.
     # Depending on your selection, the system will instantiate the corresponding
-    # algorithm (XGBoost, LightGBM, Random Forest or an ensemble) and compute
-    # predictions.  Users can compare predictions across all models via the
-    # Coin Signal Scanner and adjust the selection in the AI Backtest tab.
+    # algorithm (XGBoost or Random Forest) and compute predictions.  Internally,
+    # an ensemble of these two algorithms is also available for legacy purposes,
+    # but it is not exposed in the UI.  Users can compare predictions across
+    # both models via the Coin Signal Scanner and adjust the selection in the
+    # AI Backtest tab.
     st.markdown(
         f"<p style='color:{TEXT_MUTED};font-size:0.9rem;'>"
         "This tool trains one or more machine‑learning models on recent candles to estimate whether the next candle will close higher or lower. "
-        "You can select multiple algorithms – <b>XGBoost</b>, <b>LightGBM</b>, <b>Random Forest</b> or an <b>Ensemble</b> – and the app will compute predictions for each. "
+        "You can select one or both algorithms – <b>XGBoost</b> or <b>Random Forest</b> – and the app will compute predictions for each. "
         "For each selected model, a compact card shows the predicted probability and labels it as Up, Down or Neutral.  Detailed analysis with suggested entry/exit levels, leverage and technical context is provided for <em>every</em> selected model, displayed sequentially in the same timeframe column. "
         "Use this information in conjunction with other analysis; past performance does not guarantee future results.  You can configure which model(s) to backtest in the AI Backtest tab.</p>",
         unsafe_allow_html=True
@@ -3202,8 +3202,6 @@ def render_ml_tab():
                         short_name = {
                             "XGBoost": "XGB",
                             "Random Forest": "RF",
-                            "LightGBM": "LGBM",
-                            "Ensemble": "ENS",
                         }.get(mdl, mdl)
                         subcols_pred[m_i].markdown(
                             f"<div class='metric-card' style='padding:16px 12px;'>"
@@ -3380,8 +3378,6 @@ def render_ml_tab():
                         short_name_panel = {
                             "XGBoost": "XGB",
                             "Random Forest": "RF",
-                            "LightGBM": "LGBM",
-                            "Ensemble": "ENS",
                         }.get(mdl, mdl)
                         panel_html = (
                             f"<div class='panel-box'>"
@@ -3816,7 +3812,10 @@ def run_ai_backtest(
         # Build a list of base models.  Include all supported model names
         # irrespective of external library availability; ``make_model`` will
         # substitute appropriate scikit‑learn implementations when necessary.
-        base_names: list[str] = ["XGBoost", "LightGBM", "Random Forest"]
+        # Build a list of base models.  Only XGBoost and Random Forest are used
+        # in this simplified version of the app.  LightGBM has been removed
+        # from the ensemble to reduce complexity.
+        base_names: list[str] = ["XGBoost", "Random Forest"]
         for name in base_names:
             try:
                 mdl = make_model(name)
@@ -3994,9 +3993,10 @@ def render_ai_backtest_tab():
     on historical data.  This tab is separate from the rule‑based backtest and
     allows the user to specify a probability threshold for LONG/SHORT trades
     and a fixed exit horizon.  You can run independent backtests for multiple
-    models (XGBoost, LightGBM, Random Forest or an Ensemble) simultaneously; each
-    selected model trains on the same data and outputs its own results.  The
-    available AI models mirror the choices provided in the sidebar.
+    models – specifically <b>XGBoost</b> and <b>Random Forest</b> – simultaneously; each
+    selected model trains on the same data and outputs its own results.  Only these two
+    models are supported in the simplified version of the dashboard, and the available
+    AI models mirror the choices provided in the sidebar.
     """
     st.markdown(f"<h2 style='color:{ACCENT};'>AI Backtest Simulator</h2>", unsafe_allow_html=True)
     # Input controls for the AI backtest.  Use unique keys to avoid conflicts
@@ -4124,4 +4124,6 @@ def main():
         render_guide_tab()
 
 main()
+
+
 
