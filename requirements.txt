@@ -5,9 +5,7 @@ requests
 plotly
 ccxt
 ta
-pandas-ta
 scikit-learn
 xgboost
 lightgbm
-catboost
-
+pandas-ta
