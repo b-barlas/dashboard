@@ -10,7 +10,39 @@ import ta
 # for auto-refreshing the dashboard but has been superseded by manual
 # refresh mechanisms.  Removing the import avoids an unused import warning.
 from typing import Tuple
-import pandas_ta as pta
+# Attempt to import pandas_ta for additional indicators.  In hosted
+# environments such as Streamlit Cloud running on bleeding‑edge Python
+# versions (e.g. Python 3.13), pandas_ta may depend on a version of
+# numba/llvmlite that is not yet available.  To ensure the app still
+# functions when pandas_ta cannot be imported, we attempt the import
+# inside a try/except and fall back to a stub if it fails.  Any
+# references to pta will be resolved at runtime; NameError exceptions
+# are caught and ignored in the relevant code paths.
+try:
+    import pandas_ta as pta  # noqa: F401
+except Exception:
+    pta = None  # type: ignore
+
+def compute_wma(series: pd.Series, length: int) -> pd.Series:
+    """Compute a weighted moving average with a linear weighting scheme.
+
+    If pandas_ta is available and its WMA function succeeds, use that
+    implementation.  Otherwise, fall back to a manual calculation
+    using numpy.  This ensures WMA plots continue to work even when
+    pandas_ta cannot be installed (for example, due to numba
+    incompatibilities on Python 3.13).
+    """
+    # Try pandas_ta first
+    if pta is not None:
+        try:
+            return pta.wma(series, length=length)
+        except Exception:
+            pass
+    # Manual calculation: weights 1,2,3,...,length
+    weights = np.arange(1, length + 1)
+    return series.rolling(length).apply(
+        lambda x: float(np.dot(x, weights)) / float(weights.sum()), raw=True
+    )
 # Use a modern ensemble model (RandomForest) instead of a linear classifier
 # LogisticRegression was previously used here, but we now import RandomForestClassifier
 # to capture nonlinear relationships and improve predictive power.  See ml_predict_direction below.
@@ -2307,8 +2339,8 @@ def render_spot_tab():
         # Plot weighted moving averages (WMA) for additional insight.  The WMA gives
         # more weight to recent prices and can help identify trend shifts earlier.
         try:
-            wma20 = pta.wma(df['close'], length=20)
-            wma50 = pta.wma(df['close'], length=50)
+            wma20 = compute_wma(df['close'], length=20)
+            wma50 = compute_wma(df['close'], length=50)
             fig.add_trace(go.Scatter(x=df['timestamp'], y=wma20, mode='lines',
                                      name="WMA20", line=dict(color='#34D399', width=1, dash='dot')))
             fig.add_trace(go.Scatter(x=df['timestamp'], y=wma50, mode='lines',
@@ -2749,8 +2781,8 @@ def render_position_tab():
                                                 name=f"EMA{window}", line=dict(color=color, width=1.5)))
             # Plot weighted moving averages (WMA) for deeper trend insight
             try:
-                wma20_c = pta.wma(df_candle['close'], length=20)
-                wma50_c = pta.wma(df_candle['close'], length=50)
+                wma20_c = compute_wma(df_candle['close'], length=20)
+                wma50_c = compute_wma(df_candle['close'], length=50)
                 fig_candle.add_trace(go.Scatter(x=df_candle['timestamp'], y=wma20_c, mode='lines',
                                                 name="WMA20", line=dict(color='#34D399', width=1, dash='dot')))
                 fig_candle.add_trace(go.Scatter(x=df_candle['timestamp'], y=wma50_c, mode='lines',
@@ -3476,8 +3508,8 @@ def render_ml_tab():
                             ))
                         # Weighted moving averages (WMA)
                         try:
-                            wma20 = pta.wma(df['close'], length=20)
-                            wma50 = pta.wma(df['close'], length=50)
+                            wma20 = compute_wma(df['close'], length=20)
+                            wma50 = compute_wma(df['close'], length=50)
                             fig.add_trace(go.Scatter(
                                 x=df['timestamp'], y=wma20, mode='lines',
                                 name="WMA20", line=dict(color='#34D399', width=1, dash='dot')
@@ -4092,6 +4124,4 @@ def main():
         render_guide_tab()
 
 main()
-
-
 
