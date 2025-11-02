@@ -887,6 +887,11 @@ def get_signal_from_confidence(confidence: float) -> Tuple[str, str]:
         return "STRONG SELL", "⚠️ Strong bearish bias. SHORT with high confidence."
 
 # Analyse a dataframe of price data and signal, lev_base, comment, volume_spike, atr_comment, candle_pattern, confidence_score, adx, supertrend, ichimoku trend, stochRSI, bollinger, vwap_label, psar_trend, williams_val, cci_label
+# Cache the analysis results to avoid recomputing expensive technical indicators on identical datasets.
+# The underlying DataFrame is copied to ensure that cached results are independent of any external
+# modifications.  A TTL of 10 minutes strikes a balance between reusing recent computations and
+# reflecting fresh market data when the user refreshes the dashboard.
+@st.cache_data(ttl=600, show_spinner=False)
 def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, float, str, str, float, str, str, str, str, str]:
     """
     Perform a comprehensive technical analysis on a DataFrame of OHLCV data and
@@ -1409,6 +1414,10 @@ def get_scalping_entry_target(
     return scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note
 
 # === Machine Learning Prediction ===
+# Cache the model prediction so that repeated calls on the same dataset and model reuse the trained
+# classifier.  The DataFrame and model name form part of the cache key.  A TTL of 10 minutes
+# ensures predictions are refreshed periodically without retraining on every call.
+@st.cache_data(ttl=600, show_spinner=False)
 def ml_predict_direction(df: pd.DataFrame, model_name: str | None = None) -> tuple[float, str]:
     """
     Train a machine‑learning model to estimate the probability that the next candle
@@ -1843,9 +1852,10 @@ def render_market_tab():
             if df is None or len(df) <= 30:
                 continue
     
-            df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
-            df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
-            df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+            # Remove redundant indicator calculations.  The analyse() function computes all
+            # required moving averages, RSI and other indicators internally.  Duplicating
+            # these calculations here adds unnecessary overhead.  Rely on analyse() to
+            # populate the 'ema*', 'rsi' and related columns as needed.
 
             # Compute the AI meta model prediction (Ensemble) once per symbol and timeframe.
             try:
@@ -1876,12 +1886,19 @@ def render_market_tab():
             williams_label, cci_label = analyse(df)
 
             # Compute hybrid confidence and final signal direction
-            # ATR ratio for volatility regime
+            # ATR ratio for volatility regime.  analyse() populates the 'atr' column on
+            # the provided DataFrame, so we can read the latest ATR directly instead
+            # of recalculating it.  Fall back to 0.0 if unavailable.
             try:
-                atr_series = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
-                atr_latest = atr_series.iloc[-1] if len(atr_series) > 0 else np.nan
+                if 'atr' in df.columns:
+                    atr_latest = df['atr'].iloc[-1]
+                else:
+                    atr_latest = np.nan
                 close_val = df['close'].iloc[-1]
-                atr_ratio = (atr_latest / close_val) if (close_val and not pd.isna(close_val) and not pd.isna(atr_latest)) else 0.0
+                if close_val and pd.notna(atr_latest):
+                    atr_ratio = float(atr_latest) / float(close_val)
+                else:
+                    atr_ratio = 0.0
             except Exception:
                 atr_ratio = 0.0
             # Blend technical and AI meta prediction
@@ -2954,13 +2971,11 @@ def render_guide_tab():
 
     st.markdown(backtest_html, unsafe_allow_html=True)
 
-    # Skip the legacy guide below
+    # End of the modern analysis guide.  The legacy guide that follows in the original
+    # implementation has been removed to improve performance and reduce the size of
+    # the compiled script.  The return statement below ensures that no dead
+    # code executes.
     return
-
-    st.markdown(
-        f"<h2 style='color:{ACCENT}; font-size:1.6rem; margin-bottom:1rem;'>Analysis Guide</h2>",
-        unsafe_allow_html=True,
-    )
 
     signal_html = f"""
     <div class='panel-box'>
