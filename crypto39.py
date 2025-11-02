@@ -23,6 +23,40 @@ try:
 except Exception:
     pta = None  # type: ignore
 
+# ---------------------------------------------------------------------------
+# Streamlit helper utilities
+#
+# Streamlit’s API has evolved across versions.  In particular, the mechanism
+# for re-running the app changed from ``st.experimental_rerun()`` to
+# ``st.rerun()``.  The hosted Streamlit Cloud environment may be running
+# either an older or newer version, so calling only one of these methods
+# could result in an ``AttributeError``.  To ensure our app refreshes
+# correctly regardless of Streamlit version, we provide a tiny wrapper
+# that tries ``st.rerun()`` first and falls back to
+# ``st.experimental_rerun()`` when necessary.  If neither method exists
+# (which would be highly unusual), the function silently does nothing.
+def rerun_script() -> None:
+    """
+    Safely trigger a script re-run in Streamlit.
+
+    This helper attempts to call ``st.rerun()`` if it exists.  On older
+    Streamlit releases where ``st.rerun()`` is unavailable, it falls back
+    to ``st.experimental_rerun()``.  If both attributes are missing,
+    the function returns without raising an exception.  Use this wrapper
+    rather than calling either rerun method directly to maximise
+    compatibility across Streamlit versions.
+    """
+    try:
+        # Streamlit ≥ 1.22 provides st.rerun()
+        st.rerun()
+    except AttributeError:
+        # Fall back to the experimental API on older versions
+        try:
+            st.experimental_rerun()  # type: ignore[attr-defined]
+        except Exception:
+            # If neither method exists, do nothing
+            pass
+
 def compute_wma(series: pd.Series, length: int) -> pd.Series:
     """Compute a weighted moving average with a linear weighting scheme.
 
@@ -47,15 +81,6 @@ def compute_wma(series: pd.Series, length: int) -> pd.Series:
 # LogisticRegression was previously used here, but we now import RandomForestClassifier
 # to capture nonlinear relationships and improve predictive power.  See ml_predict_direction below.
 from sklearn.ensemble import (
-try:
-    from datetime import datetime, UTC
-    def utc_now():
-        return datetime.now(UTC)
-except Exception:  # Python < 3.11
-    from datetime import datetime, timezone
-    def utc_now():
-        return datetime.now(timezone.utc)
-
     RandomForestClassifier,
     GradientBoostingClassifier,
     HistGradientBoostingClassifier,
@@ -1459,7 +1484,7 @@ def render_market_tab():
     # Show data source and last update time.  This helps users understand
     # where the numbers originate and when they were fetched.  The timestamp
     # uses UTC for consistency across time zones.
-    last_update = datetime.utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
+    last_update = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     st.markdown(
         f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:0.5rem;'>"
         f"Data from CCXT (Bybit → OKX → KuCoin fallback; using {EXCHANGE_ID.upper() if EXCHANGE_ID else 'None'}) &amp; CoinGecko. Last updated: {last_update}."
@@ -1468,9 +1493,10 @@ def render_market_tab():
     )
     # Provide a refresh button to allow users to manually refresh market data.
     if st.button("Refresh Data"):
-        # `st.experimental_rerun()` has been removed in recent Streamlit releases.
-        # Use `st.rerun()` to reload the script when the user clicks the refresh button.
-        st.rerun()
+        # When the user clicks the refresh button we want to re-run the app.  Use
+        # the ``rerun_script()`` helper to support both the new ``st.rerun()``
+        # function and the legacy ``st.experimental_rerun()`` across versions.
+        rerun_script()
 
     # Determine which timeframe to use for the market prediction.  We rely on
     # Streamlit session state to persist the selected timeframe from the
@@ -4111,3 +4137,5 @@ def main():
         render_guide_tab()
 
 main()
+
+
