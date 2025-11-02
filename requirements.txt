@@ -7,5 +7,3 @@ ccxt
 ta
 scikit-learn
 xgboost
-lightgbm
-pandas-ta
