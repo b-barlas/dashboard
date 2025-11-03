@@ -6,7 +6,6 @@ import requests
 import plotly.graph_objs as go
 import ccxt
 import ta
-from streamlit_autorefresh import st_autorefresh
 from typing import Tuple
 import pandas_ta as pta
 from sklearn.linear_model import LogisticRegression
