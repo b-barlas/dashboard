@@ -1,21 +1,26 @@
+# Core
 streamlit==1.51.0
 pandas==2.3.3
 numpy==2.1.3
+python-dateutil==2.9.0.post0
+requests==2.32.3
+python-dotenv==1.0.1
+
+# Plotting
 plotly==5.24.1
 
+# TA libs
+ta==0.11.0
+pandas-ta==0.4.71b0
+numba==0.61.2
+llvmlite==0.44.0
+
+# ML
 scikit-learn==1.6.1
 xgboost==3.1.1
 
-ta==0.11.0
-requests==2.32.3
-python-dateutil==2.9.0.post0
-python-dotenv==1.0.1
+# Crypto API
 ccxt==4.3.83
+
+# Streamlit utils
 streamlit-autorefresh==1.0.1
-
-# package name 'pandas-ta', import name 'pandas_ta'
-pandas-ta==0.4.71b0
-
-# pandas-ta 0.4.x -> numba/llvmlite ihtiyacı olur; uyumlu sürümleri sabitle
-numba==0.61.2
-llvmlite==0.44.0
