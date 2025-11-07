@@ -1,13 +1,13 @@
 streamlit==1.51.0
 pandas==2.2.3
-numpy==1.26.4
+numpy==2.3.4
 plotly==5.24.1
-scikit-learn==1.5.2
-xgboost==2.0.3
+scikit-learn==1.6.0
+xgboost==3.1.1
 ta==0.11.0
 requests==2.32.3
 python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
 ccxt==4.3.83
 streamlit-autorefresh==1.0.1
-pandas_ta==0.3.14b0
+pandas-ta==0.4.71b0
