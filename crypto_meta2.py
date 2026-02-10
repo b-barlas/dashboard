@@ -196,7 +196,7 @@ st.markdown(
 # Exchange set up with caching
 @st.cache_resource(show_spinner=False)
 def get_exchange():
-    return ccxt.bybit({
+    return ccxt.kraken({
         "enableRateLimit": True,
     })
 
