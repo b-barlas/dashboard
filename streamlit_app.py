@@ -1218,30 +1218,27 @@ def ml_predict_direction(df: pd.DataFrame) -> tuple[float, str]:
     y = df_model['target'].astype(int).values
 
     try:
-        # using XGBoost
-        import xgboost as xgb
+        from sklearn.ensemble import GradientBoostingClassifier
         from sklearn.preprocessing import StandardScaler
-        
+
         # Scale features for better performance
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X[:-1])  # Exclude last point (no target)
         X_last_scaled = scaler.transform(X[-1:])
-        
-        # Train XGBoost model
-        model = xgb.XGBClassifier(
+
+        # Train GradientBoosting model
+        model = GradientBoostingClassifier(
             n_estimators=100,
             max_depth=4,
             learning_rate=0.1,
             random_state=42,
-            eval_metric='logloss'
         )
-        model.fit(X_scaled, y[:-1], verbose=False)
-        
+        model.fit(X_scaled, y[:-1])
+
         # Predict probability
         prob_up = float(model.predict_proba(X_last_scaled)[0][1])
     except Exception as e:
-        # Fallback to LogisticRegression if XGBoost fails
-        print(f"XGBoost failed ({e}), falling back to LogisticRegression")
+        # Fallback to LogisticRegression
         try:
             model = LogisticRegression(max_iter=1000)
             model.fit(X[:-1], y[:-1])
