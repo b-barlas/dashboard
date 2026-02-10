@@ -1175,9 +1175,9 @@ def get_scalping_entry_target(
 # === Machine Learning Prediction ===
 def ml_predict_direction(df: pd.DataFrame) -> tuple[float, str]:
     """
-    Train an advanced machine‑learning classifier (XGBoost) on recent candles to estimate whether
+    Train an advanced machine‑learning classifier (Gradient Boosting) on recent candles to estimate whether
     the next candle's close will be higher (bullish) or lower (bearish).  This function generates
-    a range of technical indicators and statistical features, fits an XGBoost classifier to the
+    a range of technical indicators and statistical features, fits a Gradient Boosting classifier to the
     historical data, and returns the probability of an upward move along with a directional label.
     """
     if df is None or len(df) < 60:
@@ -1218,8 +1218,7 @@ def ml_predict_direction(df: pd.DataFrame) -> tuple[float, str]:
     y = df_model['target'].astype(int).values
 
     try:
-        # using XGBoost
-        import xgboost as xgb
+        from sklearn.ensemble import GradientBoostingClassifier
         from sklearn.preprocessing import StandardScaler
 
         # Scale features for better performance
@@ -1227,21 +1226,20 @@ def ml_predict_direction(df: pd.DataFrame) -> tuple[float, str]:
         X_scaled = scaler.fit_transform(X[:-1])  # Exclude last point (no target)
         X_last_scaled = scaler.transform(X[-1:])
 
-        # Train XGBoost model
-        model = xgb.XGBClassifier(
+        # Train Gradient Boosting model
+        model = GradientBoostingClassifier(
             n_estimators=100,
             max_depth=4,
             learning_rate=0.1,
-            random_state=42,
-            eval_metric='logloss'
+            random_state=42
         )
-        model.fit(X_scaled, y[:-1], verbose=False)
+        model.fit(X_scaled, y[:-1])
 
         # Predict probability
         prob_up = float(model.predict_proba(X_last_scaled)[0][1])
     except Exception as e:
-        # Fallback to LogisticRegression if XGBoost fails
-        print(f"XGBoost failed ({e}), falling back to LogisticRegression")
+        # Fallback to LogisticRegression if Gradient Boosting fails
+        print(f"GradientBoosting failed ({e}), falling back to LogisticRegression")
         try:
             model = LogisticRegression(max_iter=1000)
             model.fit(X[:-1], y[:-1])
@@ -1652,7 +1650,7 @@ def render_market_tab():
             df['rsi'] = ta.momentum.rsi(df['close'], window=14)
 
             # Compute an AI prediction based on recent candles.  The
-            # ml_predict_direction function fits an XGBoost classifier to
+            # ml_predict_direction function fits a Gradient Boosting classifier to
             # technical features derived from the recent OHLCV data and
             # returns both a probability and a categorical direction
             # (LONG/SHORT/NEUTRAL).  If the data set is too small, it
@@ -2696,7 +2694,7 @@ def render_guide_tab():
     <div class='panel-box'>
       <b style='color:#06D6A0; font-size:1.3rem;'>🤖 Machine Learning Predictions</b>
       <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
-        Uses XGBoost (gradient boosting algorithm) to predict next candle direction.
+        Uses Gradient Boosting algorithm to predict next candle direction.
       </p>
       <div style='margin-top:1.5rem;'>
         <p style='color:#E5E7EB; font-size:0.9rem;'><b>How It Works:</b></p>
@@ -2772,7 +2770,7 @@ def render_ml_tab():
     )
     st.markdown(
         f"<p style='color:#8CA1B6;font-size:0.9rem;'>"
-        "This tool trains an advanced gradient boosting (XGBoost) model on recent candles to estimate whether the next candle will close higher or lower. "
+        "This tool trains an advanced Gradient Boosting model on recent candles to estimate whether the next candle will close higher or lower. "
         "The output is a probability and a suggested direction (LONG/SHORT/NEUTRAL). "
         "Use this information in conjunction with other analysis; past performance does not guarantee future results.</p>",
         unsafe_allow_html=True
