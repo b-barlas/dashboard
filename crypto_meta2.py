@@ -7,8 +7,47 @@ import plotly.graph_objs as go
 import ccxt
 import ta
 from typing import Tuple
-import pandas_ta as pta
 from sklearn.linear_model import LogisticRegression
+
+
+def _wma(series: pd.Series, length: int) -> pd.Series:
+    """Weighted Moving Average – gives more weight to recent prices."""
+    weights = np.arange(1, length + 1, dtype=float)
+    return series.rolling(window=length).apply(
+        lambda x: np.dot(x, weights) / weights.sum(), raw=True
+    )
+
+
+def _supertrend(high: pd.Series, low: pd.Series, close: pd.Series,
+                length: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
+    """SuperTrend indicator using ATR bands."""
+    atr = ta.volatility.average_true_range(high, low, close, window=length)
+    hl2 = (high + low) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+
+    supertrend = pd.Series(np.nan, index=close.index)
+    direction = pd.Series(1, index=close.index)
+
+    for i in range(length, len(close)):
+        if close.iloc[i] > upper_band.iloc[i - 1]:
+            direction.iloc[i] = 1
+        elif close.iloc[i] < lower_band.iloc[i - 1]:
+            direction.iloc[i] = -1
+        else:
+            direction.iloc[i] = direction.iloc[i - 1]
+            if direction.iloc[i] == 1 and lower_band.iloc[i] < lower_band.iloc[i - 1]:
+                lower_band.iloc[i] = lower_band.iloc[i - 1]
+            if direction.iloc[i] == -1 and upper_band.iloc[i] > upper_band.iloc[i - 1]:
+                upper_band.iloc[i] = upper_band.iloc[i - 1]
+
+        supertrend.iloc[i] = lower_band.iloc[i] if direction.iloc[i] == 1 else upper_band.iloc[i]
+
+    result = pd.DataFrame({
+        f'SUPERT_{length}_{multiplier}': supertrend,
+        f'SUPERTd_{length}_{multiplier}': direction,
+    }, index=close.index)
+    return result
 
 
 # Set up page title, icon and wide layout
@@ -355,7 +394,12 @@ def signal_plain(signal: str) -> str:
 def format_delta(delta):
      if delta is None:
          return ''
-     triangle = "▲" if delta > 0 else "▼"
+     if delta > 0:
+         triangle = "▲"
+     elif delta < 0:
+         triangle = "▼"
+     else:
+         triangle = "→"
      return f"{triangle} {abs(delta):.2f}%"
 
 def format_trend(trend: str) -> str:
@@ -588,12 +632,10 @@ def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, flo
 
     # Parabolic SAR
     try:
-        psar_df = pta.psar(df['high'], df['low'], df['close'])
-
-        if 'PSARl' in psar_df.columns and 'PSARs' in psar_df.columns:
-            df["psar"] = psar_df['PSARl'].fillna(psar_df['PSARs'])
-        else:
-            df["psar"] = psar_df.iloc[:, 0]
+        psar_ind = ta.trend.PSARIndicator(high=df['high'], low=df['low'], close=df['close'])
+        psar_up = psar_ind.psar_up()
+        psar_down = psar_ind.psar_down()
+        df["psar"] = psar_up.fillna(psar_down)
     except Exception as e:
         print("PSAR Error:", e)
         df["psar"] = np.nan
@@ -651,7 +693,7 @@ def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, flo
     
     # SuperTrend calculation
     try:
-        st_data = pta.supertrend(df['high'], df['low'], df['close'], length=10, multiplier=3.0)
+        st_data = _supertrend(df['high'], df['low'], df['close'], length=10, multiplier=3.0)
         df['supertrend'] = st_data[st_data.columns[0]]
     except Exception as e:
         print("SuperTrend Error:", e)
@@ -1912,8 +1954,8 @@ def render_spot_tab():
         # Plot weighted moving averages (WMA) for additional insight.  The WMA gives
         # more weight to recent prices and can help identify trend shifts earlier.
         try:
-            wma20 = pta.wma(df['close'], length=20)
-            wma50 = pta.wma(df['close'], length=50)
+            wma20 = _wma(df['close'], length=20)
+            wma50 = _wma(df['close'], length=50)
             fig.add_trace(go.Scatter(x=df['timestamp'], y=wma20, mode='lines',
                                      name="WMA20", line=dict(color='#34D399', width=1, dash='dot')))
             fig.add_trace(go.Scatter(x=df['timestamp'], y=wma50, mode='lines',
@@ -2073,8 +2115,8 @@ def render_position_tab():
 
         for idx, tf in enumerate(selected_timeframes):
             with cols[idx]:
-                df = fetch_ohlcv(coin, tf, limit=100)
-                if df is None or len(df) < 30:
+                df = fetch_ohlcv(coin, tf, limit=200)
+                if df is None or len(df) < 120:
                     st.error(f"Not enough data to analyse position for {tf}.")
                     continue
 
@@ -2273,9 +2315,10 @@ def render_position_tab():
                     df_scalp['ema21'] = df_scalp['close'].ewm(span=21).mean()
                     df_scalp['atr'] = ta.volatility.average_true_range(df_scalp['high'], df_scalp['low'], df_scalp['close'], window=14)
                     df_scalp['rsi'] = ta.momentum.rsi(df_scalp['close'], window=14)
-                    df_scalp['macd'] = ta.trend.macd(df_scalp['close'])
-                    df_scalp['macd_signal'] = ta.trend.macd_signal(df_scalp['close'])
-                    df_scalp['macd_diff'] = df_scalp['macd'] - df_scalp['macd_signal']
+                    _macd_scalp = ta.trend.MACD(df_scalp['close'])
+                    df_scalp['macd'] = _macd_scalp.macd()
+                    df_scalp['macd_signal'] = _macd_scalp.macd_signal()
+                    df_scalp['macd_diff'] = _macd_scalp.macd_diff()
                     df_scalp['obv'] = ta.volume.on_balance_volume(df_scalp['close'], df_scalp['volume'])
                 
                     latest = df_scalp.iloc[-1]
@@ -2354,8 +2397,8 @@ def render_position_tab():
                                                 name=f"EMA{window}", line=dict(color=color, width=1.5)))
             # Plot weighted moving averages (WMA) for deeper trend insight
             try:
-                wma20_c = pta.wma(df_candle['close'], length=20)
-                wma50_c = pta.wma(df_candle['close'], length=50)
+                wma20_c = _wma(df_candle['close'], length=20)
+                wma50_c = _wma(df_candle['close'], length=50)
                 fig_candle.add_trace(go.Scatter(x=df_candle['timestamp'], y=wma20_c, mode='lines',
                                                 name="WMA20", line=dict(color='#34D399', width=1, dash='dot')))
                 fig_candle.add_trace(go.Scatter(x=df_candle['timestamp'], y=wma50_c, mode='lines',
@@ -3049,8 +3092,8 @@ def render_ml_tab():
                             ))
                         # Weighted moving averages (WMA)
                         try:
-                            wma20 = pta.wma(df['close'], length=20)
-                            wma50 = pta.wma(df['close'], length=50)
+                            wma20 = _wma(df['close'], length=20)
+                            wma50 = _wma(df['close'], length=50)
                             fig.add_trace(go.Scatter(
                                 x=df['timestamp'], y=wma20, mode='lines',
                                 name="WMA20", line=dict(color='#34D399', width=1, dash='dot')
@@ -3214,7 +3257,7 @@ def run_backtest(df: pd.DataFrame, threshold: float = 70, exit_after: int = 5, c
     consecutive_losses = 0
     max_consecutive_losses = 0
 
-    for i in range(30, len(df) - exit_after):
+    for i in range(120, len(df) - exit_after):
         df_slice = df.iloc[:i + 1].copy()
         try:
             result = analyse(df_slice)
