@@ -61,7 +61,8 @@ st.set_page_config(
 if 'debug_mode' not in st.session_state:
     st.session_state['debug_mode'] = False
 with st.sidebar:
-    st.session_state['debug_mode'] = st.toggle('Debug mode', value=st.session_state['debug_mode'])
+    with st.expander("Developer Tools", expanded=False):
+        st.session_state['debug_mode'] = st.toggle('Debug mode', value=st.session_state['debug_mode'])
 
 def _debug(msg: str) -> None:
     """Emit a debug message only when Debug mode is enabled."""
@@ -195,11 +196,8 @@ st.markdown(
 # Exchange set up with caching
 @st.cache_resource(show_spinner=False)
 def get_exchange():
-    return ccxt.binance({
+    return ccxt.bybit({
         "enableRateLimit": True,
-        "options": {
-            "adjustForTimeDifference": True 
-        }
     })
 
 EXCHANGE = get_exchange()
@@ -3439,7 +3437,7 @@ def render_backtest_tab():
                              help="Only take trades with confidence above this level")
         exit_after = st.slider("Exit After N Candles", 1, 20, step=1, value=5)
         commission = st.slider("Commission (%)", 0.0, 1.0, step=0.05, value=0.1,
-                              help="Trading fee per trade (Binance spot: 0.1%)") / 100
+                              help="Trading fee per trade (typical spot: 0.1%)") / 100
 
     if st.button("🚀 Run Backtest", type="primary"):
         st.info("Fetching data and running comprehensive analysis...")
