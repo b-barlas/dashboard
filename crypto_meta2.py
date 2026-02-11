@@ -322,7 +322,7 @@ def get_markets() -> dict:
         # Markets may already be loaded by get_exchange(); reload to be safe.
         return EXCHANGE.load_markets()
     except Exception as e:
-        st.warning(f"Markets yüklenemedi ({EXCHANGE.id}): {e}")
+        st.warning(f"Failed to load markets ({EXCHANGE.id}): {e}")
         return {}
 
 MARKETS = get_markets()
@@ -365,47 +365,6 @@ def get_major_ohlcv_bundle(timeframe: str, limit: int = 500) -> dict[str, pd.Dat
     for sym in majors:
         out[sym] = fetch_ohlcv(sym, timeframe, limit=limit)
     return out
-
-
-# === Funding Rate & Open Interest (Binance Futures public API – no auth) ===
-@st.cache_data(ttl=300, show_spinner=False)
-def get_funding_rate(symbol: str) -> dict:
-    """Fetch latest funding rate from Binance Futures public API."""
-    try:
-        binance_sym = symbol.replace("/", "")
-        resp = requests.get(
-            "https://fapi.binance.com/fapi/v1/fundingRate",
-            params={"symbol": binance_sym, "limit": 1},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if data:
-                return {
-                    "rate": float(data[0].get("fundingRate", 0)),
-                    "time": int(data[0].get("fundingTime", 0)),
-                }
-    except Exception:
-        pass
-    return {"rate": 0.0, "time": 0}
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def get_open_interest(symbol: str) -> float:
-    """Fetch open interest from Binance Futures public API."""
-    try:
-        binance_sym = symbol.replace("/", "")
-        resp = requests.get(
-            "https://fapi.binance.com/fapi/v1/openInterest",
-            params={"symbol": binance_sym},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            return float(resp.json().get("openInterest", 0))
-    except Exception:
-        pass
-    return 0.0
-
 
 def signal_badge(signal: str) -> str:
     """Return a simplified badge for the given signal."""
@@ -1519,7 +1478,7 @@ def render_market_tab():
             plot_bgcolor="#0e1117",
             paper_bgcolor="#0e1117",
         )
-        st.plotly_chart(fig_btc, use_container_width=True)
+        st.plotly_chart(fig_btc, width="stretch")
 
     # ETH dominance gauge
     with g2:
@@ -1545,7 +1504,7 @@ def render_market_tab():
             plot_bgcolor="#0e1117",
             paper_bgcolor="#0e1117",
         )
-        st.plotly_chart(fig_eth, use_container_width=True)
+        st.plotly_chart(fig_eth, width="stretch")
 
     # AI market outlook gauge
     with g3:
@@ -1571,7 +1530,7 @@ def render_market_tab():
             plot_bgcolor="#0e1117",
             paper_bgcolor="#0e1117",
         )
-        st.plotly_chart(fig_behaviour, use_container_width=True)
+        st.plotly_chart(fig_behaviour, width="stretch")
         # Show the directional label below the gauge to indicate trend
         st.markdown(
             f"<div style='text-align:center; color:{behaviour_color}; font-size:0.9rem; margin-top:-12px;'>"
@@ -1821,7 +1780,7 @@ def render_market_tab():
                 .map(style_scalp_opp, subset=['Scalp Opportunity'])
                 .map(style_delta, subset=['Δ (%)'])
             )
-            st.dataframe(styled, use_container_width=True)
+            st.dataframe(styled, width="stretch")
 
             # Provide option to download the scanning results as a CSV.  Users
             # can further analyse the output or archive it.  We drop the
@@ -1836,50 +1795,6 @@ def render_market_tab():
         else:
             st.info("No coins matched the criteria.")
 
-    # === Funding Rate & Open Interest Section ===
-    st.markdown("\n\n")
-    st.markdown(
-        f"<h2 style='color:{ACCENT};margin-bottom:0.5rem;'>Funding Rate & Open Interest</h2>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
-        "Live funding rates and open interest for major perpetual futures. "
-        "Positive funding = longs pay shorts (bullish crowding). Negative = shorts pay longs."
-        "</p>",
-        unsafe_allow_html=True,
-    )
-    foi_symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"]
-    foi_rows = []
-    for sym in foi_symbols:
-        fr = get_funding_rate(sym)
-        oi = get_open_interest(sym)
-        rate_pct = fr["rate"] * 100
-        rate_label = f"{rate_pct:+.4f}%"
-        if rate_pct > 0.01:
-            bias = "Bullish crowding"
-        elif rate_pct < -0.01:
-            bias = "Bearish crowding"
-        else:
-            bias = "Neutral"
-        foi_rows.append({
-            "Coin": sym.split("/")[0],
-            "Funding Rate": rate_label,
-            "Bias": bias,
-            "Open Interest": f"{oi:,.2f}" if oi else "N/A",
-        })
-    if foi_rows:
-        df_foi = pd.DataFrame(foi_rows)
-
-        def _style_funding_bias(val: str) -> str:
-            if "Bullish" in val:
-                return f"color: {POSITIVE}; font-weight: 600;"
-            elif "Bearish" in val:
-                return f"color: {NEGATIVE}; font-weight: 600;"
-            return f"color: {WARNING};"
-
-        styled_foi = df_foi.style.map(_style_funding_bias, subset=["Bias"])
-        st.dataframe(styled_foi, use_container_width=True)
 
 
 def render_spot_tab():
@@ -2032,7 +1947,7 @@ def render_spot_tab():
             template='plotly_dark',
             paper_bgcolor=PRIMARY_BG
         )
-        st.plotly_chart(gauge_sent, use_container_width=True)
+        st.plotly_chart(gauge_sent, width="stretch")
         # Plot candlestick with EMAs
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
@@ -2064,7 +1979,7 @@ def render_spot_tab():
             showlegend=True,
             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
         # RSI chart
         rsi_fig = go.Figure()
         for period, color in [(6, '#D8B4FE'), (14, '#A78BFA'), (24, '#818CF8')]:
@@ -2084,7 +1999,7 @@ def render_spot_tab():
             showlegend=True,
             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
         )
-        st.plotly_chart(rsi_fig, use_container_width=True)
+        st.plotly_chart(rsi_fig, width="stretch")
 
         # MACD chart
         macd_ind = ta.trend.MACD(df['close'])
@@ -2112,7 +2027,7 @@ def render_spot_tab():
             showlegend=True,
             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
         )
-        st.plotly_chart(macd_fig, use_container_width=True)
+        st.plotly_chart(macd_fig, width="stretch")
 
         # Volume & OBV chart
         df['obv'] = ta.volume.on_balance_volume(df['close'], df['volume'])
@@ -2134,7 +2049,7 @@ def render_spot_tab():
             showlegend=True,
             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
         )
-        st.plotly_chart(volume_fig, use_container_width=True)
+        st.plotly_chart(volume_fig, width="stretch")
 
         # Technical snapshot
         # Compute indicators for snapshot
@@ -2502,7 +2417,7 @@ def render_position_tab():
                 legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
             )
             st.markdown(f"<h4 style='color:{ACCENT};'>📈 Candlestick Chart – {largest_tf}</h4>", unsafe_allow_html=True)
-            st.plotly_chart(fig_candle, use_container_width=True)
+            st.plotly_chart(fig_candle, width="stretch")
         else:
             st.warning(f"Not enough data to display candlestick chart for {largest_tf}.")
 
@@ -2836,6 +2751,149 @@ def render_guide_tab():
     """
     st.markdown(tips_panel, unsafe_allow_html=True)
 
+    # === New Features Guide Sections ===
+
+    # Multi-Timeframe Confluence
+    mtf_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>🔀 Multi-Timeframe Confluence</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Analyses your chosen coin across 5 timeframes (5m, 15m, 1h, 4h, 1d) simultaneously and combines their signals into a single <b>Confluence Score</b>.
+      </p>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>How It Works:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li>Runs the full technical analysis on each of the 5 timeframes.</li>
+          <li>Counts how many timeframes agree on the same direction (LONG or SHORT).</li>
+          <li>Confluence % = (agreeing timeframes / total valid timeframes) × 100.</li>
+          <li>Also shows average confidence across all timeframes.</li>
+        </ul>
+      </div>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>How to Read It:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>80-100% Confluence:</b> Very strong setup — almost all timeframes agree. Best entries.</li>
+          <li><b>60-80% Confluence:</b> Moderate agreement — trade with caution, use smaller position.</li>
+          <li><b>Below 60%:</b> Weak confluence — timeframes are mixed, better to wait.</li>
+        </ul>
+      </div>
+      <p style='color:#E5E7EB; font-size:0.85rem; margin-top:1rem; padding:10px; background-color:rgba(255,209,102,0.1); border-radius:6px;'>
+        <b style='color:#FFD166;'>Pro Tip:</b> The best trades happen when the 1h, 4h, and 1d all agree on the same direction.
+        Short timeframes (5m, 15m) are useful for fine-tuning entries, but the higher timeframes set the trend.
+      </p>
+    </div>
+    """
+    st.markdown(mtf_panel, unsafe_allow_html=True)
+
+    # Correlation Matrix
+    corr_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>📊 Correlation Matrix</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Shows how major crypto assets (BTC, ETH, BNB, SOL, ADA, XRP) move relative to each other.
+        You can also add your own coin to see how it correlates with the majors.
+      </p>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>How to Read the Heatmap:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>+1.0 (bright green):</b> Perfectly correlated — they move in the same direction at the same time.</li>
+          <li><b>0.0 (yellow):</b> No correlation — their movements are independent of each other.</li>
+          <li><b>-1.0 (red):</b> Negatively correlated — when one goes up, the other tends to go down.</li>
+        </ul>
+      </div>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>Why It Matters:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Diversification:</b> If two assets are highly correlated (>0.8), holding both doubles your risk instead of spreading it.</li>
+          <li><b>Hedging:</b> Low or negative correlation pairs can be used to hedge positions.</li>
+          <li><b>Market Regime:</b> When all correlations spike to 1.0, it usually means panic selling or a macro event — everything moves together.</li>
+        </ul>
+      </div>
+    </div>
+    """
+    st.markdown(corr_panel, unsafe_allow_html=True)
+
+    # Session Analysis
+    session_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>🌍 Session Analysis</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Crypto trades 24/7, but activity varies by global trading session. This tool breaks down market behaviour across three sessions:
+      </p>
+      <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+        <li><b>Asian Session (00:00-08:00 UTC):</b> Tokyo, Hong Kong, Singapore. Generally lower volume, tighter ranges.</li>
+        <li><b>European Session (08:00-16:00 UTC):</b> London, Frankfurt. Usually high volume, strong moves.</li>
+        <li><b>US Session (16:00-00:00 UTC):</b> New York, Chicago. Highest volatility, major news releases.</li>
+      </ul>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>Metrics Explained:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Volume:</b> Total amount traded during the session. Higher volume means more liquidity and easier trade execution.</li>
+          <li><b>Avg Range (%):</b> Average high-to-low price swing per candle. Higher range = more volatility = bigger potential moves.</li>
+          <li><b>Avg Return (%):</b> Average open-to-close change per candle. Positive = price tends to rise, negative = tends to fall.</li>
+        </ul>
+      </div>
+      <p style='color:#E5E7EB; font-size:0.85rem; margin-top:1rem; padding:10px; background-color:rgba(255,209,102,0.1); border-radius:6px;'>
+        <b style='color:#FFD166;'>Pro Tip:</b> Scalpers should target sessions with high volume AND moderate volatility.
+        Swing traders can use this data to time entries at the start of active sessions.
+      </p>
+    </div>
+    """
+    st.markdown(session_panel, unsafe_allow_html=True)
+
+    # R:R Calculator
+    rr_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>⚖️ Risk/Reward Calculator</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        An interactive tool to plan your trades before entering. Enter your entry, stop loss, and take profit to see the risk/reward ratio and optimal position size.
+      </p>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>Key Outputs:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>R:R Ratio:</b> Reward divided by risk. A ratio of 1:2 means you gain $2 for every $1 risked. Aim for at least 1:1.5.</li>
+          <li><b>Position Size:</b> How much of the asset to buy based on your account size and risk tolerance (e.g. 2% risk per trade).</li>
+          <li><b>PnL Table:</b> Shows potential profit and loss at different leverage levels (1x to 20x), so you can visualise the impact of leverage.</li>
+        </ul>
+      </div>
+      <p style='color:#E5E7EB; font-size:0.85rem; margin-top:1rem; padding:10px; background-color:rgba(239,71,111,0.1); border-radius:6px;'>
+        <b style='color:#EF476F;'>Important:</b> Always plan your risk BEFORE entering a trade.
+        The calculator helps you determine the right position size so a single losing trade does not wipe out your account.
+      </p>
+    </div>
+    """
+    st.markdown(rr_panel, unsafe_allow_html=True)
+
+    # Liquidation Levels
+    liq_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>💀 Liquidation Level Estimator</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Shows the price at which your position would be liquidated (forced closed) for different leverage levels.
+        Uses the simplified formula for isolated margin.
+      </p>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>How to Read It:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Distance from Entry:</b> How far price needs to move against you before liquidation. At 10x, that's only ~10%.</li>
+          <li><b>Risk Level:</b> LOW (>10% distance), Medium (3-10%), HIGH (<3%). Higher leverage = closer liquidation = more danger.</li>
+        </ul>
+      </div>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>Key Takeaways:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li>At <b>2x leverage</b>, price must move ~50% against you for liquidation — relatively safe.</li>
+          <li>At <b>10x leverage</b>, only ~10% move needed — a normal daily swing can wipe you out.</li>
+          <li>At <b>50x+ leverage</b>, even a 2% move can liquidate — extremely dangerous.</li>
+        </ul>
+      </div>
+      <p style='color:#E5E7EB; font-size:0.85rem; margin-top:1rem; padding:10px; background-color:rgba(239,71,111,0.1); border-radius:6px;'>
+        <b style='color:#EF476F;'>Warning:</b> These are estimates for isolated margin. Actual liquidation prices vary by exchange
+        due to maintenance margin rates and funding fees. Always check your exchange for exact values.
+      </p>
+    </div>
+    """
+    st.markdown(liq_panel, unsafe_allow_html=True)
 
         # Confidence Levels - rendered in parts
     st.markdown('<div class="panel-box"><b style="color:#06D6A0; font-size:1.3rem;">📊 Understanding Confidence Levels</b><p style="color:#E5E7EB; font-size:0.95rem; margin-top:1rem;">The confidence score tells you how likely the signal is to work out. Higher confidence = higher probability of success.</p></div>', unsafe_allow_html=True)
@@ -3201,7 +3259,7 @@ def render_ml_tab():
                             showlegend=True,
                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
                     except Exception:
                         pass
 
@@ -3225,7 +3283,7 @@ def render_ml_tab():
                             showlegend=True,
                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
                         )
-                        st.plotly_chart(rsi_fig, use_container_width=True)
+                        st.plotly_chart(rsi_fig, width="stretch")
                     except Exception:
                         pass
 
@@ -3256,7 +3314,7 @@ def render_ml_tab():
                             showlegend=True,
                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
                         )
-                        st.plotly_chart(macd_fig, use_container_width=True)
+                        st.plotly_chart(macd_fig, width="stretch")
                     except Exception:
                         pass
 
@@ -3281,7 +3339,7 @@ def render_ml_tab():
                             showlegend=True,
                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
                         )
-                        st.plotly_chart(volume_fig, use_container_width=True)
+                        st.plotly_chart(volume_fig, width="stretch")
                     except Exception:
                         pass
 
@@ -3626,7 +3684,7 @@ def render_backtest_tab():
                             showlegend=False,
                             hovermode='x unified'
                         )
-                        st.plotly_chart(equity_fig, use_container_width=True)
+                        st.plotly_chart(equity_fig, width="stretch")
 
                     # Trade History Table
                     st.markdown(f"<h3 style='color:{ACCENT}; margin-top:2rem;'>📜 Trade History</h3>", unsafe_allow_html=True)
@@ -3642,7 +3700,7 @@ def render_backtest_tab():
                         styled_df["Equity"] = styled_df["Equity"].apply(lambda x: f"${x:,.2f}")
                     
 
-                    st.dataframe(styled_df, use_container_width=True)
+                    st.dataframe(styled_df, width="stretch")
 
                     # Offer a download button for the raw results
                     csv_bytes = result_df.to_csv(index=False).encode('utf-8')
@@ -3732,7 +3790,7 @@ def render_multitf_tab():
                 height=200, margin=dict(l=10, r=10, t=50, b=15),
                 plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
             )
-            st.plotly_chart(fig_conf, use_container_width=True)
+            st.plotly_chart(fig_conf, width="stretch")
 
             # Summary cards
             c1, c2, c3 = st.columns(3)
@@ -3761,7 +3819,7 @@ def render_multitf_tab():
                 df_mtf.style
                 .map(style_signal, subset=["Signal"])
             )
-            st.dataframe(styled_mtf, use_container_width=True)
+            st.dataframe(styled_mtf, width="stretch")
 
             # Recommendation
             if confluence_pct >= 80 and dominant != "NEUTRAL":
@@ -3782,9 +3840,20 @@ def render_correlation_tab():
         "</p>",
         unsafe_allow_html=True,
     )
-    tf_corr = st.selectbox("Timeframe", ["15m", "1h", "4h", "1d"], index=2, key="corr_tf")
+    corr_c1, corr_c2 = st.columns(2)
+    with corr_c1:
+        tf_corr = st.selectbox("Timeframe", ["15m", "1h", "4h", "1d"], index=2, key="corr_tf")
+    with corr_c2:
+        custom_coin = st.text_input(
+            "Add your own coin (optional)",
+            value="",
+            placeholder="e.g. DOGE/USDT",
+            key="corr_custom_coin",
+        ).upper().strip()
     if st.button("Generate Correlation Matrix", type="primary"):
         symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "ADA/USDT", "XRP/USDT"]
+        if custom_coin and "/" in custom_coin and custom_coin not in symbols:
+            symbols.append(custom_coin)
         labels = [s.split("/")[0] for s in symbols]
         with st.spinner("Fetching data for correlation analysis..."):
             returns_dict = {}
@@ -3818,7 +3887,7 @@ def render_correlation_tab():
                 margin=dict(l=60, r=20, t=30, b=60),
                 xaxis=dict(side="bottom"),
             )
-            st.plotly_chart(fig_corr, use_container_width=True)
+            st.plotly_chart(fig_corr, width="stretch")
 
             # Insights
             pairs = []
@@ -3843,6 +3912,20 @@ def render_sessions_tab():
         "Asian (00:00-08:00 UTC), European (08:00-16:00 UTC), US (16:00-00:00 UTC). "
         "Find which session has the most volume, volatility, and best conditions."
         "</p>",
+        unsafe_allow_html=True,
+    )
+    # Explain key metrics so users understand the results
+    st.markdown(
+        f"<div class='panel-box' style='margin-bottom:1rem;'>"
+        f"<b style='color:{ACCENT};'>What the metrics mean:</b>"
+        f"<ul style='color:{TEXT_MUTED}; font-size:0.88rem; line-height:1.7; margin-top:0.5rem;'>"
+        "<li><b>Volume:</b> The total amount of the asset traded during that session. "
+        "Higher volume = more active market, tighter spreads, and easier to enter/exit trades.</li>"
+        "<li><b>Avg Range (%):</b> The average difference between the highest and lowest price within each candle, "
+        "expressed as a percentage. Higher range = more volatility = bigger potential profits but also bigger risk.</li>"
+        "<li><b>Avg Return (%):</b> The average percentage change from open to close per candle. "
+        "Positive = price tends to go up during this session. Negative = price tends to go down.</li>"
+        "</ul></div>",
         unsafe_allow_html=True,
     )
     coin_s = st.text_input("Coin Symbol", value="BTC/USDT", key="session_coin_input").upper()
@@ -3906,7 +3989,7 @@ def render_sessions_tab():
                 margin=dict(l=20, r=20, t=40, b=30),
                 showlegend=False,
             )
-            st.plotly_chart(fig_vol, use_container_width=True)
+            st.plotly_chart(fig_vol, width="stretch")
 
             # Volatility by session bar chart
             fig_range = go.Figure()
@@ -3922,7 +4005,7 @@ def render_sessions_tab():
                 margin=dict(l=20, r=20, t=40, b=30),
                 showlegend=False,
             )
-            st.plotly_chart(fig_range, use_container_width=True)
+            st.plotly_chart(fig_range, width="stretch")
 
             # Best session recommendation
             best_vol = grouped["avg_volume"].idxmax()
@@ -4016,7 +4099,7 @@ def render_tools_tab():
                     "Loss (%)": f"-{pnl_loss_pct:.2f}%",
                     "Effective Size ($)": f"${position_value * lev:,.2f}",
                 })
-            st.dataframe(pd.DataFrame(lev_rows), use_container_width=True)
+            st.dataframe(pd.DataFrame(lev_rows), width="stretch")
 
             if rr_ratio < 1.0:
                 st.error("R:R ratio is below 1.0 — risk exceeds reward. Not recommended.")
@@ -4070,7 +4153,7 @@ def render_tools_tab():
                 return f"color: {WARNING}; font-weight: 600;"
 
             styled_liq = df_liq.style.map(_style_risk, subset=["Risk Level"])
-            st.dataframe(styled_liq, use_container_width=True)
+            st.dataframe(styled_liq, width="stretch")
 
             # Visual chart
             fig_liq = go.Figure()
@@ -4097,7 +4180,7 @@ def render_tools_tab():
                 margin=dict(l=20, r=20, t=30, b=30),
                 xaxis_title="Leverage", yaxis_title="Liquidation Price ($)",
             )
-            st.plotly_chart(fig_liq, use_container_width=True)
+            st.plotly_chart(fig_liq, width="stretch")
 
 
 def main():
