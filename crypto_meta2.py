@@ -340,6 +340,16 @@ def _symbol_variants(symbol: str) -> list[str]:
     return variants
 
 
+def _normalize_coin_input(raw: str) -> str:
+    """Normalize coin input: 'BTC' → 'BTC/USDT', 'btc' → 'BTC/USDT', keeps 'BTC/USD' as-is."""
+    raw = raw.strip().upper()
+    if not raw:
+        return raw
+    if "/" not in raw:
+        return f"{raw}/USDT"
+    return raw
+
+
 # Fetch price change percentage for a given symbol via ccxt
 @st.cache_data(ttl=60, show_spinner=False)
 def get_price_change(symbol: str) -> float | None:
@@ -1437,33 +1447,8 @@ def render_market_tab():
     # proxy for the overall crypto market and compute a prediction using
     # 500 candles of history.
     selected_timeframe = st.session_state.get("market_timeframe", "1h")
-    try:
-        mkt_df = get_major_ohlcv_bundle(selected_timeframe, limit=500).get('BTC/USDT')
-        if mkt_df is not None and not mkt_df.empty:
-            mkt_prob, mkt_dir = ml_predict_direction(mkt_df)
-        else:
-            mkt_prob, mkt_dir = 0.5, "NEUTRAL"
-    except Exception:
-        mkt_prob, mkt_dir = 0.5, "NEUTRAL"
-    # Determine arrow and color for the market prediction card.  The text
-    # component will be used below when rendering the metric card, and
-    # mkt_color drives the text colour.  Market prediction values are
-    # displayed to one decimal place below.
-    if mkt_dir == "LONG":
-        mkt_arrow = "▲"
-        mkt_label = "Up"
-        mkt_color = POSITIVE
-    elif mkt_dir == "SHORT":
-        mkt_arrow = "▼"
-        mkt_label = "Down"
-        mkt_color = NEGATIVE
-    else:
-        mkt_arrow = "➖"
-        mkt_label = "Neutral"
-        mkt_color = WARNING
-
-    # Top row: Price and market cap metrics, including a market prediction card.
-    m1, m2, m3, m4, m5 = st.columns(5, gap="medium")
+    # Top row: Price and market cap metrics.
+    m1, m2, m3, m4 = st.columns(4, gap="medium")
     # Bitcoin price
     with m1:
         delta_class = "metric-delta-positive" if (btc_change or 0) >= 0 else "metric-delta-negative"
@@ -1504,31 +1489,20 @@ def render_market_tab():
         sentiment_color = POSITIVE if "Greed" in fg_label else (NEGATIVE if "Fear" in fg_label else WARNING)
         st.markdown(
             f"<div class='metric-card'>"
-            f"  <div class='metric-label'>Fear &amp; Greed</div>"
+            f"  <div class='metric-label'>Fear &amp; Greed "
+            f"<span title='Crypto Fear &amp; Greed Index (0-100). "
+            f"0-25 = Extreme Fear (potential buy zone), 75-100 = Extreme Greed (potential sell zone).' "
+            f"style='cursor:help; font-size:0.7rem;'>ℹ️</span></div>"
             f"  <div class='metric-value'>{fg_value}</div>"
             f"  <div style='color:{sentiment_color};font-size:0.9rem;'>{fg_label}</div>"
             f"</div>",
             unsafe_allow_html=True,
         )
-    # Market prediction card
-    with m5:
-        st.markdown(
-            f"<div class='metric-card'>"
-            f"  <div class='metric-label'>Market Prediction</div>"
-            f"  <div class='metric-value'>{mkt_prob*100:.1f}%</div>"
-            f"  <div style='color:{mkt_color};font-size:0.9rem;'>{mkt_label}</div>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-
     # Second row: Dominance gauges and AI market outlook
-    # Compute an advanced AI market outlook using a longer timeframe (4h) on
-    # BTC, ETH and major altcoins (BNB, SOL, ADA, XRP).  We fetch 500 candles
-    # for each asset and weight their predicted probabilities by their current
-    # dominance values.  This makes the indicator sensitive to shifts in
-    # capital between BTC and leading altcoins rather than BTC/ETH alone.
+    # Compute AI market outlook using a dominance-weighted ML prediction across
+    # BTC, ETH and major altcoins (BNB, SOL, ADA, XRP) on the selected timeframe.
     try:
-        bundle_behav = get_major_ohlcv_bundle('4h', limit=500)
+        bundle_behav = get_major_ohlcv_bundle(selected_timeframe, limit=500)
         btc_df_behav = bundle_behav.get('BTC/USDT')
         eth_df_behav = bundle_behav.get('ETH/USDT')
         bnb_df_behav = bundle_behav.get('BNB/USDT')
@@ -1663,12 +1637,16 @@ def render_market_tab():
             paper_bgcolor="#0e1117",
         )
         st.plotly_chart(fig_behaviour, width="stretch")
-        # Show the directional label below the gauge to indicate trend
+        # Direction label + tooltip explanation
         st.markdown(
-            f"<div style='text-align:center; color:{behaviour_color}; font-size:0.9rem; margin-top:-12px;'>"
-            f"{behaviour_label}"
+            f"<div style='text-align:center; margin-top:-12px;'>"
+            f"<span style='color:{behaviour_color}; font-size:0.9rem;'>{behaviour_label}</span>"
+            f"<span title='Dominance-weighted ML prediction across BTC, ETH, BNB, SOL, ADA, XRP "
+            f"on the selected timeframe. Each coin&apos;s prediction is weighted by its market dominance. "
+            f"&gt;60% = Bullish, &lt;40% = Bearish, 40-60% = Neutral.' "
+            f"style='cursor:help; color:{TEXT_MUTED}; font-size:0.8rem; margin-left:6px;'>ℹ️</span>"
             f"</div>",
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
 
@@ -1849,13 +1827,28 @@ def render_market_tab():
             else:
                 ai_display = ai_direction  # Aligned or both neutral
             
+            # Conviction: alignment of Signal + AI + Confidence
+            if signal_direction == ai_direction and signal_direction != "NEUTRAL":
+                if confidence_score >= 75:
+                    conviction = "🟢 HIGH"
+                elif confidence_score >= 60:
+                    conviction = "🟡 MEDIUM"
+                else:
+                    conviction = "⚪ LOW"
+            elif signal_direction != "NEUTRAL" and ai_direction == "NEUTRAL":
+                conviction = "⚪ LOW"
+            elif signal_direction != ai_direction and ai_direction != "NEUTRAL" and signal_direction != "NEUTRAL":
+                conviction = "🔴 CONFLICT"
+            else:
+                conviction = ""
+
             results.append({
                 'Coin': base,
                 'Price ($)': f"{price:,.2f}",
                 'Signal': signal_plain(signal),
                 'Confidence': confidence_score_badge(confidence_score),
-                # Include AI prediction with divergence warning
                 'AI Prediction': ai_display,
+                'Conviction': conviction,
                 'Market Cap ($)': readable_market_cap(mcap_val),
                 'Leverage': leverage_badge(lev) if scalp_direction else '',
                 'Scalp Opportunity': scalp_direction or "",
@@ -1885,20 +1878,40 @@ def render_market_tab():
     
         # Prepare DataFrame for display
         if results:
+            # Column legend
+            st.markdown(
+                f"<details style='margin-bottom:0.8rem;'>"
+                f"<summary style='color:{ACCENT}; cursor:pointer; font-size:0.9rem;'>"
+                f"ℹ️ Column Guide (click to expand)</summary>"
+                f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; padding:0.5rem;'>"
+                "<b>Signal</b> — Technical analysis direction (LONG/SHORT/WAIT) based on EMA, RSI, MACD, "
+                "SuperTrend, Ichimoku, Bollinger, ADX, and more. LONG = all indicators agree bullish.<br>"
+                "<b>Confidence</b> — How strongly the indicators agree (0-100%). Higher = more indicators "
+                "are aligned in the same direction. &ge;75% is strong.<br>"
+                "<b>AI Prediction</b> — Machine learning model (Gradient Boosting) trained on recent candles "
+                "to predict the next candle's direction. Independent from the Signal.<br>"
+                "<b>Conviction</b> — Combined alignment check: "
+                "🟢 HIGH = Signal + AI agree &amp; confidence &ge;75%, "
+                "🟡 MEDIUM = agree &amp; confidence 60-75%, "
+                "⚪ LOW = weak agreement, "
+                "🔴 CONFLICT = Signal and AI disagree. "
+                "<b>Only trade 🟢 HIGH conviction setups with confidence.</b>"
+                "</div></details>",
+                unsafe_allow_html=True,
+            )
+
             df_results = pd.DataFrame(results)
-    
+
             # Trend and ADX column visual
             df_results["SuperTrend"] = df_results["SuperTrend"].apply(format_trend)
             df_results["ADX"] = df_results["ADX"].apply(format_adx)
             df_results["Ichimoku"] = df_results["Ichimoku"].apply(format_trend)
             df_results["Stochastic RSI"] = df_results["Stochastic RSI"].apply(format_stochrsi)
-    
+
             # '__confidence_val' hide
             df_display = df_results.drop(columns=['__confidence_val'])
-    
+
             # Style
-            # Apply styling to several columns.  Include the AI Prediction column in
-            # the signal styling to highlight LONG/SHORT/NEUTRAL outcomes.
             styled = (
                 df_display.style
                 .map(style_signal, subset=['Signal', 'AI Prediction'])
@@ -1929,11 +1942,11 @@ def render_spot_tab():
         f"<h2 style='color:{ACCENT};margin-bottom:0.5rem;'>Spot Trading</h2>",
         unsafe_allow_html=True,
     )
-    coin = st.text_input(
-        "Enter coin symbol (e.g., BTC/USDT)",
-        value="BTC/USDT",
+    coin = _normalize_coin_input(st.text_input(
+        "Coin (e.g. BTC, ETH, TAO)",
+        value="BTC",
         key="spot_coin_input",
-    ).upper()
+    ))
     timeframe = st.selectbox("Timeframe", ['1m', '3m', '5m', '15m', '1h', '4h', '1d'], index=4)
     if st.button("Analyse", type="primary"):
         df = fetch_ohlcv(coin, timeframe)
@@ -3523,7 +3536,7 @@ def run_backtest(df: pd.DataFrame, threshold: float = 70, exit_after: int = 5, c
     consecutive_losses = 0
     max_consecutive_losses = 0
 
-    for i in range(120, len(df) - exit_after):
+    for i in range(55, len(df) - exit_after):
         df_slice = df.iloc[:i + 1].copy()
         try:
             result = analyse(df_slice)
@@ -3689,16 +3702,30 @@ def run_backtest(df: pd.DataFrame, threshold: float = 70, exit_after: int = 5, c
 def render_backtest_tab():
     """Render the Backtest tab to simulate past signals."""
     st.markdown(f"<h2 style='color:{ACCENT};'>Backtest Simulator</h2>", unsafe_allow_html=True)
-    st.markdown(f"<p style='color:{TEXT_MUTED};'>Test your strategy with realistic trading conditions</p>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='panel-box' style='margin-bottom:1rem;'>"
+        f"<b style='color:{ACCENT};'>How the backtest works:</b>"
+        f"<ul style='color:{TEXT_MUTED}; font-size:0.88rem; line-height:1.7; margin-top:0.5rem;'>"
+        "<li>The engine slides a window through historical candles and runs the <b>full technical analysis</b> "
+        "(EMA, RSI, MACD, SuperTrend, Ichimoku, Bollinger, ADX, etc.) at each step.</li>"
+        "<li>When the <b>Signal</b> is LONG or SHORT <b>and</b> the <b>Confidence Score</b> exceeds your threshold, "
+        "a simulated trade is opened at the closing price.</li>"
+        "<li>The trade is automatically closed after <b>N candles</b> (your exit setting). "
+        "Commission is deducted on both entry and exit.</li>"
+        "<li>This tests whether the dashboard's signal + confidence system would have been profitable "
+        "on the chosen coin and timeframe. Use it to calibrate your confidence threshold and hold duration.</li>"
+        "</ul></div>",
+        unsafe_allow_html=True,
+    )
 
     col1, col2 = st.columns(2)
     
     with col1:
-        coin = st.text_input(
-            "Coin Symbol",
-            value="BTC/USDT",
+        coin = _normalize_coin_input(st.text_input(
+            "Coin (e.g. BTC, ETH, TAO)",
+            value="BTC",
             key="backtest_coin_input",
-        ).upper()
+        ))
         timeframe = st.selectbox("Timeframe", ["3m", "5m", "15m", "1h", "4h", "1d"], index=2)
         limit = st.slider("Number of Candles", 100, 1000, step=100, value=500)
     
@@ -3852,7 +3879,7 @@ def render_multitf_tab():
         "</p>",
         unsafe_allow_html=True,
     )
-    coin = st.text_input("Coin Symbol", value="BTC/USDT", key="mtf_coin_input").upper()
+    coin = _normalize_coin_input(st.text_input("Coin (e.g. BTC, ETH, TAO)", value="BTC", key="mtf_coin_input"))
     if st.button("Run Multi-TF Analysis", type="primary"):
         timeframes = ["5m", "15m", "1h", "4h", "1d"]
         with st.spinner("Analysing across all timeframes..."):
@@ -4061,7 +4088,7 @@ def render_sessions_tab():
         "</ul></div>",
         unsafe_allow_html=True,
     )
-    coin_s = st.text_input("Coin Symbol", value="BTC/USDT", key="session_coin_input").upper()
+    coin_s = _normalize_coin_input(st.text_input("Coin (e.g. BTC, ETH, TAO)", value="BTC", key="session_coin_input"))
     if st.button("Analyse Sessions", type="primary"):
         with st.spinner("Fetching hourly data for session analysis..."):
             df = fetch_ohlcv(coin_s, "1h", limit=500)
