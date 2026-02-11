@@ -328,16 +328,29 @@ def get_markets() -> dict:
 MARKETS = get_markets()
 
 
+def _symbol_variants(symbol: str) -> list[str]:
+    """Return symbol variants to try on the exchange (e.g. USDT→USD)."""
+    variants = [symbol]
+    if "/" in symbol:
+        base, quote = symbol.split("/", 1)
+        if quote == "USDT":
+            variants.append(f"{base}/USD")
+        elif quote == "USD":
+            variants.append(f"{base}/USDT")
+    return variants
+
+
 # Fetch price change percentage for a given symbol via ccxt
 @st.cache_data(ttl=60, show_spinner=False)
 def get_price_change(symbol: str) -> float | None:
-    try:
-        ticker = EXCHANGE.fetch_ticker(symbol)
-        percent = ticker.get('percentage')
-        return round(percent, 2) if percent is not None else None
-    except Exception as e:
-        _debug(f"get_price_change failed: {symbol} → {e}")
-        return None
+    for variant in _symbol_variants(symbol):
+        try:
+            ticker = EXCHANGE.fetch_ticker(variant)
+            percent = ticker.get('percentage')
+            return round(percent, 2) if percent is not None else None
+        except Exception as e:
+            _debug(f"get_price_change failed: {variant} → {e}")
+    return None
 
 # Fetch OHLCV data for a symbol and timeframe
 @st.cache_data(ttl=60, show_spinner=False)
@@ -350,8 +363,8 @@ def fetch_ohlcv_cached(symbol: str, timeframe: str, limit: int = 120) -> pd.Data
 
 # === CoinGecko fallback for coins not listed on the primary exchange ===
 _TF_TO_CG_DAYS = {
-    "1m": 1, "3m": 1, "5m": 1, "15m": 1,
-    "1h": 30, "4h": 90, "1d": 365,
+    "1m": 2, "3m": 2, "5m": 2, "15m": 7,
+    "1h": 90, "4h": 180, "1d": 365,
 }
 
 
@@ -375,8 +388,49 @@ def _coingecko_coin_id(symbol: str) -> str | None:
 
 @st.cache_data(ttl=120, show_spinner=False)
 def _coingecko_market_chart(coin_id: str, days: int) -> pd.DataFrame | None:
-    """Fetch price + volume data from CoinGecko market_chart endpoint."""
+    """Fetch OHLC data from CoinGecko /ohlc endpoint, with volume from /market_chart."""
     try:
+        # 1) Real OHLC candles from the dedicated OHLC endpoint
+        ohlc_resp = requests.get(
+            f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc",
+            params={"vs_currency": "usd", "days": days},
+            timeout=15,
+        )
+        if ohlc_resp.status_code == 200:
+            ohlc_data = ohlc_resp.json()
+            if ohlc_data and isinstance(ohlc_data, list) and len(ohlc_data) > 5:
+                df = pd.DataFrame(ohlc_data, columns=["timestamp", "open", "high", "low", "close"])
+                # 2) Get volume from market_chart
+                try:
+                    vol_resp = requests.get(
+                        f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart",
+                        params={"vs_currency": "usd", "days": days},
+                        timeout=15,
+                    )
+                    if vol_resp.status_code == 200:
+                        volumes = vol_resp.json().get("total_volumes", [])
+                        if volumes:
+                            df_v = pd.DataFrame(volumes, columns=["ts_v", "volume"])
+                            # Merge volume by nearest timestamp
+                            df["ts_ms"] = df["timestamp"]
+                            df_v["ts_ms"] = df_v["ts_v"]
+                            df = pd.merge_asof(
+                                df.sort_values("ts_ms"),
+                                df_v[["ts_ms", "volume"]].sort_values("ts_ms"),
+                                on="ts_ms", direction="nearest",
+                            )
+                            df.drop(columns=["ts_ms"], inplace=True)
+                        else:
+                            df["volume"] = 0
+                    else:
+                        df["volume"] = 0
+                except Exception:
+                    df["volume"] = 0
+                df["volume"] = df["volume"].fillna(0)
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+                return df
+        # 3) Fallback: market_chart only (price-only OHLC)
         resp = requests.get(
             f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart",
             params={"vs_currency": "usd", "days": days},
@@ -417,11 +471,13 @@ def _fetch_coingecko_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFr
 
 
 def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 120) -> pd.DataFrame | None:
-    """Safe OHLCV fetch. Tries primary exchange first, falls back to CoinGecko."""
-    try:
-        return fetch_ohlcv_cached(symbol, timeframe, limit)
-    except Exception as e:
-        _debug(f"fetch_ohlcv primary failed: {symbol} {timeframe} (limit={limit}) → {e}")
+    """Safe OHLCV fetch. Tries symbol variants on exchange, falls back to CoinGecko."""
+    # Try symbol and its variants on the primary exchange
+    for variant in _symbol_variants(symbol):
+        try:
+            return fetch_ohlcv_cached(variant, timeframe, limit)
+        except Exception as e:
+            _debug(f"fetch_ohlcv primary failed: {variant} {timeframe} (limit={limit}) → {e}")
     # Fallback: CoinGecko
     try:
         cg_df = _fetch_coingecko_ohlcv(symbol, timeframe, limit)
@@ -696,9 +752,9 @@ def get_signal_from_confidence(confidence: float) -> Tuple[str, str]:
 
 def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, float, str, str, float, str, str, str, str, str]:
 
-    if df is None or len(df) < 120:
+    if df is None or len(df) < 55:
         return (
-            "NO DATA", 1, "Insufficient data", False, "", "", 
+            "NO DATA", 1, "Insufficient data", False, "", "",
             0.0, 0.0, "", "", 0.0, "", "", "", "", ""
         )
 
@@ -1674,10 +1730,13 @@ def render_market_tab():
                     if not symbol or symbol in seen:
                         continue
                     seen.add(symbol)
-    
-                    pair = f"{symbol}/USDT"
-                    if pair in markets:
-                        valid.append(pair)
+
+                    # Try USDT first, then USD (Kraken uses /USD for most pairs)
+                    for quote in ("USDT", "USD"):
+                        pair = f"{symbol}/{quote}"
+                        if pair in markets:
+                            valid.append(pair)
+                            break
     
                 return valid, data
             except Exception as e:
@@ -1768,13 +1827,6 @@ def render_market_tab():
             entry_price = entry_s if scalp_direction else 0.0
             target_price = target_s if scalp_direction else 0.0
 
-            # leverage
-            lev_base = lev 
-            conservative_lev = max(1, int(round(lev_base * 0.85)))
-            medium_risk_lev  = min(max(1, int(round(lev_base * 1.10))), 14)
-            high_risk_lev    = min(max(1, int(round(lev_base * 1.35))), 20)
-            
-                        
             # filter (LONG/SHORT/BOTH)
             include = (
                 (signal_filter == 'BOTH') or
@@ -1805,9 +1857,7 @@ def render_market_tab():
                 # Include AI prediction with divergence warning
                 'AI Prediction': ai_display,
                 'Market Cap ($)': readable_market_cap(mcap_val),
-                'Low Risk (X)': leverage_badge(conservative_lev),
-                'Medium Risk (X)': leverage_badge(medium_risk_lev),
-                'High Risk (X)': leverage_badge(high_risk_lev),
+                'Leverage': leverage_badge(lev) if scalp_direction else '',
                 'Scalp Opportunity': scalp_direction or "",
                 'Entry Price': f"${entry_price:,.2f}" if entry_price else '',
                 'Target Price': f"${target_price:,.2f}" if target_price else '',
@@ -1892,20 +1942,14 @@ def render_spot_tab():
             return
         signal, lev, comment, volume_spike, atr_comment, candle_pattern, confidence_score, adx_val, supertrend_trend, ichimoku_trend, stochrsi_k_val, bollinger_bias, vwap_label, psar_trend, williams_label, cci_label = analyse(df)
 
-        # --- Leverage tiers (proportional to analyse() -> lev) ---
-        lev_base = lev
-        conservative_lev = max(1, int(round(lev_base * 0.85)))
-        medium_risk_lev  = min(max(1, int(round(lev_base * 1.10))), 14)
-        high_risk_lev    = min(max(1, int(round(lev_base * 1.35))), 20)
-
         current_price = df['close'].iloc[-1]
 
         # Display summary
         signal_clean = signal_plain(signal)
-        
+
         st.markdown(
             f"**Signal:** {signal_clean} | "
-            f"**Leverage:** LOW x{conservative_lev} • MED x{medium_risk_lev} • HIGH x{high_risk_lev} | "
+            f"**Leverage:** x{lev} | "
             f"**Confidence:** {confidence_score_badge(confidence_score)}",
             unsafe_allow_html=True
         )
@@ -3815,7 +3859,7 @@ def render_multitf_tab():
             rows = []
             for tf in timeframes:
                 df = fetch_ohlcv(coin, tf, limit=200)
-                if df is None or len(df) < 120:
+                if df is None or len(df) < 55:
                     rows.append({"Timeframe": tf, "Signal": "NO DATA", "Confidence": 0.0,
                                  "SuperTrend": "", "Ichimoku": "", "VWAP": "", "ADX": 0.0})
                     continue
