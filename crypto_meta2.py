@@ -193,10 +193,12 @@ st.markdown(
 )
 
 
-# Exchange set up with caching – Kraken (primary, FCA‑regulated) with Gate.io fallback
+# Exchange set up with caching – Kraken (primary) with Coinbase & Bitstamp fallbacks
+# All three exchanges are FCA‑regulated and legally available in the UK.
 _EXCHANGE_CONFIGS = [
     ("kraken", {}),
-    ("gate", {}),
+    ("coinbase", {}),
+    ("bitstamp", {}),
 ]
 
 @st.cache_resource(show_spinner=False)
