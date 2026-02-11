@@ -193,12 +193,26 @@ st.markdown(
 )
 
 
-# Exchange set up with caching
+# Exchange set up with caching – Kraken (primary) with Coinbase & Bitstamp fallbacks
+# All three exchanges are FCA‑regulated and legally available in the UK.
+_EXCHANGE_CONFIGS = [
+    ("kraken", {}),
+    ("coinbase", {}),
+    ("bitstamp", {}),
+]
+
 @st.cache_resource(show_spinner=False)
 def get_exchange():
-    return ccxt.kraken({
-        "enableRateLimit": True,
-    })
+    for name, extra in _EXCHANGE_CONFIGS:
+        try:
+            ex = getattr(ccxt, name)({"enableRateLimit": True, **extra})
+            ex.load_markets()  # verify connectivity
+            return ex
+        except Exception as e:
+            print(f"Exchange {name} unavailable: {e}")
+    # last resort – return Kraken instance even if offline so the rest of the
+    # code doesn't crash; individual API calls will still fail gracefully.
+    return ccxt.kraken({"enableRateLimit": True})
 
 EXCHANGE = get_exchange()
 
@@ -305,9 +319,10 @@ def get_social_sentiment(symbol: str) -> tuple[int, str]:
 @st.cache_resource(show_spinner=False)
 def get_markets() -> dict:
     try:
+        # Markets may already be loaded by get_exchange(); reload to be safe.
         return EXCHANGE.load_markets()
     except Exception as e:
-        st.warning(f"Markets yüklenemedi: {e}")
+        st.warning(f"Markets yüklenemedi ({EXCHANGE.id}): {e}")
         return {}
 
 MARKETS = get_markets()
@@ -350,6 +365,48 @@ def get_major_ohlcv_bundle(timeframe: str, limit: int = 500) -> dict[str, pd.Dat
     for sym in majors:
         out[sym] = fetch_ohlcv(sym, timeframe, limit=limit)
     return out
+
+
+# === Funding Rate & Open Interest (Binance Futures public API – no auth) ===
+@st.cache_data(ttl=300, show_spinner=False)
+def get_funding_rate(symbol: str) -> dict:
+    """Fetch latest funding rate from Binance Futures public API."""
+    try:
+        binance_sym = symbol.replace("/", "")
+        resp = requests.get(
+            "https://fapi.binance.com/fapi/v1/fundingRate",
+            params={"symbol": binance_sym, "limit": 1},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data:
+                return {
+                    "rate": float(data[0].get("fundingRate", 0)),
+                    "time": int(data[0].get("fundingTime", 0)),
+                }
+    except Exception:
+        pass
+    return {"rate": 0.0, "time": 0}
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_open_interest(symbol: str) -> float:
+    """Fetch open interest from Binance Futures public API."""
+    try:
+        binance_sym = symbol.replace("/", "")
+        resp = requests.get(
+            "https://fapi.binance.com/fapi/v1/openInterest",
+            params={"symbol": binance_sym},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return float(resp.json().get("openInterest", 0))
+    except Exception:
+        pass
+    return 0.0
+
+
 def signal_badge(signal: str) -> str:
     """Return a simplified badge for the given signal."""
     if signal in ("STRONG BUY", "BUY"):
@@ -1050,7 +1107,7 @@ def get_scalping_entry_target(
     ichimoku_trend: str,
     vwap_label: str,
     volume_spike: bool,
-    strict_mode: bool = False
+    strict_mode: bool = True
 ):
     if df is None or len(df) <= 30:
         return None, 0.0, 0.0, 0.0, 0.0, ""
@@ -1548,12 +1605,7 @@ def render_market_tab():
         signal_filter = st.selectbox("Signal", ['LONG', 'SHORT', 'BOTH'], index=2)
     with controls[2]:
         top_n = st.slider("Top N", min_value=3, max_value=50, value=50)
-    with controls[3]:
-        strict_toggle_market = st.toggle(
-            "Strict scalp",
-            value=True,
-            key="strict_scalp_market",
-        )
+    # Strict scalp mode is always enabled (non-strict path removed).
 
 
     # Fetch top coins
@@ -1676,7 +1728,7 @@ def render_market_tab():
                 ichimoku_trend,
                 vwap_label,
                 volume_spike,
-                strict_mode=strict_toggle_market
+                strict_mode=True
             )
             entry_price = entry_s if scalp_direction else 0.0
             target_price = target_s if scalp_direction else 0.0
@@ -1783,6 +1835,51 @@ def render_market_tab():
             )
         else:
             st.info("No coins matched the criteria.")
+
+    # === Funding Rate & Open Interest Section ===
+    st.markdown("\n\n")
+    st.markdown(
+        f"<h2 style='color:{ACCENT};margin-bottom:0.5rem;'>Funding Rate & Open Interest</h2>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
+        "Live funding rates and open interest for major perpetual futures. "
+        "Positive funding = longs pay shorts (bullish crowding). Negative = shorts pay longs."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+    foi_symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "ADA/USDT"]
+    foi_rows = []
+    for sym in foi_symbols:
+        fr = get_funding_rate(sym)
+        oi = get_open_interest(sym)
+        rate_pct = fr["rate"] * 100
+        rate_label = f"{rate_pct:+.4f}%"
+        if rate_pct > 0.01:
+            bias = "Bullish crowding"
+        elif rate_pct < -0.01:
+            bias = "Bearish crowding"
+        else:
+            bias = "Neutral"
+        foi_rows.append({
+            "Coin": sym.split("/")[0],
+            "Funding Rate": rate_label,
+            "Bias": bias,
+            "Open Interest": f"{oi:,.2f}" if oi else "N/A",
+        })
+    if foi_rows:
+        df_foi = pd.DataFrame(foi_rows)
+
+        def _style_funding_bias(val: str) -> str:
+            if "Bullish" in val:
+                return f"color: {POSITIVE}; font-weight: 600;"
+            elif "Bearish" in val:
+                return f"color: {NEGATIVE}; font-weight: 600;"
+            return f"color: {WARNING};"
+
+        styled_foi = df_foi.style.map(_style_funding_bias, subset=["Bias"])
+        st.dataframe(styled_foi, use_container_width=True)
 
 
 def render_spot_tab():
@@ -2088,20 +2185,15 @@ def render_position_tab():
 
     default_entry_price: float = 0.0
     try:
-        df_current = fetch_ohlcv(coin, selected_timeframes[0], limit=1)
-        if df_current is not None and len(df_current) > 0:
-            default_entry_price = float(df_current['close'].iloc[-1])
+        ticker = EXCHANGE.fetch_ticker(coin)
+        default_entry_price = float(ticker.get('last', 0) or 0)
     except Exception:
         default_entry_price = 0.0
 
     entry_price = st.number_input("Entry Price", min_value=0.0, format="%.4f", value=default_entry_price)
     direction = st.selectbox("Position Direction", ["LONG", "SHORT"])
 
-    strict_toggle_position = st.toggle(
-        "Strict scalp",
-        value=True,
-        key="strict_scalp_position",
-    )
+    # Strict scalp mode is always enabled (non-strict path removed).
    
     if st.button("Analyse Position", type="primary"):
         tf_order = {'1m': 1, '3m': 2, '5m': 3, '15m': 4, '1h': 5, '4h': 6, '1d': 7}
@@ -2353,7 +2445,7 @@ def render_position_tab():
                         ichimoku_trend,
                         vwap_label,
                         volume_spike,
-                        strict_mode=strict_toggle_position
+                        strict_mode=True
                     )
                 
                     # === Display Scalping Result ===
@@ -2373,7 +2465,7 @@ def render_position_tab():
                             unsafe_allow_html=True
                         )
                     else:
-                        msg = breakout_note or ("No valid scalping setup with current filters." if strict_toggle_position else "No valid scalping setup (soft mode).")
+                        msg = breakout_note or "No valid scalping setup with current filters."
                         st.info(msg)
                 
                     st.markdown(scalping_snapshot_html, unsafe_allow_html=True)
@@ -2856,7 +2948,7 @@ def render_ml_tab():
                             ichimoku_trend,
                             vwap_label,
                             volume_spike,
-                            strict_mode=False
+                            strict_mode=True
                         )
                         # Only use the scalping result if it matches the ML direction.  This avoids
                         # showing long entries for short predictions or vice versa.  Also skip
@@ -3572,9 +3664,449 @@ def render_backtest_tab():
             st.error("Failed to fetch historical data. Please check the symbol or connection.")
 
 
+def render_multitf_tab():
+    """Multi-timeframe confluence analysis."""
+    st.markdown(f"<h2 style='color:{ACCENT};'>Multi-Timeframe Confluence</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
+        "Analyse signals across 5m, 15m, 1h, 4h, 1d and combine into a single confluence score. "
+        "Higher confluence = more timeframes agree on direction."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+    coin = st.text_input("Coin Symbol", value="BTC/USDT", key="mtf_coin_input").upper()
+    if st.button("Run Multi-TF Analysis", type="primary"):
+        timeframes = ["5m", "15m", "1h", "4h", "1d"]
+        with st.spinner("Analysing across all timeframes..."):
+            rows = []
+            for tf in timeframes:
+                df = fetch_ohlcv(coin, tf, limit=200)
+                if df is None or len(df) < 120:
+                    rows.append({"Timeframe": tf, "Signal": "NO DATA", "Confidence": 0.0,
+                                 "SuperTrend": "", "Ichimoku": "", "VWAP": "", "ADX": 0.0})
+                    continue
+                sig, _lev, _comment, _vs, _atr, _cp, conf, adx, st_trend, ichi, _sk, _bb, vwap, _ps, _wl, _cc = analyse(df)
+                rows.append({
+                    "Timeframe": tf,
+                    "Signal": signal_plain(sig),
+                    "Confidence": round(conf, 1),
+                    "SuperTrend": format_trend(st_trend),
+                    "Ichimoku": format_trend(ichi),
+                    "VWAP": vwap,
+                    "ADX": round(adx, 1),
+                })
+
+            # Confluence calculation
+            valid = [r for r in rows if r["Signal"] != "NO DATA"]
+            long_c = sum(1 for r in valid if r["Signal"] == "LONG")
+            short_c = sum(1 for r in valid if r["Signal"] == "SHORT")
+            total_valid = len(valid)
+            avg_conf = np.mean([r["Confidence"] for r in valid]) if valid else 0.0
+
+            if total_valid > 0:
+                confluence_pct = max(long_c, short_c) / total_valid * 100
+                dominant = "LONG" if long_c > short_c else ("SHORT" if short_c > long_c else "NEUTRAL")
+            else:
+                confluence_pct = 0
+                dominant = "NEUTRAL"
+
+            # Confluence gauge
+            conf_color = POSITIVE if dominant == "LONG" else (NEGATIVE if dominant == "SHORT" else WARNING)
+            fig_conf = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=round(confluence_pct),
+                gauge={
+                    "axis": {"range": [0, 100], "tickwidth": 1},
+                    "bar": {"color": conf_color},
+                    "bgcolor": CARD_BG,
+                    "steps": [
+                        {"range": [0, 40], "color": NEGATIVE},
+                        {"range": [40, 60], "color": WARNING},
+                        {"range": [60, 100], "color": POSITIVE},
+                    ],
+                },
+                title={"text": f"Confluence ({dominant})", "font": {"size": 16, "color": ACCENT}},
+                number={"font": {"color": ACCENT, "size": 38}, "suffix": "%"},
+            ))
+            fig_conf.update_layout(
+                height=200, margin=dict(l=10, r=10, t=50, b=15),
+                plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+            )
+            st.plotly_chart(fig_conf, use_container_width=True)
+
+            # Summary cards
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.markdown(
+                    f"<div class='metric-card'><div class='metric-label'>Dominant Direction</div>"
+                    f"<div class='metric-value' style='color:{conf_color};'>{dominant}</div></div>",
+                    unsafe_allow_html=True,
+                )
+            with c2:
+                st.markdown(
+                    f"<div class='metric-card'><div class='metric-label'>TFs Agreeing</div>"
+                    f"<div class='metric-value'>{max(long_c, short_c)}/{total_valid}</div></div>",
+                    unsafe_allow_html=True,
+                )
+            with c3:
+                st.markdown(
+                    f"<div class='metric-card'><div class='metric-label'>Avg Confidence</div>"
+                    f"<div class='metric-value'>{avg_conf:.1f}%</div></div>",
+                    unsafe_allow_html=True,
+                )
+
+            # Detail table
+            df_mtf = pd.DataFrame(rows)
+            styled_mtf = (
+                df_mtf.style
+                .map(style_signal, subset=["Signal"])
+            )
+            st.dataframe(styled_mtf, use_container_width=True)
+
+            # Recommendation
+            if confluence_pct >= 80 and dominant != "NEUTRAL":
+                st.success(f"Strong confluence: {int(confluence_pct)}% of timeframes agree on {dominant}. High-probability setup.")
+            elif confluence_pct >= 60 and dominant != "NEUTRAL":
+                st.info(f"Moderate confluence: {int(confluence_pct)}% agree on {dominant}. Consider with caution.")
+            else:
+                st.warning("Weak confluence. Timeframes are mixed — wait for better alignment.")
+
+
+def render_correlation_tab():
+    """Render a correlation matrix for major crypto assets."""
+    st.markdown(f"<h2 style='color:{ACCENT};'>Correlation Matrix</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
+        "Shows how major crypto assets move relative to each other. "
+        "High correlation (near 1.0) = they move together. Low/negative = they diverge."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+    tf_corr = st.selectbox("Timeframe", ["15m", "1h", "4h", "1d"], index=2, key="corr_tf")
+    if st.button("Generate Correlation Matrix", type="primary"):
+        symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "ADA/USDT", "XRP/USDT"]
+        labels = [s.split("/")[0] for s in symbols]
+        with st.spinner("Fetching data for correlation analysis..."):
+            returns_dict = {}
+            for sym, label in zip(symbols, labels):
+                df = fetch_ohlcv(sym, tf_corr, limit=200)
+                if df is not None and len(df) > 10:
+                    returns_dict[label] = df["close"].pct_change().dropna().values
+            if len(returns_dict) < 2:
+                st.error("Not enough data to compute correlations.")
+                return
+            # Align lengths
+            min_len = min(len(v) for v in returns_dict.values())
+            aligned = {k: v[-min_len:] for k, v in returns_dict.items()}
+            df_ret = pd.DataFrame(aligned)
+            corr = df_ret.corr()
+
+            # Heatmap
+            fig_corr = go.Figure(data=go.Heatmap(
+                z=corr.values,
+                x=corr.columns.tolist(),
+                y=corr.index.tolist(),
+                colorscale="RdYlGn",
+                zmin=-1, zmax=1,
+                text=np.round(corr.values, 2),
+                texttemplate="%{text}",
+                textfont={"size": 14},
+            ))
+            fig_corr.update_layout(
+                height=450,
+                template="plotly_dark",
+                margin=dict(l=60, r=20, t=30, b=60),
+                xaxis=dict(side="bottom"),
+            )
+            st.plotly_chart(fig_corr, use_container_width=True)
+
+            # Insights
+            pairs = []
+            cols_list = list(corr.columns)
+            for i in range(len(cols_list)):
+                for j in range(i + 1, len(cols_list)):
+                    pairs.append((cols_list[i], cols_list[j], corr.iloc[i, j]))
+            pairs.sort(key=lambda x: x[2])
+            st.markdown(f"**Most correlated:** {pairs[-1][0]}-{pairs[-1][1]} ({pairs[-1][2]:.2f})")
+            st.markdown(f"**Least correlated:** {pairs[0][0]}-{pairs[0][1]} ({pairs[0][2]:.2f})")
+            if any(p[2] < 0.3 for p in pairs):
+                low_pairs = [f"{p[0]}-{p[1]}" for p in pairs if p[2] < 0.3]
+                st.info(f"Diversification opportunity: {', '.join(low_pairs[:3])} have low correlation.")
+
+
+def render_sessions_tab():
+    """Session-based analysis: Asian, European, US sessions."""
+    st.markdown(f"<h2 style='color:{ACCENT};'>Session Analysis</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
+        "Analyse trading activity across global sessions: "
+        "Asian (00:00-08:00 UTC), European (08:00-16:00 UTC), US (16:00-00:00 UTC). "
+        "Find which session has the most volume, volatility, and best conditions."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+    coin_s = st.text_input("Coin Symbol", value="BTC/USDT", key="session_coin_input").upper()
+    if st.button("Analyse Sessions", type="primary"):
+        with st.spinner("Fetching hourly data for session analysis..."):
+            df = fetch_ohlcv(coin_s, "1h", limit=500)
+            if df is None or len(df) < 48:
+                st.error("Not enough hourly data for session analysis.")
+                return
+
+            df["hour"] = df["timestamp"].dt.hour
+            df["range_pct"] = (df["high"] - df["low"]) / df["low"] * 100
+            df["return_pct"] = df["close"].pct_change() * 100
+
+            def _session(h: int) -> str:
+                if 0 <= h < 8:
+                    return "Asian (00-08 UTC)"
+                elif 8 <= h < 16:
+                    return "European (08-16 UTC)"
+                else:
+                    return "US (16-00 UTC)"
+
+            df["session"] = df["hour"].apply(_session)
+            session_order = ["Asian (00-08 UTC)", "European (08-16 UTC)", "US (16-00 UTC)"]
+
+            grouped = df.groupby("session").agg(
+                avg_volume=("volume", "mean"),
+                total_volume=("volume", "sum"),
+                avg_range=("range_pct", "mean"),
+                avg_return=("return_pct", "mean"),
+                candle_count=("close", "count"),
+            ).reindex(session_order)
+
+            # Session summary cards
+            session_colors = [WARNING, POSITIVE, NEGATIVE]
+            cols = st.columns(3)
+            for idx, (sess, row) in enumerate(grouped.iterrows()):
+                with cols[idx]:
+                    st.markdown(
+                        f"<div class='metric-card'>"
+                        f"<div class='metric-label'>{sess}</div>"
+                        f"<div class='metric-value' style='font-size:1.2rem;'>"
+                        f"Vol: {readable_market_cap(int(row['total_volume']))}</div>"
+                        f"<div style='color:{TEXT_MUTED};font-size:0.85rem;'>"
+                        f"Avg Range: {row['avg_range']:.3f}% | Avg Return: {row['avg_return']:+.3f}%"
+                        f"</div></div>",
+                        unsafe_allow_html=True,
+                    )
+
+            # Volume by session bar chart
+            fig_vol = go.Figure()
+            for idx, sess in enumerate(session_order):
+                if sess in grouped.index:
+                    fig_vol.add_trace(go.Bar(
+                        x=[sess], y=[grouped.loc[sess, "avg_volume"]],
+                        name=sess, marker_color=session_colors[idx],
+                    ))
+            fig_vol.update_layout(
+                title="Average Hourly Volume by Session",
+                height=300, template="plotly_dark",
+                margin=dict(l=20, r=20, t=40, b=30),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_vol, use_container_width=True)
+
+            # Volatility by session bar chart
+            fig_range = go.Figure()
+            for idx, sess in enumerate(session_order):
+                if sess in grouped.index:
+                    fig_range.add_trace(go.Bar(
+                        x=[sess], y=[grouped.loc[sess, "avg_range"]],
+                        name=sess, marker_color=session_colors[idx],
+                    ))
+            fig_range.update_layout(
+                title="Average Price Range (%) by Session",
+                height=300, template="plotly_dark",
+                margin=dict(l=20, r=20, t=40, b=30),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_range, use_container_width=True)
+
+            # Best session recommendation
+            best_vol = grouped["avg_volume"].idxmax()
+            best_range = grouped["avg_range"].idxmax()
+            st.info(
+                f"**Highest volume:** {best_vol} | "
+                f"**Most volatile:** {best_range} | "
+                f"Best for scalping: choose sessions with high volume AND moderate volatility."
+            )
+
+
+def render_tools_tab():
+    """R:R Calculator and Liquidation Levels."""
+    st.markdown(f"<h2 style='color:{ACCENT};'>Trading Tools</h2>", unsafe_allow_html=True)
+
+    # === R:R Calculator ===
+    st.markdown(f"<h3 style='color:{ACCENT};'>Risk/Reward Calculator</h3>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
+        "Calculate position size, risk/reward ratio, and PnL for different leverage levels."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+    rc1, rc2 = st.columns(2)
+    with rc1:
+        rr_entry = st.number_input("Entry Price ($)", min_value=0.0, value=100000.0, format="%.2f", key="rr_entry")
+        rr_stop = st.number_input("Stop Loss ($)", min_value=0.0, value=98000.0, format="%.2f", key="rr_stop")
+        rr_target = st.number_input("Take Profit ($)", min_value=0.0, value=105000.0, format="%.2f", key="rr_target")
+    with rc2:
+        rr_account = st.number_input("Account Size ($)", min_value=0.0, value=10000.0, format="%.2f", key="rr_account")
+        rr_risk_pct = st.slider("Risk per Trade (%)", min_value=0.5, max_value=10.0, value=2.0, step=0.5, key="rr_risk")
+        rr_direction = st.selectbox("Direction", ["LONG", "SHORT"], key="rr_dir")
+
+    if st.button("Calculate R:R", type="primary"):
+        if rr_entry <= 0:
+            st.error("Entry price must be > 0")
+        else:
+            if rr_direction == "LONG":
+                risk_per_unit = abs(rr_entry - rr_stop)
+                reward_per_unit = abs(rr_target - rr_entry)
+            else:
+                risk_per_unit = abs(rr_stop - rr_entry)
+                reward_per_unit = abs(rr_entry - rr_target)
+
+            rr_ratio = reward_per_unit / risk_per_unit if risk_per_unit > 0 else 0
+            risk_amount = rr_account * (rr_risk_pct / 100)
+            position_size = risk_amount / risk_per_unit if risk_per_unit > 0 else 0
+            position_value = position_size * rr_entry
+
+            # Summary
+            rr_color = POSITIVE if rr_ratio >= 1.5 else (WARNING if rr_ratio >= 1.0 else NEGATIVE)
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.markdown(
+                    f"<div class='metric-card'><div class='metric-label'>R:R Ratio</div>"
+                    f"<div class='metric-value' style='color:{rr_color};'>1:{rr_ratio:.2f}</div></div>",
+                    unsafe_allow_html=True,
+                )
+            with c2:
+                st.markdown(
+                    f"<div class='metric-card'><div class='metric-label'>Risk Amount</div>"
+                    f"<div class='metric-value'>${risk_amount:,.2f}</div></div>",
+                    unsafe_allow_html=True,
+                )
+            with c3:
+                st.markdown(
+                    f"<div class='metric-card'><div class='metric-label'>Position Size</div>"
+                    f"<div class='metric-value'>{position_size:,.6f}</div></div>",
+                    unsafe_allow_html=True,
+                )
+            with c4:
+                st.markdown(
+                    f"<div class='metric-card'><div class='metric-label'>Position Value</div>"
+                    f"<div class='metric-value'>${position_value:,.2f}</div></div>",
+                    unsafe_allow_html=True,
+                )
+
+            # PnL at various leverage levels
+            st.markdown(f"<h4 style='color:{ACCENT};'>PnL at Different Leverage Levels</h4>", unsafe_allow_html=True)
+            lev_rows = []
+            for lev in [1, 2, 3, 5, 10, 15, 20]:
+                pnl_win = reward_per_unit * position_size * lev
+                pnl_loss = risk_per_unit * position_size * lev
+                pnl_win_pct = (pnl_win / rr_account) * 100 if rr_account > 0 else 0
+                pnl_loss_pct = (pnl_loss / rr_account) * 100 if rr_account > 0 else 0
+                lev_rows.append({
+                    "Leverage": f"x{lev}",
+                    "Win ($)": f"+${pnl_win:,.2f}",
+                    "Win (%)": f"+{pnl_win_pct:.2f}%",
+                    "Loss ($)": f"-${pnl_loss:,.2f}",
+                    "Loss (%)": f"-{pnl_loss_pct:.2f}%",
+                    "Effective Size ($)": f"${position_value * lev:,.2f}",
+                })
+            st.dataframe(pd.DataFrame(lev_rows), use_container_width=True)
+
+            if rr_ratio < 1.0:
+                st.error("R:R ratio is below 1.0 — risk exceeds reward. Not recommended.")
+            elif rr_ratio < 1.5:
+                st.warning("R:R ratio is below 1.5. Consider adjusting targets or stops.")
+            else:
+                st.success(f"R:R ratio of 1:{rr_ratio:.2f} is healthy.")
+
+    # === Liquidation Levels ===
+    st.markdown("---")
+    st.markdown(f"<h3 style='color:{ACCENT};'>Liquidation Level Estimator</h3>", unsafe_allow_html=True)
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
+        "Estimate liquidation prices for various leverage levels. "
+        "Assumes isolated margin with 100% maintenance margin rate for simplicity."
+        "</p>",
+        unsafe_allow_html=True,
+    )
+    lq1, lq2 = st.columns(2)
+    with lq1:
+        lq_entry = st.number_input("Entry Price ($)", min_value=0.0, value=100000.0, format="%.2f", key="lq_entry")
+    with lq2:
+        lq_direction = st.selectbox("Direction", ["LONG", "SHORT"], key="lq_dir")
+
+    if st.button("Show Liquidation Levels", type="primary"):
+        if lq_entry <= 0:
+            st.error("Entry price must be > 0")
+        else:
+            liq_rows = []
+            leverages = [2, 3, 5, 10, 15, 20, 25, 50, 75, 100]
+            for lev in leverages:
+                if lq_direction == "LONG":
+                    liq_price = lq_entry * (1 - 1 / lev)
+                    distance_pct = (lq_entry - liq_price) / lq_entry * 100
+                else:
+                    liq_price = lq_entry * (1 + 1 / lev)
+                    distance_pct = (liq_price - lq_entry) / lq_entry * 100
+                liq_rows.append({
+                    "Leverage": f"x{lev}",
+                    "Liquidation Price": f"${liq_price:,.2f}",
+                    "Distance from Entry": f"{distance_pct:.2f}%",
+                    "Risk Level": "Low" if distance_pct > 10 else ("Medium" if distance_pct > 3 else "HIGH"),
+                })
+            df_liq = pd.DataFrame(liq_rows)
+
+            def _style_risk(val: str) -> str:
+                if val == "LOW":
+                    return f"color: {POSITIVE}; font-weight: 600;"
+                elif val == "HIGH":
+                    return f"color: {NEGATIVE}; font-weight: 600;"
+                return f"color: {WARNING}; font-weight: 600;"
+
+            styled_liq = df_liq.style.map(_style_risk, subset=["Risk Level"])
+            st.dataframe(styled_liq, use_container_width=True)
+
+            # Visual chart
+            fig_liq = go.Figure()
+            liq_prices = []
+            for lev in leverages:
+                if lq_direction == "LONG":
+                    liq_prices.append(lq_entry * (1 - 1 / lev))
+                else:
+                    liq_prices.append(lq_entry * (1 + 1 / lev))
+
+            fig_liq.add_trace(go.Scatter(
+                x=[f"x{l}" for l in leverages], y=liq_prices,
+                mode="lines+markers", name="Liquidation Price",
+                line=dict(color=NEGATIVE, width=2),
+                marker=dict(size=8),
+            ))
+            fig_liq.add_hline(
+                y=lq_entry,
+                line=dict(color=POSITIVE, dash="dash", width=1),
+                annotation_text=f"Entry: ${lq_entry:,.2f}",
+            )
+            fig_liq.update_layout(
+                height=350, template="plotly_dark",
+                margin=dict(l=20, r=20, t=30, b=30),
+                xaxis_title="Leverage", yaxis_title="Liquidation Price ($)",
+            )
+            st.plotly_chart(fig_liq, use_container_width=True)
+
+
 def main():
     """Entry point for the Streamlit app."""
-    tabs = st.tabs(["Market", "Spot", "Position", "AI Prediction", "Backtest", "Analysis Guide"])
+    tabs = st.tabs([
+        "Market", "Spot", "Position", "AI Prediction",
+        "Multi-TF", "Correlation", "Sessions", "Tools",
+        "Backtest", "Analysis Guide",
+    ])
     with tabs[0]:
         render_market_tab()
     with tabs[1]:
@@ -3584,8 +4116,16 @@ def main():
     with tabs[3]:
         render_ml_tab()
     with tabs[4]:
-        render_backtest_tab()
+        render_multitf_tab()
     with tabs[5]:
+        render_correlation_tab()
+    with tabs[6]:
+        render_sessions_tab()
+    with tabs[7]:
+        render_tools_tab()
+    with tabs[8]:
+        render_backtest_tab()
+    with tabs[9]:
         render_guide_tab()
 
 main()
