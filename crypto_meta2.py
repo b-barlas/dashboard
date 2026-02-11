@@ -193,12 +193,24 @@ st.markdown(
 )
 
 
-# Exchange set up with caching
+# Exchange set up with caching – Kraken (primary, FCA‑regulated) with Gate.io fallback
+_EXCHANGE_CONFIGS = [
+    ("kraken", {}),
+    ("gate", {}),
+]
+
 @st.cache_resource(show_spinner=False)
 def get_exchange():
-    return ccxt.kraken({
-        "enableRateLimit": True,
-    })
+    for name, extra in _EXCHANGE_CONFIGS:
+        try:
+            ex = getattr(ccxt, name)({"enableRateLimit": True, **extra})
+            ex.load_markets()  # verify connectivity
+            return ex
+        except Exception as e:
+            print(f"Exchange {name} unavailable: {e}")
+    # last resort – return Kraken instance even if offline so the rest of the
+    # code doesn't crash; individual API calls will still fail gracefully.
+    return ccxt.kraken({"enableRateLimit": True})
 
 EXCHANGE = get_exchange()
 
@@ -305,9 +317,10 @@ def get_social_sentiment(symbol: str) -> tuple[int, str]:
 @st.cache_resource(show_spinner=False)
 def get_markets() -> dict:
     try:
+        # Markets may already be loaded by get_exchange(); reload to be safe.
         return EXCHANGE.load_markets()
     except Exception as e:
-        st.warning(f"Markets yüklenemedi: {e}")
+        st.warning(f"Markets yüklenemedi ({EXCHANGE.id}): {e}")
         return {}
 
 MARKETS = get_markets()
@@ -1050,7 +1063,7 @@ def get_scalping_entry_target(
     ichimoku_trend: str,
     vwap_label: str,
     volume_spike: bool,
-    strict_mode: bool = False
+    strict_mode: bool = True
 ):
     if df is None or len(df) <= 30:
         return None, 0.0, 0.0, 0.0, 0.0, ""
@@ -1548,12 +1561,7 @@ def render_market_tab():
         signal_filter = st.selectbox("Signal", ['LONG', 'SHORT', 'BOTH'], index=2)
     with controls[2]:
         top_n = st.slider("Top N", min_value=3, max_value=50, value=50)
-    with controls[3]:
-        strict_toggle_market = st.toggle(
-            "Strict scalp",
-            value=True,
-            key="strict_scalp_market",
-        )
+    # Strict scalp mode is always enabled (non-strict path removed).
 
 
     # Fetch top coins
@@ -1676,7 +1684,7 @@ def render_market_tab():
                 ichimoku_trend,
                 vwap_label,
                 volume_spike,
-                strict_mode=strict_toggle_market
+                strict_mode=True
             )
             entry_price = entry_s if scalp_direction else 0.0
             target_price = target_s if scalp_direction else 0.0
@@ -2088,20 +2096,15 @@ def render_position_tab():
 
     default_entry_price: float = 0.0
     try:
-        df_current = fetch_ohlcv(coin, selected_timeframes[0], limit=1)
-        if df_current is not None and len(df_current) > 0:
-            default_entry_price = float(df_current['close'].iloc[-1])
+        ticker = EXCHANGE.fetch_ticker(coin)
+        default_entry_price = float(ticker.get('last', 0) or 0)
     except Exception:
         default_entry_price = 0.0
 
     entry_price = st.number_input("Entry Price", min_value=0.0, format="%.4f", value=default_entry_price)
     direction = st.selectbox("Position Direction", ["LONG", "SHORT"])
 
-    strict_toggle_position = st.toggle(
-        "Strict scalp",
-        value=True,
-        key="strict_scalp_position",
-    )
+    # Strict scalp mode is always enabled (non-strict path removed).
    
     if st.button("Analyse Position", type="primary"):
         tf_order = {'1m': 1, '3m': 2, '5m': 3, '15m': 4, '1h': 5, '4h': 6, '1d': 7}
@@ -2353,7 +2356,7 @@ def render_position_tab():
                         ichimoku_trend,
                         vwap_label,
                         volume_spike,
-                        strict_mode=strict_toggle_position
+                        strict_mode=True
                     )
                 
                     # === Display Scalping Result ===
@@ -2373,7 +2376,7 @@ def render_position_tab():
                             unsafe_allow_html=True
                         )
                     else:
-                        msg = breakout_note or ("No valid scalping setup with current filters." if strict_toggle_position else "No valid scalping setup (soft mode).")
+                        msg = breakout_note or "No valid scalping setup with current filters."
                         st.info(msg)
                 
                     st.markdown(scalping_snapshot_html, unsafe_allow_html=True)
@@ -2856,7 +2859,7 @@ def render_ml_tab():
                             ichimoku_trend,
                             vwap_label,
                             volume_spike,
-                            strict_mode=False
+                            strict_mode=True
                         )
                         # Only use the scalping result if it matches the ML direction.  This avoids
                         # showing long entries for short predictions or vice versa.  Also skip
