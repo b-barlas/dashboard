@@ -1969,87 +1969,56 @@ def render_spot_tab():
 
         st.markdown(f"<p style='color:{TEXT_MUTED};'>{comment}</p>", unsafe_allow_html=True)
 
-        # Volume / Volatility / Pattern explanations
-        explanations = []
+        # Indicator grid (professional card layout)
+        def _ind_color_spot(val: str) -> str:
+            if any(k in val for k in ["Bullish", "Above", "Oversold", "Low"]):
+                return POSITIVE
+            if any(k in val for k in ["Bearish", "Below", "Overbought", "High"]):
+                return NEGATIVE
+            return WARNING
 
-        if volume_spike:
-            explanations.append("📈 <b>Volume Spike detected</b> – sudden increase in trading activity.")
-
-        # Clean ATR comment (strip emoji/symbols)
-        atr_clean = atr_comment.replace("▲", "").replace("▼", "").replace("–", "").strip()
-        if atr_clean == "Moderate":
-            explanations.append("🔄 <b>Volatility is moderate</b> – stable price conditions.")
-        elif atr_clean == "High":
-            explanations.append("⚠️ <b>Volatility is high</b> – expect sharp moves.")
-        elif atr_clean == "Low":
-            explanations.append("🟢 <b>Volatility is low</b> – steady market behaviour.")
-
-        if candle_pattern:
-            explanations.append(f"🕯️ <b>Candle pattern:</b> {candle_pattern}")
-
-        if not np.isnan(adx_val):
-            explanations.append(f"📊 <b>ADX:</b> {format_adx(adx_val)}")
-
-
+        indicators_spot = []
         if supertrend_trend:
-            explanations.append(f"📈 <b>SuperTrend:</b> {format_trend(supertrend_trend)}")
-
-        if ichimoku_trend == "Bullish":
-            explanations.append("☁️ <b>Ichimoku Cloud:</b> Price is above the cloud → <span style='color:limegreen;'>Bullish</span> signal.")
-        elif ichimoku_trend == "Bearish":
-            explanations.append("☁️ <b>Ichimoku Cloud:</b> Price is below the cloud → <span style='color:red;'>Bearish</span> signal.")
-        elif ichimoku_trend == "Neutral":
-            explanations.append("☁️ <b>Ichimoku Cloud:</b> Price is inside the cloud → <span style='color:orange;'>Neutral</span> state.")
-        
+            indicators_spot.append(("SuperTrend", format_trend(supertrend_trend), _ind_color_spot(supertrend_trend)))
+        if ichimoku_trend:
+            indicators_spot.append(("Ichimoku", format_trend(ichimoku_trend), _ind_color_spot(ichimoku_trend)))
+        if vwap_label:
+            indicators_spot.append(("VWAP", vwap_label, _ind_color_spot(vwap_label)))
+        if not np.isnan(adx_val):
+            indicators_spot.append(("ADX", format_adx(adx_val), WARNING))
+        if bollinger_bias:
+            indicators_spot.append(("Bollinger", bollinger_bias, _ind_color_spot(bollinger_bias)))
         if not np.isnan(stochrsi_k_val):
-            if stochrsi_k_val < 0.2:
-                explanations.append("🟢 <b>Stochastic RSI:</b> Oversold (< 0.2) – possible rebound.")
-            elif stochrsi_k_val > 0.8:
-                explanations.append("🔴 <b>Stochastic RSI:</b> Overbought (> 0.8) – possible pullback.")
-            else:
-                explanations.append("🟡 <b>Stochastic RSI:</b> Neutral zone.")
+            srsi_c_s = POSITIVE if stochrsi_k_val < 0.2 else (NEGATIVE if stochrsi_k_val > 0.8 else WARNING)
+            indicators_spot.append(("StochRSI", f"{stochrsi_k_val:.2f}", srsi_c_s))
+        if "Bullish" in psar_trend or "Bearish" in psar_trend:
+            indicators_spot.append(("PSAR", psar_trend, _ind_color_spot(psar_trend)))
+        if williams_label:
+            indicators_spot.append(("Williams %R", williams_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color_spot(williams_label)))
+        if cci_label:
+            indicators_spot.append(("CCI", cci_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color_spot(cci_label)))
+        if volume_spike:
+            indicators_spot.append(("Volume", "Spike ▲", POSITIVE))
+        atr_clean = atr_comment.replace("▲", "").replace("▼", "").replace("–", "").strip()
+        if atr_clean:
+            indicators_spot.append(("Volatility", atr_clean, _ind_color_spot(atr_clean)))
+        if candle_pattern:
+            indicators_spot.append(("Pattern", candle_pattern.split(" (")[0], WARNING))
 
-        if "Overbought" in bollinger_bias:
-            explanations.append("🔴 <b>Bollinger:</b> Price is strongly above upper band — <span style='color:red;'>overbought zone</span>.")
-        elif "Oversold" in bollinger_bias:
-            explanations.append("🟢 <b>Bollinger:</b> Price is strongly below lower band — <span style='color:limegreen;'>oversold zone</span>.")
-        elif "Near" in bollinger_bias:
-            explanations.append(f"🟡 <b>Bollinger:</b> {bollinger_bias} — price is near edge of band.")
-        else:
-            explanations.append("➖ <b>Bollinger:</b> Price is inside bands — <span style='color:gray;'>neutral zone</span>.")
-
-
-        if vwap_label == "🟢 Above":
-            explanations.append("🟢 <b>VWAP:</b> Price is above VWAP — <span style='color:limegreen;'>bullish bias</span>.")
-        elif vwap_label == "🔴 Below":
-            explanations.append("🔴 <b>VWAP:</b> Price is below VWAP — <span style='color:red;'>bearish bias</span>.")
-        elif "Near" in vwap_label:
-            explanations.append("🟡 <b>VWAP:</b> Price is near VWAP — <span style='color:gray;'>neutral zone</span>.")
-
-        if "Bullish" in psar_trend:
-            explanations.append("🟢 <b>Parabolic SAR:</b> Price is above PSAR — <span style='color:limegreen;'>bullish continuation</span>.")
-        elif "Bearish" in psar_trend:
-            explanations.append("🔴 <b>Parabolic SAR:</b> Price is below PSAR — <span style='color:red;'>bearish reversal</span>.")
-        elif psar_trend == "":
-            explanations.append("➖ <b>Parabolic SAR:</b> Not available — insufficient data or calculation error.")
-
-        if williams_label == "🟢 Oversold":
-            explanations.append("🟢 <b>Williams %R:</b> Below −80 — <span style='color:limegreen;'>oversold</span> zone.")
-        elif williams_label == "🔴 Overbought":
-            explanations.append("🔴 <b>Williams %R:</b> Above −20 — <span style='color:red;'>overbought</span> zone.")
-        elif williams_label == "🟡 Neutral":
-            explanations.append("🟡 <b>Williams %R:</b> Neutral range.")
-
-        if "Oversold" in cci_label:
-            explanations.append("🟢 <b>CCI:</b> Oversold (< -100) — potential bullish reversal.")
-        elif "Overbought" in cci_label:
-            explanations.append("🔴 <b>CCI:</b> Overbought (> 100) — potential bearish reversal.")
-        else:
-            explanations.append("🟡 <b>CCI:</b> Neutral range.")
-        
-                
-        if explanations:
-            st.markdown("<br/>".join(explanations), unsafe_allow_html=True)
+        if indicators_spot:
+            grid_items_spot = "".join(
+                f"<div style='text-align:center; padding:6px;'>"
+                f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>{name}</div>"
+                f"<div style='color:{color}; font-size:0.85rem; font-weight:600;'>{val}</div>"
+                f"</div>"
+                for name, val, color in indicators_spot
+            )
+            st.markdown(
+                f"<div style='display:grid; grid-template-columns:repeat(auto-fill, minmax(90px, 1fr)); "
+                f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
+                f"{grid_items_spot}</div>",
+                unsafe_allow_html=True,
+            )
 
         # Price box
         st.markdown(f"<div class='metric-card'><div class='metric-label'>Current Price</div><div class='metric-value'>${current_price:,.2f}</div></div>", unsafe_allow_html=True)
@@ -2224,19 +2193,21 @@ def render_position_tab():
         unsafe_allow_html=True,
     )
     # Assign a unique key to avoid StreamlitDuplicateElementId errors
-    coin = st.text_input(
-        "Coin Symbol (e.g. BTC/USDT)",
-        value="BTC/USDT",
+    coin = _normalize_coin_input(st.text_input(
+        "Coin (e.g. BTC, ETH, TAO)",
+        value="BTC",
         key="position_coin_input",
-    ).upper()
+    ))
     selected_timeframes = st.multiselect("Select up to 3 Timeframes", ['1m', '3m', '5m', '15m', '1h', '4h', '1d'], default=['3m'], max_selections=3)
 
     default_entry_price: float = 0.0
-    try:
-        ticker = EXCHANGE.fetch_ticker(coin)
-        default_entry_price = float(ticker.get('last', 0) or 0)
-    except Exception:
-        default_entry_price = 0.0
+    for _v in _symbol_variants(coin):
+        try:
+            ticker = EXCHANGE.fetch_ticker(_v)
+            default_entry_price = float(ticker.get('last', 0) or 0)
+            break
+        except Exception:
+            continue
 
     entry_price = st.number_input("Entry Price", min_value=0.0, format="%.4f", value=default_entry_price)
     direction = st.selectbox("Position Direction", ["LONG", "SHORT"])
@@ -2252,18 +2223,12 @@ def render_position_tab():
         for idx, tf in enumerate(selected_timeframes):
             with cols[idx]:
                 df = fetch_ohlcv(coin, tf, limit=200)
-                if df is None or len(df) < 120:
+                if df is None or len(df) < 55:
                     st.error(f"Not enough data to analyse position for {tf}.")
                     continue
 
                 signal, lev, comment, volume_spike, atr_comment, candle_pattern, confidence_score, adx_val, supertrend_trend, ichimoku_trend, stochrsi_k_val, bollinger_bias, vwap_label, psar_trend, williams_label, cci_label = analyse(df)
-                
-                # --- Leverage tiers (proportional to analyse() -> lev) ---
-                lev_base = lev
-                conservative_lev = max(1, int(round(lev_base * 0.85)))
-                medium_risk_lev  = min(max(1, int(round(lev_base * 1.10))), 14)
-                high_risk_lev    = min(max(1, int(round(lev_base * 1.35))), 20)
-                
+
                 current_price = df['close'].iloc[-1]
                 pnl = entry_price - current_price if direction == "SHORT" else current_price - entry_price
                 pnl_percent = (pnl / entry_price * 100) if entry_price else 0
@@ -2283,91 +2248,81 @@ def render_position_tab():
 
                 st.markdown(
                     f"**Signal:** {signal_clean} | "
-                    f"**Leverage:** LOW X{conservative_lev} • MED X{medium_risk_lev} • HIGH X{high_risk_lev} | "
+                    f"**Leverage:** x{lev} | "
                     f"**Confidence:** {confidence_score_badge(confidence_score)}",
                     unsafe_allow_html=True
                 )
 
                 st.markdown(f"<p style='color:{TEXT_MUTED};'>{comment}</p>", unsafe_allow_html=True)
-                
 
-                explanations = []
+                # -- AI Prediction for this coin/timeframe --
+                try:
+                    ai_prob, ai_dir = ml_predict_direction(df)
+                    ai_color = POSITIVE if ai_dir == "LONG" else (NEGATIVE if ai_dir == "SHORT" else WARNING)
+                    st.markdown(
+                        f"<div style='background:{CARD_BG}; padding:8px 12px; border-radius:6px; "
+                        f"border-left:3px solid {ai_color}; margin-bottom:8px;'>"
+                        f"<span style='color:{TEXT_MUTED}; font-size:0.8rem;'>AI Prediction</span> "
+                        f"<b style='color:{ai_color}; font-size:1rem;'>{ai_dir}</b> "
+                        f"<span style='color:{TEXT_MUTED}; font-size:0.8rem;'>({ai_prob*100:.0f}%)</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
+                except Exception:
+                    pass
+
+                # -- Indicator grid (professional card layout) --
+                def _ind_color(val: str) -> str:
+                    if any(k in val for k in ["Bullish", "Above", "Oversold", "Low"]):
+                        return POSITIVE
+                    if any(k in val for k in ["Bearish", "Below", "Overbought", "High"]):
+                        return NEGATIVE
+                    return WARNING
+
+                indicators = []
+                if supertrend_trend:
+                    indicators.append(("SuperTrend", format_trend(supertrend_trend), _ind_color(supertrend_trend)))
+                if ichimoku_trend:
+                    indicators.append(("Ichimoku", format_trend(ichimoku_trend), _ind_color(ichimoku_trend)))
+                if vwap_label:
+                    indicators.append(("VWAP", vwap_label, _ind_color(vwap_label)))
+                if not np.isnan(adx_val):
+                    indicators.append(("ADX", format_adx(adx_val), WARNING))
+                if bollinger_bias:
+                    indicators.append(("Bollinger", bollinger_bias, _ind_color(bollinger_bias)))
+                if not np.isnan(stochrsi_k_val):
+                    srsi_lbl = f"{stochrsi_k_val:.2f}"
+                    srsi_c = POSITIVE if stochrsi_k_val < 0.2 else (NEGATIVE if stochrsi_k_val > 0.8 else WARNING)
+                    indicators.append(("StochRSI", srsi_lbl, srsi_c))
+                if "Bullish" in psar_trend or "Bearish" in psar_trend:
+                    indicators.append(("PSAR", psar_trend, _ind_color(psar_trend)))
+                if williams_label:
+                    indicators.append(("Williams %R", williams_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(williams_label)))
+                if cci_label:
+                    indicators.append(("CCI", cci_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(cci_label)))
                 if volume_spike:
-                    explanations.append("📈 <b>Volume Spike detected</b> – sudden increase in trading activity.")
+                    indicators.append(("Volume", "Spike ▲", POSITIVE))
 
                 atr_clean = atr_comment.replace("▲", "").replace("▼", "").replace("–", "").strip()
-                if atr_clean == "Moderate":
-                    explanations.append("🔄 <b>Volatility is moderate</b> – stable price conditions.")
-                elif atr_clean == "High":
-                    explanations.append("⚠️ <b>Volatility is high</b> – expect sharp moves.")
-                elif atr_clean == "Low":
-                    explanations.append("🟢 <b>Volatility is low</b> – steady market behaviour.")
-
+                if atr_clean:
+                    indicators.append(("Volatility", atr_clean, _ind_color(atr_clean)))
                 if candle_pattern:
-                    explanations.append(f"🕯️ <b>Candle pattern:</b> {candle_pattern}")
+                    indicators.append(("Pattern", candle_pattern.split(" (")[0], WARNING))
 
-                if not np.isnan(adx_val):
-                    explanations.append(f"📊 <b>ADX:</b> {format_adx(adx_val)}")
-                
-                if supertrend_trend in ["Bullish", "Bearish", "Neutral"]:
-                    trend_icon = "▲" if supertrend_trend == "Bullish" else "▼" if supertrend_trend == "Bearish" else "–"
-                    explanations.append(f"📈 <b>SuperTrend:</b> {trend_icon} {supertrend_trend}")
-
-                if ichimoku_trend == "Bullish":
-                    explanations.append("☁️ <b>Ichimoku Cloud:</b> Price is above the cloud → <span style='color:limegreen;'>Bullish</span> signal.")
-                elif ichimoku_trend == "Bearish":
-                    explanations.append("☁️ <b>Ichimoku Cloud:</b> Price is below the cloud → <span style='color:red;'>Bearish</span> signal.")
-                elif ichimoku_trend == "Neutral":
-                    explanations.append("☁️ <b>Ichimoku Cloud:</b> Price is inside the cloud → <span style='color:orange;'>Neutral</span> state.")
-                
-                if not np.isnan(stochrsi_k_val):
-                    if stochrsi_k_val < 0.2:
-                        explanations.append("🟢 <b>Stochastic RSI:</b> Oversold (< 0.2) – possible rebound.")
-                    elif stochrsi_k_val > 0.8:
-                        explanations.append("🔴 <b>Stochastic RSI:</b> Overbought (> 0.8) – possible pullback.")
-                    else:
-                        explanations.append("🟡 <b>Stochastic RSI:</b> Neutral zone.")
-
-                if "Overbought" in bollinger_bias:
-                    explanations.append("🔴 <b>Bollinger:</b> Price is strongly above upper band — <span style='color:red;'>overbought zone</span>.")
-                elif "Oversold" in bollinger_bias:
-                    explanations.append("🟢 <b>Bollinger:</b> Price is strongly below lower band — <span style='color:limegreen;'>oversold zone</span>.")
-                elif "Near" in bollinger_bias:
-                    explanations.append(f"🟡 <b>Bollinger:</b> {bollinger_bias} — price is near edge of band.")
-                else:
-                    explanations.append("➖ <b>Bollinger:</b> Price is inside bands — <span style='color:gray;'>neutral zone</span>.")
-                               
-                if vwap_label == "🟢 Above":
-                    explanations.append("🟢 <b>VWAP:</b> Price is above VWAP — <span style='color:limegreen;'>bullish bias</span>.")
-                elif vwap_label == "🔴 Below":
-                    explanations.append("🔴 <b>VWAP:</b> Price is below VWAP — <span style='color:red;'>bearish bias</span>.")
-                elif "Near" in vwap_label:
-                    explanations.append("🟡 <b>VWAP:</b> Price is near VWAP — <span style='color:gray;'>neutral zone</span>.")
-
-                if "Bullish" in psar_trend:
-                    explanations.append("🟢 <b>Parabolic SAR:</b> Price is above PSAR — <span style='color:limegreen;'>bullish continuation</span>.")
-                elif "Bearish" in psar_trend:
-                    explanations.append("🔴 <b>Parabolic SAR:</b> Price is below PSAR — <span style='color:red;'>bearish reversal</span>.")
-                elif psar_trend == "":
-                    explanations.append("➖ <b>Parabolic SAR:</b> Not available — insufficient data or calculation error.")
-
-                if williams_label == "🟢 Oversold":
-                    explanations.append("🟢 <b>Williams %R:</b> Below −80 — <span style='color:limegreen;'>oversold</span> zone.")
-                elif williams_label == "🔴 Overbought":
-                    explanations.append("🔴 <b>Williams %R:</b> Above −20 — <span style='color:red;'>overbought</span> zone.")
-                elif williams_label == "🟡 Neutral":
-                    explanations.append("🟡 <b>Williams %R:</b> Neutral range.")
-                
-                if "Oversold" in cci_label:
-                    explanations.append("🟢 <b>CCI:</b> Oversold (< -100) — potential bullish reversal.")
-                elif "Overbought" in cci_label:
-                    explanations.append("🔴 <b>CCI:</b> Overbought (> 100) — potential bearish reversal.")
-                else:
-                    explanations.append("🟡 <b>CCI:</b> Neutral range.")
-                
-                                                                
-                if explanations:
-                    st.markdown("<br/>".join(explanations), unsafe_allow_html=True)
+                if indicators:
+                    grid_items = "".join(
+                        f"<div style='text-align:center; padding:6px;'>"
+                        f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>{name}</div>"
+                        f"<div style='color:{color}; font-size:0.85rem; font-weight:600;'>{val}</div>"
+                        f"</div>"
+                        for name, val, color in indicators
+                    )
+                    st.markdown(
+                        f"<div style='display:grid; grid-template-columns:repeat(auto-fill, minmax(90px, 1fr)); "
+                        f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
+                        f"{grid_items}</div>",
+                        unsafe_allow_html=True,
+                    )
 
                 df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
                 df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
@@ -3057,11 +3012,11 @@ def render_ml_tab():
         unsafe_allow_html=True
     )
     # Assign a unique key to avoid StreamlitDuplicateElementId errors on AI tab
-    coin = st.text_input(
-        "Coin Symbol (e.g. BTC/USDT)",
-        value="BTC/USDT",
+    coin = _normalize_coin_input(st.text_input(
+        "Coin (e.g. BTC, ETH, TAO)",
+        value="BTC",
         key="ai_coin_input",
-    ).upper()
+    ))
     # Allow the user to select up to three timeframes to evaluate.  This works
     # similarly to the Position Analyser tab, enabling a multi‑timeframe view
     # of the AI prediction.  By default, we select '1h'.
@@ -3273,83 +3228,57 @@ def render_ml_tab():
                     panel_html += ("</p></div>")
                     st.markdown(panel_html, unsafe_allow_html=True)
 
-                    # Explanation bullets
-                    explanations = []
-                    if volume_spike:
-                        explanations.append("📈 <b>Volume Spike detected</b> – sudden increase in trading activity.")
-                    # ATR comment
-                    atr_clean = atr_comment.replace("▲", "").replace("▼", "").replace("–", "").strip()
-                    if atr_clean == "Moderate":
-                        explanations.append("🔄 <b>Volatility is moderate</b> – stable price conditions.")
-                    elif atr_clean == "High":
-                        explanations.append("⚠️ <b>Volatility is high</b> – expect sharp moves.")
-                    elif atr_clean == "Low":
-                        explanations.append("🟢 <b>Volatility is low</b> – steady market behaviour.")
-                    # Candle pattern
-                    if candle_pattern:
-                        explanations.append(f"🕯️ <b>Candle pattern:</b> {candle_pattern}")
-                    # ADX
+                    # Indicator grid (same professional layout as Position tab)
+                    def _ind_color_ai(val: str) -> str:
+                        if any(k in val for k in ["Bullish", "Above", "Oversold", "Low"]):
+                            return POSITIVE
+                        if any(k in val for k in ["Bearish", "Below", "Overbought", "High"]):
+                            return NEGATIVE
+                        return WARNING
+
+                    indicators_ai = []
+                    if supertrend_trend:
+                        indicators_ai.append(("SuperTrend", format_trend(supertrend_trend), _ind_color_ai(supertrend_trend)))
+                    if ichimoku_trend:
+                        indicators_ai.append(("Ichimoku", format_trend(ichimoku_trend), _ind_color_ai(ichimoku_trend)))
+                    if vwap_label:
+                        indicators_ai.append(("VWAP", vwap_label, _ind_color_ai(vwap_label)))
                     if not np.isnan(adx_val):
-                        explanations.append(f"📊 <b>ADX:</b> {format_adx(adx_val)}")
-                    # SuperTrend
-                    if supertrend_trend in ["Bullish", "Bearish", "Neutral"]:
-                        trend_icon = "▲" if supertrend_trend == "Bullish" else "▼" if supertrend_trend == "Bearish" else "–"
-                        explanations.append(f"📈 <b>SuperTrend:</b> {trend_icon} {supertrend_trend}")
-                    # Ichimoku Cloud
-                    if ichimoku_trend == "Bullish":
-                        explanations.append("☁️ <b>Ichimoku Cloud:</b> Price is above the cloud → <span style='color:limegreen;'>Bullish</span> signal.")
-                    elif ichimoku_trend == "Bearish":
-                        explanations.append("☁️ <b>Ichimoku Cloud:</b> Price is below the cloud → <span style='color:red;'>Bearish</span> signal.")
-                    elif ichimoku_trend == "Neutral":
-                        explanations.append("☁️ <b>Ichimoku Cloud:</b> Price is inside the cloud → <span style='color:orange;'>Neutral</span> state.")
-                    # Stochastic RSI
+                        indicators_ai.append(("ADX", format_adx(adx_val), WARNING))
+                    if bollinger_bias:
+                        indicators_ai.append(("Bollinger", bollinger_bias, _ind_color_ai(bollinger_bias)))
                     if not np.isnan(stochrsi_k_val):
-                        if stochrsi_k_val < 0.2:
-                            explanations.append("🟢 <b>Stochastic RSI:</b> Oversold (< 0.2) – possible rebound.")
-                        elif stochrsi_k_val > 0.8:
-                            explanations.append("🔴 <b>Stochastic RSI:</b> Overbought (> 0.8) – possible pullback.")
-                        else:
-                            explanations.append("🟡 <b>Stochastic RSI:</b> Neutral zone.")
-                    # Bollinger Bands
-                    if "Overbought" in bollinger_bias:
-                        explanations.append("🔴 <b>Bollinger:</b> Price is strongly above upper band — <span style='color:red;'>overbought zone</span>.")
-                    elif "Oversold" in bollinger_bias:
-                        explanations.append("🟢 <b>Bollinger:</b> Price is strongly below lower band — <span style='color:limegreen;'>oversold zone</span>.")
-                    elif "Near" in bollinger_bias:
-                        explanations.append(f"🟡 <b>Bollinger:</b> {bollinger_bias} — price is near edge of band.")
-                    else:
-                        explanations.append("➖ <b>Bollinger:</b> Price is inside bands — <span style='color:gray;'>neutral zone</span>.")
-                    # VWAP
-                    if vwap_label == "🟢 Above":
-                        explanations.append("🟢 <b>VWAP:</b> Price is above VWAP — <span style='color:limegreen;'>bullish bias</span>.")
-                    elif vwap_label == "🔴 Below":
-                        explanations.append("🔴 <b>VWAP:</b> Price is below VWAP — <span style='color:red;'>bearish bias</span>.")
-                    elif "Near" in vwap_label:
-                        explanations.append("🟡 <b>VWAP:</b> Price is near VWAP — <span style='color:gray;'>neutral zone</span>.")
-                    # Parabolic SAR
-                    if "Bullish" in psar_trend:
-                        explanations.append("🟢 <b>Parabolic SAR:</b> Price is above PSAR — <span style='color:limegreen;'>bullish continuation</span>.")
-                    elif "Bearish" in psar_trend:
-                        explanations.append("🔴 <b>Parabolic SAR:</b> Price is below PSAR — <span style='color:red;'>bearish reversal</span>.")
-                    elif psar_trend == "":
-                        explanations.append("➖ <b>Parabolic SAR:</b> Not available — insufficient data or calculation error.")
-                    # Williams %R
-                    if williams_label == "🟢 Oversold":
-                        explanations.append("🟢 <b>Williams %R:</b> Below −80 — <span style='color:limegreen;'>oversold</span> zone.")
-                    elif williams_label == "🔴 Overbought":
-                        explanations.append("🔴 <b>Williams %R:</b> Above −20 — <span style='color:red;'>overbought</span> zone.")
-                    elif williams_label == "🟡 Neutral":
-                        explanations.append("🟡 <b>Williams %R:</b> Neutral range.")
-                    # CCI
-                    if "Oversold" in cci_label:
-                        explanations.append("🟢 <b>CCI:</b> Oversold (< -100) — potential bullish reversal.")
-                    elif "Overbought" in cci_label:
-                        explanations.append("🔴 <b>CCI:</b> Overbought (> 100) — potential bearish reversal.")
-                    elif "Neutral" in cci_label:
-                        explanations.append("🟡 <b>CCI:</b> Neutral range.")
-                    # Display explanations as markdown list
-                    if explanations:
-                        st.markdown("<ul style='padding-left: 1.2rem;'>" + "".join([f"<li style='margin-bottom:4px;'>{exp}</li>" for exp in explanations]) + "</ul>", unsafe_allow_html=True)
+                        srsi_lbl_ai = f"{stochrsi_k_val:.2f}"
+                        srsi_c_ai = POSITIVE if stochrsi_k_val < 0.2 else (NEGATIVE if stochrsi_k_val > 0.8 else WARNING)
+                        indicators_ai.append(("StochRSI", srsi_lbl_ai, srsi_c_ai))
+                    if "Bullish" in psar_trend or "Bearish" in psar_trend:
+                        indicators_ai.append(("PSAR", psar_trend, _ind_color_ai(psar_trend)))
+                    if williams_label:
+                        indicators_ai.append(("Williams %R", williams_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color_ai(williams_label)))
+                    if cci_label:
+                        indicators_ai.append(("CCI", cci_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color_ai(cci_label)))
+                    if volume_spike:
+                        indicators_ai.append(("Volume", "Spike ▲", POSITIVE))
+                    atr_clean = atr_comment.replace("▲", "").replace("▼", "").replace("–", "").strip()
+                    if atr_clean:
+                        indicators_ai.append(("Volatility", atr_clean, _ind_color_ai(atr_clean)))
+                    if candle_pattern:
+                        indicators_ai.append(("Pattern", candle_pattern.split(" (")[0], WARNING))
+
+                    if indicators_ai:
+                        grid_items_ai = "".join(
+                            f"<div style='text-align:center; padding:6px;'>"
+                            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>{name}</div>"
+                            f"<div style='color:{color}; font-size:0.85rem; font-weight:600;'>{val}</div>"
+                            f"</div>"
+                            for name, val, color in indicators_ai
+                        )
+                        st.markdown(
+                            f"<div style='display:grid; grid-template-columns:repeat(auto-fill, minmax(90px, 1fr)); "
+                            f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
+                            f"{grid_items_ai}</div>",
+                            unsafe_allow_html=True,
+                        )
 
                     # === Charts Section ===
                     # Candlestick with EMAs and WMAs
@@ -3989,22 +3918,23 @@ def render_correlation_tab():
     )
     corr_c1, corr_c2 = st.columns(2)
     with corr_c1:
-        tf_corr = st.selectbox("Timeframe", ["15m", "1h", "4h", "1d"], index=2, key="corr_tf")
+        tf_corr = st.selectbox("Timeframe", ["15m", "1h", "4h", "1d"], index=3, key="corr_tf")
     with corr_c2:
-        custom_coin = st.text_input(
-            "Add your own coin (optional)",
+        custom_coins_raw = st.text_input(
+            "Add coins (up to 4, comma-separated)",
             value="",
-            placeholder="e.g. DOGE/USDT",
+            placeholder="e.g. DOGE, TAO, LINK, FET",
             key="corr_custom_coin",
         ).upper().strip()
     if st.button("Generate Correlation Matrix", type="primary"):
         symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "ADA/USDT", "XRP/USDT"]
-        # Handle custom coin: auto-append /USDT if user types just a ticker name
-        if custom_coin:
-            if "/" not in custom_coin:
-                custom_coin = custom_coin + "/USDT"
-            if custom_coin not in symbols:
-                symbols.append(custom_coin)
+        # Parse comma-separated custom coins (up to 4)
+        if custom_coins_raw:
+            custom_list = [c.strip() for c in custom_coins_raw.split(",") if c.strip()][:4]
+            for cc in custom_list:
+                normalized = _normalize_coin_input(cc)
+                if normalized and normalized not in symbols:
+                    symbols.append(normalized)
         labels = [s.split("/")[0] for s in symbols]
         with st.spinner("Fetching data for correlation analysis..."):
             returns_dict = {}
