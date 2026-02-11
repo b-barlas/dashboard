@@ -348,13 +348,89 @@ def fetch_ohlcv_cached(symbol: str, timeframe: str, limit: int = 120) -> pd.Data
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     return df
 
+# === CoinGecko fallback for coins not listed on the primary exchange ===
+_TF_TO_CG_DAYS = {
+    "1m": 1, "3m": 1, "5m": 1, "15m": 1,
+    "1h": 30, "4h": 90, "1d": 365,
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _coingecko_coin_id(symbol: str) -> str | None:
+    """Resolve a ticker symbol (e.g. 'WLFI') to a CoinGecko coin ID."""
+    try:
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/search",
+            params={"query": symbol},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            for coin in resp.json().get("coins", []):
+                if coin.get("symbol", "").upper() == symbol.upper():
+                    return coin["id"]
+    except Exception:
+        pass
+    return None
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _coingecko_market_chart(coin_id: str, days: int) -> pd.DataFrame | None:
+    """Fetch price + volume data from CoinGecko market_chart endpoint."""
+    try:
+        resp = requests.get(
+            f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart",
+            params={"vs_currency": "usd", "days": days},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        prices = data.get("prices", [])
+        volumes = data.get("total_volumes", [])
+        if not prices:
+            return None
+        df_p = pd.DataFrame(prices, columns=["timestamp", "close"])
+        df_v = pd.DataFrame(volumes, columns=["timestamp", "volume"])
+        df = df_p.merge(df_v, on="timestamp", how="left")
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df["volume"] = df["volume"].fillna(0)
+        df["open"] = df["close"]
+        df["high"] = df["close"]
+        df["low"] = df["close"]
+        df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+        return df
+    except Exception:
+        return None
+
+
+def _fetch_coingecko_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFrame | None:
+    """CoinGecko fallback: resolve symbol and fetch market chart data."""
+    base = symbol.split("/")[0].strip()
+    coin_id = _coingecko_coin_id(base)
+    if not coin_id:
+        return None
+    days = _TF_TO_CG_DAYS.get(timeframe, 30)
+    df = _coingecko_market_chart(coin_id, days)
+    if df is not None and len(df) > limit:
+        df = df.tail(limit).reset_index(drop=True)
+    return df
+
+
 def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 120) -> pd.DataFrame | None:
-    """Safe OHLCV fetch. Returns None on failure; shows details in Debug mode."""
+    """Safe OHLCV fetch. Tries primary exchange first, falls back to CoinGecko."""
     try:
         return fetch_ohlcv_cached(symbol, timeframe, limit)
     except Exception as e:
-        _debug(f"fetch_ohlcv failed: {symbol} {timeframe} (limit={limit}) → {e}")
-        return None
+        _debug(f"fetch_ohlcv primary failed: {symbol} {timeframe} (limit={limit}) → {e}")
+    # Fallback: CoinGecko
+    try:
+        cg_df = _fetch_coingecko_ohlcv(symbol, timeframe, limit)
+        if cg_df is not None and not cg_df.empty:
+            _debug(f"fetch_ohlcv CoinGecko fallback OK: {symbol} {timeframe} → {len(cg_df)} rows")
+            return cg_df
+    except Exception as e:
+        _debug(f"fetch_ohlcv CoinGecko fallback failed: {symbol} {timeframe} → {e}")
+    return None
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -3871,8 +3947,8 @@ def render_correlation_tab():
             if failed_coins:
                 st.warning(
                     f"Could not fetch data for: **{', '.join(failed_coins)}**. "
-                    f"These coins may not be listed on **{EXCHANGE.id.title()}**. "
-                    f"Only coins available on {EXCHANGE.id.title()} can be analysed."
+                    f"These coins were not found on {EXCHANGE.id.title()} or CoinGecko. "
+                    f"Please check the symbol is correct."
                 )
             if len(returns_dict) < 2:
                 st.error("Not enough data to compute correlations.")
@@ -3947,14 +4023,14 @@ def render_sessions_tab():
             df = fetch_ohlcv(coin_s, "1h", limit=500)
             if df is None:
                 st.error(
-                    f"**{coin_s}** is not available on **{EXCHANGE.id.title()}**. "
-                    f"This exchange only lists major coins. Try BTC/USDT, ETH/USDT, SOL/USDT, etc."
+                    f"**{coin_s}** could not be found on **{EXCHANGE.id.title()}** or CoinGecko. "
+                    f"Please check the symbol and try again."
                 )
                 return
             if len(df) < 48:
                 st.error(
                     f"Only {len(df)} hourly candles available for **{coin_s}** (need at least 48). "
-                    f"This coin may have limited history on {EXCHANGE.id.title()}."
+                    f"This coin may have limited history."
                 )
                 return
 
