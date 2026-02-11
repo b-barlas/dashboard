@@ -1957,17 +1957,45 @@ def render_spot_tab():
 
         current_price = df['close'].iloc[-1]
 
-        # Display summary
+        # Display summary grid
         signal_clean = signal_plain(signal)
+        try:
+            _ai_prob_s, ai_dir_s = ml_predict_direction(df)
+        except Exception:
+            ai_dir_s = "NEUTRAL"
 
+        sig_dir_s = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "WAIT")
+        if sig_dir_s == ai_dir_s and sig_dir_s != "WAIT":
+            conv_lbl_s = "HIGH" if confidence_score >= 75 else ("MEDIUM" if confidence_score >= 60 else "LOW")
+            conv_c_s = POSITIVE if confidence_score >= 75 else (WARNING if confidence_score >= 60 else TEXT_MUTED)
+        elif sig_dir_s != "WAIT" and ai_dir_s != "NEUTRAL" and sig_dir_s != ai_dir_s:
+            conv_lbl_s, conv_c_s = "CONFLICT", NEGATIVE
+        else:
+            conv_lbl_s, conv_c_s = "LOW", TEXT_MUTED
+
+        sig_c_s = POSITIVE if "LONG" in signal_clean else (NEGATIVE if "SHORT" in signal_clean else WARNING)
+        ai_c_s = POSITIVE if ai_dir_s == "LONG" else (NEGATIVE if ai_dir_s == "SHORT" else WARNING)
+        conf_c_s = POSITIVE if confidence_score >= 70 else (WARNING if confidence_score >= 50 else NEGATIVE)
         st.markdown(
-            f"**Signal:** {signal_clean} | "
-            f"**Leverage:** x{lev} | "
-            f"**Confidence:** {confidence_score_badge(confidence_score)}",
-            unsafe_allow_html=True
+            f"<div style='display:grid; grid-template-columns:repeat(4, 1fr); "
+            f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
+            f"<div style='text-align:center; padding:6px;'>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Signal</div>"
+            f"<div style='color:{sig_c_s}; font-size:0.85rem; font-weight:600;'>{signal_clean}</div></div>"
+            f"<div style='text-align:center; padding:6px;'>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Confidence</div>"
+            f"<div style='color:{conf_c_s}; font-size:0.85rem; font-weight:600;'>{confidence_score:.0f}%</div></div>"
+            f"<div style='text-align:center; padding:6px;'>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Prediction</div>"
+            f"<div style='color:{ai_c_s}; font-size:0.85rem; font-weight:600;'>{ai_dir_s}</div></div>"
+            f"<div style='text-align:center; padding:6px;'>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Conviction</div>"
+            f"<div style='color:{conv_c_s}; font-size:0.85rem; font-weight:600;'>{conv_lbl_s}</div></div>"
+            f"</div>",
+            unsafe_allow_html=True,
         )
 
-        st.markdown(f"<p style='color:{TEXT_MUTED};'>{comment}</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='color:{TEXT_MUTED}; font-size:0.88rem;'>{comment}</p>", unsafe_allow_html=True)
 
         # Indicator grid (professional card layout)
         def _ind_color_spot(val: str) -> str:
@@ -2246,30 +2274,52 @@ def render_position_tab():
 
                 signal_clean = signal_plain(signal)
 
-                st.markdown(
-                    f"**Signal:** {signal_clean} | "
-                    f"**Leverage:** x{lev} | "
-                    f"**Confidence:** {confidence_score_badge(confidence_score)}",
-                    unsafe_allow_html=True
-                )
-
-                st.markdown(f"<p style='color:{TEXT_MUTED};'>{comment}</p>", unsafe_allow_html=True)
-
                 # -- AI Prediction for this coin/timeframe --
                 try:
-                    ai_prob, ai_dir = ml_predict_direction(df)
-                    ai_color = POSITIVE if ai_dir == "LONG" else (NEGATIVE if ai_dir == "SHORT" else WARNING)
-                    st.markdown(
-                        f"<div style='background:{CARD_BG}; padding:8px 12px; border-radius:6px; "
-                        f"border-left:3px solid {ai_color}; margin-bottom:8px;'>"
-                        f"<span style='color:{TEXT_MUTED}; font-size:0.8rem;'>AI Prediction</span> "
-                        f"<b style='color:{ai_color}; font-size:1rem;'>{ai_dir}</b> "
-                        f"<span style='color:{TEXT_MUTED}; font-size:0.8rem;'>({ai_prob*100:.0f}%)</span>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+                    _ai_prob, ai_dir = ml_predict_direction(df)
                 except Exception:
-                    pass
+                    ai_dir = "NEUTRAL"
+
+                # Conviction: alignment of Signal + AI + Confidence
+                sig_direction = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "WAIT")
+                if sig_direction == ai_dir and sig_direction != "WAIT":
+                    if confidence_score >= 75:
+                        conviction_lbl, conviction_c = "HIGH", POSITIVE
+                    elif confidence_score >= 60:
+                        conviction_lbl, conviction_c = "MEDIUM", WARNING
+                    else:
+                        conviction_lbl, conviction_c = "LOW", TEXT_MUTED
+                elif sig_direction != "WAIT" and ai_dir != "NEUTRAL" and sig_direction != ai_dir:
+                    conviction_lbl, conviction_c = "CONFLICT", NEGATIVE
+                else:
+                    conviction_lbl, conviction_c = "LOW", TEXT_MUTED
+
+                # Signal / Confidence / AI / Conviction summary grid
+                sig_color = POSITIVE if "LONG" in signal_clean else (NEGATIVE if "SHORT" in signal_clean else WARNING)
+                ai_color = POSITIVE if ai_dir == "LONG" else (NEGATIVE if ai_dir == "SHORT" else WARNING)
+                conf_color = POSITIVE if confidence_score >= 70 else (WARNING if confidence_score >= 50 else NEGATIVE)
+                summary_row = (
+                    f"<div style='text-align:center; padding:6px;'>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Signal</div>"
+                    f"<div style='color:{sig_color}; font-size:0.85rem; font-weight:600;'>{signal_clean}</div></div>"
+                    f"<div style='text-align:center; padding:6px;'>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Confidence</div>"
+                    f"<div style='color:{conf_color}; font-size:0.85rem; font-weight:600;'>{confidence_score:.0f}%</div></div>"
+                    f"<div style='text-align:center; padding:6px;'>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Prediction</div>"
+                    f"<div style='color:{ai_color}; font-size:0.85rem; font-weight:600;'>{ai_dir}</div></div>"
+                    f"<div style='text-align:center; padding:6px;'>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Conviction</div>"
+                    f"<div style='color:{conviction_c}; font-size:0.85rem; font-weight:600;'>{conviction_lbl}</div></div>"
+                )
+                st.markdown(
+                    f"<div style='display:grid; grid-template-columns:repeat(4, 1fr); "
+                    f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
+                    f"{summary_row}</div>",
+                    unsafe_allow_html=True,
+                )
+
+                st.markdown(f"<p style='color:{TEXT_MUTED}; font-size:0.88rem;'>{comment}</p>", unsafe_allow_html=True)
 
                 # -- Indicator grid (professional card layout) --
                 def _ind_color(val: str) -> str:
