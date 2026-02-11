@@ -3852,15 +3852,28 @@ def render_correlation_tab():
         ).upper().strip()
     if st.button("Generate Correlation Matrix", type="primary"):
         symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "ADA/USDT", "XRP/USDT"]
-        if custom_coin and "/" in custom_coin and custom_coin not in symbols:
-            symbols.append(custom_coin)
+        # Handle custom coin: auto-append /USDT if user types just a ticker name
+        if custom_coin:
+            if "/" not in custom_coin:
+                custom_coin = custom_coin + "/USDT"
+            if custom_coin not in symbols:
+                symbols.append(custom_coin)
         labels = [s.split("/")[0] for s in symbols]
         with st.spinner("Fetching data for correlation analysis..."):
             returns_dict = {}
+            failed_coins = []
             for sym, label in zip(symbols, labels):
                 df = fetch_ohlcv(sym, tf_corr, limit=200)
                 if df is not None and len(df) > 10:
                     returns_dict[label] = df["close"].pct_change().dropna().values
+                else:
+                    failed_coins.append(sym)
+            if failed_coins:
+                st.warning(
+                    f"Could not fetch data for: **{', '.join(failed_coins)}**. "
+                    f"These coins may not be listed on **{EXCHANGE.id.title()}**. "
+                    f"Only coins available on {EXCHANGE.id.title()} can be analysed."
+                )
             if len(returns_dict) < 2:
                 st.error("Not enough data to compute correlations.")
                 return
@@ -3932,8 +3945,17 @@ def render_sessions_tab():
     if st.button("Analyse Sessions", type="primary"):
         with st.spinner("Fetching hourly data for session analysis..."):
             df = fetch_ohlcv(coin_s, "1h", limit=500)
-            if df is None or len(df) < 48:
-                st.error("Not enough hourly data for session analysis.")
+            if df is None:
+                st.error(
+                    f"**{coin_s}** is not available on **{EXCHANGE.id.title()}**. "
+                    f"This exchange only lists major coins. Try BTC/USDT, ETH/USDT, SOL/USDT, etc."
+                )
+                return
+            if len(df) < 48:
+                st.error(
+                    f"Only {len(df)} hourly candles available for **{coin_s}** (need at least 48). "
+                    f"This coin may have limited history on {EXCHANGE.id.title()}."
+                )
                 return
 
             df["hour"] = df["timestamp"].dt.hour
