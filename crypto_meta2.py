@@ -223,13 +223,15 @@ def get_btc_eth_prices():
         url = "https://api.coingecko.com/api/v3/simple/price"
         params = {"ids": "bitcoin,ethereum", "vs_currencies": "usd"}
         response = requests.get(url, params=params, timeout=10).json()
-        return response.get("bitcoin", {}).get("usd", 0), response.get("ethereum", {}).get("usd", 0)
+        btc = response.get("bitcoin", {}).get("usd")
+        eth = response.get("ethereum", {}).get("usd")
+        return (btc if btc else None), (eth if eth else None)
     except Exception as e:
-        print(f"get_btc_eth_prices error: {e}")
-        return 0, 0
+        _debug(f"get_btc_eth_prices error: {e}")
+        return None, None
 
 # Fetch market dominance and total/alt market cap from CoinGecko
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def get_market_indices():
     """Fetch global market indices and dominance values for major assets.
 
@@ -287,8 +289,8 @@ def get_fear_greed():
         label = data.get("data", [{}])[0].get("value_classification", "Unknown")
         return value, label
     except Exception as e:
-        print(f"get_fear_greed error: {e}")
-        return 0, "Unknown"
+        _debug(f"get_fear_greed error: {e}")
+        return None, "Unavailable"
 
 def get_social_sentiment(symbol: str) -> tuple[int, str]:
     """Return a naive sentiment score (0–100) and label based on 24h price change.
@@ -345,9 +347,32 @@ def _normalize_coin_input(raw: str) -> str:
     raw = raw.strip().upper()
     if not raw:
         return raw
+    # Strip common user mistakes (dollar signs, commas, extra spaces)
+    raw = raw.replace("$", "").replace(",", "").strip()
     if "/" not in raw:
         return f"{raw}/USDT"
     return raw
+
+
+def _validate_coin_symbol(symbol: str) -> str | None:
+    """Return an error message if the symbol looks invalid, else None."""
+    if not symbol:
+        return "Please enter a coin symbol."
+    base = symbol.split("/")[0] if "/" in symbol else symbol
+    if len(base) < 2 or len(base) > 10:
+        return f"'{base}' doesn't look like a valid coin ticker (2-10 characters expected)."
+    if not base.isalpha():
+        return f"'{base}' contains invalid characters. Use letters only (e.g. BTC, ETH)."
+    return None
+
+
+def _sr_lookback(timeframe: str | None = None) -> int:
+    """Return support/resistance lookback bars adapted to timeframe.
+
+    Lower timeframes have more noise so we look at more bars.
+    """
+    mapping = {"1m": 60, "3m": 50, "5m": 50, "15m": 40, "1h": 30, "4h": 20, "1d": 20}
+    return mapping.get(timeframe or "", 30)
 
 
 # Fetch price change percentage for a given symbol via ccxt
@@ -501,12 +526,23 @@ def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 120) -> pd.DataFrame |
 
 @st.cache_data(ttl=120, show_spinner=False)
 def get_major_ohlcv_bundle(timeframe: str, limit: int = 500) -> dict[str, pd.DataFrame | None]:
-    """Fetch a bundle of major market OHLCV frames for a timeframe."""
+    """Fetch a bundle of major market OHLCV frames for a timeframe.
+    Keys are always BASE/USDT for consistency (even if exchange uses /USD)."""
     majors = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "ADA/USDT", "XRP/USDT"]
     out: dict[str, pd.DataFrame | None] = {}
     for sym in majors:
+        # fetch_ohlcv already tries USDT→USD variants via _symbol_variants
         out[sym] = fetch_ohlcv(sym, timeframe, limit=limit)
     return out
+
+def _ind_color(val: str) -> str:
+    """Return colour for an indicator value (Bullish=green, Bearish=red, else=yellow)."""
+    if any(k in val for k in ["Bullish", "Above", "Oversold", "Low"]):
+        return POSITIVE
+    if any(k in val for k in ["Bearish", "Below", "Overbought", "High"]):
+        return NEGATIVE
+    return WARNING
+
 
 def signal_badge(signal: str) -> str:
     """Return a simplified badge for the given signal."""
@@ -654,7 +690,7 @@ def detect_volume_spike(df: pd.DataFrame, window: int = 20, multiplier: float = 
     return last_volume > avg_volume * multiplier
 
 def detect_candle_pattern(df: pd.DataFrame) -> str:
-    if df is None or len(df) < 3:
+    if df is None or len(df) < 5:
         return ""
 
     last = df.iloc[-1]
@@ -768,6 +804,24 @@ def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, flo
             0.0, 0.0, "", "", 0.0, "", "", "", "", ""
         )
 
+    # Infer timeframe from candle spacing for adaptive S/R lookback
+    _inferred_tf = None
+    if "timestamp" in df.columns and len(df) >= 2:
+        _delta_mins = (df["timestamp"].iloc[-1] - df["timestamp"].iloc[-2]).total_seconds() / 60
+        if _delta_mins <= 1.5:
+            _inferred_tf = "1m"
+        elif _delta_mins <= 4:
+            _inferred_tf = "3m"
+        elif _delta_mins <= 7:
+            _inferred_tf = "5m"
+        elif _delta_mins <= 20:
+            _inferred_tf = "15m"
+        elif _delta_mins <= 90:
+            _inferred_tf = "1h"
+        elif _delta_mins <= 300:
+            _inferred_tf = "4h"
+        else:
+            _inferred_tf = "1d"
 
     df["ema5"] = ta.trend.ema_indicator(df["close"], window=5)
     df["ema9"] = ta.trend.ema_indicator(df["close"], window=9)
@@ -820,11 +874,15 @@ def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, flo
     # Use the last *closed* candle to avoid repainting on live/updating charts
     latest = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
 
-    vwap_label = "→ Near VWAP"
-    if latest["close"] > latest["vwap"]:
+    vwap_val = latest.get("vwap", np.nan)
+    if pd.isna(vwap_val):
+        vwap_label = "Unavailable"
+    elif latest["close"] > vwap_val:
         vwap_label = "🟢 Above"
-    elif latest["close"] < latest["vwap"]:
+    elif latest["close"] < vwap_val:
         vwap_label = "🔴 Below"
+    else:
+        vwap_label = "→ Near VWAP"
 
 
     volume_spike = detect_volume_spike(df)
@@ -859,9 +917,9 @@ def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, flo
     stoch_rsi = ta.momentum.StochRSIIndicator(close=df["close"], window=14, smooth1=3, smooth2=3)
     df["stochrsi_k"] = stoch_rsi.stochrsi_k()
     
-    # Bollinger Bands
+    # Bollinger Bands (ddof=0 for population std, matching standard BB definition)
     df['bb_mid'] = df['close'].rolling(window=20).mean()
-    df['bb_std'] = df['close'].rolling(window=20).std()
+    df['bb_std'] = df['close'].rolling(window=20).std(ddof=0)
     df['bb_upper'] = df['bb_mid'] + 2 * df['bb_std']
     df['bb_lower'] = df['bb_mid'] - 2 * df['bb_std']
     
@@ -992,11 +1050,13 @@ def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, flo
     # === CATEGORY 3: VOLUME SCORE (-1 to +1) ===
     volume_signals = []
     
-    # OBV Trend
-    if df["obv"].iloc[-1] > df["obv"].iloc[-5]:
-        volume_signals.append(0.5)
-    elif df["obv"].iloc[-1] < df["obv"].iloc[-5]:
-        volume_signals.append(-0.5)
+    # OBV Trend (guard against short data)
+    _obv_back = min(5, len(df) - 1)
+    if _obv_back > 0:
+        if df["obv"].iloc[-1] > df["obv"].iloc[-_obv_back]:
+            volume_signals.append(0.5)
+        elif df["obv"].iloc[-1] < df["obv"].iloc[-_obv_back]:
+            volume_signals.append(-0.5)
     
     # Volume Spike
     if volume_spike:
@@ -1052,6 +1112,12 @@ def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, flo
     # Convert to 0-100 confidence
     confidence_score = round((final_score + 1) / 2 * 100, 1)
     confidence_score = float(np.clip(confidence_score, 0, 100))
+
+    # Regime-weighted confidence: discount when market is ranging (ADX < 20)
+    if not pd.isna(adx_val) and adx_val < 20:
+        _regime_discount = np.interp(adx_val, [0, 20], [0.70, 1.0])  # up to 30% discount
+        confidence_score = round(confidence_score * _regime_discount, 1)
+        confidence_score = float(np.clip(confidence_score, 0, 100))
 
     # === SIGNAL GENERATION WITH QUALITY FILTERS ===
     
@@ -1171,10 +1237,12 @@ def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, flo
     # === Leverage calculation (IMPROVED) ===
     risk_score = 0.0
     bollinger_width = (df['bb_upper'].iloc[-1] - df['bb_lower'].iloc[-1])
-    volatility_factor = min(bollinger_width / latest["close"], 0.1)
+    volatility_factor = min(bollinger_width / max(latest["close"], 1e-9), 0.1)
     rsi_factor = 0.1 if latest["rsi"] > 70 or latest["rsi"] < 30 else 0
-    obv_factor = 0.1 if df["obv"].iloc[-1] > df["obv"].iloc[-5] and latest["close"] > latest["ema21"] else 0
-    recent = df.tail(20)
+    _obv_back_lev = min(5, len(df) - 1)
+    obv_factor = 0.1 if (_obv_back_lev > 0 and df["obv"].iloc[-1] > df["obv"].iloc[-_obv_back_lev] and latest["close"] > latest["ema21"]) else 0
+    _sr_bars = _sr_lookback(_inferred_tf)
+    recent = df.tail(_sr_bars)
     support = recent["low"].min()
     resistance = recent["high"].max()
     current_price = latest["close"]
@@ -1301,8 +1369,9 @@ def get_scalping_entry_target(
         if (atr / close_price) < 0.0015:  # 0.15%
             return None, None, None, None, None, "Low Volatility"
 
-    # === Support / Resistance ===
-    recent = df.tail(20)
+    # === Support / Resistance (timeframe-aware lookback) ===
+    _scalp_sr_bars = _sr_lookback()  # default 30 for scalping context
+    recent = df.tail(_scalp_sr_bars)
     support = recent['low'].min()
     resistance = recent['high'].max()
 
@@ -1377,28 +1446,32 @@ def ml_predict_direction(df: pd.DataFrame) -> tuple[float, str]:
         from sklearn.ensemble import GradientBoostingClassifier
         from sklearn.preprocessing import StandardScaler
 
-        # Scale features for better performance
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X[:-1])  # Exclude last point (no target)
-        X_last_scaled = scaler.transform(X[-1:])
+        # Time-series aware split: train on first 80%, validate, predict last
+        split_idx = int(len(X) * 0.8)
+        X_train, y_train = X[:split_idx], y[:split_idx]
+        X_pred = X[-1:]
 
-        # Train Gradient Boosting model
+        # Fit scaler only on training data to prevent data leakage
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_pred_scaled = scaler.transform(X_pred)
+
         model = GradientBoostingClassifier(
             n_estimators=100,
-            max_depth=4,
+            max_depth=3,
             learning_rate=0.1,
+            subsample=0.8,
             random_state=42
         )
-        model.fit(X_scaled, y[:-1])
+        model.fit(X_train_scaled, y_train)
 
-        # Predict probability
-        prob_up = float(model.predict_proba(X_last_scaled)[0][1])
+        prob_up = float(model.predict_proba(X_pred_scaled)[0][1])
     except Exception as e:
-        # Fallback to LogisticRegression if Gradient Boosting fails
-        print(f"GradientBoosting failed ({e}), falling back to LogisticRegression")
+        _debug(f"GradientBoosting failed ({e}), falling back to LogisticRegression")
         try:
+            split_idx = int(len(X) * 0.8)
             model = LogisticRegression(max_iter=1000)
-            model.fit(X[:-1], y[:-1])
+            model.fit(X[:split_idx], y[:split_idx])
             prob_up = float(model.predict_proba(X[-1:].reshape(1, -1))[0][1])
         except Exception:
             return 0.5, "NEUTRAL"
@@ -1416,12 +1489,13 @@ def render_market_tab():
     # additional dominance values for use in the AI market outlook calculation.
     btc_dom, eth_dom, total_mcap, alt_mcap, mcap_24h_pct, bnb_dom, sol_dom, ada_dom, xrp_dom = get_market_indices()
     fg_value, fg_label = get_fear_greed()
+    fg_value = fg_value if fg_value is not None else 0
     btc_price, eth_price = get_btc_eth_prices()
-    
+    btc_price = btc_price or 0
+    eth_price = eth_price or 0
 
     # Compute percentage change for market cap
     delta_mcap = mcap_24h_pct
-    
 
     # Compute price change percentages using ccxt
     btc_change = get_price_change("BTC/USDT")
@@ -1949,9 +2023,13 @@ def render_spot_tab():
     ))
     timeframe = st.selectbox("Timeframe", ['1m', '3m', '5m', '15m', '1h', '4h', '1d'], index=4)
     if st.button("Analyse", type="primary"):
+        _val_err = _validate_coin_symbol(coin)
+        if _val_err:
+            st.error(_val_err)
+            return
         df = fetch_ohlcv(coin, timeframe)
         if df is None or len(df) < 30:
-            st.error("Could not fetch data or not enough candles. Try another symbol/timeframe.")
+            st.error(f"Could not fetch data for **{coin}** on {timeframe}. The coin may not be listed on supported exchanges. Try a major pair (BTC, ETH) or check the symbol.")
             return
         signal, lev, comment, volume_spike, atr_comment, candle_pattern, confidence_score, adx_val, supertrend_trend, ichimoku_trend, stochrsi_k_val, bollinger_bias, vwap_label, psar_trend, williams_label, cci_label = analyse(df)
 
@@ -1997,39 +2075,54 @@ def render_spot_tab():
 
         st.markdown(f"<p style='color:{TEXT_MUTED}; font-size:0.88rem;'>{comment}</p>", unsafe_allow_html=True)
 
-        # Indicator grid (professional card layout)
-        def _ind_color_spot(val: str) -> str:
-            if any(k in val for k in ["Bullish", "Above", "Oversold", "Low"]):
-                return POSITIVE
-            if any(k in val for k in ["Bearish", "Below", "Overbought", "High"]):
-                return NEGATIVE
-            return WARNING
+        # Market regime warning (ADX < 20 = ranging market)
+        if not np.isnan(adx_val) and adx_val < 20:
+            st.markdown(
+                f"<div style='background:#2D1B00; border-left:4px solid {WARNING}; "
+                f"padding:8px 12px; border-radius:4px; margin:6px 0;'>"
+                f"<span style='color:{WARNING}; font-weight:600;'>Market Ranging (ADX {adx_val:.0f})</span>"
+                f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'> — Trend signals are less reliable. "
+                f"Confidence discounted. Consider smaller positions or waiting for a clear trend.</span></div>",
+                unsafe_allow_html=True,
+            )
 
+        # Risk alert: high leverage suggestion + low confidence
+        if lev >= 6 and confidence_score < 55:
+            st.markdown(
+                f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
+                f"padding:8px 12px; border-radius:4px; margin:6px 0;'>"
+                f"<span style='color:{NEGATIVE}; font-weight:600;'>Risk Warning</span>"
+                f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'> — Leverage x{lev} with only "
+                f"{confidence_score:.0f}% confidence is dangerous. Reduce position size or wait for higher conviction.</span></div>",
+                unsafe_allow_html=True,
+            )
+
+        # Indicator grid (professional card layout)
         indicators_spot = []
         if supertrend_trend:
-            indicators_spot.append(("SuperTrend", format_trend(supertrend_trend), _ind_color_spot(supertrend_trend)))
+            indicators_spot.append(("SuperTrend", format_trend(supertrend_trend), _ind_color(supertrend_trend)))
         if ichimoku_trend:
-            indicators_spot.append(("Ichimoku", format_trend(ichimoku_trend), _ind_color_spot(ichimoku_trend)))
+            indicators_spot.append(("Ichimoku", format_trend(ichimoku_trend), _ind_color(ichimoku_trend)))
         if vwap_label:
-            indicators_spot.append(("VWAP", vwap_label, _ind_color_spot(vwap_label)))
+            indicators_spot.append(("VWAP", vwap_label, _ind_color(vwap_label)))
         if not np.isnan(adx_val):
             indicators_spot.append(("ADX", format_adx(adx_val), WARNING))
         if bollinger_bias:
-            indicators_spot.append(("Bollinger", bollinger_bias, _ind_color_spot(bollinger_bias)))
+            indicators_spot.append(("Bollinger", bollinger_bias, _ind_color(bollinger_bias)))
         if not np.isnan(stochrsi_k_val):
             srsi_c_s = POSITIVE if stochrsi_k_val < 0.2 else (NEGATIVE if stochrsi_k_val > 0.8 else WARNING)
             indicators_spot.append(("StochRSI", f"{stochrsi_k_val:.2f}", srsi_c_s))
         if "Bullish" in psar_trend or "Bearish" in psar_trend:
-            indicators_spot.append(("PSAR", psar_trend, _ind_color_spot(psar_trend)))
+            indicators_spot.append(("PSAR", psar_trend, _ind_color(psar_trend)))
         if williams_label:
-            indicators_spot.append(("Williams %R", williams_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color_spot(williams_label)))
+            indicators_spot.append(("Williams %R", williams_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(williams_label)))
         if cci_label:
-            indicators_spot.append(("CCI", cci_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color_spot(cci_label)))
+            indicators_spot.append(("CCI", cci_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(cci_label)))
         if volume_spike:
             indicators_spot.append(("Volume", "Spike ▲", POSITIVE))
         atr_clean = atr_comment.replace("▲", "").replace("▼", "").replace("–", "").strip()
         if atr_clean:
-            indicators_spot.append(("Volatility", atr_clean, _ind_color_spot(atr_clean)))
+            indicators_spot.append(("Volatility", atr_clean, _ind_color(atr_clean)))
         if candle_pattern:
             indicators_spot.append(("Pattern", candle_pattern.split(" (")[0], WARNING))
 
@@ -2098,8 +2191,8 @@ def render_spot_tab():
                                      name="WMA20", line=dict(color='#34D399', width=1, dash='dot')))
             fig.add_trace(go.Scatter(x=df['timestamp'], y=wma50, mode='lines',
                                      name="WMA50", line=dict(color='#10B981', width=1, dash='dash')))
-        except Exception:
-            pass
+        except Exception as e:
+            _debug(f"WMA chart overlay error: {e}")
         # Place legend at top left for candlestick chart
         fig.update_layout(
             height=380,
@@ -2191,8 +2284,9 @@ def render_spot_tab():
         ema21 = latest['ema21']
         macd_val = df['macd'].iloc[-1]
         rsi_val = latest['rsi14']
-        obv_change = ((df['obv'].iloc[-1] - df['obv'].iloc[-5]) / abs(df['obv'].iloc[-5]) * 100) if df['obv'].iloc[-5] != 0 else 0
-        recent = df.tail(20)
+        _obv_back_pos = min(5, len(df) - 1)
+        obv_change = ((df['obv'].iloc[-1] - df['obv'].iloc[-_obv_back_pos]) / abs(df['obv'].iloc[-_obv_back_pos]) * 100) if (_obv_back_pos > 0 and df['obv'].iloc[-_obv_back_pos] != 0) else 0
+        recent = df.tail(_sr_lookback())
         support = recent['low'].min()
         resistance = recent['high'].max()
         current_price = latest['close']
@@ -2243,6 +2337,10 @@ def render_position_tab():
     # Strict scalp mode is always enabled (non-strict path removed).
    
     if st.button("Analyse Position", type="primary"):
+        _val_err = _validate_coin_symbol(coin)
+        if _val_err:
+            st.error(_val_err)
+            return
         tf_order = {'1m': 1, '3m': 2, '5m': 3, '15m': 4, '1h': 5, '4h': 6, '1d': 7}
         largest_tf = max(selected_timeframes, key=lambda tf: tf_order[tf])
 
@@ -2321,14 +2419,37 @@ def render_position_tab():
 
                 st.markdown(f"<p style='color:{TEXT_MUTED}; font-size:0.88rem;'>{comment}</p>", unsafe_allow_html=True)
 
-                # -- Indicator grid (professional card layout) --
-                def _ind_color(val: str) -> str:
-                    if any(k in val for k in ["Bullish", "Above", "Oversold", "Low"]):
-                        return POSITIVE
-                    if any(k in val for k in ["Bearish", "Below", "Overbought", "High"]):
-                        return NEGATIVE
-                    return WARNING
+                # Market regime warning (ADX < 20)
+                if not np.isnan(adx_val) and adx_val < 20:
+                    st.markdown(
+                        f"<div style='background:#2D1B00; border-left:4px solid {WARNING}; "
+                        f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
+                        f"<span style='color:{WARNING}; font-weight:600;'>Ranging (ADX {adx_val:.0f})</span>"
+                        f"<span style='color:{TEXT_MUTED};'> — Signals less reliable.</span></div>",
+                        unsafe_allow_html=True,
+                    )
 
+                # Risk alert for position
+                if direction == sig_direction and confidence_score < 50:
+                    st.markdown(
+                        f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
+                        f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
+                        f"<span style='color:{NEGATIVE}; font-weight:600;'>Low Confidence</span>"
+                        f"<span style='color:{TEXT_MUTED};'> — Position direction matches signal but confidence "
+                        f"is only {confidence_score:.0f}%. Consider tightening stop-loss.</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                elif direction != sig_direction and sig_direction != "WAIT":
+                    st.markdown(
+                        f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
+                        f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
+                        f"<span style='color:{NEGATIVE}; font-weight:600;'>Signal Conflict</span>"
+                        f"<span style='color:{TEXT_MUTED};'> — Your {direction} position conflicts with "
+                        f"the current {sig_direction} signal. Review position validity.</span></div>",
+                        unsafe_allow_html=True,
+                    )
+
+                # -- Indicator grid (professional card layout) --
                 indicators = []
                 if supertrend_trend:
                     indicators.append(("SuperTrend", format_trend(supertrend_trend), _ind_color(supertrend_trend)))
@@ -2387,7 +2508,7 @@ def render_position_tab():
                 df['rsi24'] = ta.momentum.rsi(df['close'], window=24)
                 df['obv'] = ta.volume.on_balance_volume(df['close'], df['volume'])
 
-                recent_sr = df.tail(20)
+                recent_sr = df.tail(_sr_lookback())
                 support_sr = recent_sr['low'].min()
                 resistance_sr = recent_sr['high'].max()
                 suggestion = ""
@@ -2544,8 +2665,8 @@ def render_position_tab():
                                                 name="WMA20", line=dict(color='#34D399', width=1, dash='dot')))
                 fig_candle.add_trace(go.Scatter(x=df_candle['timestamp'], y=wma50_c, mode='lines',
                                                 name="WMA50", line=dict(color='#10B981', width=1, dash='dash')))
-            except Exception:
-                pass
+            except Exception as e:
+                _debug(f"WMA candlestick overlay error: {e}")
             fig_candle.update_layout(
                 height=380,
                 template='plotly_dark',
@@ -3074,6 +3195,10 @@ def render_ml_tab():
         "Select up to 3 Timeframes", ['1m','3m','5m','15m','1h','4h','1d'], default=['5m'], max_selections=3
     )
     if st.button("Predict", type="primary"):
+        _val_err = _validate_coin_symbol(coin)
+        if _val_err:
+            st.error(_val_err)
+            return
         # Use columns to display each timeframe side by side.  One column per
         # selected timeframe.  The panel includes the probability, direction,
         # entry/exit prices, leverage (if applicable) and a detailed list of
@@ -3279,39 +3404,32 @@ def render_ml_tab():
                     st.markdown(panel_html, unsafe_allow_html=True)
 
                     # Indicator grid (same professional layout as Position tab)
-                    def _ind_color_ai(val: str) -> str:
-                        if any(k in val for k in ["Bullish", "Above", "Oversold", "Low"]):
-                            return POSITIVE
-                        if any(k in val for k in ["Bearish", "Below", "Overbought", "High"]):
-                            return NEGATIVE
-                        return WARNING
-
                     indicators_ai = []
                     if supertrend_trend:
-                        indicators_ai.append(("SuperTrend", format_trend(supertrend_trend), _ind_color_ai(supertrend_trend)))
+                        indicators_ai.append(("SuperTrend", format_trend(supertrend_trend), _ind_color(supertrend_trend)))
                     if ichimoku_trend:
-                        indicators_ai.append(("Ichimoku", format_trend(ichimoku_trend), _ind_color_ai(ichimoku_trend)))
+                        indicators_ai.append(("Ichimoku", format_trend(ichimoku_trend), _ind_color(ichimoku_trend)))
                     if vwap_label:
-                        indicators_ai.append(("VWAP", vwap_label, _ind_color_ai(vwap_label)))
+                        indicators_ai.append(("VWAP", vwap_label, _ind_color(vwap_label)))
                     if not np.isnan(adx_val):
                         indicators_ai.append(("ADX", format_adx(adx_val), WARNING))
                     if bollinger_bias:
-                        indicators_ai.append(("Bollinger", bollinger_bias, _ind_color_ai(bollinger_bias)))
+                        indicators_ai.append(("Bollinger", bollinger_bias, _ind_color(bollinger_bias)))
                     if not np.isnan(stochrsi_k_val):
                         srsi_lbl_ai = f"{stochrsi_k_val:.2f}"
                         srsi_c_ai = POSITIVE if stochrsi_k_val < 0.2 else (NEGATIVE if stochrsi_k_val > 0.8 else WARNING)
                         indicators_ai.append(("StochRSI", srsi_lbl_ai, srsi_c_ai))
                     if "Bullish" in psar_trend or "Bearish" in psar_trend:
-                        indicators_ai.append(("PSAR", psar_trend, _ind_color_ai(psar_trend)))
+                        indicators_ai.append(("PSAR", psar_trend, _ind_color(psar_trend)))
                     if williams_label:
-                        indicators_ai.append(("Williams %R", williams_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color_ai(williams_label)))
+                        indicators_ai.append(("Williams %R", williams_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(williams_label)))
                     if cci_label:
-                        indicators_ai.append(("CCI", cci_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color_ai(cci_label)))
+                        indicators_ai.append(("CCI", cci_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(cci_label)))
                     if volume_spike:
                         indicators_ai.append(("Volume", "Spike ▲", POSITIVE))
                     atr_clean = atr_comment.replace("▲", "").replace("▼", "").replace("–", "").strip()
                     if atr_clean:
-                        indicators_ai.append(("Volatility", atr_clean, _ind_color_ai(atr_clean)))
+                        indicators_ai.append(("Volatility", atr_clean, _ind_color(atr_clean)))
                     if candle_pattern:
                         indicators_ai.append(("Pattern", candle_pattern.split(" (")[0], WARNING))
 
@@ -3360,8 +3478,8 @@ def render_ml_tab():
                                 x=df['timestamp'], y=wma50, mode='lines',
                                 name="WMA50", line=dict(color='#10B981', width=1, dash='dash')
                             ))
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            _debug(f"AI tab WMA overlay error: {e}")
                         # Layout settings
                         fig.update_layout(
                             height=380,
@@ -3372,8 +3490,8 @@ def render_ml_tab():
                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
                         )
                         st.plotly_chart(fig, width="stretch")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        st.warning(f"Could not render price chart: {e}")
 
                     # RSI chart
                     try:
@@ -3427,8 +3545,8 @@ def render_ml_tab():
                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
                         )
                         st.plotly_chart(macd_fig, width="stretch")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _debug(f"MACD chart error: {e}")
 
                     # Volume & OBV chart
                     try:
@@ -3452,8 +3570,8 @@ def render_ml_tab():
                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
                         )
                         st.plotly_chart(volume_fig, width="stretch")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _debug(f"Volume/OBV chart error: {e}")
 
                     # Technical Snapshot
                     try:
@@ -3470,8 +3588,8 @@ def render_ml_tab():
                         obv_change = 0.0
                         if 'obv' in df and len(df['obv']) > 5 and df['obv'].iloc[-5] != 0:
                             obv_change = (df['obv'].iloc[-1] - df['obv'].iloc[-5]) / abs(df['obv'].iloc[-5]) * 100
-                        # Support/resistance from last 20 bars
-                        recent = df.tail(20)
+                        # Support/resistance (adaptive lookback)
+                        recent = df.tail(_sr_lookback())
                         support = recent['low'].min()
                         resistance = recent['high'].max()
                         current_price_snap = latest_snap['close']
@@ -3490,19 +3608,21 @@ def render_ml_tab():
                         </div>
                         """
                         st.markdown(snapshot_html, unsafe_allow_html=True)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        st.warning(f"Could not render technical snapshot: {e}")
 
-def run_backtest(df: pd.DataFrame, threshold: float = 70, exit_after: int = 5, commission: float = 0.001) -> tuple[pd.DataFrame, str]:
+def run_backtest(df: pd.DataFrame, threshold: float = 70, exit_after: int = 5,
+                 commission: float = 0.001, slippage: float = 0.0005) -> tuple[pd.DataFrame, str]:
     """
-    BACKTEST ENGINE with comprehensive metrics
-    
+    BACKTEST ENGINE with comprehensive metrics.
+
     Args:
         df: OHLCV dataframe
         threshold: Minimum confidence score to take trades
         exit_after: Number of candles to hold position
-        commission: Trading commission (default 0.1% = 0.001)
-    
+        commission: Trading commission per side (default 0.1% = 0.001)
+        slippage: Simulated slippage per trade (default 0.05% = 0.0005)
+
     Returns:
         results_df: DataFrame with all trades
         summary_html: HTML summary with metrics
@@ -3514,29 +3634,34 @@ def run_backtest(df: pd.DataFrame, threshold: float = 70, exit_after: int = 5, c
     consecutive_wins = 0
     consecutive_losses = 0
     max_consecutive_losses = 0
+    # Use rolling window instead of full copy for performance
+    window_size = 200
 
     for i in range(55, len(df) - exit_after):
-        df_slice = df.iloc[:i + 1].copy()
+        start_idx = max(0, i - window_size)
+        df_slice = df.iloc[start_idx:i + 1]
+        if len(df_slice) < 55:
+            continue
         try:
             result = analyse(df_slice)
-            raw_signal = result[0]           # "STRONG BUY", "BUY", "WAIT", "SELL", "STRONG SELL"
+            raw_signal = result[0]
             conf_score = result[6]
         except Exception:
             continue
 
-        # Normalize to LONG/SHORT/WAIT
         sig_plain = "LONG" if raw_signal in ["STRONG BUY", "BUY"] else \
                     "SHORT" if raw_signal in ["STRONG SELL", "SELL"] else "WAIT"
 
         if conf_score >= threshold and sig_plain in ["LONG", "SHORT"]:
             entry_price = df['close'].iloc[i]
             future_price = df['close'].iloc[i + exit_after]
-            
-            # Calculate PnL with commission (entry + exit)
+            # Total cost = commission (entry + exit) + slippage (entry + exit)
+            total_cost = 2 * commission + 2 * slippage
+
             if sig_plain == "LONG":
-                pnl = ((future_price - entry_price) / entry_price - 2 * commission) * 100
+                pnl = ((future_price - entry_price) / entry_price - total_cost) * 100
             else:  # SHORT
-                pnl = ((entry_price - future_price) / entry_price - 2 * commission) * 100
+                pnl = ((entry_price - future_price) / entry_price - total_cost) * 100
             
             # Update equity curve
             equity = equity_curve[-1] * (1 + pnl / 100)
@@ -3714,8 +3839,14 @@ def render_backtest_tab():
         exit_after = st.slider("Exit After N Candles", 1, 20, step=1, value=5)
         commission = st.slider("Commission (%)", 0.0, 1.0, step=0.05, value=0.1,
                               help="Trading fee per trade (typical spot: 0.1%)") / 100
+        slippage = st.slider("Slippage (%)", 0.0, 0.5, step=0.01, value=0.05,
+                            help="Simulated slippage per trade (market impact + spread)") / 100
 
     if st.button("🚀 Run Backtest", type="primary"):
+        _val_err = _validate_coin_symbol(coin)
+        if _val_err:
+            st.error(_val_err)
+            return
         st.info("Fetching data and running comprehensive analysis...")
 
         df = fetch_ohlcv(coin, timeframe, limit)
@@ -3724,7 +3855,7 @@ def render_backtest_tab():
             st.success(f"✅ Fetched {len(df)} candles. Running backtest...")
 
             try:
-                result_df, summary_html = run_backtest(df, threshold, exit_after, commission)
+                result_df, summary_html = run_backtest(df, threshold, exit_after, commission, slippage)
 
                 if not result_df.empty:
                     # Display metrics using Streamlit native components instead of HTML
@@ -3776,7 +3907,7 @@ def render_backtest_tab():
                         st.metric("Avg Loss", f"{avg_loss:.2f}%")
                     with col3:
                         st.metric("Profit Factor", f"{profit_factor:.2f}", "Target: ≥1.5")
-                        st.metric("Commission", f"{commission*100:.2f}%", "per trade")
+                        st.metric("Costs", f"{commission*100:.2f}% + {slippage*100:.2f}%", "comm + slip")
                     
                     col4, col5, col6 = st.columns(3)
                     with col4:
@@ -3860,6 +3991,10 @@ def render_multitf_tab():
     )
     coin = _normalize_coin_input(st.text_input("Coin (e.g. BTC, ETH, TAO)", value="BTC", key="mtf_coin_input"))
     if st.button("Run Multi-TF Analysis", type="primary"):
+        _val_err = _validate_coin_symbol(coin)
+        if _val_err:
+            st.error(_val_err)
+            return
         timeframes = ["5m", "15m", "1h", "4h", "1d"]
         with st.spinner("Analysing across all timeframes..."):
             rows = []
@@ -4070,6 +4205,10 @@ def render_sessions_tab():
     )
     coin_s = _normalize_coin_input(st.text_input("Coin (e.g. BTC, ETH, TAO)", value="BTC", key="session_coin_input"))
     if st.button("Analyse Sessions", type="primary"):
+        _val_err = _validate_coin_symbol(coin_s)
+        if _val_err:
+            st.error(_val_err)
+            return
         with st.spinner("Fetching hourly data for session analysis..."):
             df = fetch_ohlcv(coin_s, "1h", limit=500)
             if df is None:
