@@ -7,7 +7,8 @@ import plotly.graph_objs as go
 import ccxt
 import ta
 from typing import Tuple
-from sklearn.linear_model import LogisticRegression
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def _wma(series: pd.Series, length: int) -> pd.Series:
@@ -375,6 +376,92 @@ def _sr_lookback(timeframe: str | None = None) -> int:
     return mapping.get(timeframe or "", 30)
 
 
+@dataclass
+class AnalysisResult:
+    """Structured result from analyse() — replaces fragile 16-element tuple."""
+    signal: str = "NO DATA"
+    leverage: int = 1
+    comment: str = ""
+    volume_spike: bool = False
+    atr_comment: str = ""
+    candle_pattern: str = ""
+    confidence: float = 0.0
+    adx: float = 0.0
+    supertrend: str = ""
+    ichimoku: str = ""
+    stochrsi_k: float = 0.0
+    bollinger: str = ""
+    vwap: str = ""
+    psar: str = ""
+    williams: str = ""
+    cci: str = ""
+
+
+def _build_indicator_grid(supertrend_trend: str, ichimoku_trend: str, vwap_label: str,
+                          adx_val: float, bollinger_bias: str, stochrsi_k_val: float,
+                          psar_trend: str, williams_label: str, cci_label: str,
+                          volume_spike: bool, atr_comment: str, candle_pattern: str) -> str:
+    """Build the professional indicator grid HTML used in Spot, Position, and AI tabs."""
+    indicators = []
+    if supertrend_trend:
+        indicators.append(("SuperTrend", format_trend(supertrend_trend), _ind_color(supertrend_trend)))
+    if ichimoku_trend:
+        indicators.append(("Ichimoku", format_trend(ichimoku_trend), _ind_color(ichimoku_trend)))
+    if vwap_label:
+        indicators.append(("VWAP", vwap_label, _ind_color(vwap_label)))
+    if not np.isnan(adx_val):
+        indicators.append(("ADX", format_adx(adx_val), WARNING))
+    if bollinger_bias:
+        indicators.append(("Bollinger", bollinger_bias, _ind_color(bollinger_bias)))
+    if not np.isnan(stochrsi_k_val):
+        srsi_c = POSITIVE if stochrsi_k_val < 0.2 else (NEGATIVE if stochrsi_k_val > 0.8 else WARNING)
+        indicators.append(("StochRSI", f"{stochrsi_k_val:.2f}", srsi_c))
+    if "Bullish" in psar_trend or "Bearish" in psar_trend:
+        indicators.append(("PSAR", psar_trend, _ind_color(psar_trend)))
+    if williams_label:
+        indicators.append(("Williams %R", williams_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(williams_label)))
+    if cci_label:
+        indicators.append(("CCI", cci_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(cci_label)))
+    if volume_spike:
+        indicators.append(("Volume", "Spike ▲", POSITIVE))
+    atr_clean = atr_comment.replace("▲", "").replace("▼", "").replace("–", "").strip()
+    if atr_clean:
+        indicators.append(("Volatility", atr_clean, _ind_color(atr_clean)))
+    if candle_pattern:
+        indicators.append(("Pattern", candle_pattern.split(" (")[0], WARNING))
+    if not indicators:
+        return ""
+    grid_items = "".join(
+        f"<div style='text-align:center; padding:6px;'>"
+        f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>{name}</div>"
+        f"<div style='color:{color}; font-size:0.85rem; font-weight:600;'>{val}</div>"
+        f"</div>"
+        for name, val, color in indicators
+    )
+    return (
+        f"<div style='display:grid; grid-template-columns:repeat(auto-fill, minmax(90px, 1fr)); "
+        f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
+        f"{grid_items}</div>"
+    )
+
+
+def _calc_conviction(signal_dir: str, ai_dir: str, confidence: float) -> tuple[str, str]:
+    """Return (label, color) for conviction based on signal/AI alignment and confidence.
+
+    signal_dir: 'LONG', 'SHORT', 'WAIT'
+    ai_dir:     'LONG', 'SHORT', 'NEUTRAL'
+    """
+    if signal_dir in ("LONG", "SHORT") and signal_dir == ai_dir:
+        if confidence >= 75:
+            return "HIGH", POSITIVE
+        elif confidence >= 60:
+            return "MEDIUM", WARNING
+        return "LOW", TEXT_MUTED
+    if signal_dir in ("LONG", "SHORT") and ai_dir not in ("NEUTRAL", "WAIT", "") and signal_dir != ai_dir:
+        return "CONFLICT", NEGATIVE
+    return "LOW", TEXT_MUTED
+
+
 # Fetch price change percentage for a given symbol via ccxt
 @st.cache_data(ttl=60, show_spinner=False)
 def get_price_change(symbol: str) -> float | None:
@@ -416,8 +503,8 @@ def _coingecko_coin_id(symbol: str) -> str | None:
             for coin in resp.json().get("coins", []):
                 if coin.get("symbol", "").upper() == symbol.upper():
                     return coin["id"]
-    except Exception:
-        pass
+    except Exception as e:
+        _debug(f"CoinGecko coin ID lookup failed for '{symbol}': {e}")
     return None
 
 
@@ -796,13 +883,10 @@ def get_signal_from_confidence(confidence: float) -> Tuple[str, str]:
     else:
         return "STRONG SELL", "⚠️ Strong bearish bias. SHORT with high confidence."
 
-def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, float, str, str, float, str, str, str, str, str]:
+def analyse(df: pd.DataFrame) -> AnalysisResult:
 
     if df is None or len(df) < 55:
-        return (
-            "NO DATA", 1, "Insufficient data", False, "", "",
-            0.0, 0.0, "", "", 0.0, "", "", "", "", ""
-        )
+        return AnalysisResult(comment="Insufficient data")
 
     # Infer timeframe from candle spacing for adaptive S/R lookback
     _inferred_tf = None
@@ -847,7 +931,7 @@ def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, flo
         psar_down = psar_ind.psar_down()
         df["psar"] = psar_up.fillna(psar_down)
     except Exception as e:
-        print("PSAR Error:", e)
+        _debug(f"PSAR Error: {e}")
         df["psar"] = np.nan
 
     # Williams %R
@@ -910,7 +994,7 @@ def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, flo
         st_data = _supertrend(df['high'], df['low'], df['close'], length=10, multiplier=3.0)
         df['supertrend'] = st_data[st_data.columns[0]]
     except Exception as e:
-        print("SuperTrend Error:", e)
+        _debug(f"SuperTrend Error: {e}")
         df['supertrend'] = np.nan
 
     # Stochastic RSI
@@ -1266,7 +1350,13 @@ def analyse(df: pd.DataFrame) -> tuple[str, int, str, bool, str, str, float, flo
     elif confidence_score < 75:
         lev_base = min(lev_base, 6)
 
-    return signal, lev_base, comment, volume_spike, atr_comment, candle_pattern, confidence_score, adx_val, supertrend_trend, ichimoku_trend, stochrsi_k_val, bollinger_bias, vwap_label, psar_trend, williams_label, cci_label
+    return AnalysisResult(
+        signal=signal, leverage=lev_base, comment=comment, volume_spike=volume_spike,
+        atr_comment=atr_comment, candle_pattern=candle_pattern, confidence=confidence_score,
+        adx=adx_val, supertrend=supertrend_trend, ichimoku=ichimoku_trend,
+        stochrsi_k=stochrsi_k_val, bollinger=bollinger_bias, vwap=vwap_label,
+        psar=psar_trend, williams=williams_label, cci=cci_label,
+    )
 
 
 def get_scalping_entry_target(
@@ -1478,6 +1568,47 @@ def ml_predict_direction(df: pd.DataFrame) -> tuple[float, str]:
 
     direction = "LONG" if prob_up >= 0.6 else ("SHORT" if prob_up <= 0.4 else "NEUTRAL")
     return prob_up, direction
+
+
+def get_top_volume_usdt_symbols(top_n: int = 100, vs_currency: str = "usd"):
+    """Obtain top USDT trading pairs from CoinGecko and filter by exchange markets."""
+    try:
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            "vs_currency": vs_currency,
+            "order": "volume_desc",
+            "per_page": min(top_n, 250),
+            "page": 1,
+            "sparkline": False,
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code != 200:
+            _debug(f"CoinGecko error: {resp.status_code} {resp.text}")
+            return [], []
+        data = resp.json()
+        if not isinstance(data, list):
+            _debug(f"CoinGecko invalid data type: {type(data)}")
+            return [], []
+
+        markets = MARKETS
+        valid = []
+        seen = set()
+
+        for coin in data:
+            symbol = (coin.get("symbol") or "").upper()
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            for quote in ("USDT", "USD"):
+                pair = f"{symbol}/{quote}"
+                if pair in markets:
+                    valid.append(pair)
+                    break
+
+        return valid, data
+    except Exception as e:
+        _debug(f"get_top_volume_usdt_symbols error: {e}")
+        return [], []
 
 
 def render_market_tab():
@@ -1753,49 +1884,6 @@ def render_market_tab():
 
     # Fetch top coins
     with st.spinner(f"Scanning {top_n} coins ({signal_filter}) [{timeframe}] ..."):
-        # Obtain top USDT trading pairs from CoinGecko and filter by exchange markets
-        def get_top_volume_usdt_symbols(top_n: int = 100, vs_currency: str = "usd"):
-            try:
-                url = "https://api.coingecko.com/api/v3/coins/markets"
-                params = {
-                    "vs_currency": vs_currency,
-                    "order": "volume_desc",
-                    "per_page": min(top_n, 250),
-                    "page": 1,
-                    "sparkline": False,
-                }
-                resp = requests.get(url, params=params, timeout=10)
-                if resp.status_code != 200:
-                    print("Coingecko error:", resp.status_code, resp.text)
-                    return [], []
-                data = resp.json()
-                if not isinstance(data, list):
-                    print("Coingecko invalid data type:", type(data), data)
-                    return [], []
-    
-                markets = MARKETS
-                valid = []
-                seen = set()
-    
-                for coin in data:
-                    symbol = (coin.get("symbol") or "").upper()
-                    if not symbol or symbol in seen:
-                        continue
-                    seen.add(symbol)
-
-                    # Try USDT first, then USD (Kraken uses /USD for most pairs)
-                    for quote in ("USDT", "USD"):
-                        pair = f"{symbol}/{quote}"
-                        if pair in markets:
-                            valid.append(pair)
-                            break
-    
-                return valid, data
-            except Exception as e:
-                print(f"get_top_volume_usdt_symbols error: {e}")
-                return [], []
-    
-
         usdt_symbols, market_data = get_top_volume_usdt_symbols(max(top_n, 50))
     
         # skip "wrapped"
@@ -1831,67 +1919,49 @@ def render_market_tab():
         working_symbols = [s for s in usdt_symbols if s.split("/")[0].upper() in valid_bases]
         working_symbols = working_symbols[:top_n]
     
-        # Analysis
-        results: list[dict] = []
-        for sym in working_symbols:
-            # Fetch a larger window of historical data for the AI prediction.  A
-            # limit of 500 ensures there are enough candles to compute
-            # technical features and train the gradient boosting model similar to the AI tab.
+        # Analysis — parallelised data fetching for speed
+        def _scan_one(sym: str) -> dict | None:
+            """Analyse a single symbol for the scanner. Returns a row dict or None."""
             df = fetch_ohlcv(sym, timeframe, limit=500)
             if df is None or len(df) <= 30:
-                continue
-    
+                return None
+
             df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
             df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
             df['rsi'] = ta.momentum.rsi(df['close'], window=14)
 
-            # Compute an AI prediction based on recent candles.  The
-            # ml_predict_direction function fits a Gradient Boosting classifier to
-            # technical features derived from the recent OHLCV data and
-            # returns both a probability and a categorical direction
-            # (LONG/SHORT/NEUTRAL).  If the data set is too small, it
-            # gracefully defaults to a neutral prediction.
             prob_up, ai_direction = ml_predict_direction(df)
-
             latest = df.iloc[-1]
-    
+
             base = sym.split('/')[0].upper()
             mcap_val = mcap_map.get(base, 0)
-    
             price = float(latest['close'])
             price_change = get_price_change(sym)
-    
-            # main analysis
-            signal, lev, comment, volume_spike, atr_comment, candle_pattern, confidence_score, adx_val, \
-            supertrend_trend, ichimoku_trend, stochrsi_k_val, bollinger_bias, vwap_label, psar_trend, \
-            williams_label, cci_label = analyse(df)
-    
-            # scalping set-up
+
+            a = analyse(df)
+            signal, lev, volume_spike = a.signal, a.leverage, a.volume_spike
+            atr_comment_v, candle_pattern_v, confidence_score_v = a.atr_comment, a.candle_pattern, a.confidence
+            adx_val_v, supertrend_trend_v, ichimoku_trend_v = a.adx, a.supertrend, a.ichimoku
+            stochrsi_k_val_v, bollinger_bias_v, vwap_label_v = a.stochrsi_k, a.bollinger, a.vwap
+            psar_trend_v = a.psar
+
             scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note = get_scalping_entry_target(
-                df,
-                confidence_score,
-                supertrend_trend,
-                ichimoku_trend,
-                vwap_label,
-                volume_spike,
-                strict_mode=True
+                df, confidence_score_v, supertrend_trend_v, ichimoku_trend_v, vwap_label_v,
+                volume_spike, strict_mode=True,
             )
             entry_price = entry_s if scalp_direction else 0.0
             target_price = target_s if scalp_direction else 0.0
 
-            # filter (LONG/SHORT/BOTH)
             include = (
                 (signal_filter == 'BOTH') or
                 (signal_filter == 'LONG' and signal in ['STRONG BUY', 'BUY']) or
                 (signal_filter == 'SHORT' and signal in ['STRONG SELL', 'SELL'])
             )
             if not include:
-                continue
-    
-            # Check for Signal-AI divergence
+                return None
+
             signal_direction = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "NEUTRAL")
-            
-            # Format AI prediction with divergence warning if needed
+
             if signal_direction == "LONG" and ai_direction == "SHORT":
                 ai_display = "⚠️ SHORT (Divergence)"
             elif signal_direction == "SHORT" and ai_direction == "LONG":
@@ -1899,28 +1969,17 @@ def render_market_tab():
             elif signal_direction != "NEUTRAL" and ai_direction == "NEUTRAL":
                 ai_display = f"{ai_direction} (Weak)"
             else:
-                ai_display = ai_direction  # Aligned or both neutral
-            
-            # Conviction: alignment of Signal + AI + Confidence
-            if signal_direction == ai_direction and signal_direction != "NEUTRAL":
-                if confidence_score >= 75:
-                    conviction = "🟢 HIGH"
-                elif confidence_score >= 60:
-                    conviction = "🟡 MEDIUM"
-                else:
-                    conviction = "⚪ LOW"
-            elif signal_direction != "NEUTRAL" and ai_direction == "NEUTRAL":
-                conviction = "⚪ LOW"
-            elif signal_direction != ai_direction and ai_direction != "NEUTRAL" and signal_direction != "NEUTRAL":
-                conviction = "🔴 CONFLICT"
-            else:
-                conviction = ""
+                ai_display = ai_direction
 
-            results.append({
+            _conv_lbl, _conv_clr = _calc_conviction(signal_direction, ai_direction, confidence_score_v)
+            _emoji_map = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "⚪", "CONFLICT": "🔴"}
+            conviction = f"{_emoji_map.get(_conv_lbl, '')} {_conv_lbl}" if _conv_lbl else ""
+
+            return {
                 'Coin': base,
                 'Price ($)': f"{price:,.2f}",
                 'Signal': signal_plain(signal),
-                'Confidence': confidence_score_badge(confidence_score),
+                'Confidence': confidence_score_badge(confidence_score_v),
                 'AI Prediction': ai_display,
                 'Conviction': conviction,
                 'Market Cap ($)': readable_market_cap(mcap_val),
@@ -1930,20 +1989,32 @@ def render_market_tab():
                 'Target Price': f"${target_price:,.2f}" if target_price else '',
                 'Δ (%)': format_delta(price_change) if price_change is not None else '',
                 'Spike Alert': '▲ Spike' if volume_spike else '',
-                'ADX': round(adx_val, 1),
-                'SuperTrend': supertrend_trend,
-                'Volatility': atr_comment,
-                'Stochastic RSI': round(stochrsi_k_val, 2),
-                'Candle Pattern': candle_pattern,
-                'Ichimoku': ichimoku_trend,
-                'Bollinger': bollinger_bias,
-                'VWAP': vwap_label,
-                'PSAR': psar_trend if psar_trend != "Unavailable" else '',
-                'Williams %R': williams_label,
-                'CCI': cci_label,
-                '__confidence_val': confidence_score,
-            })
-    
+                'ADX': round(adx_val_v, 1),
+                'SuperTrend': supertrend_trend_v,
+                'Volatility': atr_comment_v,
+                'Stochastic RSI': round(stochrsi_k_val_v, 2),
+                'Candle Pattern': candle_pattern_v,
+                'Ichimoku': ichimoku_trend_v,
+                'Bollinger': bollinger_bias_v,
+                'VWAP': vwap_label_v,
+                'PSAR': psar_trend_v if psar_trend_v != "Unavailable" else '',
+                'Williams %R': a.williams,
+                'CCI': a.cci,
+                '__confidence_val': confidence_score_v,
+            }
+
+        # Parallel scan using ThreadPoolExecutor (5-10x faster than sequential)
+        results: list[dict] = []
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = {executor.submit(_scan_one, sym): sym for sym in working_symbols}
+            for future in as_completed(futures):
+                try:
+                    row = future.result()
+                    if row is not None:
+                        results.append(row)
+                except Exception as e:
+                    _debug(f"Scanner error for {futures[future]}: {e}")
+
         # Sort results by confidence score (descending)
         results = sorted(results, key=lambda x: x['__confidence_val'], reverse=True)
     
@@ -2031,7 +2102,12 @@ def render_spot_tab():
         if df is None or len(df) < 30:
             st.error(f"Could not fetch data for **{coin}** on {timeframe}. The coin may not be listed on supported exchanges. Try a major pair (BTC, ETH) or check the symbol.")
             return
-        signal, lev, comment, volume_spike, atr_comment, candle_pattern, confidence_score, adx_val, supertrend_trend, ichimoku_trend, stochrsi_k_val, bollinger_bias, vwap_label, psar_trend, williams_label, cci_label = analyse(df)
+        a = analyse(df)
+        signal, lev, comment, volume_spike = a.signal, a.leverage, a.comment, a.volume_spike
+        atr_comment, candle_pattern, confidence_score = a.atr_comment, a.candle_pattern, a.confidence
+        adx_val, supertrend_trend, ichimoku_trend = a.adx, a.supertrend, a.ichimoku
+        stochrsi_k_val, bollinger_bias, vwap_label = a.stochrsi_k, a.bollinger, a.vwap
+        psar_trend, williams_label, cci_label = a.psar, a.williams, a.cci
 
         current_price = df['close'].iloc[-1]
 
@@ -2043,13 +2119,7 @@ def render_spot_tab():
             ai_dir_s = "NEUTRAL"
 
         sig_dir_s = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "WAIT")
-        if sig_dir_s == ai_dir_s and sig_dir_s != "WAIT":
-            conv_lbl_s = "HIGH" if confidence_score >= 75 else ("MEDIUM" if confidence_score >= 60 else "LOW")
-            conv_c_s = POSITIVE if confidence_score >= 75 else (WARNING if confidence_score >= 60 else TEXT_MUTED)
-        elif sig_dir_s != "WAIT" and ai_dir_s != "NEUTRAL" and sig_dir_s != ai_dir_s:
-            conv_lbl_s, conv_c_s = "CONFLICT", NEGATIVE
-        else:
-            conv_lbl_s, conv_c_s = "LOW", TEXT_MUTED
+        conv_lbl_s, conv_c_s = _calc_conviction(sig_dir_s, ai_dir_s, confidence_score)
 
         sig_c_s = POSITIVE if "LONG" in signal_clean else (NEGATIVE if "SHORT" in signal_clean else WARNING)
         ai_c_s = POSITIVE if ai_dir_s == "LONG" else (NEGATIVE if ai_dir_s == "SHORT" else WARNING)
@@ -2098,47 +2168,13 @@ def render_spot_tab():
             )
 
         # Indicator grid (professional card layout)
-        indicators_spot = []
-        if supertrend_trend:
-            indicators_spot.append(("SuperTrend", format_trend(supertrend_trend), _ind_color(supertrend_trend)))
-        if ichimoku_trend:
-            indicators_spot.append(("Ichimoku", format_trend(ichimoku_trend), _ind_color(ichimoku_trend)))
-        if vwap_label:
-            indicators_spot.append(("VWAP", vwap_label, _ind_color(vwap_label)))
-        if not np.isnan(adx_val):
-            indicators_spot.append(("ADX", format_adx(adx_val), WARNING))
-        if bollinger_bias:
-            indicators_spot.append(("Bollinger", bollinger_bias, _ind_color(bollinger_bias)))
-        if not np.isnan(stochrsi_k_val):
-            srsi_c_s = POSITIVE if stochrsi_k_val < 0.2 else (NEGATIVE if stochrsi_k_val > 0.8 else WARNING)
-            indicators_spot.append(("StochRSI", f"{stochrsi_k_val:.2f}", srsi_c_s))
-        if "Bullish" in psar_trend or "Bearish" in psar_trend:
-            indicators_spot.append(("PSAR", psar_trend, _ind_color(psar_trend)))
-        if williams_label:
-            indicators_spot.append(("Williams %R", williams_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(williams_label)))
-        if cci_label:
-            indicators_spot.append(("CCI", cci_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(cci_label)))
-        if volume_spike:
-            indicators_spot.append(("Volume", "Spike ▲", POSITIVE))
-        atr_clean = atr_comment.replace("▲", "").replace("▼", "").replace("–", "").strip()
-        if atr_clean:
-            indicators_spot.append(("Volatility", atr_clean, _ind_color(atr_clean)))
-        if candle_pattern:
-            indicators_spot.append(("Pattern", candle_pattern.split(" (")[0], WARNING))
-
-        if indicators_spot:
-            grid_items_spot = "".join(
-                f"<div style='text-align:center; padding:6px;'>"
-                f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>{name}</div>"
-                f"<div style='color:{color}; font-size:0.85rem; font-weight:600;'>{val}</div>"
-                f"</div>"
-                for name, val, color in indicators_spot
-            )
-            st.markdown(
-                f"<div style='display:grid; grid-template-columns:repeat(auto-fill, minmax(90px, 1fr)); "
-                f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
-                f"{grid_items_spot}</div>",
-                unsafe_allow_html=True,
+        _grid_html = _build_indicator_grid(
+            supertrend_trend, ichimoku_trend, vwap_label, adx_val, bollinger_bias,
+            stochrsi_k_val, psar_trend, williams_label, cci_label,
+            volume_spike, atr_comment, candle_pattern,
+        )
+        if _grid_html:
+            st.markdown(_grid_html, unsafe_allow_html=True,
             )
 
         # Price box
@@ -2353,7 +2389,12 @@ def render_position_tab():
                     st.error(f"Not enough data to analyse position for {tf}.")
                     continue
 
-                signal, lev, comment, volume_spike, atr_comment, candle_pattern, confidence_score, adx_val, supertrend_trend, ichimoku_trend, stochrsi_k_val, bollinger_bias, vwap_label, psar_trend, williams_label, cci_label = analyse(df)
+                a = analyse(df)
+                signal, lev, comment, volume_spike = a.signal, a.leverage, a.comment, a.volume_spike
+                atr_comment, candle_pattern, confidence_score = a.atr_comment, a.candle_pattern, a.confidence
+                adx_val, supertrend_trend, ichimoku_trend = a.adx, a.supertrend, a.ichimoku
+                stochrsi_k_val, bollinger_bias, vwap_label = a.stochrsi_k, a.bollinger, a.vwap
+                psar_trend, williams_label, cci_label = a.psar, a.williams, a.cci
 
                 current_price = df['close'].iloc[-1]
                 pnl = entry_price - current_price if direction == "SHORT" else current_price - entry_price
@@ -2380,17 +2421,7 @@ def render_position_tab():
 
                 # Conviction: alignment of Signal + AI + Confidence
                 sig_direction = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "WAIT")
-                if sig_direction == ai_dir and sig_direction != "WAIT":
-                    if confidence_score >= 75:
-                        conviction_lbl, conviction_c = "HIGH", POSITIVE
-                    elif confidence_score >= 60:
-                        conviction_lbl, conviction_c = "MEDIUM", WARNING
-                    else:
-                        conviction_lbl, conviction_c = "LOW", TEXT_MUTED
-                elif sig_direction != "WAIT" and ai_dir != "NEUTRAL" and sig_direction != ai_dir:
-                    conviction_lbl, conviction_c = "CONFLICT", NEGATIVE
-                else:
-                    conviction_lbl, conviction_c = "LOW", TEXT_MUTED
+                conviction_lbl, conviction_c = _calc_conviction(sig_direction, ai_dir, confidence_score)
 
                 # Signal / Confidence / AI / Conviction summary grid
                 sig_color = POSITIVE if "LONG" in signal_clean else (NEGATIVE if "SHORT" in signal_clean else WARNING)
@@ -2450,50 +2481,13 @@ def render_position_tab():
                     )
 
                 # -- Indicator grid (professional card layout) --
-                indicators = []
-                if supertrend_trend:
-                    indicators.append(("SuperTrend", format_trend(supertrend_trend), _ind_color(supertrend_trend)))
-                if ichimoku_trend:
-                    indicators.append(("Ichimoku", format_trend(ichimoku_trend), _ind_color(ichimoku_trend)))
-                if vwap_label:
-                    indicators.append(("VWAP", vwap_label, _ind_color(vwap_label)))
-                if not np.isnan(adx_val):
-                    indicators.append(("ADX", format_adx(adx_val), WARNING))
-                if bollinger_bias:
-                    indicators.append(("Bollinger", bollinger_bias, _ind_color(bollinger_bias)))
-                if not np.isnan(stochrsi_k_val):
-                    srsi_lbl = f"{stochrsi_k_val:.2f}"
-                    srsi_c = POSITIVE if stochrsi_k_val < 0.2 else (NEGATIVE if stochrsi_k_val > 0.8 else WARNING)
-                    indicators.append(("StochRSI", srsi_lbl, srsi_c))
-                if "Bullish" in psar_trend or "Bearish" in psar_trend:
-                    indicators.append(("PSAR", psar_trend, _ind_color(psar_trend)))
-                if williams_label:
-                    indicators.append(("Williams %R", williams_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(williams_label)))
-                if cci_label:
-                    indicators.append(("CCI", cci_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(cci_label)))
-                if volume_spike:
-                    indicators.append(("Volume", "Spike ▲", POSITIVE))
-
-                atr_clean = atr_comment.replace("▲", "").replace("▼", "").replace("–", "").strip()
-                if atr_clean:
-                    indicators.append(("Volatility", atr_clean, _ind_color(atr_clean)))
-                if candle_pattern:
-                    indicators.append(("Pattern", candle_pattern.split(" (")[0], WARNING))
-
-                if indicators:
-                    grid_items = "".join(
-                        f"<div style='text-align:center; padding:6px;'>"
-                        f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>{name}</div>"
-                        f"<div style='color:{color}; font-size:0.85rem; font-weight:600;'>{val}</div>"
-                        f"</div>"
-                        for name, val, color in indicators
-                    )
-                    st.markdown(
-                        f"<div style='display:grid; grid-template-columns:repeat(auto-fill, minmax(90px, 1fr)); "
-                        f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
-                        f"{grid_items}</div>",
-                        unsafe_allow_html=True,
-                    )
+                _grid_html = _build_indicator_grid(
+                    supertrend_trend, ichimoku_trend, vwap_label, adx_val, bollinger_bias,
+                    stochrsi_k_val, psar_trend, williams_label, cci_label,
+                    volume_spike, atr_comment, candle_pattern,
+                )
+                if _grid_html:
+                    st.markdown(_grid_html, unsafe_allow_html=True)
 
                 df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
                 df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
@@ -2589,10 +2583,12 @@ def render_position_tab():
                     ema13_val = latest['ema13']
                     macd_hist_s = latest['macd_diff']
                     rsi14_val = latest['rsi']
-                    obv5 = df_scalp['obv'].iloc[-5]
+                    _obv_back_scalp = min(5, len(df_scalp) - 1)
+                    obv5 = df_scalp['obv'].iloc[-_obv_back_scalp] if _obv_back_scalp > 0 else df_scalp['obv'].iloc[-1]
                     obv_change_s = ((latest['obv'] - obv5) / abs(obv5) * 100) if obv5 != 0 else 0
-                    support_s = df_scalp['low'].tail(20).min()
-                    resistance_s = df_scalp['high'].tail(20).max()
+                    _sr_scalp = _sr_lookback()
+                    support_s = df_scalp['low'].tail(_sr_scalp).min()
+                    resistance_s = df_scalp['high'].tail(_sr_scalp).max()
                     support_dist_s = abs(close_price - support_s) / close_price * 100
                     resistance_dist_s = abs(close_price - resistance_s) / close_price * 100
                 
@@ -3223,22 +3219,21 @@ def render_ml_tab():
 
                     # Analysis details
                     try:
-                        analysis_result = analyse(df)
-                        lev_base = analysis_result[1]
-                        suggested_lev = lev_base if direction != "NEUTRAL" else None
-                        volume_spike = analysis_result[3]
-                        atr_comment = analysis_result[4]
-                        candle_pattern = analysis_result[5]
-                        confidence_score = analysis_result[6]
-                        adx_val = analysis_result[7]
-                        supertrend_trend = analysis_result[8]
-                        ichimoku_trend = analysis_result[9]
-                        stochrsi_k_val = analysis_result[10]
-                        bollinger_bias = analysis_result[11]
-                        vwap_label = analysis_result[12]
-                        psar_trend = analysis_result[13]
-                        williams_label = analysis_result[14]
-                        cci_label = analysis_result[15]
+                        ar = analyse(df)
+                        suggested_lev = ar.leverage if direction != "NEUTRAL" else None
+                        volume_spike = ar.volume_spike
+                        atr_comment = ar.atr_comment
+                        candle_pattern = ar.candle_pattern
+                        confidence_score = ar.confidence
+                        adx_val = ar.adx
+                        supertrend_trend = ar.supertrend
+                        ichimoku_trend = ar.ichimoku
+                        stochrsi_k_val = ar.stochrsi_k
+                        bollinger_bias = ar.bollinger
+                        vwap_label = ar.vwap
+                        psar_trend = ar.psar
+                        williams_label = ar.williams
+                        cci_label = ar.cci
                     except Exception:
                         suggested_lev = None
                         volume_spike = False
@@ -3278,8 +3273,8 @@ def render_ml_tab():
                             entry_price = entry_s
                             exit_price = target_s
                             entry_source = 'ai'
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _debug(f"AI tab scalping entry error: {e}")
 
                     # Fallback: if no scalping entry was found but the ML direction is
                     # LONG or SHORT, use an ATR‑based offset as a generic entry/exit.
@@ -3377,7 +3372,6 @@ def render_ml_tab():
                         f"<b style='color:{ACCENT}; font-size:1.2rem;'>AI Prediction ({tf})</b><br>"
                         f"<p style='color:{TEXT_LIGHT}; font-size:1rem; margin-top:6px;'>"
                         f"Current Price: <b>${current_price:,.4f}</b><br>"
-                        f"Probability of Up Move: <b>{prob*100:.1f}%</b><br>"
                         f"AI Market Outlook: <b>{mkt_prob_tf*100:.1f}%</b> ({mkt_dir_tf})<br>"
                         f"Suggested Direction: <b><span style='color:{dir_color};'>{direction}</span></b>"
                     )
@@ -3403,50 +3397,14 @@ def render_ml_tab():
                     panel_html += ("</p></div>")
                     st.markdown(panel_html, unsafe_allow_html=True)
 
-                    # Indicator grid (same professional layout as Position tab)
-                    indicators_ai = []
-                    if supertrend_trend:
-                        indicators_ai.append(("SuperTrend", format_trend(supertrend_trend), _ind_color(supertrend_trend)))
-                    if ichimoku_trend:
-                        indicators_ai.append(("Ichimoku", format_trend(ichimoku_trend), _ind_color(ichimoku_trend)))
-                    if vwap_label:
-                        indicators_ai.append(("VWAP", vwap_label, _ind_color(vwap_label)))
-                    if not np.isnan(adx_val):
-                        indicators_ai.append(("ADX", format_adx(adx_val), WARNING))
-                    if bollinger_bias:
-                        indicators_ai.append(("Bollinger", bollinger_bias, _ind_color(bollinger_bias)))
-                    if not np.isnan(stochrsi_k_val):
-                        srsi_lbl_ai = f"{stochrsi_k_val:.2f}"
-                        srsi_c_ai = POSITIVE if stochrsi_k_val < 0.2 else (NEGATIVE if stochrsi_k_val > 0.8 else WARNING)
-                        indicators_ai.append(("StochRSI", srsi_lbl_ai, srsi_c_ai))
-                    if "Bullish" in psar_trend or "Bearish" in psar_trend:
-                        indicators_ai.append(("PSAR", psar_trend, _ind_color(psar_trend)))
-                    if williams_label:
-                        indicators_ai.append(("Williams %R", williams_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(williams_label)))
-                    if cci_label:
-                        indicators_ai.append(("CCI", cci_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), _ind_color(cci_label)))
-                    if volume_spike:
-                        indicators_ai.append(("Volume", "Spike ▲", POSITIVE))
-                    atr_clean = atr_comment.replace("▲", "").replace("▼", "").replace("–", "").strip()
-                    if atr_clean:
-                        indicators_ai.append(("Volatility", atr_clean, _ind_color(atr_clean)))
-                    if candle_pattern:
-                        indicators_ai.append(("Pattern", candle_pattern.split(" (")[0], WARNING))
-
-                    if indicators_ai:
-                        grid_items_ai = "".join(
-                            f"<div style='text-align:center; padding:6px;'>"
-                            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>{name}</div>"
-                            f"<div style='color:{color}; font-size:0.85rem; font-weight:600;'>{val}</div>"
-                            f"</div>"
-                            for name, val, color in indicators_ai
-                        )
-                        st.markdown(
-                            f"<div style='display:grid; grid-template-columns:repeat(auto-fill, minmax(90px, 1fr)); "
-                            f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
-                            f"{grid_items_ai}</div>",
-                            unsafe_allow_html=True,
-                        )
+                    # Indicator grid (same professional layout as other tabs)
+                    _grid_html = _build_indicator_grid(
+                        supertrend_trend, ichimoku_trend, vwap_label, adx_val, bollinger_bias,
+                        stochrsi_k_val, psar_trend, williams_label, cci_label,
+                        volume_spike, atr_comment, candle_pattern,
+                    )
+                    if _grid_html:
+                        st.markdown(_grid_html, unsafe_allow_html=True)
 
                     # === Charts Section ===
                     # Candlestick with EMAs and WMAs
@@ -3514,8 +3472,8 @@ def render_ml_tab():
                             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
                         )
                         st.plotly_chart(rsi_fig, width="stretch")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _debug(f"RSI chart error: {e}")
 
                     # MACD chart
                     try:
@@ -3644,8 +3602,8 @@ def run_backtest(df: pd.DataFrame, threshold: float = 70, exit_after: int = 5,
             continue
         try:
             result = analyse(df_slice)
-            raw_signal = result[0]
-            conf_score = result[6]
+            raw_signal = result.signal
+            conf_score = result.confidence
         except Exception:
             continue
 
@@ -4004,15 +3962,15 @@ def render_multitf_tab():
                     rows.append({"Timeframe": tf, "Signal": "NO DATA", "Confidence": 0.0,
                                  "SuperTrend": "", "Ichimoku": "", "VWAP": "", "ADX": 0.0})
                     continue
-                sig, _lev, _comment, _vs, _atr, _cp, conf, adx, st_trend, ichi, _sk, _bb, vwap, _ps, _wl, _cc = analyse(df)
+                ar = analyse(df)
                 rows.append({
                     "Timeframe": tf,
-                    "Signal": signal_plain(sig),
-                    "Confidence": round(conf, 1),
-                    "SuperTrend": format_trend(st_trend),
-                    "Ichimoku": format_trend(ichi),
-                    "VWAP": vwap,
-                    "ADX": round(adx, 1),
+                    "Signal": signal_plain(ar.signal),
+                    "Confidence": round(ar.confidence, 1),
+                    "SuperTrend": format_trend(ar.supertrend),
+                    "Ichimoku": format_trend(ar.ichimoku),
+                    "VWAP": ar.vwap,
+                    "ADX": round(ar.adx, 1),
                 })
 
             # Confluence calculation
@@ -4434,9 +4392,10 @@ def render_tools_tab():
             df_liq = pd.DataFrame(liq_rows)
 
             def _style_risk(val: str) -> str:
-                if val == "LOW":
+                v = val.upper()
+                if v == "LOW":
                     return f"color: {POSITIVE}; font-weight: 600;"
-                elif val == "HIGH":
+                elif v == "HIGH":
                     return f"color: {NEGATIVE}; font-weight: 600;"
                 return f"color: {WARNING}; font-weight: 600;"
 
