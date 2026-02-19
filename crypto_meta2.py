@@ -1,14 +1,23 @@
 import datetime
+import time
+import math
+import json
+import hashlib
 import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
 import plotly.graph_objs as go
+import plotly.express as px
+from plotly.subplots import make_subplots
 import ccxt
 import ta
-from typing import Tuple
-from dataclasses import dataclass
+from typing import Tuple, List, Dict, Optional
+from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier, VotingClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 
 
 def _wma(series: pd.Series, length: int) -> pd.Series:
@@ -53,9 +62,10 @@ def _supertrend(high: pd.Series, low: pd.Series, close: pd.Series,
 
 # Set up page title, icon and wide layout
 st.set_page_config(
-    page_title="Crypto Market Dashboard",
-    page_icon="📊",
+    page_title="GOD MODE | Crypto Command Center",
+    page_icon="🔱",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 # === Debug / diagnostics ===
@@ -72,126 +82,424 @@ def _debug(msg: str) -> None:
 
 
 
-PRIMARY_BG = "#0D1117"        # overall app background – near‑black
-CARD_BG    = "#16213E"        # cards and panel backgrounds – dark blue
+PRIMARY_BG = "#0A0E1A"        # overall app background – deep space black
+CARD_BG    = "#0F1629"        # cards and panel backgrounds – midnight blue
 ACCENT     = "#FFFFFF"        # white color
-POSITIVE   = "#06D6A0"        # green for positive change
-NEGATIVE   = "#EF476F"        # red for negative change
+POSITIVE   = "#00FF88"        # neon green for positive change
+NEGATIVE   = "#FF3366"        # neon red for negative change
 WARNING    = "#FFD166"        # yellow for neutral or caution
 TEXT_LIGHT = "#E5E7EB"        # light text color
 TEXT_MUTED = "#8CA1B6"        # muted grey for secondary text
+NEON_BLUE  = "#00D4FF"        # neon blue for accents
+NEON_PURPLE = "#B24BF3"       # neon purple for gradients
+GOLD       = "#FFD700"        # gold for premium features
 
-
+# GOD MODE CSS - Maximum visual impact
 st.markdown(f"""
-    <style>
-    .metric-delta-positive {{
-        color: {POSITIVE};
-        font-weight: 600;
-        font-size: 0.85rem;
-    }}
-    .metric-delta-negative {{
-        color: {NEGATIVE};
-        font-weight: 600;
-        font-size: 0.85rem;
-    }}
-    </style>
+<style>
+/* ===== GOD MODE CSS ===== */
+
+/* Animated gradient background */
+.stApp {{
+    background: linear-gradient(135deg, {PRIMARY_BG} 0%, #0B1426 25%, #0D0F2B 50%, #0A1628 75%, {PRIMARY_BG} 100%);
+    background-size: 400% 400%;
+    animation: godGradient 15s ease infinite;
+    color: {TEXT_LIGHT};
+    font-family: 'Inter', 'Segoe UI', sans-serif;
+}}
+
+@keyframes godGradient {{
+    0% {{ background-position: 0% 50%; }}
+    50% {{ background-position: 100% 50%; }}
+    100% {{ background-position: 0% 50%; }}
+}}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {{ width: 6px; height: 6px; }}
+::-webkit-scrollbar-track {{ background: {PRIMARY_BG}; }}
+::-webkit-scrollbar-thumb {{ background: linear-gradient(180deg, {NEON_BLUE}, {NEON_PURPLE}); border-radius: 3px; }}
+::-webkit-scrollbar-thumb:hover {{ background: linear-gradient(180deg, {POSITIVE}, {NEON_BLUE}); }}
+
+/* Metric delta colors */
+.metric-delta-positive {{
+    color: {POSITIVE};
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-shadow: 0 0 10px rgba(0, 255, 136, 0.5);
+}}
+.metric-delta-negative {{
+    color: {NEGATIVE};
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-shadow: 0 0 10px rgba(255, 51, 102, 0.5);
+}}
+
+/* Glassmorphism titles */
+h1.title {{
+    font-size: 2.8rem;
+    font-weight: 800;
+    background: linear-gradient(135deg, {ACCENT}, {NEON_BLUE}, {NEON_PURPLE});
+    background-size: 200% 200%;
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    animation: titleGlow 3s ease infinite;
+    margin-bottom: 0.4rem;
+    letter-spacing: -0.5px;
+}}
+
+@keyframes titleGlow {{
+    0% {{ background-position: 0% 50%; }}
+    50% {{ background-position: 100% 50%; }}
+    100% {{ background-position: 0% 50%; }}
+}}
+
+p.subtitle {{
+    font-size: 1.05rem;
+    color: {TEXT_MUTED};
+    margin-top: 0;
+    margin-bottom: 2rem;
+}}
+
+/* Glassmorphism metric cards */
+.metric-card {{
+    background: rgba(15, 22, 41, 0.7);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(0, 212, 255, 0.15);
+    border-radius: 16px;
+    padding: 24px 20px;
+    text-align: center;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    margin-bottom: 20px;
+    position: relative;
+    overflow: hidden;
+    transition: all 0.3s ease;
+}}
+.metric-card:hover {{
+    border-color: rgba(0, 212, 255, 0.4);
+    box-shadow: 0 8px 32px rgba(0, 212, 255, 0.15), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    transform: translateY(-2px);
+}}
+.metric-card::before {{
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 200%;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, {NEON_BLUE}, transparent);
+    animation: shimmer 3s ease infinite;
+}}
+
+@keyframes shimmer {{
+    0% {{ left: -100%; }}
+    100% {{ left: 100%; }}
+}}
+
+.metric-label {{
+    font-size: 0.8rem;
+    color: {TEXT_MUTED};
+    margin-bottom: 8px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    font-weight: 500;
+}}
+.metric-value {{
+    font-size: 1.9rem;
+    font-weight: 700;
+    color: {ACCENT};
+    text-shadow: 0 0 20px rgba(255, 255, 255, 0.1);
+}}
+
+/* Glassmorphism panel boxes */
+.panel-box {{
+    background: rgba(15, 22, 41, 0.6);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-radius: 18px;
+    padding: 28px;
+    margin-bottom: 32px;
+    border: 1px solid rgba(0, 212, 255, 0.1);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    position: relative;
+    overflow: hidden;
+}}
+.panel-box::after {{
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(0, 212, 255, 0.3), transparent);
+}}
+
+/* God Mode badge */
+.god-mode-badge {{
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: linear-gradient(135deg, rgba(178, 75, 243, 0.2), rgba(0, 212, 255, 0.2));
+    border: 1px solid rgba(178, 75, 243, 0.4);
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: {NEON_PURPLE};
+    animation: badgePulse 2s ease infinite;
+}}
+
+@keyframes badgePulse {{
+    0%, 100% {{ box-shadow: 0 0 5px rgba(178, 75, 243, 0.3); }}
+    50% {{ box-shadow: 0 0 20px rgba(178, 75, 243, 0.6); }}
+}}
+
+/* Neon glow signal cards */
+.signal-long {{
+    background: rgba(0, 255, 136, 0.08);
+    border: 1px solid rgba(0, 255, 136, 0.3);
+    border-radius: 12px;
+    padding: 12px;
+    text-align: center;
+    box-shadow: 0 0 20px rgba(0, 255, 136, 0.1);
+}}
+.signal-short {{
+    background: rgba(255, 51, 102, 0.08);
+    border: 1px solid rgba(255, 51, 102, 0.3);
+    border-radius: 12px;
+    padding: 12px;
+    text-align: center;
+    box-shadow: 0 0 20px rgba(255, 51, 102, 0.1);
+}}
+.signal-wait {{
+    background: rgba(255, 209, 102, 0.08);
+    border: 1px solid rgba(255, 209, 102, 0.3);
+    border-radius: 12px;
+    padding: 12px;
+    text-align: center;
+    box-shadow: 0 0 20px rgba(255, 209, 102, 0.1);
+}}
+
+/* Enhanced table styling */
+.table-container {{ overflow-x: auto; }}
+table.dataframe {{
+    width: 100% !important;
+    border-collapse: collapse;
+    background-color: rgba(10, 14, 26, 0.8);
+    backdrop-filter: blur(10px);
+}}
+table.dataframe thead tr {{
+    background: linear-gradient(90deg, rgba(0, 212, 255, 0.1), rgba(178, 75, 243, 0.1));
+}}
+table.dataframe th {{
+    color: {NEON_BLUE};
+    padding: 12px;
+    text-align: left;
+    font-size: 0.85rem;
+    border-bottom: 1px solid rgba(0, 212, 255, 0.2);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    font-weight: 600;
+}}
+table.dataframe td {{
+    padding: 10px 12px;
+    font-size: 0.9rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    color: {TEXT_LIGHT};
+    transition: background 0.2s;
+}}
+table.dataframe tbody tr:hover {{
+    background-color: rgba(0, 212, 255, 0.05);
+}}
+
+/* Streamlit tab styling */
+.stTabs [data-baseweb="tab-list"] {{
+    gap: 4px;
+    background: rgba(15, 22, 41, 0.5);
+    border-radius: 12px;
+    padding: 4px;
+}}
+.stTabs [data-baseweb="tab"] {{
+    border-radius: 8px;
+    color: {TEXT_MUTED};
+    font-weight: 500;
+    padding: 8px 16px;
+    transition: all 0.2s ease;
+}}
+.stTabs [aria-selected="true"] {{
+    background: linear-gradient(135deg, rgba(0, 212, 255, 0.15), rgba(178, 75, 243, 0.15)) !important;
+    color: {ACCENT} !important;
+    border-bottom-color: {NEON_BLUE} !important;
+}}
+
+/* Streamlit button styling */
+.stButton > button {{
+    background: linear-gradient(135deg, rgba(0, 212, 255, 0.2), rgba(178, 75, 243, 0.2));
+    border: 1px solid rgba(0, 212, 255, 0.3);
+    color: {ACCENT};
+    border-radius: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    transition: all 0.3s ease;
+}}
+.stButton > button:hover {{
+    background: linear-gradient(135deg, rgba(0, 212, 255, 0.35), rgba(178, 75, 243, 0.35));
+    border-color: {NEON_BLUE};
+    box-shadow: 0 0 20px rgba(0, 212, 255, 0.2);
+    transform: translateY(-1px);
+}}
+.stButton > button[kind="primary"] {{
+    background: linear-gradient(135deg, {NEON_BLUE}, {NEON_PURPLE});
+    border: none;
+    color: white;
+    font-weight: 700;
+    text-shadow: 0 1px 2px rgba(0,0,0,0.3);
+}}
+.stButton > button[kind="primary"]:hover {{
+    box-shadow: 0 0 30px rgba(0, 212, 255, 0.4);
+}}
+
+/* Sidebar styling */
+section[data-testid="stSidebar"] {{
+    background: linear-gradient(180deg, {PRIMARY_BG}, #0B1426);
+    border-right: 1px solid rgba(0, 212, 255, 0.1);
+}}
+
+/* Input fields */
+.stTextInput > div > div > input,
+.stSelectbox > div > div,
+.stMultiSelect > div > div {{
+    background-color: rgba(15, 22, 41, 0.8) !important;
+    border-color: rgba(0, 212, 255, 0.2) !important;
+    color: {TEXT_LIGHT} !important;
+    border-radius: 8px !important;
+}}
+
+/* Expander styling */
+.streamlit-expanderHeader {{
+    background: rgba(15, 22, 41, 0.5);
+    border-radius: 8px;
+}}
+
+/* Live ticker bar */
+.ticker-bar {{
+    background: linear-gradient(90deg, rgba(0, 212, 255, 0.05), rgba(178, 75, 243, 0.05), rgba(0, 212, 255, 0.05));
+    border: 1px solid rgba(0, 212, 255, 0.1);
+    border-radius: 10px;
+    padding: 8px 16px;
+    margin-bottom: 16px;
+    overflow: hidden;
+    position: relative;
+}}
+.ticker-content {{
+    display: flex;
+    animation: tickerScroll 30s linear infinite;
+    white-space: nowrap;
+    gap: 40px;
+}}
+@keyframes tickerScroll {{
+    0% {{ transform: translateX(0); }}
+    100% {{ transform: translateX(-50%); }}
+}}
+.ticker-item {{
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: {TEXT_LIGHT};
+}}
+
+/* Heatmap cell */
+.heatmap-cell {{
+    border-radius: 6px;
+    padding: 8px;
+    text-align: center;
+    transition: transform 0.2s;
+    cursor: default;
+}}
+.heatmap-cell:hover {{
+    transform: scale(1.05);
+    z-index: 10;
+}}
+
+/* God mode section header */
+.god-header {{
+    background: linear-gradient(90deg, transparent, rgba(0, 212, 255, 0.1), transparent);
+    border-left: 3px solid {NEON_BLUE};
+    padding: 8px 16px;
+    margin: 16px 0;
+    border-radius: 0 8px 8px 0;
+}}
+
+/* Pulse animation for live data */
+.pulse {{
+    animation: pulse 2s ease infinite;
+}}
+@keyframes pulse {{
+    0%, 100% {{ opacity: 1; }}
+    50% {{ opacity: 0.6; }}
+}}
+
+/* Risk level indicators */
+.risk-low {{ color: {POSITIVE}; text-shadow: 0 0 8px rgba(0, 255, 136, 0.4); }}
+.risk-medium {{ color: {WARNING}; text-shadow: 0 0 8px rgba(255, 209, 102, 0.4); }}
+.risk-high {{ color: {NEGATIVE}; text-shadow: 0 0 8px rgba(255, 51, 102, 0.4); }}
+.risk-extreme {{ color: #FF0000; text-shadow: 0 0 12px rgba(255, 0, 0, 0.6); animation: pulse 1s ease infinite; }}
+
+/* Fibonacci level bars */
+.fib-level {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 12px;
+    margin: 2px 0;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    transition: all 0.2s;
+}}
+.fib-level:hover {{ transform: translateX(4px); }}
+
+/* Monte Carlo confidence band */
+.mc-stat {{
+    text-align: center;
+    padding: 12px;
+    background: rgba(15, 22, 41, 0.5);
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}}
+
+/* Whale tracker entry */
+.whale-entry {{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    background: rgba(15, 22, 41, 0.5);
+    border-radius: 10px;
+    border-left: 3px solid {NEON_BLUE};
+    margin: 6px 0;
+    transition: all 0.2s;
+}}
+.whale-entry:hover {{
+    background: rgba(15, 22, 41, 0.8);
+    border-left-color: {NEON_PURPLE};
+}}
+
+/* Advanced screener row highlight */
+.screener-match {{
+    background: rgba(0, 255, 136, 0.05);
+    border: 1px solid rgba(0, 255, 136, 0.2);
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin: 4px 0;
+}}
+</style>
 """, unsafe_allow_html=True)
-
-
-st.markdown(
-    f"""
-    <style>
-    /* Global styles */
-    .stApp {{
-        background-color: {PRIMARY_BG};
-        color: {TEXT_LIGHT};
-        font-family: 'Segoe UI', sans-serif;
-    }}
-
-    /* Titles and subtitles */
-    h1.title {{
-        font-size: 2.4rem;
-        font-weight: 700;
-        color: {ACCENT};
-        margin-bottom: 0.4rem;
-    }}
-    p.subtitle {{
-        font-size: 1.05rem;
-        color: {TEXT_MUTED};
-        margin-top: 0;
-        margin-bottom: 2rem;
-    }}
-
-    /* Card styling */
-    .metric-card {{
-        background-color: {PRIMARY_BG};
-        border: 1px solid rgba(255, 255, 255, 0.06);
-        border-radius: 14px;
-        padding: 24px 20px;
-        text-align: center;
-        box-shadow: 0 8px 16px rgba(0, 0, 0, 0.5);
-        margin-bottom: 20px;
-    }}
-    .metric-label {{
-        font-size: 0.9rem;
-        color: {TEXT_MUTED};
-        margin-bottom: 8px;
-        letter-spacing: 0.5px;
-    }}
-    .metric-value {{
-        font-size: 1.8rem;
-        font-weight: 600;
-        color: {ACCENT};
-    }}
-    .metric-delta-positive, .metric-delta-negative {{
-        font-size: 0.9rem;
-        font-weight: 500;
-    }}
-    .metric-delta-positive {{ color: {POSITIVE}; }}
-    .metric-delta-negative {{ color: {NEGATIVE}; }}
-
-    /* Panel boxes for larger sections */
-    .panel-box {{
-        background-color: {PRIMARY_BG};
-        border-radius: 16px;
-        padding: 28px;
-        margin-bottom: 32px;
-        border: 1px solid rgba(255, 255, 255, 0.06);
-        box-shadow: 0 8px 16px rgba(0, 0, 0, 0.5);
-    }}
-
-    /* Table styling */
-    .table-container {{ overflow-x: auto; }}
-    table.dataframe {{
-        width: 100% !important;
-        border-collapse: collapse;
-        background-color: {PRIMARY_BG};
-    }}
-    table.dataframe thead tr {{
-        background-color: {PRIMARY_BG};
-    }}
-    table.dataframe th {{
-        color: {ACCENT};
-        padding: 10px;
-        text-align: left;
-        font-size: 0.9rem;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    }}
-    table.dataframe td {{
-        padding: 10px;
-        font-size: 0.9rem;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-        color: {TEXT_LIGHT};
-    }}
-
-    /* Remove row hover highlight from Streamlit table */
-    table.dataframe tbody tr:hover {{
-        background-color: rgba(255, 255, 255, 0.03);
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True
-)
 
 
 # Exchange set up with caching – Kraken (primary) with Coinbase & Bitstamp fallbacks
@@ -1570,6 +1878,458 @@ def ml_predict_direction(df: pd.DataFrame) -> tuple[float, str]:
     return prob_up, direction
 
 
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                    GOD MODE FUNCTIONS                        ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
+    """GOD MODE: Ensemble ML prediction combining 3 models with voting.
+
+    Returns (probability, direction, model_details_dict).
+    """
+    if df is None or len(df) < 60:
+        return 0.5, "NEUTRAL", {}
+
+    df = df.copy().reset_index(drop=True)
+    df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
+    df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
+    df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
+    df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+    macd_ind = ta.trend.MACD(df['close'])
+    df['macd'] = macd_ind.macd()
+    df['macd_signal'] = macd_ind.macd_signal()
+    df['macd_diff'] = macd_ind.macd_diff()
+    df['obv'] = ta.volume.on_balance_volume(df['close'], df['volume'])
+    df['atr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
+    df['returns'] = df['close'].pct_change()
+    df['volume_ratio'] = df['volume'] / df['volume'].rolling(20).mean()
+    bb = ta.volatility.BollingerBands(df['close'])
+    df['bb_width'] = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg()
+    # Extra features for ensemble
+    df['ema_spread'] = (df['ema5'] - df['ema21']) / df['close']
+    df['rsi_slope'] = df['rsi'].diff(3)
+    df['vol_trend'] = df['volume'].rolling(5).mean() / df['volume'].rolling(20).mean()
+
+    df['target'] = (df['close'].shift(-1) > df['close']).astype(int)
+    feature_cols = ['ema5','ema9','ema21','rsi','macd','macd_signal','macd_diff',
+                    'obv','atr','returns','volume_ratio','bb_width',
+                    'ema_spread','rsi_slope','vol_trend']
+    df_features = df[feature_cols].shift(1)
+    df_model = pd.concat([df_features, df['target']], axis=1).dropna()
+
+    if len(df_model) < 50:
+        return 0.5, "NEUTRAL", {}
+
+    X = df_model[feature_cols].astype(float).values
+    y = df_model['target'].astype(int).values
+
+    try:
+        split_idx = int(len(X) * 0.8)
+        X_train, y_train = X[:split_idx], y[:split_idx]
+        X_pred = X[-1:]
+
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_pred_scaled = scaler.transform(X_pred)
+
+        gb = GradientBoostingClassifier(n_estimators=150, max_depth=4, learning_rate=0.08,
+                                         subsample=0.85, random_state=42)
+        rf = RandomForestClassifier(n_estimators=200, max_depth=5, random_state=42)
+        lr = LogisticRegression(max_iter=1000, random_state=42)
+
+        gb.fit(X_train_scaled, y_train)
+        rf.fit(X_train_scaled, y_train)
+        lr.fit(X_train_scaled, y_train)
+
+        gb_prob = float(gb.predict_proba(X_pred_scaled)[0][1])
+        rf_prob = float(rf.predict_proba(X_pred_scaled)[0][1])
+        lr_prob = float(lr.predict_proba(X_pred_scaled)[0][1])
+
+        # Weighted ensemble: GB has highest weight
+        weights = [0.45, 0.35, 0.20]
+        prob_up = gb_prob * weights[0] + rf_prob * weights[1] + lr_prob * weights[2]
+
+        details = {
+            'gradient_boosting': gb_prob,
+            'random_forest': rf_prob,
+            'logistic_regression': lr_prob,
+            'ensemble': prob_up,
+            'agreement': sum(1 for p in [gb_prob, rf_prob, lr_prob] if p > 0.5) / 3.0,
+        }
+    except Exception:
+        return 0.5, "NEUTRAL", {}
+
+    direction = "LONG" if prob_up >= 0.58 else ("SHORT" if prob_up <= 0.42 else "NEUTRAL")
+    return prob_up, direction, details
+
+
+def calculate_fibonacci_levels(df: pd.DataFrame, lookback: int = 100) -> dict:
+    """Calculate Fibonacci retracement and extension levels from swing high/low."""
+    if df is None or len(df) < 20:
+        return {}
+
+    data = df.tail(min(lookback, len(df)))
+    swing_high = data['high'].max()
+    swing_low = data['low'].min()
+    swing_range = swing_high - swing_low
+
+    if swing_range <= 0:
+        return {}
+
+    high_idx = data['high'].idxmax()
+    low_idx = data['low'].idxmin()
+    is_uptrend = low_idx < high_idx
+
+    levels = {}
+    fib_ratios = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
+    fib_names = ['0%', '23.6%', '38.2%', '50%', '61.8%', '78.6%', '100%']
+
+    for ratio, name in zip(fib_ratios, fib_names):
+        if is_uptrend:
+            price = swing_high - swing_range * ratio
+        else:
+            price = swing_low + swing_range * ratio
+        levels[name] = price
+
+    # Extension levels
+    ext_ratios = [1.272, 1.618, 2.0, 2.618]
+    ext_names = ['127.2%', '161.8%', '200%', '261.8%']
+    for ratio, name in zip(ext_ratios, ext_names):
+        if is_uptrend:
+            price = swing_high - swing_range * ratio
+        else:
+            price = swing_low + swing_range * ratio
+        levels[name] = price
+
+    levels['_swing_high'] = swing_high
+    levels['_swing_low'] = swing_low
+    levels['_is_uptrend'] = is_uptrend
+    return levels
+
+
+def monte_carlo_simulation(df: pd.DataFrame, num_simulations: int = 500,
+                           num_days: int = 30) -> dict:
+    """Run Monte Carlo simulation for price prediction with confidence intervals."""
+    if df is None or len(df) < 30:
+        return {}
+
+    returns = df['close'].pct_change().dropna()
+    mu = returns.mean()
+    sigma = returns.std()
+    last_price = float(df['close'].iloc[-1])
+
+    simulations = np.zeros((num_simulations, num_days))
+    for i in range(num_simulations):
+        daily_returns = np.random.normal(mu, sigma, num_days)
+        price_path = last_price * np.cumprod(1 + daily_returns)
+        simulations[i] = price_path
+
+    final_prices = simulations[:, -1]
+    return {
+        'simulations': simulations,
+        'last_price': last_price,
+        'mean_price': float(np.mean(final_prices)),
+        'median_price': float(np.median(final_prices)),
+        'p5': float(np.percentile(final_prices, 5)),
+        'p25': float(np.percentile(final_prices, 25)),
+        'p75': float(np.percentile(final_prices, 75)),
+        'p95': float(np.percentile(final_prices, 95)),
+        'min_price': float(np.min(final_prices)),
+        'max_price': float(np.max(final_prices)),
+        'prob_profit': float(np.mean(final_prices > last_price)),
+        'expected_return': float((np.mean(final_prices) - last_price) / last_price * 100),
+        'var_95': float(np.percentile(final_prices / last_price - 1, 5) * 100),
+    }
+
+
+def detect_divergence(df: pd.DataFrame) -> list[dict]:
+    """Detect RSI and MACD divergences — bullish and bearish."""
+    if df is None or len(df) < 30:
+        return []
+
+    divergences = []
+    df = df.copy()
+    df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+    macd_ind = ta.trend.MACD(df['close'])
+    df['macd'] = macd_ind.macd()
+
+    lookback = min(20, len(df) - 5)
+    recent = df.tail(lookback)
+
+    # Find local minima and maxima in price
+    for i in range(2, len(recent) - 2):
+        idx = recent.index[i]
+        prev2 = recent.iloc[i - 2]
+        prev1 = recent.iloc[i - 1]
+        curr = recent.iloc[i]
+        next1 = recent.iloc[i + 1] if i + 1 < len(recent) else curr
+        next2 = recent.iloc[i + 2] if i + 2 < len(recent) else curr
+
+        # Check for local low in price but higher low in RSI (bullish divergence)
+        if curr['low'] < prev1['low'] and curr['low'] < next1['low']:
+            # Look for previous low
+            for j in range(max(0, i - 10), i - 2):
+                prev_low = recent.iloc[j]
+                if prev_low['low'] < recent.iloc[max(0, j-1)]['low']:
+                    if curr['close'] < prev_low['close'] and curr['rsi'] > prev_low['rsi']:
+                        divergences.append({
+                            'type': 'BULLISH RSI',
+                            'description': 'Price making lower lows but RSI making higher lows',
+                            'strength': 'STRONG',
+                            'color': POSITIVE,
+                        })
+                        break
+
+        # Check for local high in price but lower high in RSI (bearish divergence)
+        if curr['high'] > prev1['high'] and curr['high'] > next1['high']:
+            for j in range(max(0, i - 10), i - 2):
+                prev_high = recent.iloc[j]
+                if prev_high['high'] > recent.iloc[max(0, j-1)]['high']:
+                    if curr['close'] > prev_high['close'] and curr['rsi'] < prev_high['rsi']:
+                        divergences.append({
+                            'type': 'BEARISH RSI',
+                            'description': 'Price making higher highs but RSI making lower highs',
+                            'strength': 'STRONG',
+                            'color': NEGATIVE,
+                        })
+                        break
+
+    # MACD divergence check
+    last_5 = df.tail(5)
+    if len(last_5) >= 5:
+        price_trend = last_5['close'].iloc[-1] - last_5['close'].iloc[0]
+        macd_trend = last_5['macd'].iloc[-1] - last_5['macd'].iloc[0]
+        if price_trend > 0 and macd_trend < 0:
+            divergences.append({
+                'type': 'BEARISH MACD',
+                'description': 'Price rising but MACD declining — momentum weakening',
+                'strength': 'MODERATE',
+                'color': WARNING,
+            })
+        elif price_trend < 0 and macd_trend > 0:
+            divergences.append({
+                'type': 'BULLISH MACD',
+                'description': 'Price falling but MACD rising — selling pressure weakening',
+                'strength': 'MODERATE',
+                'color': WARNING,
+            })
+
+    return divergences
+
+
+def calculate_risk_metrics(df: pd.DataFrame, risk_free_rate: float = 0.02) -> dict:
+    """Calculate comprehensive risk metrics: VaR, Sharpe, Sortino, Calmar, Max Drawdown."""
+    if df is None or len(df) < 20:
+        return {}
+
+    returns = df['close'].pct_change().dropna()
+    if len(returns) < 10:
+        return {}
+
+    # Basic statistics
+    mean_return = float(returns.mean())
+    std_return = float(returns.std())
+    total_return = float((df['close'].iloc[-1] / df['close'].iloc[0]) - 1)
+
+    # Annualization factor (assume ~365 trading days for crypto)
+    ann_factor = 365
+
+    # Value at Risk (Historical)
+    var_95 = float(np.percentile(returns, 5))
+    var_99 = float(np.percentile(returns, 1))
+
+    # Conditional VaR (Expected Shortfall)
+    cvar_95 = float(returns[returns <= var_95].mean()) if len(returns[returns <= var_95]) > 0 else var_95
+
+    # Sharpe Ratio (annualized)
+    daily_rf = risk_free_rate / ann_factor
+    excess_returns = returns - daily_rf
+    sharpe = float(excess_returns.mean() / (excess_returns.std() + 1e-9) * np.sqrt(ann_factor))
+
+    # Sortino Ratio (only penalizes downside volatility)
+    downside_returns = returns[returns < 0]
+    downside_std = float(downside_returns.std()) if len(downside_returns) > 0 else 1e-9
+    sortino = float((mean_return - daily_rf) / (downside_std + 1e-9) * np.sqrt(ann_factor))
+
+    # Maximum Drawdown
+    cumulative = (1 + returns).cumprod()
+    peak = cumulative.cummax()
+    drawdown = (cumulative - peak) / peak
+    max_drawdown = float(drawdown.min())
+    max_dd_duration = 0
+    dd_count = 0
+    for dd in drawdown:
+        if dd < 0:
+            dd_count += 1
+            max_dd_duration = max(max_dd_duration, dd_count)
+        else:
+            dd_count = 0
+
+    # Calmar Ratio
+    ann_return = mean_return * ann_factor
+    calmar = float(ann_return / (abs(max_drawdown) + 1e-9))
+
+    # Win rate
+    win_rate = float((returns > 0).sum() / len(returns) * 100)
+
+    # Skewness and Kurtosis
+    skewness = float(returns.skew())
+    kurtosis = float(returns.kurtosis())
+
+    # Best/Worst day
+    best_day = float(returns.max() * 100)
+    worst_day = float(returns.min() * 100)
+
+    return {
+        'total_return': total_return * 100,
+        'ann_return': ann_return * 100,
+        'ann_volatility': std_return * np.sqrt(ann_factor) * 100,
+        'sharpe': sharpe,
+        'sortino': sortino,
+        'calmar': calmar,
+        'max_drawdown': max_drawdown * 100,
+        'max_dd_duration': max_dd_duration,
+        'var_95': var_95 * 100,
+        'var_99': var_99 * 100,
+        'cvar_95': cvar_95 * 100,
+        'win_rate': win_rate,
+        'skewness': skewness,
+        'kurtosis': kurtosis,
+        'best_day': best_day,
+        'worst_day': worst_day,
+        'mean_daily': mean_return * 100,
+        'drawdown_series': drawdown,
+        'cumulative_returns': cumulative,
+    }
+
+
+def calculate_volume_profile(df: pd.DataFrame, num_bins: int = 30) -> dict:
+    """Calculate volume at price levels for volume profile visualization."""
+    if df is None or len(df) < 10:
+        return {}
+
+    price_min = df['low'].min()
+    price_max = df['high'].max()
+    bin_edges = np.linspace(price_min, price_max, num_bins + 1)
+    volumes = np.zeros(num_bins)
+
+    for _, row in df.iterrows():
+        for b in range(num_bins):
+            if row['low'] <= bin_edges[b + 1] and row['high'] >= bin_edges[b]:
+                overlap = min(row['high'], bin_edges[b + 1]) - max(row['low'], bin_edges[b])
+                total_range = row['high'] - row['low']
+                if total_range > 0:
+                    volumes[b] += row['volume'] * (overlap / total_range)
+
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+    poc_idx = int(np.argmax(volumes))
+
+    return {
+        'bin_centers': bin_centers,
+        'volumes': volumes,
+        'poc_price': float(bin_centers[poc_idx]),
+        'poc_volume': float(volumes[poc_idx]),
+        'value_area_high': float(bin_centers[min(poc_idx + int(num_bins * 0.35), num_bins - 1)]),
+        'value_area_low': float(bin_centers[max(poc_idx - int(num_bins * 0.35), 0)]),
+    }
+
+
+def detect_market_regime(df: pd.DataFrame) -> dict:
+    """Detect current market regime: Trending, Ranging, Volatile, or Breakout."""
+    if df is None or len(df) < 30:
+        return {'regime': 'UNKNOWN', 'color': TEXT_MUTED}
+
+    adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14)
+    adx_val = float(adx.iloc[-1]) if not adx.empty else 0
+
+    bb = ta.volatility.BollingerBands(df['close'], window=20)
+    bb_width = float(((bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg()).iloc[-1])
+
+    atr = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14)
+    atr_pct = float(atr.iloc[-1] / df['close'].iloc[-1])
+
+    # Detect regime
+    if adx_val > 40:
+        regime = 'STRONG TREND'
+        color = POSITIVE
+        desc = 'Powerful directional move. Trend-following strategies optimal.'
+    elif adx_val > 25:
+        regime = 'TRENDING'
+        color = NEON_BLUE
+        desc = 'Clear directional bias. EMAs and MACD reliable.'
+    elif bb_width < 0.03:
+        regime = 'COMPRESSION'
+        color = NEON_PURPLE
+        desc = 'Extreme low volatility. Breakout imminent. Watch for explosive move.'
+    elif atr_pct > 0.05:
+        regime = 'HIGH VOLATILITY'
+        color = NEGATIVE
+        desc = 'Choppy conditions. Reduce position size. Wide stops needed.'
+    elif adx_val < 15:
+        regime = 'RANGING'
+        color = WARNING
+        desc = 'No trend. Mean-reversion strategies may work. Avoid breakout trades.'
+    else:
+        regime = 'TRANSITIONING'
+        color = TEXT_MUTED
+        desc = 'Market shifting between regimes. Wait for confirmation.'
+
+    return {
+        'regime': regime,
+        'color': color,
+        'description': desc,
+        'adx': adx_val,
+        'bb_width': bb_width,
+        'atr_pct': atr_pct * 100,
+    }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_trending_coins() -> list[dict]:
+    """Fetch trending coins from CoinGecko for whale/momentum tracking."""
+    try:
+        resp = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            coins = []
+            for item in data.get('coins', [])[:15]:
+                c = item.get('item', {})
+                coins.append({
+                    'name': c.get('name', ''),
+                    'symbol': c.get('symbol', '').upper(),
+                    'market_cap_rank': c.get('market_cap_rank', 0),
+                    'price_btc': c.get('price_btc', 0),
+                    'score': c.get('score', 0),
+                })
+            return coins
+    except Exception:
+        pass
+    return []
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_top_gainers_losers(limit: int = 20) -> tuple[list, list]:
+    """Fetch top gainers and losers from CoinGecko."""
+    try:
+        url = "https://api.coingecko.com/api/v3/coins/markets"
+        params = {
+            "vs_currency": "usd", "order": "market_cap_desc",
+            "per_page": 250, "page": 1, "sparkline": False,
+            "price_change_percentage": "24h",
+        }
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            valid = [c for c in data if c.get('price_change_percentage_24h') is not None]
+            sorted_coins = sorted(valid, key=lambda x: x.get('price_change_percentage_24h', 0), reverse=True)
+            gainers = sorted_coins[:limit]
+            losers = sorted_coins[-limit:][::-1]
+            return gainers, losers
+    except Exception:
+        pass
+    return [], []
+
+
 def get_top_volume_usdt_symbols(top_n: int = 100, vs_currency: str = "usd"):
     """Obtain top USDT trading pairs from CoinGecko and filter by exchange markets."""
     try:
@@ -1633,7 +2393,7 @@ def render_market_tab():
     eth_change = get_price_change("ETH/USDT")
 
     # Display headline and subtitle
-    st.markdown("<h1 class='title'>Crypto Market Dashboard</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 class='title'>Crypto Command Center</h1>", unsafe_allow_html=True)
     st.markdown(
         f"<p style='color:{TEXT_MUTED}; font-size:0.94rem;'>"
         "Live metrics for BTC, ETH and the broader market. "
@@ -4430,13 +5190,884 @@ def render_tools_tab():
             st.plotly_chart(fig_liq, width="stretch")
 
 
+# ╔══════════════════════════════════════════════════════════════╗
+# ║                    GOD MODE TABS                             ║
+# ╚══════════════════════════════════════════════════════════════╝
+
+def render_heatmap_tab():
+    """GOD MODE: Market heatmap with treemap visualization."""
+    st.markdown(
+        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Market Heatmap</h2>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
+        "Visual treemap of top cryptocurrencies sized by market cap, colored by 24h price change. "
+        "Instantly spot which sectors are hot and which are bleeding.</p>",
+        unsafe_allow_html=True,
+    )
+
+    with st.spinner("Loading market data for heatmap..."):
+        try:
+            url = "https://api.coingecko.com/api/v3/coins/markets"
+            params = {
+                "vs_currency": "usd", "order": "market_cap_desc",
+                "per_page": 100, "page": 1, "sparkline": False,
+                "price_change_percentage": "24h",
+            }
+            resp = requests.get(url, params=params, timeout=15)
+            if resp.status_code != 200:
+                st.error("Could not fetch market data for heatmap.")
+                return
+            coins = resp.json()
+        except Exception as e:
+            st.error(f"Heatmap data error: {e}")
+            return
+
+    if not coins:
+        st.warning("No data available.")
+        return
+
+    hm_data = []
+    for c in coins:
+        mcap = c.get('market_cap', 0) or 0
+        change = c.get('price_change_percentage_24h', 0) or 0
+        price = c.get('current_price', 0) or 0
+        symbol = (c.get('symbol', '') or '').upper()
+        name = c.get('name', '')
+        if mcap > 0:
+            hm_data.append({
+                'Symbol': symbol,
+                'Name': name,
+                'Market Cap': mcap,
+                'Change 24h (%)': round(change, 2),
+                'Price': price,
+                'Sector': 'Crypto',
+            })
+
+    if not hm_data:
+        st.warning("No valid data for heatmap.")
+        return
+
+    df_hm = pd.DataFrame(hm_data)
+
+    fig = px.treemap(
+        df_hm, path=['Sector', 'Symbol'], values='Market Cap',
+        color='Change 24h (%)',
+        color_continuous_scale=['#FF0000', '#CC0000', '#660000', '#333333', '#003300', '#006600', '#00CC00'],
+        color_continuous_midpoint=0,
+        custom_data=['Name', 'Price', 'Change 24h (%)', 'Market Cap'],
+    )
+    fig.update_traces(
+        hovertemplate=(
+            "<b>%{customdata[0]} (%{label})</b><br>"
+            "Price: $%{customdata[1]:,.2f}<br>"
+            "24h Change: %{customdata[2]:+.2f}%<br>"
+            "Market Cap: $%{customdata[3]:,.0f}<extra></extra>"
+        ),
+        textinfo="label+text+percent root",
+        texttemplate="<b>%{label}</b><br>%{customdata[2]:+.2f}%",
+    )
+    fig.update_layout(
+        height=650, template='plotly_dark',
+        margin=dict(l=5, r=5, t=30, b=5),
+        paper_bgcolor=PRIMARY_BG,
+        font=dict(size=12),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Top gainers & losers
+    st.markdown(f"<div class='god-header'><b style='color:{NEON_BLUE};'>Top Movers (24h)</b></div>",
+                unsafe_allow_html=True)
+    col_g, col_l = st.columns(2)
+    df_sorted = df_hm.sort_values('Change 24h (%)', ascending=False)
+    with col_g:
+        st.markdown(f"<b style='color:{POSITIVE};'>Top Gainers</b>", unsafe_allow_html=True)
+        for _, row in df_sorted.head(10).iterrows():
+            st.markdown(
+                f"<div style='display:flex; justify-content:space-between; padding:4px 8px; "
+                f"border-left:2px solid {POSITIVE}; margin:2px 0; border-radius:0 4px 4px 0; "
+                f"background:rgba(0,255,136,0.05);'>"
+                f"<span style='color:{TEXT_LIGHT};'>{row['Symbol']}</span>"
+                f"<span style='color:{POSITIVE}; font-weight:600;'>+{row['Change 24h (%)']:.2f}%</span></div>",
+                unsafe_allow_html=True,
+            )
+    with col_l:
+        st.markdown(f"<b style='color:{NEGATIVE};'>Top Losers</b>", unsafe_allow_html=True)
+        for _, row in df_sorted.tail(10).iloc[::-1].iterrows():
+            st.markdown(
+                f"<div style='display:flex; justify-content:space-between; padding:4px 8px; "
+                f"border-left:2px solid {NEGATIVE}; margin:2px 0; border-radius:0 4px 4px 0; "
+                f"background:rgba(255,51,102,0.05);'>"
+                f"<span style='color:{TEXT_LIGHT};'>{row['Symbol']}</span>"
+                f"<span style='color:{NEGATIVE}; font-weight:600;'>{row['Change 24h (%)']:.2f}%</span></div>",
+                unsafe_allow_html=True,
+            )
+
+
+def render_monte_carlo_tab():
+    """GOD MODE: Monte Carlo simulation for price prediction."""
+    st.markdown(
+        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Monte Carlo Simulation</h2>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
+        "Stochastic price simulation using historical return distributions. "
+        "Generates thousands of possible price paths to estimate probability ranges and risk.</p>",
+        unsafe_allow_html=True,
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        mc_coin = _normalize_coin_input(st.text_input("Coin", value="BTC", key="mc_coin"))
+    with col2:
+        mc_sims = st.slider("Simulations", 100, 2000, 500, step=100, key="mc_sims")
+    with col3:
+        mc_days = st.slider("Forecast Days", 7, 90, 30, key="mc_days")
+
+    mc_tf = st.selectbox("Base Timeframe", ['1h', '4h', '1d'], index=2, key="mc_tf")
+
+    if st.button("Run Simulation", type="primary", key="mc_run"):
+        _val_err = _validate_coin_symbol(mc_coin)
+        if _val_err:
+            st.error(_val_err)
+            return
+
+        with st.spinner(f"Running {mc_sims} simulations for {mc_days} days..."):
+            df = fetch_ohlcv(mc_coin, mc_tf, limit=500)
+            if df is None or len(df) < 30:
+                st.error("Not enough data. Try a different coin or timeframe.")
+                return
+
+            result = monte_carlo_simulation(df, num_simulations=mc_sims, num_days=mc_days)
+            if not result:
+                st.error("Simulation failed.")
+                return
+
+        # Display stats
+        st.markdown(f"<div class='god-header'><b style='color:{NEON_BLUE};'>Simulation Results</b></div>",
+                    unsafe_allow_html=True)
+
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            prob_color = POSITIVE if result['prob_profit'] >= 0.5 else NEGATIVE
+            st.markdown(
+                f"<div class='mc-stat'>"
+                f"<div style='color:{TEXT_MUTED}; font-size:0.75rem;'>PROFIT PROBABILITY</div>"
+                f"<div style='color:{prob_color}; font-size:1.6rem; font-weight:700;'>{result['prob_profit']*100:.1f}%</div>"
+                f"</div>", unsafe_allow_html=True)
+        with s2:
+            ret_color = POSITIVE if result['expected_return'] > 0 else NEGATIVE
+            st.markdown(
+                f"<div class='mc-stat'>"
+                f"<div style='color:{TEXT_MUTED}; font-size:0.75rem;'>EXPECTED RETURN</div>"
+                f"<div style='color:{ret_color}; font-size:1.6rem; font-weight:700;'>{result['expected_return']:+.2f}%</div>"
+                f"</div>", unsafe_allow_html=True)
+        with s3:
+            st.markdown(
+                f"<div class='mc-stat'>"
+                f"<div style='color:{TEXT_MUTED}; font-size:0.75rem;'>VALUE AT RISK (95%)</div>"
+                f"<div style='color:{NEGATIVE}; font-size:1.6rem; font-weight:700;'>{result['var_95']:.2f}%</div>"
+                f"</div>", unsafe_allow_html=True)
+        with s4:
+            st.markdown(
+                f"<div class='mc-stat'>"
+                f"<div style='color:{TEXT_MUTED}; font-size:0.75rem;'>MEDIAN TARGET</div>"
+                f"<div style='color:{ACCENT}; font-size:1.6rem; font-weight:700;'>${result['median_price']:,.2f}</div>"
+                f"</div>", unsafe_allow_html=True)
+
+        # Price range panel
+        st.markdown(
+            f"<div class='panel-box'>"
+            f"<b style='color:{ACCENT};'>Price Distribution ({mc_days}-day forecast)</b>"
+            f"<div style='display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin-top:12px;'>"
+            f"<div style='text-align:center;'><div style='color:{NEGATIVE}; font-size:0.7rem;'>WORST CASE</div>"
+            f"<div style='color:{NEGATIVE}; font-weight:600;'>${result['min_price']:,.2f}</div></div>"
+            f"<div style='text-align:center;'><div style='color:{WARNING}; font-size:0.7rem;'>5th PCTL</div>"
+            f"<div style='color:{WARNING}; font-weight:600;'>${result['p5']:,.2f}</div></div>"
+            f"<div style='text-align:center;'><div style='color:{NEON_BLUE}; font-size:0.7rem;'>MEDIAN</div>"
+            f"<div style='color:{NEON_BLUE}; font-weight:600;'>${result['median_price']:,.2f}</div></div>"
+            f"<div style='text-align:center;'><div style='color:{WARNING}; font-size:0.7rem;'>95th PCTL</div>"
+            f"<div style='color:{WARNING}; font-weight:600;'>${result['p95']:,.2f}</div></div>"
+            f"<div style='text-align:center;'><div style='color:{POSITIVE}; font-size:0.7rem;'>BEST CASE</div>"
+            f"<div style='color:{POSITIVE}; font-weight:600;'>${result['max_price']:,.2f}</div></div>"
+            f"</div></div>",
+            unsafe_allow_html=True,
+        )
+
+        # Plot simulation paths
+        fig = go.Figure()
+        sims = result['simulations']
+        days_range = list(range(1, mc_days + 1))
+
+        sample_count = min(100, mc_sims)
+        indices = np.random.choice(mc_sims, sample_count, replace=False)
+        for idx in indices:
+            fig.add_trace(go.Scatter(
+                x=days_range, y=sims[idx], mode='lines',
+                line=dict(width=0.5, color='rgba(0, 212, 255, 0.08)'),
+                showlegend=False, hoverinfo='skip',
+            ))
+
+        p5 = np.percentile(sims, 5, axis=0)
+        p25 = np.percentile(sims, 25, axis=0)
+        p50 = np.percentile(sims, 50, axis=0)
+        p75 = np.percentile(sims, 75, axis=0)
+        p95 = np.percentile(sims, 95, axis=0)
+
+        fig.add_trace(go.Scatter(x=days_range, y=p95, mode='lines', line=dict(width=0), showlegend=False))
+        fig.add_trace(go.Scatter(x=days_range, y=p5, mode='lines', fill='tonexty',
+                                  fillcolor='rgba(0, 212, 255, 0.1)', line=dict(width=0), name='90% CI'))
+        fig.add_trace(go.Scatter(x=days_range, y=p75, mode='lines', line=dict(width=0), showlegend=False))
+        fig.add_trace(go.Scatter(x=days_range, y=p25, mode='lines', fill='tonexty',
+                                  fillcolor='rgba(178, 75, 243, 0.15)', line=dict(width=0), name='50% CI'))
+        fig.add_trace(go.Scatter(x=days_range, y=p50, mode='lines',
+                                  line=dict(color=NEON_BLUE, width=2), name='Median'))
+        fig.add_hline(y=result['last_price'], line=dict(color=WARNING, dash='dash', width=1),
+                      annotation_text=f"Current: ${result['last_price']:,.2f}")
+
+        fig.update_layout(
+            height=500, template='plotly_dark',
+            title=f"Monte Carlo — {mc_coin} ({mc_sims} paths, {mc_days} days)",
+            xaxis_title="Days", yaxis_title="Price ($)",
+            margin=dict(l=20, r=20, t=50, b=30),
+            paper_bgcolor=PRIMARY_BG,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Final price distribution histogram
+        final_prices = sims[:, -1]
+        fig_hist = go.Figure()
+        fig_hist.add_trace(go.Histogram(x=final_prices, nbinsx=50, marker_color=NEON_BLUE, opacity=0.7))
+        fig_hist.add_vline(x=result['last_price'], line=dict(color=WARNING, dash='dash', width=2),
+                           annotation_text="Current Price")
+        fig_hist.update_layout(height=300, template='plotly_dark', title="Final Price Distribution",
+                                xaxis_title="Price ($)", yaxis_title="Frequency",
+                                margin=dict(l=20, r=20, t=50, b=30), paper_bgcolor=PRIMARY_BG)
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+
+def render_fibonacci_tab():
+    """GOD MODE: Fibonacci retracement and extension analysis."""
+    st.markdown(
+        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Fibonacci Analysis</h2>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
+        "Auto-calculated Fibonacci retracement and extension levels with divergence detection "
+        "and volume profile overlay.</p>",
+        unsafe_allow_html=True,
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        fib_coin = _normalize_coin_input(st.text_input("Coin", value="BTC", key="fib_coin"))
+    with col2:
+        fib_tf = st.selectbox("Timeframe", ['5m', '15m', '1h', '4h', '1d'], index=2, key="fib_tf")
+    with col3:
+        fib_lookback = st.slider("Lookback Bars", 30, 500, 120, key="fib_lookback")
+
+    if st.button("Calculate Fibonacci", type="primary", key="fib_run"):
+        _val_err = _validate_coin_symbol(fib_coin)
+        if _val_err:
+            st.error(_val_err)
+            return
+
+        with st.spinner("Calculating Fibonacci levels..."):
+            df = fetch_ohlcv(fib_coin, fib_tf, limit=fib_lookback)
+            if df is None or len(df) < 20:
+                st.error("Not enough data.")
+                return
+
+            levels = calculate_fibonacci_levels(df, lookback=fib_lookback)
+            if not levels:
+                st.error("Could not calculate levels.")
+                return
+
+            divergences = detect_divergence(df)
+            vp = calculate_volume_profile(df)
+            regime = detect_market_regime(df)
+
+        current_price = float(df['close'].iloc[-1])
+        is_uptrend = levels.get('_is_uptrend', True)
+
+        # Market regime badge
+        st.markdown(
+            f"<div style='display:flex; gap:16px; align-items:center; margin:10px 0;'>"
+            f"<div style='background:rgba(15,22,41,0.7); border:1px solid {regime['color']}; "
+            f"border-radius:10px; padding:8px 16px;'>"
+            f"<span style='color:{TEXT_MUTED}; font-size:0.7rem;'>REGIME</span> "
+            f"<span style='color:{regime['color']}; font-weight:700;'>{regime['regime']}</span></div>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.85rem;'>{regime['description']}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # Divergence alerts
+        if divergences:
+            for div in divergences:
+                st.markdown(
+                    f"<div style='background:rgba(15,22,41,0.5); border-left:3px solid {div['color']}; "
+                    f"padding:8px 14px; border-radius:0 8px 8px 0; margin:4px 0;'>"
+                    f"<b style='color:{div['color']};'>{div['type']} DIVERGENCE</b> "
+                    f"<span style='color:{TEXT_MUTED}; font-size:0.85rem;'>({div['strength']}) — "
+                    f"{div['description']}</span></div>",
+                    unsafe_allow_html=True,
+                )
+
+        # Fibonacci levels display
+        st.markdown(f"<div class='god-header'><b style='color:{NEON_BLUE};'>"
+                    f"Fibonacci Levels ({'Uptrend' if is_uptrend else 'Downtrend'})</b></div>",
+                    unsafe_allow_html=True)
+
+        fib_colors = {
+            '0%': '#FF3366', '23.6%': '#FF6B6B', '38.2%': '#FFD166',
+            '50%': '#00D4FF', '61.8%': '#B24BF3', '78.6%': '#00FF88',
+            '100%': '#FFFFFF', '127.2%': '#FFD700', '161.8%': '#FF8C00',
+            '200%': '#FF4500', '261.8%': '#DC143C',
+        }
+        fib_display = ['0%', '23.6%', '38.2%', '50%', '61.8%', '78.6%', '100%',
+                        '127.2%', '161.8%', '200%', '261.8%']
+
+        for name in fib_display:
+            price = levels.get(name, 0)
+            if price <= 0:
+                continue
+            dist_pct = (current_price - price) / current_price * 100
+            if abs(dist_pct) < 1:
+                bg, border_c, label_extra = 'rgba(0, 212, 255, 0.15)', NEON_BLUE, " CURRENT ZONE"
+            elif price > current_price:
+                bg, border_c, label_extra = 'rgba(0, 255, 136, 0.05)', POSITIVE, ""
+            else:
+                bg, border_c, label_extra = 'rgba(255, 51, 102, 0.05)', NEGATIVE, ""
+
+            is_ext = name in ['127.2%', '161.8%', '200%', '261.8%']
+            tag = " EXT" if is_ext else ""
+            st.markdown(
+                f"<div class='fib-level' style='background:{bg}; border-left:3px solid {border_c};'>"
+                f"<span style='color:{fib_colors.get(name, NEON_BLUE)}; font-weight:600;'>"
+                f"{name}{tag}{label_extra}</span>"
+                f"<span style='color:{ACCENT}; font-weight:600;'>${price:,.2f}</span>"
+                f"<span style='color:{TEXT_MUTED}; font-size:0.8rem;'>{dist_pct:+.2f}%</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        # Candlestick chart with Fibonacci levels
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(
+            x=df['timestamp'], open=df['open'], high=df['high'],
+            low=df['low'], close=df['close'],
+            increasing_line_color=POSITIVE, decreasing_line_color=NEGATIVE, name="Price",
+        ))
+        for name in fib_display:
+            price = levels.get(name, 0)
+            if price <= 0:
+                continue
+            fig.add_hline(y=price, line=dict(color=fib_colors.get(name, TEXT_MUTED), dash='dot', width=1),
+                          annotation_text=f"Fib {name}: ${price:,.2f}",
+                          annotation_font=dict(size=9, color=fib_colors.get(name, TEXT_MUTED)))
+
+        if vp and 'poc_price' in vp:
+            fig.add_hline(y=vp['poc_price'], line=dict(color=GOLD, dash='dash', width=1.5),
+                          annotation_text=f"POC: ${vp['poc_price']:,.2f}")
+
+        fig.update_layout(height=550, template='plotly_dark',
+                          title=f"Fibonacci — {fib_coin} ({fib_tf})",
+                          margin=dict(l=20, r=20, t=50, b=30),
+                          xaxis_rangeslider_visible=False, paper_bgcolor=PRIMARY_BG)
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def render_risk_analytics_tab():
+    """GOD MODE: Advanced risk analytics."""
+    st.markdown(
+        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Risk Analytics</h2>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
+        "Institutional-grade risk metrics: VaR, Sharpe/Sortino/Calmar ratios, "
+        "max drawdown analysis, return distribution.</p>",
+        unsafe_allow_html=True,
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        risk_coin = _normalize_coin_input(st.text_input("Coin", value="BTC", key="risk_coin"))
+    with col2:
+        risk_tf = st.selectbox("Timeframe", ['1h', '4h', '1d'], index=2, key="risk_tf")
+
+    if st.button("Analyze Risk", type="primary", key="risk_run"):
+        _val_err = _validate_coin_symbol(risk_coin)
+        if _val_err:
+            st.error(_val_err)
+            return
+
+        with st.spinner("Calculating risk metrics..."):
+            df = fetch_ohlcv(risk_coin, risk_tf, limit=500)
+            if df is None or len(df) < 30:
+                st.error("Not enough data.")
+                return
+            metrics = calculate_risk_metrics(df)
+            if not metrics:
+                st.error("Could not calculate metrics.")
+                return
+
+        # Key metrics grid
+        st.markdown(f"<div class='god-header'><b style='color:{NEON_BLUE};'>Key Risk Metrics</b></div>",
+                    unsafe_allow_html=True)
+
+        r1, r2, r3, r4 = st.columns(4)
+        with r1:
+            sr_c = POSITIVE if metrics['sharpe'] > 1 else (WARNING if metrics['sharpe'] > 0 else NEGATIVE)
+            st.markdown(f"<div class='mc-stat'>"
+                        f"<div style='color:{TEXT_MUTED}; font-size:0.7rem;'>SHARPE RATIO</div>"
+                        f"<div style='color:{sr_c}; font-size:1.5rem; font-weight:700;'>{metrics['sharpe']:.2f}</div>"
+                        f"</div>", unsafe_allow_html=True)
+        with r2:
+            so_c = POSITIVE if metrics['sortino'] > 1.5 else (WARNING if metrics['sortino'] > 0 else NEGATIVE)
+            st.markdown(f"<div class='mc-stat'>"
+                        f"<div style='color:{TEXT_MUTED}; font-size:0.7rem;'>SORTINO RATIO</div>"
+                        f"<div style='color:{so_c}; font-size:1.5rem; font-weight:700;'>{metrics['sortino']:.2f}</div>"
+                        f"</div>", unsafe_allow_html=True)
+        with r3:
+            dd_c = POSITIVE if abs(metrics['max_drawdown']) < 15 else (WARNING if abs(metrics['max_drawdown']) < 30 else NEGATIVE)
+            st.markdown(f"<div class='mc-stat'>"
+                        f"<div style='color:{TEXT_MUTED}; font-size:0.7rem;'>MAX DRAWDOWN</div>"
+                        f"<div style='color:{dd_c}; font-size:1.5rem; font-weight:700;'>{metrics['max_drawdown']:.2f}%</div>"
+                        f"</div>", unsafe_allow_html=True)
+        with r4:
+            st.markdown(f"<div class='mc-stat'>"
+                        f"<div style='color:{TEXT_MUTED}; font-size:0.7rem;'>VALUE AT RISK (95%)</div>"
+                        f"<div style='color:{NEGATIVE}; font-size:1.5rem; font-weight:700;'>{metrics['var_95']:.2f}%</div>"
+                        f"</div>", unsafe_allow_html=True)
+
+        r5, r6, r7, r8 = st.columns(4)
+        with r5:
+            ret_c = POSITIVE if metrics['total_return'] > 0 else NEGATIVE
+            st.markdown(f"<div class='mc-stat'>"
+                        f"<div style='color:{TEXT_MUTED}; font-size:0.7rem;'>TOTAL RETURN</div>"
+                        f"<div style='color:{ret_c}; font-size:1.5rem; font-weight:700;'>{metrics['total_return']:+.2f}%</div>"
+                        f"</div>", unsafe_allow_html=True)
+        with r6:
+            cal_c = POSITIVE if metrics['calmar'] > 1 else WARNING
+            st.markdown(f"<div class='mc-stat'>"
+                        f"<div style='color:{TEXT_MUTED}; font-size:0.7rem;'>CALMAR RATIO</div>"
+                        f"<div style='color:{cal_c}; font-size:1.5rem; font-weight:700;'>{metrics['calmar']:.2f}</div>"
+                        f"</div>", unsafe_allow_html=True)
+        with r7:
+            wr_c = POSITIVE if metrics['win_rate'] > 50 else NEGATIVE
+            st.markdown(f"<div class='mc-stat'>"
+                        f"<div style='color:{TEXT_MUTED}; font-size:0.7rem;'>WIN RATE</div>"
+                        f"<div style='color:{wr_c}; font-size:1.5rem; font-weight:700;'>{metrics['win_rate']:.1f}%</div>"
+                        f"</div>", unsafe_allow_html=True)
+        with r8:
+            st.markdown(f"<div class='mc-stat'>"
+                        f"<div style='color:{TEXT_MUTED}; font-size:0.7rem;'>ANN. VOLATILITY</div>"
+                        f"<div style='color:{WARNING}; font-size:1.5rem; font-weight:700;'>{metrics['ann_volatility']:.1f}%</div>"
+                        f"</div>", unsafe_allow_html=True)
+
+        # Performance details
+        st.markdown(
+            f"<div class='panel-box'><b style='color:{ACCENT};'>Performance Details</b>"
+            f"<div style='display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:12px;'>"
+            f"<div><span style='color:{TEXT_MUTED}; font-size:0.75rem;'>Best Day</span><br>"
+            f"<span style='color:{POSITIVE}; font-weight:600;'>{metrics['best_day']:+.2f}%</span></div>"
+            f"<div><span style='color:{TEXT_MUTED}; font-size:0.75rem;'>Worst Day</span><br>"
+            f"<span style='color:{NEGATIVE}; font-weight:600;'>{metrics['worst_day']:.2f}%</span></div>"
+            f"<div><span style='color:{TEXT_MUTED}; font-size:0.75rem;'>Skewness</span><br>"
+            f"<span style='color:{ACCENT}; font-weight:600;'>{metrics['skewness']:.3f}</span></div>"
+            f"<div><span style='color:{TEXT_MUTED}; font-size:0.75rem;'>Kurtosis</span><br>"
+            f"<span style='color:{ACCENT}; font-weight:600;'>{metrics['kurtosis']:.3f}</span></div>"
+            f"</div></div>",
+            unsafe_allow_html=True,
+        )
+
+        # Drawdown chart
+        dd_series = metrics['drawdown_series']
+        ts_vals = df['timestamp'].iloc[1:len(dd_series)+1] if 'timestamp' in df.columns else list(range(len(dd_series)))
+        fig_dd = go.Figure()
+        fig_dd.add_trace(go.Scatter(x=ts_vals, y=dd_series.values * 100, fill='tozeroy',
+                                     fillcolor='rgba(255, 51, 102, 0.2)',
+                                     line=dict(color=NEGATIVE, width=1.5), name='Drawdown %'))
+        fig_dd.update_layout(height=250, template='plotly_dark', title="Drawdown Analysis",
+                              yaxis_title="Drawdown (%)", margin=dict(l=20, r=20, t=50, b=30),
+                              paper_bgcolor=PRIMARY_BG)
+        st.plotly_chart(fig_dd, use_container_width=True)
+
+        # Cumulative returns
+        cum_ret = metrics['cumulative_returns']
+        ts_vals2 = df['timestamp'].iloc[1:len(cum_ret)+1] if 'timestamp' in df.columns else list(range(len(cum_ret)))
+        fig_cum = go.Figure()
+        fig_cum.add_trace(go.Scatter(x=ts_vals2, y=(cum_ret.values - 1) * 100, fill='tozeroy',
+                                      fillcolor='rgba(0, 212, 255, 0.1)',
+                                      line=dict(color=NEON_BLUE, width=2), name='Return %'))
+        fig_cum.add_hline(y=0, line=dict(color=TEXT_MUTED, dash='dash', width=1))
+        fig_cum.update_layout(height=300, template='plotly_dark', title="Cumulative Returns",
+                               yaxis_title="Return (%)", margin=dict(l=20, r=20, t=50, b=30),
+                               paper_bgcolor=PRIMARY_BG)
+        st.plotly_chart(fig_cum, use_container_width=True)
+
+        # Return distribution
+        returns = df['close'].pct_change().dropna() * 100
+        fig_dist = go.Figure()
+        fig_dist.add_trace(go.Histogram(x=returns, nbinsx=50, marker_color=NEON_PURPLE, opacity=0.7))
+        fig_dist.add_vline(x=0, line=dict(color=ACCENT, dash='dash', width=1))
+        fig_dist.add_vline(x=metrics['var_95'], line=dict(color=NEGATIVE, dash='dash', width=2),
+                           annotation_text=f"VaR 95%: {metrics['var_95']:.2f}%")
+        fig_dist.update_layout(height=250, template='plotly_dark', title="Return Distribution",
+                                xaxis_title="Return (%)", yaxis_title="Frequency",
+                                margin=dict(l=20, r=20, t=50, b=30), paper_bgcolor=PRIMARY_BG)
+        st.plotly_chart(fig_dist, use_container_width=True)
+
+
+def render_whale_tab():
+    """GOD MODE: Whale tracking and momentum signals."""
+    st.markdown(
+        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Whale Tracker</h2>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
+        "Track trending coins, top gainers/losers, and volume surges.</p>",
+        unsafe_allow_html=True,
+    )
+
+    with st.spinner("Fetching whale & momentum data..."):
+        trending = fetch_trending_coins()
+        gainers, losers = fetch_top_gainers_losers(15)
+
+    # Trending coins
+    st.markdown(f"<div class='god-header'><b style='color:{NEON_BLUE};'>Trending Coins</b></div>",
+                unsafe_allow_html=True)
+    if trending:
+        for i, coin in enumerate(trending[:10]):
+            rank_color = GOLD if i < 3 else NEON_BLUE if i < 6 else TEXT_MUTED
+            st.markdown(
+                f"<div class='whale-entry'>"
+                f"<span style='color:{rank_color}; font-weight:700; font-size:1.1rem; min-width:30px;'>#{i+1}</span>"
+                f"<span style='color:{ACCENT}; font-weight:600;'>{coin['symbol']}</span>"
+                f"<span style='color:{TEXT_MUTED}; font-size:0.8rem;'>{coin['name']}</span>"
+                f"<span style='color:{TEXT_MUTED}; font-size:0.8rem; margin-left:auto;'>"
+                f"Rank #{coin['market_cap_rank'] or 'N/A'}</span></div>",
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info("Trending data unavailable.")
+
+    # Gainers / losers
+    st.markdown(f"<div class='god-header'><b style='color:{NEON_BLUE};'>Market Momentum (24h)</b></div>",
+                unsafe_allow_html=True)
+    col_g, col_l = st.columns(2)
+    with col_g:
+        st.markdown(f"<b style='color:{POSITIVE};'>TOP GAINERS</b>", unsafe_allow_html=True)
+        for c in (gainers or [])[:12]:
+            change = c.get('price_change_percentage_24h', 0)
+            symbol = (c.get('symbol', '') or '').upper()
+            price = c.get('current_price', 0)
+            st.markdown(
+                f"<div style='display:flex; justify-content:space-between; padding:4px 8px; "
+                f"border-left:2px solid {POSITIVE}; margin:2px 0; background:rgba(0,255,136,0.04); "
+                f"border-radius:0 4px 4px 0;'>"
+                f"<span style='color:{ACCENT};'>{symbol} <span style='color:{TEXT_MUTED}; font-size:0.75rem;'>"
+                f"${price:,.4f}</span></span>"
+                f"<span style='color:{POSITIVE}; font-weight:600;'>+{change:.2f}%</span></div>",
+                unsafe_allow_html=True,
+            )
+    with col_l:
+        st.markdown(f"<b style='color:{NEGATIVE};'>TOP LOSERS</b>", unsafe_allow_html=True)
+        for c in (losers or [])[:12]:
+            change = c.get('price_change_percentage_24h', 0)
+            symbol = (c.get('symbol', '') or '').upper()
+            price = c.get('current_price', 0)
+            st.markdown(
+                f"<div style='display:flex; justify-content:space-between; padding:4px 8px; "
+                f"border-left:2px solid {NEGATIVE}; margin:2px 0; background:rgba(255,51,102,0.04); "
+                f"border-radius:0 4px 4px 0;'>"
+                f"<span style='color:{ACCENT};'>{symbol} <span style='color:{TEXT_MUTED}; font-size:0.75rem;'>"
+                f"${price:,.4f}</span></span>"
+                f"<span style='color:{NEGATIVE}; font-weight:600;'>{change:.2f}%</span></div>",
+                unsafe_allow_html=True,
+            )
+
+    # Volume surge scanner
+    st.markdown(f"<div class='god-header'><b style='color:{NEON_BLUE};'>Volume Surge Scanner</b></div>",
+                unsafe_allow_html=True)
+    scan_tf = st.selectbox("Scan Timeframe", ['5m', '15m', '1h', '4h'], index=2, key="whale_scan_tf")
+    if st.button("Scan for Volume Surges", key="whale_scan"):
+        with st.spinner("Scanning..."):
+            symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
+                        "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "DOT/USDT", "LINK/USDT"]
+            surges = []
+            for sym in symbols:
+                try:
+                    df_s = fetch_ohlcv(sym, scan_tf, limit=50)
+                    if df_s is not None and len(df_s) > 21:
+                        avg_vol = df_s['volume'].iloc[-21:-1].mean()
+                        last_vol = df_s['volume'].iloc[-1]
+                        if avg_vol > 0:
+                            ratio = last_vol / avg_vol
+                            if ratio > 1.5:
+                                surges.append({
+                                    'symbol': sym.split('/')[0], 'ratio': ratio,
+                                    'change': ((df_s['close'].iloc[-1] / df_s['close'].iloc[-2]) - 1) * 100,
+                                })
+                except Exception:
+                    continue
+            if surges:
+                surges.sort(key=lambda x: x['ratio'], reverse=True)
+                for s in surges:
+                    ic = NEGATIVE if s['ratio'] > 3 else (WARNING if s['ratio'] > 2 else NEON_BLUE)
+                    pc = POSITIVE if s['change'] > 0 else NEGATIVE
+                    st.markdown(
+                        f"<div class='whale-entry' style='border-left-color:{ic};'>"
+                        f"<span style='color:{ACCENT}; font-weight:700;'>{s['symbol']}</span>"
+                        f"<span style='color:{ic}; font-weight:600;'>{s['ratio']:.1f}x Vol</span>"
+                        f"<span style='color:{pc};'>{s['change']:+.2f}%</span></div>",
+                        unsafe_allow_html=True,
+                    )
+            else:
+                st.info("No significant volume surges detected.")
+
+
+def render_screener_tab():
+    """GOD MODE: Advanced multi-condition screener."""
+    st.markdown(
+        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Advanced Screener</h2>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
+        "Scan the market for coins matching your exact criteria.</p>",
+        unsafe_allow_html=True,
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        scr_tf = st.selectbox("Timeframe", ['5m', '15m', '1h', '4h', '1d'], index=2, key="scr_tf")
+        min_confidence = st.slider("Min Confidence %", 0, 100, 60, key="scr_conf")
+    with col2:
+        signal_filter = st.multiselect("Signal Filter", ['STRONG BUY', 'BUY', 'WAIT', 'SELL', 'STRONG SELL'],
+                                        default=['STRONG BUY', 'BUY'], key="scr_signal")
+        min_adx = st.slider("Min ADX", 0, 80, 20, key="scr_adx")
+    with col3:
+        rsi_range = st.slider("RSI Range", 0, 100, (20, 80), key="scr_rsi")
+        volume_spike_only = st.checkbox("Volume Spike Only", value=False, key="scr_volspike")
+
+    if st.button("Run Screener", type="primary", key="scr_run"):
+        with st.spinner("Scanning markets..."):
+            symbols_to_scan = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT",
+                                "XRP/USDT", "ADA/USDT", "DOGE/USDT", "AVAX/USDT",
+                                "DOT/USDT", "LINK/USDT", "MATIC/USDT", "UNI/USDT",
+                                "ATOM/USDT", "NEAR/USDT", "LTC/USDT", "BCH/USDT"]
+            results = []
+            progress = st.progress(0)
+            for i, sym in enumerate(symbols_to_scan):
+                progress.progress((i + 1) / len(symbols_to_scan))
+                try:
+                    df = fetch_ohlcv(sym, scr_tf, limit=120)
+                    if df is None or len(df) < 55:
+                        continue
+                    a = analyse(df)
+                    if a.confidence < min_confidence:
+                        continue
+                    if signal_filter and a.signal not in signal_filter:
+                        continue
+                    if not np.isnan(a.adx) and a.adx < min_adx:
+                        continue
+                    rsi_val = ta.momentum.rsi(df['close'], window=14).iloc[-1]
+                    if rsi_val < rsi_range[0] or rsi_val > rsi_range[1]:
+                        continue
+                    if volume_spike_only and not a.volume_spike:
+                        continue
+                    try:
+                        ai_prob, ai_dir = ml_predict_direction(df)
+                    except Exception:
+                        ai_prob, ai_dir = 0.5, "NEUTRAL"
+                    results.append({
+                        'Symbol': sym.split('/')[0],
+                        'Price': df['close'].iloc[-1],
+                        'Signal': a.signal,
+                        'Confidence': a.confidence,
+                        'AI': ai_dir,
+                        'RSI': round(rsi_val, 1),
+                        'ADX': round(a.adx, 1) if not np.isnan(a.adx) else 0,
+                        'Leverage': a.leverage,
+                    })
+                except Exception:
+                    continue
+            progress.empty()
+
+        if results:
+            st.markdown(
+                f"<div style='background:rgba(0,255,136,0.08); border:1px solid rgba(0,255,136,0.3); "
+                f"border-radius:10px; padding:12px; margin:10px 0; text-align:center;'>"
+                f"<span style='color:{POSITIVE}; font-weight:700; font-size:1.2rem;'>"
+                f"{len(results)} coins match</span></div>",
+                unsafe_allow_html=True,
+            )
+            results.sort(key=lambda x: x['Confidence'], reverse=True)
+            for r in results:
+                sig_c = POSITIVE if r['Signal'] in ['STRONG BUY', 'BUY'] else (NEGATIVE if r['Signal'] in ['STRONG SELL', 'SELL'] else WARNING)
+                ai_c = POSITIVE if r['AI'] == 'LONG' else (NEGATIVE if r['AI'] == 'SHORT' else WARNING)
+                conf_c = POSITIVE if r['Confidence'] >= 70 else (WARNING if r['Confidence'] >= 50 else NEGATIVE)
+                st.markdown(
+                    f"<div style='display:grid; grid-template-columns:70px 100px 100px 80px 70px 60px 60px; "
+                    f"gap:8px; align-items:center; padding:10px 14px; "
+                    f"background:rgba(15,22,41,0.5); border-radius:10px; margin:4px 0; "
+                    f"border:1px solid rgba(0,212,255,0.08);'>"
+                    f"<span style='color:{ACCENT}; font-weight:700;'>{r['Symbol']}</span>"
+                    f"<span style='color:{ACCENT}; font-size:0.85rem;'>${r['Price']:,.4f}</span>"
+                    f"<span style='color:{sig_c}; font-weight:700;'>{r['Signal']}</span>"
+                    f"<span style='color:{conf_c}; font-weight:600;'>{r['Confidence']:.0f}%</span>"
+                    f"<span style='color:{ai_c}; font-weight:600;'>{r['AI']}</span>"
+                    f"<span style='color:{TEXT_MUTED};'>RSI {r['RSI']}</span>"
+                    f"<span style='color:{WARNING};'>x{r['Leverage']}</span></div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.warning("No coins matched. Try relaxing filters.")
+
+
+def render_ensemble_ml_tab():
+    """GOD MODE: Enhanced ensemble ML prediction."""
+    st.markdown(
+        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Ensemble AI</h2>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
+        "Triple-model ensemble: Gradient Boosting + Random Forest + Logistic Regression with weighted voting.</p>",
+        unsafe_allow_html=True,
+    )
+
+    col1, col2 = st.columns(2)
+    with col1:
+        ens_coin = _normalize_coin_input(st.text_input("Coin", value="BTC", key="ens_coin"))
+    with col2:
+        ens_tf = st.selectbox("Timeframe", ['5m', '15m', '1h', '4h', '1d'], index=2, key="ens_tf")
+
+    if st.button("Run Ensemble Prediction", type="primary", key="ens_run"):
+        _val_err = _validate_coin_symbol(ens_coin)
+        if _val_err:
+            st.error(_val_err)
+            return
+
+        with st.spinner("Training 3 ML models..."):
+            df = fetch_ohlcv(ens_coin, ens_tf, limit=500)
+            if df is None or len(df) < 60:
+                st.error("Not enough data.")
+                return
+            prob, direction, details = ml_ensemble_predict(df)
+            if not details:
+                st.error("Ensemble prediction failed.")
+                return
+
+        dir_color = POSITIVE if direction == "LONG" else (NEGATIVE if direction == "SHORT" else WARNING)
+        agreement_pct = details.get('agreement', 0) * 100
+        agreement_color = POSITIVE if agreement_pct >= 66 else (WARNING if agreement_pct >= 33 else NEGATIVE)
+
+        # Big direction display
+        st.markdown(
+            f"<div style='text-align:center; padding:24px; background:rgba(15,22,41,0.7); "
+            f"border:2px solid {dir_color}; border-radius:16px; margin:16px 0;'>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.8rem; letter-spacing:2px;'>ENSEMBLE PREDICTION</div>"
+            f"<div style='color:{dir_color}; font-size:3rem; font-weight:800; margin:8px 0; "
+            f"text-shadow:0 0 20px {dir_color};'>{direction}</div>"
+            f"<div style='color:{ACCENT}; font-size:1.3rem;'>Probability: {prob*100:.1f}%</div>"
+            f"<div style='color:{agreement_color}; font-size:0.9rem; margin-top:6px;'>"
+            f"Model Agreement: {agreement_pct:.0f}%</div></div>",
+            unsafe_allow_html=True,
+        )
+
+        # Individual models
+        st.markdown(f"<div class='god-header'><b style='color:{NEON_BLUE};'>Individual Models</b></div>",
+                    unsafe_allow_html=True)
+        m1, m2, m3 = st.columns(3)
+        models = [
+            ("Gradient Boosting", details.get('gradient_boosting', 0.5), "45%", NEON_BLUE),
+            ("Random Forest", details.get('random_forest', 0.5), "35%", NEON_PURPLE),
+            ("Logistic Regression", details.get('logistic_regression', 0.5), "20%", WARNING),
+        ]
+        for col, (name, pv, weight, color) in zip([m1, m2, m3], models):
+            with col:
+                md = "LONG" if pv >= 0.55 else ("SHORT" if pv <= 0.45 else "NEUTRAL")
+                mc = POSITIVE if md == "LONG" else (NEGATIVE if md == "SHORT" else WARNING)
+                st.markdown(
+                    f"<div style='background:rgba(15,22,41,0.7); border:1px solid {color}; "
+                    f"border-radius:12px; padding:16px; text-align:center;'>"
+                    f"<div style='color:{color}; font-weight:700;'>{name}</div>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem;'>Weight: {weight}</div>"
+                    f"<div style='color:{mc}; font-size:1.8rem; font-weight:700; margin:8px 0;'>{md}</div>"
+                    f"<div style='color:{ACCENT};'>{pv*100:.1f}%</div></div>",
+                    unsafe_allow_html=True,
+                )
+
+        # Gauge chart
+        fig_gauge = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=prob * 100,
+            gauge={
+                'axis': {'range': [0, 100]},
+                'bar': {'color': dir_color},
+                'bgcolor': PRIMARY_BG,
+                'steps': [
+                    {'range': [0, 20], 'color': 'rgba(255, 51, 102, 0.3)'},
+                    {'range': [20, 40], 'color': 'rgba(255, 51, 102, 0.15)'},
+                    {'range': [40, 60], 'color': 'rgba(255, 209, 102, 0.15)'},
+                    {'range': [60, 80], 'color': 'rgba(0, 255, 136, 0.15)'},
+                    {'range': [80, 100], 'color': 'rgba(0, 255, 136, 0.3)'},
+                ],
+            },
+            title={'text': "Ensemble Bullish Probability", 'font': {'size': 16, 'color': ACCENT}},
+            number={'font': {'color': TEXT_LIGHT, 'size': 40}, 'suffix': '%'},
+        ))
+        fig_gauge.update_layout(height=280, margin=dict(l=30, r=30, t=60, b=20),
+                                 template='plotly_dark', paper_bgcolor=PRIMARY_BG)
+        st.plotly_chart(fig_gauge, use_container_width=True)
+
+
 def main():
-    """Entry point for the Streamlit app."""
+    """Entry point for the GOD MODE Streamlit app."""
+
+    # GOD MODE Sidebar
+    with st.sidebar:
+        st.markdown(
+            f"<div style='text-align:center; padding:12px;'>"
+            f"<span class='god-mode-badge'>GOD MODE ACTIVE</span></div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"<div style='text-align:center; margin:8px 0;'>"
+            f"<span style='color:{NEON_BLUE}; font-size:1.2rem; font-weight:700;'>"
+            f"CRYPTO COMMAND CENTER</span></div>",
+            unsafe_allow_html=True,
+        )
+
+        # Auto-refresh control
+        auto_refresh = st.checkbox("Auto-Refresh", value=False, key="auto_refresh")
+        if auto_refresh:
+            refresh_interval = st.slider("Refresh Interval (sec)", 30, 300, 60, key="refresh_interval")
+            st.markdown(
+                f"<div class='pulse' style='text-align:center; color:{POSITIVE}; font-size:0.8rem;'>"
+                f"LIVE — Refreshing every {refresh_interval}s</div>",
+                unsafe_allow_html=True,
+            )
+            time.sleep(refresh_interval)
+            st.rerun()
+
+    # All tabs: Original + GOD MODE
     tabs = st.tabs([
         "Market", "Spot", "Position", "AI Prediction",
-        "Multi-TF", "Correlation", "Sessions", "Tools",
-        "Backtest", "Analysis Guide",
+        "Ensemble AI", "Heatmap", "Monte Carlo",
+        "Fibonacci", "Risk Analytics", "Whale Tracker",
+        "Screener", "Multi-TF", "Correlation",
+        "Sessions", "Tools", "Backtest", "Analysis Guide",
     ])
+
     with tabs[0]:
         render_market_tab()
     with tabs[1]:
@@ -4446,16 +6077,30 @@ def main():
     with tabs[3]:
         render_ml_tab()
     with tabs[4]:
-        render_multitf_tab()
+        render_ensemble_ml_tab()
     with tabs[5]:
-        render_correlation_tab()
+        render_heatmap_tab()
     with tabs[6]:
-        render_sessions_tab()
+        render_monte_carlo_tab()
     with tabs[7]:
-        render_tools_tab()
+        render_fibonacci_tab()
     with tabs[8]:
-        render_backtest_tab()
+        render_risk_analytics_tab()
     with tabs[9]:
+        render_whale_tab()
+    with tabs[10]:
+        render_screener_tab()
+    with tabs[11]:
+        render_multitf_tab()
+    with tabs[12]:
+        render_correlation_tab()
+    with tabs[13]:
+        render_sessions_tab()
+    with tabs[14]:
+        render_tools_tab()
+    with tabs[15]:
+        render_backtest_tab()
+    with tabs[16]:
         render_guide_tab()
 
 main()
