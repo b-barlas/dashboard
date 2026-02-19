@@ -2439,12 +2439,14 @@ def render_market_tab():
     # Display headline and subtitle
     st.markdown("<h1 class='title'>Crypto Command Center</h1>", unsafe_allow_html=True)
     st.markdown(
-        f"<p style='color:{TEXT_MUTED}; font-size:0.94rem;'>"
-        "Live metrics for BTC, ETH and the broader market. "
-        "Top coins are dynamically selected based on 24h volume rankings from CoinGecko, "
-        "and filtered to include only USDT pairs actively traded on the exchange. "
-        "Each coin is scored based on real-time technical signals."
-        "</p>",
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"Your market overview dashboard. Shows live BTC/ETH prices, total market cap, "
+        f"{_tip('Fear & Greed Index', 'A 0-100 score measuring market sentiment. 0 = Extreme Fear (buy opportunity), 100 = Extreme Greed (sell signal). Based on volatility, volume, social media, and surveys.')} "
+        f"and {_tip('BTC Dominance', 'Percentage of total crypto market cap that belongs to Bitcoin. Rising dominance = money flowing into BTC (risk-off). Falling = altcoin season.')}. "
+        f"Top coins are dynamically selected by 24h volume from CoinGecko and scored with real-time technical signals.</p>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -2891,6 +2893,20 @@ def render_spot_tab():
         f"<h2 style='color:{ACCENT};margin-bottom:0.5rem;'>Spot Trading</h2>",
         unsafe_allow_html=True,
     )
+    st.markdown(
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"In-depth technical analysis for any coin. Combines "
+        f"{_tip('Trend', 'EMA crossovers, SuperTrend, Ichimoku Cloud, Parabolic SAR, and ADX indicators.')} (40%), "
+        f"{_tip('Momentum', 'RSI, MACD, Stochastic RSI, Williams %R, and CCI indicators.')} (30%), "
+        f"{_tip('Volume', 'OBV direction, volume spikes, and VWAP positioning.')} (20%), and "
+        f"{_tip('Volatility', 'Bollinger Band width, ATR level, and Keltner Channel breakouts.')} (10%) "
+        f"into a single signal (BUY / SELL / WAIT) with a confidence score from 0-100%. "
+        f"Designed for spot trading without leverage.</p>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
     coin = _normalize_coin_input(st.text_input(
         "Coin (e.g. BTC, ETH, TAO)",
         value="BTC",
@@ -3152,6 +3168,18 @@ def render_position_tab():
     """Render the Position Analyser tab for evaluating open positions."""
     st.markdown(
         f"<h2 style='color:{ACCENT};margin-bottom:0.5rem;'>Position Analyser</h2>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"Track and manage open positions. Enter your entry price, leverage, and direction to see "
+        f"{_tip('PnL', 'Profit and Loss — your current gain or loss percentage based on entry price vs current price, multiplied by leverage.')} in real-time, "
+        f"{_tip('Stop-Loss / Take-Profit', 'Automatically calculated based on ATR (Average True Range). Stop-loss protects against excessive loss, take-profit locks in gains.')} levels, "
+        f"and {_tip('liquidation distance', 'How far the price needs to move against you before your position is liquidated. Lower leverage = safer distance.')}. "
+        f"Also shows updated technical signals for the coin while your position is open.</p>"
+        f"</div>",
         unsafe_allow_html=True,
     )
     # Assign a unique key to avoid StreamlitDuplicateElementId errors
@@ -4429,11 +4457,16 @@ def render_ml_tab():
         unsafe_allow_html=True,
     )
     st.markdown(
-        f"<p style='color:#8CA1B6;font-size:0.9rem;'>"
-        "This tool trains an advanced Gradient Boosting model on recent candles to estimate whether the next candle will close higher or lower. "
-        "The output is a probability and a suggested direction (LONG/SHORT/NEUTRAL). "
-        "Use this information in conjunction with other analysis; past performance does not guarantee future results.</p>",
-        unsafe_allow_html=True
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"Trains a single {_tip('Gradient Boosting', 'A machine learning model that builds decision trees sequentially, each one correcting the errors of the previous. Good at capturing complex patterns in data.')} "
+        f"model on recent candles to predict whether the next candle will close higher or lower. "
+        f"Outputs a probability and a suggested direction (LONG / SHORT / NEUTRAL). "
+        f"You can select up to 3 timeframes for a multi-timeframe AI view. "
+        f"Use alongside other analysis — past performance does not guarantee future results.</p>"
+        f"</div>",
+        unsafe_allow_html=True,
     )
     # Assign a unique key to avoid StreamlitDuplicateElementId errors on AI tab
     coin = _normalize_coin_input(st.text_input(
@@ -5198,10 +5231,14 @@ def render_multitf_tab():
     """Multi-timeframe confluence analysis."""
     st.markdown(f"<h2 style='color:{ACCENT};'>Multi-Timeframe Confluence</h2>", unsafe_allow_html=True)
     st.markdown(
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
-        "Analyse signals across 5m, 15m, 1h, 4h, 1d and combine into a single confluence score. "
-        "Higher confluence = more timeframes agree on direction."
-        "</p>",
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"Runs the full technical analysis across all 5 timeframes (5m, 15m, 1h, 4h, 1d) simultaneously. "
+        f"The {_tip('Confluence Score', 'Measures how many timeframes agree on the same direction. 100% = all 5 agree, 60% = 3 out of 5. Higher confluence = higher probability trade.')} "
+        f"tells you how many timeframes agree. When short-term and long-term signals align, "
+        f"the trade setup is much stronger.</p>"
+        f"</div>",
         unsafe_allow_html=True,
     )
     coin = _normalize_coin_input(st.text_input("Coin (e.g. BTC, ETH, TAO)", value="BTC", key="mtf_coin_input"))
@@ -5310,10 +5347,13 @@ def render_correlation_tab():
     """Render a correlation matrix for major crypto assets."""
     st.markdown(f"<h2 style='color:{ACCENT};'>Correlation Matrix</h2>", unsafe_allow_html=True)
     st.markdown(
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
-        "Shows how major crypto assets move relative to each other. "
-        "High correlation (near 1.0) = they move together. Low/negative = they diverge."
-        "</p>",
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"Displays a {_tip('correlation matrix', 'A grid showing how closely two assets move together. +1.0 = perfectly correlated (move in same direction), -1.0 = perfectly inverse, 0 = no relationship.')} "
+        f"for major crypto assets. Helps with {_tip('portfolio diversification', 'Holding assets that are NOT highly correlated reduces your overall risk. If BTC drops, a low-correlation asset may not drop as much.')}. "
+        f"You can add up to 4 custom coins to compare. Use this to avoid holding coins that all move the same way.</p>"
+        f"</div>",
         unsafe_allow_html=True,
     )
     corr_c1, corr_c2 = st.columns(2)
@@ -5523,6 +5563,17 @@ def render_sessions_tab():
 def render_tools_tab():
     """R:R Calculator and Liquidation Levels."""
     st.markdown(f"<h2 style='color:{ACCENT};'>Trading Tools</h2>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"Practical trading calculators. The {_tip('R:R Calculator', 'Risk/Reward ratio. Compares potential profit to potential loss. A 1:3 R:R means you risk $1 to potentially make $3. Aim for at least 1:2.')} "
+        f"helps you size positions and calculate PnL at different leverage levels. "
+        f"The {_tip('Liquidation Calculator', 'Shows at what price your position gets force-closed by the exchange. Depends on entry price, leverage, and margin mode.')} "
+        f"shows where your position would get liquidated. Always calculate these before entering a trade.</p>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
     # === R:R Calculator ===
     st.markdown(f"<h3 style='color:{ACCENT};'>Risk/Reward Calculator</h3>", unsafe_allow_html=True)
