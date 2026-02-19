@@ -5753,7 +5753,7 @@ def render_heatmap_tab():
         f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
         f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
         f"Displays the top 100 cryptocurrencies in a single view. "
-        f"Each tile's {_tip('size', 'The larger the tile, the higher the coin\\'s market capitalization.')} "
+        f"Each tile's {_tip('size', 'The larger the tile, the higher that coin market capitalization.')} "
         f"represents market cap, while its {_tip('color', 'Green = price increased in the last 24h. Red = price decreased. Darker color = larger change.')} "
         f"reflects the 24-hour price change. "
         f"See which coins are rising and which are falling at a glance.</p>"
@@ -5876,7 +5876,7 @@ def render_monte_carlo_tab():
         f"<b>Key metrics:</b> "
         f"{_tip('Profit Probability', 'Percentage of simulations that ended above the current price. If 60%, then 600 out of 1000 simulations resulted in profit.')} — Chance of profit, "
         f"{_tip('Expected Return', 'Average return across all simulations. E.g. +5% means profit is expected on average.')} — Average expected gain, "
-        f"{_tip('VaR 95%', 'Value at Risk. The worst-case loss covering 95% of scenarios. E.g. -12% means you won\\'t lose more than this 95% of the time.')} — Risk value, "
+        f"{_tip('VaR 95%', 'Value at Risk. The worst-case loss covering 95% of scenarios. E.g. -12% means you will not lose more than this 95% of the time.')} — Risk value, "
         f"{_tip('Median Target', 'The median (middle) final price across all simulations. Unlike the mean, it is not affected by extreme outliers.')} — Median target price.</p>"
         f"</div>",
         unsafe_allow_html=True,
@@ -6171,7 +6171,7 @@ def render_risk_analytics_tab():
         f"{_tip('Sharpe Ratio', 'Return per unit of risk. Above 1.0 is good, above 2.0 is excellent. Negative means you are losing money relative to the risk taken.')} | "
         f"{_tip('Sortino Ratio', 'Like Sharpe but only penalizes downside volatility. Does not penalize upward price swings. A fairer measure.')} | "
         f"{_tip('Max Drawdown', 'Largest peak-to-trough loss percentage. Below 15% is good, above 30% is dangerous.')} | "
-        f"{_tip('VaR 95%', 'Value at Risk. On any given day you won\\'t lose more than this 95% of the time. E.g. -3% means on 95 out of 100 days the loss is under 3%.')} | "
+        f"{_tip('VaR 95%', 'Value at Risk. On any given day you will not lose more than this 95% of the time. E.g. -3% means on 95 out of 100 days the loss is under 3%.')} | "
         f"{_tip('Calmar Ratio', 'Annual return divided by max drawdown. Shows return relative to risk. Above 1.0 is good.')} | "
         f"{_tip('Skewness', 'Asymmetry of the return distribution. Negative = large losses more frequent, positive = large gains more frequent.')} | "
         f"{_tip('Kurtosis', 'Peakedness of the return distribution. Higher values = more extreme moves (tail risk) than normal.')} </p>"
