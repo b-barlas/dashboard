@@ -82,8 +82,8 @@ def _debug(msg: str) -> None:
 
 
 
-PRIMARY_BG = "#0D1117"        # overall app background – pure dark
-CARD_BG    = "#161B22"        # cards and panel backgrounds – dark grey
+PRIMARY_BG = "#000000"        # overall app background – pure black
+CARD_BG    = "#000000"        # cards and panel backgrounds – pure black
 ACCENT     = "#FFFFFF"        # white color
 POSITIVE   = "#00FF88"        # neon green for positive change
 NEGATIVE   = "#FF3366"        # neon red for negative change
@@ -152,7 +152,7 @@ p.subtitle {{
 
 /* Glassmorphism metric cards */
 .metric-card {{
-    background: rgba(15, 22, 41, 0.7);
+    background: rgba(0, 0, 0, 0.85);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     border: 1px solid rgba(0, 212, 255, 0.15);
@@ -203,7 +203,7 @@ p.subtitle {{
 
 /* Glassmorphism panel boxes */
 .panel-box {{
-    background: rgba(15, 22, 41, 0.6);
+    background: rgba(0, 0, 0, 0.75);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
     border-radius: 18px;
@@ -255,7 +255,7 @@ p.subtitle {{
 table.dataframe {{
     width: 100% !important;
     border-collapse: collapse;
-    background-color: rgba(10, 14, 26, 0.8);
+    background-color: rgba(0, 0, 0, 0.9);
     backdrop-filter: blur(10px);
 }}
 table.dataframe thead tr {{
@@ -285,17 +285,18 @@ table.dataframe tbody tr:hover {{
 /* Streamlit tab styling */
 .stTabs [data-baseweb="tab-list"] {{
     gap: 2px;
-    background: rgba(15, 22, 41, 0.5);
+    background: rgba(0, 0, 0, 0.8);
     border-radius: 10px;
     padding: 3px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
 }}
 .stTabs [data-baseweb="tab"] {{
     border-radius: 6px;
     color: {TEXT_MUTED};
     font-weight: 500;
-    padding: 6px 10px;
-    font-size: 0.82rem;
+    padding: 4px 8px;
+    font-size: 0.75rem;
     transition: all 0.2s ease;
     white-space: nowrap;
 }}
@@ -342,7 +343,7 @@ section[data-testid="stSidebar"] {{
 .stTextInput > div > div > input,
 .stSelectbox > div > div,
 .stMultiSelect > div > div {{
-    background-color: rgba(15, 22, 41, 0.8) !important;
+    background-color: rgba(0, 0, 0, 0.9) !important;
     border-color: rgba(0, 212, 255, 0.2) !important;
     color: {TEXT_LIGHT} !important;
     border-radius: 8px !important;
@@ -374,7 +375,7 @@ div[data-testid="stVerticalBlock"] > div {{
 
 /* Expander styling */
 .streamlit-expanderHeader {{
-    background: rgba(15, 22, 41, 0.5);
+    background: rgba(0, 0, 0, 0.7);
     border-radius: 8px;
 }}
 
@@ -462,7 +463,7 @@ div[data-testid="stVerticalBlock"] > div {{
 .mc-stat {{
     text-align: center;
     padding: 12px;
-    background: rgba(15, 22, 41, 0.5);
+    background: rgba(0, 0, 0, 0.7);
     border-radius: 10px;
     border: 1px solid rgba(255, 255, 255, 0.05);
 }}
@@ -473,14 +474,14 @@ div[data-testid="stVerticalBlock"] > div {{
     align-items: center;
     gap: 12px;
     padding: 10px 14px;
-    background: rgba(15, 22, 41, 0.5);
+    background: rgba(0, 0, 0, 0.7);
     border-radius: 10px;
     border-left: 3px solid {NEON_BLUE};
     margin: 6px 0;
     transition: all 0.2s;
 }}
 .whale-entry:hover {{
-    background: rgba(15, 22, 41, 0.8);
+    background: rgba(0, 0, 0, 0.9);
     border-left-color: {NEON_PURPLE};
 }}
 
@@ -517,7 +518,7 @@ div[data-testid="stVerticalBlock"] > div {{
     bottom: 125%;
     left: 50%;
     transform: translateX(-50%);
-    background: #1C2333;
+    background: #000000;
     color: {TEXT_LIGHT};
     padding: 8px 12px;
     border-radius: 8px;
@@ -2592,8 +2593,8 @@ def render_market_tab():
         fig_btc.update_layout(
             height=170,
             margin=dict(l=10, r=10, t=40, b=15),
-            plot_bgcolor="#0e1117",
-            paper_bgcolor="#0e1117",
+            plot_bgcolor="#000000",
+            paper_bgcolor="#000000",
         )
         st.plotly_chart(fig_btc, width="stretch")
 
@@ -2618,8 +2619,8 @@ def render_market_tab():
         fig_eth.update_layout(
             height=170,
             margin=dict(l=10, r=10, t=40, b=15),
-            plot_bgcolor="#0e1117",
-            paper_bgcolor="#0e1117",
+            plot_bgcolor="#000000",
+            paper_bgcolor="#000000",
         )
         st.plotly_chart(fig_eth, width="stretch")
 
@@ -2644,8 +2645,8 @@ def render_market_tab():
         fig_behaviour.update_layout(
             height=170,
             margin=dict(l=10, r=10, t=40, b=15),
-            plot_bgcolor="#0e1117",
-            paper_bgcolor="#0e1117",
+            plot_bgcolor="#000000",
+            paper_bgcolor="#000000",
         )
         st.plotly_chart(fig_behaviour, width="stretch")
         # Direction label + tooltip explanation
@@ -5301,7 +5302,7 @@ def render_multitf_tab():
             ))
             fig_conf.update_layout(
                 height=200, margin=dict(l=10, r=10, t=50, b=15),
-                plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+                plot_bgcolor="#000000", paper_bgcolor="#000000",
             )
             st.plotly_chart(fig_conf, width="stretch")
 
