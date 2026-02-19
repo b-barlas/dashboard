@@ -62,8 +62,8 @@ def _supertrend(high: pd.Series, low: pd.Series, close: pd.Series,
 
 # Set up page title, icon and wide layout
 st.set_page_config(
-    page_title="GOD MODE | Crypto Command Center",
-    page_icon="🔱",
+    page_title="Crypto Command Center",
+    page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -82,8 +82,8 @@ def _debug(msg: str) -> None:
 
 
 
-PRIMARY_BG = "#0A0E1A"        # overall app background – deep space black
-CARD_BG    = "#0F1629"        # cards and panel backgrounds – midnight blue
+PRIMARY_BG = "#0D1117"        # overall app background – pure dark
+CARD_BG    = "#161B22"        # cards and panel backgrounds – dark grey
 ACCENT     = "#FFFFFF"        # white color
 POSITIVE   = "#00FF88"        # neon green for positive change
 NEGATIVE   = "#FF3366"        # neon red for negative change
@@ -94,24 +94,13 @@ NEON_BLUE  = "#00D4FF"        # neon blue for accents
 NEON_PURPLE = "#B24BF3"       # neon purple for gradients
 GOLD       = "#FFD700"        # gold for premium features
 
-# GOD MODE CSS - Maximum visual impact
 st.markdown(f"""
 <style>
-/* ===== GOD MODE CSS ===== */
-
-/* Animated gradient background */
+/* Global styles */
 .stApp {{
-    background: linear-gradient(135deg, {PRIMARY_BG} 0%, #0B1426 25%, #0D0F2B 50%, #0A1628 75%, {PRIMARY_BG} 100%);
-    background-size: 400% 400%;
-    animation: godGradient 15s ease infinite;
+    background-color: {PRIMARY_BG};
     color: {TEXT_LIGHT};
     font-family: 'Inter', 'Segoe UI', sans-serif;
-}}
-
-@keyframes godGradient {{
-    0% {{ background-position: 0% 50%; }}
-    50% {{ background-position: 100% 50%; }}
-    100% {{ background-position: 0% 50%; }}
 }}
 
 /* Custom scrollbar */
@@ -235,28 +224,6 @@ p.subtitle {{
     background: linear-gradient(90deg, transparent, rgba(0, 212, 255, 0.3), transparent);
 }}
 
-/* God Mode badge */
-.god-mode-badge {{
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: linear-gradient(135deg, rgba(178, 75, 243, 0.2), rgba(0, 212, 255, 0.2));
-    border: 1px solid rgba(178, 75, 243, 0.4);
-    border-radius: 20px;
-    padding: 4px 14px;
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-    color: {NEON_PURPLE};
-    animation: badgePulse 2s ease infinite;
-}}
-
-@keyframes badgePulse {{
-    0%, 100% {{ box-shadow: 0 0 5px rgba(178, 75, 243, 0.3); }}
-    50% {{ box-shadow: 0 0 20px rgba(178, 75, 243, 0.6); }}
-}}
-
 /* Neon glow signal cards */
 .signal-long {{
     background: rgba(0, 255, 136, 0.08);
@@ -364,8 +331,8 @@ table.dataframe tbody tr:hover {{
 
 /* Sidebar styling */
 section[data-testid="stSidebar"] {{
-    background: linear-gradient(180deg, {PRIMARY_BG}, #0B1426);
-    border-right: 1px solid rgba(0, 212, 255, 0.1);
+    background-color: {PRIMARY_BG};
+    border-right: 1px solid rgba(255, 255, 255, 0.06);
 }}
 
 /* Input fields */
@@ -426,7 +393,7 @@ section[data-testid="stSidebar"] {{
     z-index: 10;
 }}
 
-/* God mode section header */
+/* Section header */
 .god-header {{
     background: linear-gradient(90deg, transparent, rgba(0, 212, 255, 0.1), transparent);
     border-left: 3px solid {NEON_BLUE};
@@ -498,8 +465,58 @@ section[data-testid="stSidebar"] {{
     padding: 8px 12px;
     margin: 4px 0;
 }}
+
+/* Tooltip question mark */
+.tt {{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: rgba(0, 212, 255, 0.15);
+    color: {NEON_BLUE};
+    font-size: 0.65rem;
+    font-weight: 700;
+    cursor: help;
+    position: relative;
+    vertical-align: middle;
+    margin-left: 4px;
+    border: 1px solid rgba(0, 212, 255, 0.3);
+}}
+.tt .ttt {{
+    visibility: hidden;
+    opacity: 0;
+    position: absolute;
+    bottom: 125%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1C2333;
+    color: {TEXT_LIGHT};
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 0.78rem;
+    font-weight: 400;
+    line-height: 1.4;
+    width: max-content;
+    max-width: 280px;
+    white-space: normal;
+    z-index: 999;
+    border: 1px solid rgba(0, 212, 255, 0.2);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    transition: opacity 0.2s;
+    pointer-events: none;
+}}
+.tt:hover .ttt {{
+    visibility: visible;
+    opacity: 1;
+}}
 </style>
 """, unsafe_allow_html=True)
+
+
+def _tip(label: str, tooltip: str) -> str:
+    """Return HTML for a label with a hover tooltip question mark."""
+    return (f"{label}<span class='tt'>?<span class='ttt'>{tooltip}</span></span>")
 
 
 # Exchange set up with caching – Kraken (primary) with Coinbase & Bitstamp fallbacks
@@ -1879,11 +1896,11 @@ def ml_predict_direction(df: pd.DataFrame) -> tuple[float, str]:
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║                    GOD MODE FUNCTIONS                        ║
+# ║                  ADVANCED ANALYSIS FUNCTIONS                  ║
 # ╚══════════════════════════════════════════════════════════════╝
 
 def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
-    """GOD MODE: Ensemble ML prediction combining 3 models with voting.
+    """Ensemble ML prediction combining 3 models with voting.
 
     Returns (probability, direction, model_details_dict).
     """
@@ -3921,6 +3938,461 @@ def render_guide_tab():
     
     st.markdown('<div style="padding:12px; margin:10px 0; background: linear-gradient(90deg, rgba(239,71,111,0.2) 0%, transparent 100%); border-left:4px solid #EF476F; border-radius:6px;"><b style="color:#EF476F;">20-35%: SELL | 0-20%: STRONG SELL</b><p style="color:#E5E7EB; margin:0.5rem 0 0 0;"><b>What it means:</b> Bearish setup.</p><p style="color:#8CA1B6; margin:0.5rem 0 0 0;"><b>Action:</b> Short opportunity.</p></div>', unsafe_allow_html=True)
 
+    # ── Spot Tab ──
+    spot_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>💰 Spot Analiz Sekmesi</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Spot piyasa analizi, seçtiğiniz kripto paranın anlık teknik durumunu derinlemesine inceler.
+        Kaldıraç kullanmadan, doğrudan alım-satım kararları için tasarlanmıştır.
+      </p>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>Ne Gösterir:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Fiyat & Değişim:</b> Anlık fiyat, 24 saatlik değişim yüzdesi ve işlem hacmi.</li>
+          <li><b>Teknik Sinyal:</b> Trend, Momentum, Volume ve Volatility skorlarının bileşimi olan ana sinyal (BUY/SELL/WAIT).</li>
+          <li><b>Güven Skoru (Confidence):</b> 0-100% arası, sinyalin ne kadar güçlü olduğunu gösterir.</li>
+          <li><b>Kategori Detayları:</b> Her dört kategori (Trend, Momentum, Volume, Volatility) ayrı ayrı görselleştirilir ve hangi indikatörlerin sinyali desteklediği açıklanır.</li>
+          <li><b>Fear & Greed Index:</b> Bitcoin piyasasının genel korku/açgözlülük seviyesi (0=Aşırı Korku, 100=Aşırı Açgözlülük).</li>
+          <li><b>Kaldıraç Önerisi:</b> Güven skoruna ve risk seviyesine göre önerilen maksimum kaldıraç.</li>
+        </ul>
+      </div>
+      <p style='color:#E5E7EB; font-size:0.85rem; margin-top:1rem; padding:10px; background-color:rgba(255,209,102,0.1); border-radius:6px;'>
+        <b style='color:#FFD166;'>İpucu:</b> Spot piyasa kaldıraçsız olduğu için daha güvenlidir.
+        %65+ güven skoru ile giriş yapmanız önerilir.
+      </p>
+    </div>
+    """
+    st.markdown(spot_panel, unsafe_allow_html=True)
+
+    # ── Position Tab ──
+    position_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>📈 Pozisyon Yönetimi Sekmesi</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Açık pozisyonlarınızı takip etmek ve yönetmek için tasarlanmış sekmedir.
+        Futures/margin işlemlerinde giriş fiyatı, stop-loss, take-profit gibi bilgileri görsel olarak sunar.
+      </p>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>Ne Gösterir:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Pozisyon Detayları:</b> Giriş fiyatı, anlık fiyat, kâr/zarar yüzdesi.</li>
+          <li><b>Stop-Loss & Take-Profit:</b> ATR bazlı otomatik hesaplanan stop ve hedef seviyeleri.</li>
+          <li><b>Kaldıraç Analizi:</b> Seçilen kaldıraçta likidasyon mesafesi ve risk seviyesi.</li>
+          <li><b>Teknik Güncelleme:</b> Pozisyon açıkken bile teknik göstergelerin güncel durumunu gösterir.</li>
+        </ul>
+      </div>
+    </div>
+    """
+    st.markdown(position_panel, unsafe_allow_html=True)
+
+    # ── Ensemble AI Tab ──
+    ensemble_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>🧠 Ensemble AI Sekmesi</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Tek bir ML modeli yerine <b>3 farklı makine öğrenmesi modeli</b> çalıştırır ve sonuçlarını ağırlıklı oylama ile birleştirir.
+        Bu yöntem tek modele göre daha güvenilir tahminler üretir.
+      </p>
+      <div style='margin-top:1.5rem; padding:15px; background-color:rgba(6,214,160,0.05); border-left:4px solid #06D6A0; border-radius:6px;'>
+        <b style='color:#06D6A0; font-size:1.1rem;'>Kullanılan 3 Model:</b>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Gradient Boosting (%45 ağırlık):</b> En güçlü model. Verideki karmaşık ilişkileri öğrenir. Ardışık olarak hatalardan ders çıkararak karar ağaçları oluşturur. Nonlineer (doğrusal olmayan) kalıpları yakalamakta en başarılı modeldir.</li>
+          <li><b>Random Forest (%35 ağırlık):</b> Yüzlerce bağımsız karar ağacı oluşturur ve çoğunluk oylamasıyla karar verir. Aşırı uyum (overfitting) riskine karşı dayanıklıdır.</li>
+          <li><b>Logistic Regression (%20 ağırlık):</b> En basit model. Doğrusal ilişkileri yakalar. Diğer ikisi yanlış yaptığında dengeleyici bir güç olarak işlev görür.</li>
+        </ul>
+      </div>
+      <div style='margin-top:1.5rem; padding:15px; background-color:rgba(255,209,102,0.05); border-left:4px solid #FFD166; border-radius:6px;'>
+        <b style='color:#FFD166; font-size:1.1rem;'>Önemli Metrikler:</b>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Model Agreement (Model Uyumu):</b> 3 modelin ne kadarının aynı yönde oy verdiğini gösterir. %100 = üçü de aynı fikir, %66 = ikisi aynı biri farklı, %33 = hiçbiri anlaşamıyor.</li>
+          <li><b>Ensemble Probability (Topluluk Olasılığı):</b> Ağırlıklı ortalama olasılık. %60 üzeri = LONG (yükseliş beklentisi), %40 altı = SHORT (düşüş beklentisi), arası = NEUTRAL.</li>
+          <li><b>Gauge Chart (Gösterge):</b> Yeşil bölge alış, kırmızı bölge satış sinyali verir. İbre ne kadar uçtaysa sinyal o kadar güçlüdür.</li>
+        </ul>
+      </div>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>Nasıl Hesaplanır:</b></p>
+        <ol style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li>Seçilen coin için OHLCV verisi çekilir.</li>
+          <li>12 teknik gösterge hesaplanır (EMA'lar, RSI, MACD, OBV, ATR, Bollinger genişliği vb.).</li>
+          <li>Her 3 model bu göstergelerle eğitilir.</li>
+          <li>Her model bağımsız olarak tahmin yapar (LONG/SHORT olasılığı).</li>
+          <li>Tahminler ağırlıklı olarak birleştirilir: (GB × 0.45) + (RF × 0.35) + (LR × 0.20).</li>
+        </ol>
+      </div>
+      <p style='color:#E5E7EB; font-size:0.85rem; margin-top:1rem; padding:10px; background-color:rgba(255,209,102,0.1); border-radius:6px;'>
+        <b style='color:#FFD166;'>Uyarı:</b> ML modelleri yalnızca geçmiş verilere bakar. Haber, düzenleme veya beklenmedik olayları tahmin edemez.
+        Ensemble AI'yı tek başına değil, diğer teknik analiz araçlarıyla birlikte kullanın.
+      </p>
+    </div>
+    """
+    st.markdown(ensemble_panel, unsafe_allow_html=True)
+
+    # ── Heatmap Tab ──
+    heatmap_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>🗺️ Market Heatmap Sekmesi</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Kripto piyasasındaki en büyük 100 coini tek bir <b>treemap</b> görselinde sunar.
+        Piyasanın genel durumunu bir bakışta anlayabilirsiniz.
+      </p>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>Nasıl Okunur:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Kutucuk Boyutu:</b> Coinin piyasa değeri (market cap) ne kadar büyükse, kutucuk o kadar büyük görünür. BTC ve ETH genellikle en büyük kutucuklardır.</li>
+          <li><b>Kutucuk Rengi:</b> Son 24 saatteki fiyat değişimine göre belirlenir:
+            <ul style='margin-left:1rem; margin-top:0.3rem;'>
+              <li><span style='color:#00CC00;'>Yeşil</span> = Fiyat artmış (koyu yeşil = çok artmış)</li>
+              <li><span style='color:#FF0000;'>Kırmızı</span> = Fiyat düşmüş (koyu kırmızı = çok düşmüş)</li>
+              <li><span style='color:#888;'>Gri</span> = Değişim yok veya çok az</li>
+            </ul>
+          </li>
+        </ul>
+      </div>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>Ek Bilgiler:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Top Gainers (En Çok Yükselenler):</b> Son 24 saatte en çok değer kazanan 10 coin.</li>
+          <li><b>Top Losers (En Çok Düşenler):</b> Son 24 saatte en çok değer kaybeden 10 coin.</li>
+        </ul>
+      </div>
+      <p style='color:#E5E7EB; font-size:0.85rem; margin-top:1rem; padding:10px; background-color:rgba(255,209,102,0.1); border-radius:6px;'>
+        <b style='color:#FFD166;'>İpucu:</b> Haritanın büyük bölümü yeşilse piyasa genel olarak yükseliyor (boğa piyasası),
+        kırmızıysa düşüyor (ayı piyasası) demektir. Sektör bazlı trendleri görmek için kutucuk gruplarına dikkat edin.
+      </p>
+    </div>
+    """
+    st.markdown(heatmap_panel, unsafe_allow_html=True)
+
+    # ── Monte Carlo Simulation Tab ──
+    mc_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>🎲 Monte Carlo Simülasyonu Sekmesi</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Geçmiş fiyat hareketlerinden yola çıkarak gelecekteki olası fiyat yollarını simüle eder.
+        Tek bir tahmin yerine yüzlerce/binlerce olasılık senaryosu üretir.
+      </p>
+      <div style='margin-top:1.5rem; padding:15px; background-color:rgba(6,214,160,0.05); border-left:4px solid #06D6A0; border-radius:6px;'>
+        <b style='color:#06D6A0; font-size:1.1rem;'>Nasıl Hesaplanır:</b>
+        <ol style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li>Geçmiş fiyat verilerinden günlük/saatlik getiri hesaplanır.</li>
+          <li>Bu getirilerin ortalaması (μ) ve standart sapması (σ) bulunur.</li>
+          <li>Her simülasyonda: Yeni_Fiyat = Eski_Fiyat × e^(μ - σ²/2 + σ × rastgele_sayı)</li>
+          <li>Bu işlem her gün için tekrarlanarak bir fiyat yolu oluşturulur.</li>
+          <li>Süreç N kez tekrarlanır (ör. 500 veya 1000 simülasyon).</li>
+        </ol>
+      </div>
+      <div style='margin-top:1.5rem; padding:15px; background-color:rgba(255,209,102,0.05); border-left:4px solid #FFD166; border-radius:6px;'>
+        <b style='color:#FFD166; font-size:1.1rem;'>Gösterilen Metrikler:</b>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Profit Probability (Kâr Olasılığı):</b> Simülasyonların yüzde kaçı mevcut fiyatın üzerinde bitti. Örneğin %65 ise, 1000 simülasyonun 650'si kârlı sonuçlandı.</li>
+          <li><b>Expected Return (Beklenen Getiri):</b> Tüm simülasyonların ortalama getiri yüzdesi. Pozitif = ortalamada kâr beklenir.</li>
+          <li><b>VaR 95% (Value at Risk):</b> %95 güven aralığında en kötü kayıp. Örneğin -15% ise, %95 olasılıkla bundan fazla kaybetmezsiniz. Kalan %5'te daha kötü olabilir.</li>
+          <li><b>Median Target (Ortanca Hedef):</b> Simülasyonların tam ortasındaki (medyan) bitiş fiyatı. Aşırı değerlerden etkilenmez, ortalamadan daha güvenilirdir.</li>
+        </ul>
+      </div>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>Grafikleri Okumak:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Simülasyon Yolları:</b> Her ince çizgi bir olası fiyat senaryosudur. Çizgilerin yoğunlaştığı bölge en olası fiyat aralığıdır.</li>
+          <li><b>%90 Güven Aralığı (açık mavi bant):</b> Fiyatın %90 olasılıkla bu bant içinde kalacağını gösterir.</li>
+          <li><b>%50 Güven Aralığı (mor bant):</b> Fiyatın %50 olasılıkla bu daha dar bant içinde kalacağını gösterir.</li>
+          <li><b>Medyan çizgisi (mavi):</b> En olası orta yol senaryosu.</li>
+          <li><b>Histogram:</b> Simülasyonların bitiş fiyatlarının dağılımı. Çanın tepesi en olası bitiş fiyatıdır.</li>
+        </ul>
+      </div>
+      <p style='color:#E5E7EB; font-size:0.85rem; margin-top:1rem; padding:10px; background-color:rgba(239,71,111,0.1); border-radius:6px;'>
+        <b style='color:#EF476F;'>Sınırlılık:</b> Monte Carlo geçmiş volatiliteye dayanır. Ani haberler, düzenlemeler veya piyasa yapısı değişiklikleri
+        modelin dışındadır. Kesin fiyat tahmini değil, olasılık dağılımı olarak değerlendirin.
+      </p>
+    </div>
+    """
+    st.markdown(mc_panel, unsafe_allow_html=True)
+
+    # ── Fibonacci Analysis Tab ──
+    fib_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>🔢 Fibonacci Analiz Sekmesi</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Fibonacci sayı dizisinden türetilen oranlarla fiyatın destek/direnç seviyelerini hesaplar.
+        Ayrıca divergence (sapma) tespiti, volume profile analizi ve market regime (piyasa rejimi) tespiti yapar.
+      </p>
+      <div style='margin-top:1.5rem; padding:15px; background-color:rgba(6,214,160,0.05); border-left:4px solid #06D6A0; border-radius:6px;'>
+        <b style='color:#06D6A0; font-size:1.1rem;'>Fibonacci Seviyeleri:</b>
+        <p style='color:#8CA1B6; font-size:0.9rem; margin-top:0.5rem; line-height:1.7;'>
+          Belirli bir dönemdeki en yüksek ve en düşük fiyat arasındaki farka Fibonacci oranları uygulanarak hesaplanır:
+        </p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Retracement (Geri Çekilme) Seviyeleri:</b>
+            <ul style='margin-left:1rem; margin-top:0.3rem;'>
+              <li><b>%23.6:</b> Sığ geri çekilme — güçlü trendlerde ilk destek</li>
+              <li><b>%38.2:</b> Orta geri çekilme — sık kullanılan destek seviyesi</li>
+              <li><b>%50.0:</b> Yarı yol — psikolojik olarak önemli seviye</li>
+              <li><b>%61.8:</b> "Altın oran" — en güçlü Fibonacci seviyesi, burada tutunursa trend devam eder</li>
+              <li><b>%78.6:</b> Derin geri çekilme — burası kırılırsa trend sona ermiş olabilir</li>
+            </ul>
+          </li>
+          <li style='margin-top:0.5rem;'><b>Extension (Uzantı) Seviyeleri:</b>
+            <ul style='margin-left:1rem; margin-top:0.3rem;'>
+              <li><b>%127.2:</b> İlk hedef seviye — mütevazı hedef</li>
+              <li><b>%161.8:</b> İkinci hedef — altın oran uzantısı, yaygın kâr alma noktası</li>
+              <li><b>%200.0:</b> Üçüncü hedef — güçlü trendlerde ulaşılabilir</li>
+              <li><b>%261.8:</b> Agresif hedef — çok güçlü momentumda nadir ulaşılır</li>
+            </ul>
+          </li>
+        </ul>
+      </div>
+      <div style='margin-top:1.5rem; padding:15px; background-color:rgba(255,209,102,0.05); border-left:4px solid #FFD166; border-radius:6px;'>
+        <b style='color:#FFD166; font-size:1.1rem;'>Divergence (Sapma) Tespiti:</b>
+        <p style='color:#8CA1B6; font-size:0.9rem; margin-top:0.5rem; line-height:1.7;'>
+          Fiyat ile teknik göstergeler (RSI, MACD) arasındaki tutarsızlıkları tespit eder:
+        </p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Bullish Divergence (Boğa Sapması):</b> Fiyat daha düşük dip yaparken RSI/MACD daha yüksek dip yapıyor → yükseliş sinyali. Düşüş trendi zayıflıyor olabilir.</li>
+          <li><b>Bearish Divergence (Ayı Sapması):</b> Fiyat daha yüksek tepe yaparken RSI/MACD daha düşük tepe yapıyor → düşüş sinyali. Yükseliş trendi zayıflıyor olabilir.</li>
+        </ul>
+        <p style='color:#8CA1B6; font-size:0.85rem; margin-top:0.5rem; padding:8px; background-color:rgba(255,255,255,0.03); border-radius:4px;'>
+          💡 Divergence güçlü bir erken uyarı sinyalidir ama tek başına trade açmak için yeterli değildir. Fibonacci seviyeleriyle birlikte kullanıldığında daha güvenilirdir.
+        </p>
+      </div>
+      <div style='margin-top:1.5rem; padding:15px; background-color:rgba(0,212,255,0.05); border-left:4px solid #00D4FF; border-radius:6px;'>
+        <b style='color:#00D4FF; font-size:1.1rem;'>Volume Profile (Hacim Profili):</b>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Nedir:</b> Her fiyat seviyesinde ne kadar işlem hacmi olduğunu gösteren yatay histogram.</li>
+          <li><b>POC (Point of Control):</b> En yüksek hacimli fiyat seviyesi. Güçlü bir destek/direnç noktasıdır çünkü en çok alım-satım burada gerçekleşmiştir.</li>
+          <li><b>Value Area:</b> Toplam hacmin %70'inin gerçekleştiği fiyat aralığı. Fiyat bu aralığın dışına çıkarsa güçlü bir hareket beklenir.</li>
+        </ul>
+      </div>
+      <div style='margin-top:1.5rem; padding:15px; background-color:rgba(178,75,243,0.05); border-left:4px solid #B24BF3; border-radius:6px;'>
+        <b style='color:#B24BF3; font-size:1.1rem;'>Market Regime (Piyasa Rejimi):</b>
+        <p style='color:#8CA1B6; font-size:0.9rem; margin-top:0.5rem; line-height:1.7;'>
+          Piyasanın mevcut durumunu otomatik olarak sınıflandırır:
+        </p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Trending (Trendli):</b> ADX > 25. Güçlü bir yönlü hareket var. Trend takip stratejileri en iyi bu ortamda çalışır.</li>
+          <li><b>Ranging (Yatay):</b> ADX < 20 ve dar Bollinger bantları. Fiyat belirli bir aralıkta sıkışmış. Destek/direnç stratejileri uygundur.</li>
+          <li><b>High Volatility (Yüksek Volatilite):</b> ATR normalin üzerinde. Büyük fiyat dalgalanmaları var, risk yüksek.</li>
+          <li><b>Compression (Sıkışma):</b> Çok dar Bollinger bantları. Büyük bir hareket gelmek üzere olabilir (yön belirsiz).</li>
+        </ul>
+      </div>
+    </div>
+    """
+    st.markdown(fib_panel, unsafe_allow_html=True)
+
+    # ── Risk Analytics Tab ──
+    risk_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>📉 Risk Analitik Sekmesi</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Seçtiğiniz kripto paranın detaylı risk profilini çıkarır.
+        Profesyonel fon yöneticilerinin kullandığı risk metriklerini hesaplar.
+      </p>
+      <div style='margin-top:1.5rem; padding:15px; background-color:rgba(6,214,160,0.05); border-left:4px solid #06D6A0; border-radius:6px;'>
+        <b style='color:#06D6A0; font-size:1.1rem;'>Risk Metrikleri Açıklaması:</b>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Sharpe Ratio (Sharpe Oranı):</b> Risk başına getiri. Yıllıklandırılmış getiriden risksiz faiz oranı çıkarılır ve volatiliteye bölünür.
+            <ul style='margin-left:1rem; margin-top:0.3rem;'>
+              <li>< 0: Zararda</li>
+              <li>0 - 1.0: Düşük performans</li>
+              <li>1.0 - 2.0: İyi</li>
+              <li>> 2.0: Mükemmel</li>
+            </ul>
+          </li>
+          <li style='margin-top:0.5rem;'><b>Sortino Ratio (Sortino Oranı):</b> Sharpe'a benzer ama sadece aşağı yönlü volatiliteyi (kayıp riski) dikkate alır.
+            Yukarı yönlü dalgalanma cezalandırılmaz. > 2.0 çok iyi kabul edilir.</li>
+          <li style='margin-top:0.5rem;'><b>Calmar Ratio (Calmar Oranı):</b> Yıllıklandırılmış getiriyi maksimum düşüşe (max drawdown) böler.
+            Risk başına ne kadar getiri üretildiğini gösterir. > 3.0 mükemmeldir.</li>
+          <li style='margin-top:0.5rem;'><b>Max Drawdown (Maksimum Düşüş):</b> Tepe noktasından dip noktasına en büyük kayıp yüzdesi.
+            Örneğin -%30 ise, en kötü dönemde portföyün %30'u eridi. Kripto için %20 altı iyi sayılır.</li>
+          <li style='margin-top:0.5rem;'><b>VaR 95% (Value at Risk):</b> %95 güvenle, bir günde karşılaşabileceğiniz en kötü kayıp.
+            Örneğin -%5 ise, günlerin %95'inde bundan fazla kaybetmezsiniz.</li>
+          <li style='margin-top:0.5rem;'><b>CVaR 95% (Conditional VaR / Expected Shortfall):</b> VaR'ın ötesindeki kayıpların ortalaması.
+            En kötü %5'lik durumda ortalama ne kadar kayıp yaşanır. VaR'dan her zaman daha kötüdür ve "tail risk" ölçer.</li>
+          <li style='margin-top:0.5rem;'><b>Skewness (Çarpıklık):</b> Getiri dağılımının simetrik olup olmadığını gösterir.
+            <ul style='margin-left:1rem; margin-top:0.3rem;'>
+              <li>Negatif çarpıklık: Sol kuyruk uzun, büyük kayıp riski yüksek</li>
+              <li>Sıfıra yakın: Simetrik dağılım</li>
+              <li>Pozitif çarpıklık: Sağ kuyruk uzun, büyük kazanç potansiyeli</li>
+            </ul>
+          </li>
+          <li style='margin-top:0.5rem;'><b>Kurtosis (Basıklık):</b> Uç değerlerin (ani büyük hareketler) sıklığını ölçer.
+            <ul style='margin-left:1rem; margin-top:0.3rem;'>
+              <li>3'ten büyük (leptokurtic): Normal dağılımdan daha fazla uç değer, "siyah kuğu" riski yüksek</li>
+              <li>3'e yakın (mesokurtic): Normal dağılıma benzer</li>
+              <li>3'ten küçük (platykurtic): Daha az uç değer, daha tahmin edilebilir</li>
+            </ul>
+          </li>
+        </ul>
+      </div>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>Grafikleri Okumak:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Drawdown Grafiği:</b> Zaman içinde portföyün tepe noktasından ne kadar düştüğünü gösterir. Derin çukurlar büyük kayıp dönemlerini temsil eder.</li>
+          <li><b>Kümülatif Getiri Grafiği:</b> Yatırımın baştan beri toplam getirisini gösterir. Sürekli yükselen çizgi sağlıklı bir yatırımı işaret eder.</li>
+          <li><b>Getiri Dağılımı Histogramı:</b> Günlük getirilerin ne sıklıkla hangi aralıkta olduğunu gösterir. İdeal olan dar, simetrik bir çan eğrisidir.</li>
+        </ul>
+      </div>
+    </div>
+    """
+    st.markdown(risk_panel, unsafe_allow_html=True)
+
+    # ── Whale Tracker Tab ──
+    whale_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>🐋 Whale Tracker Sekmesi</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Piyasadaki büyük hareketleri ve trendleri takip eder. CoinGecko verilerini kullanarak
+        hangi coinlerin popüler olduğunu, hangilerinin anormal hacim artışı gösterdiğini tespit eder.
+      </p>
+      <div style='margin-top:1.5rem; padding:15px; background-color:rgba(6,214,160,0.05); border-left:4px solid #06D6A0; border-radius:6px;'>
+        <b style='color:#06D6A0; font-size:1.1rem;'>Gösterilen Veriler:</b>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Trending Coins (Popüler Coinler):</b> CoinGecko'nun arama trendlerinden alınır. Hangi coinlerin en çok arandığını ve ilgi gördüğünü gösterir.
+            Popülerlik artışı genellikle fiyat hareketinden önce gelir.</li>
+          <li><b>Top Gainers (En Çok Yükselenler):</b> Son 24 saatte en fazla yüzdesel artış gösteren coinler. Fiyat, piyasa değeri ve değişim yüzdesi birlikte gösterilir.</li>
+          <li><b>Top Losers (En Çok Düşenler):</b> Son 24 saatte en fazla yüzdesel kayıp yaşayan coinler. Panik satışı mı yoksa sağlıklı düzeltme mi olduğunu anlamak için hacimle birlikte değerlendirilmelidir.</li>
+          <li><b>Volume Surge Scanner (Hacim Patlaması Tarayıcı):</b> Normalin üzerinde işlem hacmi gösteren coinleri tespit eder. Ani hacim artışı büyük oyuncuların (balinalar, kurumsal yatırımcılar)
+            pozisyon aldığına işaret edebilir.</li>
+        </ul>
+      </div>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>Nasıl Kullanılır:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li>Trending'de sürekli görünen ama henüz pompalanmamış coinlere dikkat edin — erken giriş fırsatı olabilir.</li>
+          <li>Top Gainers'da çok yüksek artış gösteren coinlere hemen girmeyin (FOMO'ya kapılmayın) — genellikle geri çekilme gelir.</li>
+          <li>Volume Surge ile fiyat artışı aynı anda oluyorsa güçlü sinyal, sadece hacim artıyorsa birikim (accumulation) olabilir.</li>
+        </ul>
+      </div>
+      <p style='color:#E5E7EB; font-size:0.85rem; margin-top:1rem; padding:10px; background-color:rgba(255,209,102,0.1); border-radius:6px;'>
+        <b style='color:#FFD166;'>İpucu:</b> Whale Tracker'ı Market Heatmap ile birlikte kullanın.
+        Heatmap genel piyasa resmini, Whale Tracker ise spesifik fırsatları gösterir.
+      </p>
+    </div>
+    """
+    st.markdown(whale_panel, unsafe_allow_html=True)
+
+    # ── Advanced Screener Tab ──
+    screener_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>🔍 Advanced Screener Sekmesi</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Birden fazla kripto parayı belirlediğiniz teknik kriterlere göre otomatik olarak tarar ve filtreleyerek
+        işlem fırsatlarını bulmanızı sağlar.
+      </p>
+      <div style='margin-top:1.5rem; padding:15px; background-color:rgba(6,214,160,0.05); border-left:4px solid #06D6A0; border-radius:6px;'>
+        <b style='color:#06D6A0; font-size:1.1rem;'>Filtre Seçenekleri:</b>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li><b>Min Confidence (Minimum Güven):</b> Sadece bu güven skorunun üzerindeki coinleri gösterir. Örn: %70 seçerseniz, yalnızca güçlü sinyalli coinler listelenir.</li>
+          <li><b>Signal Type (Sinyal Türü):</b> Hangi tür sinyalleri aradığınızı belirleyin:
+            <ul style='margin-left:1rem; margin-top:0.3rem;'>
+              <li><b>ALL:</b> Tüm sinyal türleri</li>
+              <li><b>STRONG BUY:</b> Sadece çok güçlü alış sinyalleri</li>
+              <li><b>BUY:</b> Normal alış sinyalleri</li>
+              <li><b>SELL / STRONG SELL:</b> Satış sinyalleri (short fırsatları)</li>
+            </ul>
+          </li>
+          <li><b>Timeframe (Zaman Dilimi):</b> Analiz hangi periyotta yapılacak (5m, 15m, 1h, 4h, 1d).</li>
+          <li><b>Coin Listesi:</b> Taranacak coinleri seçin. Varsayılan olarak en popüler 20+ coin taranır.</li>
+        </ul>
+      </div>
+      <div style='margin-top:1rem;'>
+        <p style='color:#E5E7EB; font-size:0.9rem;'><b>Sonuçları Okumak:</b></p>
+        <ul style='color:#8CA1B6; font-size:0.9rem; line-height:1.7; margin-left:1.2rem; margin-top:0.5rem;'>
+          <li>Her coin için sinyal yönü (BUY/SELL/WAIT), güven skoru, fiyat ve 4 kategori skoru gösterilir.</li>
+          <li>Sonuçlar güven skoruna göre sıralanır — en güçlü fırsatlar üstte yer alır.</li>
+          <li>Tarama sırasında ilerleme çubuğu görürsünüz. Her coin için API'den veri çekildiği için birkaç dakika sürebilir.</li>
+        </ul>
+      </div>
+      <p style='color:#E5E7EB; font-size:0.85rem; margin-top:1rem; padding:10px; background-color:rgba(255,209,102,0.1); border-radius:6px;'>
+        <b style='color:#FFD166;'>İpucu:</b> Screener'ı 4h veya 1d timeframe'de çalıştırmak daha güvenilir sonuçlar verir.
+        Kısa periyotlarda (5m, 15m) çok fazla gürültü (false signal) olabilir.
+        Bulunan fırsatları Spot veya Fibonacci sekmesinde detaylı incelemeyi unutmayın.
+      </p>
+    </div>
+    """
+    st.markdown(screener_panel, unsafe_allow_html=True)
+
+    # ── Tab Overview Summary ──
+    overview_panel = """
+    <div class='panel-box'>
+      <b style='color:#06D6A0; font-size:1.3rem;'>🗂️ Tüm Sekmelerin Özeti</b>
+      <p style='color:#E5E7EB; font-size:0.95rem; margin-top:1rem; line-height:1.7;'>
+        Dashboard'daki 17 sekmenin kısa özeti:
+      </p>
+      <div style='margin-top:1rem; display:grid; grid-template-columns:1fr 1fr; gap:10px;'>
+        <div style='padding:10px; background:rgba(6,214,160,0.05); border-radius:6px; border-left:3px solid #06D6A0;'>
+          <b style='color:#06D6A0; font-size:0.85rem;'>Market</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Genel piyasa durumu, Fear & Greed, BTC dominansı</p>
+        </div>
+        <div style='padding:10px; background:rgba(6,214,160,0.05); border-radius:6px; border-left:3px solid #06D6A0;'>
+          <b style='color:#06D6A0; font-size:0.85rem;'>Spot</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Teknik analiz, sinyal üretimi, güven skoru</p>
+        </div>
+        <div style='padding:10px; background:rgba(6,214,160,0.05); border-radius:6px; border-left:3px solid #06D6A0;'>
+          <b style='color:#06D6A0; font-size:0.85rem;'>Position</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Pozisyon yönetimi, PnL takibi</p>
+        </div>
+        <div style='padding:10px; background:rgba(6,214,160,0.05); border-radius:6px; border-left:3px solid #06D6A0;'>
+          <b style='color:#06D6A0; font-size:0.85rem;'>AI Prediction</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Tek model ML tahmini (Gradient Boosting)</p>
+        </div>
+        <div style='padding:10px; background:rgba(0,212,255,0.05); border-radius:6px; border-left:3px solid #00D4FF;'>
+          <b style='color:#00D4FF; font-size:0.85rem;'>Multi-TF</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>5 zaman diliminde eşzamanlı analiz</p>
+        </div>
+        <div style='padding:10px; background:rgba(0,212,255,0.05); border-radius:6px; border-left:3px solid #00D4FF;'>
+          <b style='color:#00D4FF; font-size:0.85rem;'>Correlation</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Coinler arası korelasyon analizi</p>
+        </div>
+        <div style='padding:10px; background:rgba(0,212,255,0.05); border-radius:6px; border-left:3px solid #00D4FF;'>
+          <b style='color:#00D4FF; font-size:0.85rem;'>Sessions</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Asya/Avrupa/ABD seans analizi</p>
+        </div>
+        <div style='padding:10px; background:rgba(0,212,255,0.05); border-radius:6px; border-left:3px solid #00D4FF;'>
+          <b style='color:#00D4FF; font-size:0.85rem;'>Tools</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>R:R hesaplayıcı, likidasyon seviyeleri</p>
+        </div>
+        <div style='padding:10px; background:rgba(0,212,255,0.05); border-radius:6px; border-left:3px solid #00D4FF;'>
+          <b style='color:#00D4FF; font-size:0.85rem;'>Backtest</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Geçmiş veride strateji testi</p>
+        </div>
+        <div style='padding:10px; background:rgba(0,212,255,0.05); border-radius:6px; border-left:3px solid #00D4FF;'>
+          <b style='color:#00D4FF; font-size:0.85rem;'>Analysis Guide</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Bu sayfa — tüm detaylı açıklamalar</p>
+        </div>
+        <div style='padding:10px; background:rgba(178,75,243,0.05); border-radius:6px; border-left:3px solid #B24BF3;'>
+          <b style='color:#B24BF3; font-size:0.85rem;'>Ensemble AI</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>3 model birleşik ML tahmini</p>
+        </div>
+        <div style='padding:10px; background:rgba(178,75,243,0.05); border-radius:6px; border-left:3px solid #B24BF3;'>
+          <b style='color:#B24BF3; font-size:0.85rem;'>Heatmap</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Top 100 coin treemap görünümü</p>
+        </div>
+        <div style='padding:10px; background:rgba(178,75,243,0.05); border-radius:6px; border-left:3px solid #B24BF3;'>
+          <b style='color:#B24BF3; font-size:0.85rem;'>Monte Carlo</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Fiyat simülasyonu, olasılık dağılımı</p>
+        </div>
+        <div style='padding:10px; background:rgba(178,75,243,0.05); border-radius:6px; border-left:3px solid #B24BF3;'>
+          <b style='color:#B24BF3; font-size:0.85rem;'>Fibonacci</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Fib seviyeleri, divergence, volume profile</p>
+        </div>
+        <div style='padding:10px; background:rgba(178,75,243,0.05); border-radius:6px; border-left:3px solid #B24BF3;'>
+          <b style='color:#B24BF3; font-size:0.85rem;'>Risk Analytics</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Sharpe, Sortino, VaR, drawdown analizi</p>
+        </div>
+        <div style='padding:10px; background:rgba(178,75,243,0.05); border-radius:6px; border-left:3px solid #B24BF3;'>
+          <b style='color:#B24BF3; font-size:0.85rem;'>Whale Tracker</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Trending coinler, hacim patlamaları</p>
+        </div>
+        <div style='padding:10px; background:rgba(178,75,243,0.05); border-radius:6px; border-left:3px solid #B24BF3;'>
+          <b style='color:#B24BF3; font-size:0.85rem;'>Screener</b>
+          <p style='color:#8CA1B6; font-size:0.8rem; margin-top:4px;'>Çoklu coin tarama, filtre bazlı arama</p>
+        </div>
+      </div>
+    </div>
+    """
+    st.markdown(overview_panel, unsafe_allow_html=True)
+
 def render_ml_tab():
     """
     Render a tab that uses a simple machine‑learning model to predict the
@@ -5191,19 +5663,25 @@ def render_tools_tab():
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║                    GOD MODE TABS                             ║
+# ║                    ADVANCED TABS                              ║
 # ╚══════════════════════════════════════════════════════════════╝
 
 def render_heatmap_tab():
-    """GOD MODE: Market heatmap with treemap visualization."""
+    """Market heatmap with treemap visualization."""
     st.markdown(
-        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Market Heatmap</h2>",
+        f"<h2 style='color:{ACCENT};'>Market Heatmap</h2>",
         unsafe_allow_html=True,
     )
     st.markdown(
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
-        "Visual treemap of top cryptocurrencies sized by market cap, colored by 24h price change. "
-        "Instantly spot which sectors are hot and which are bleeding.</p>",
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>Bu sekme ne gosterir?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"Piyasadaki en buyuk 100 kripto parayi tek bir gorunumde gosterir. "
+        f"Her kutucugun {_tip('boyutu', 'Kutucuk ne kadar buyukse, o coinin piyasa degeri (market cap) o kadar yuksektir.')} "
+        f"piyasa degerine, {_tip('rengi', 'Yesil = son 24 saatte fiyat artmis. Kirmizi = son 24 saatte fiyat dusmus. Renk ne kadar koyuysa degisim o kadar buyuk.')} "
+        f"ise son 24 saatteki fiyat degisikligine gore belirlenir. "
+        f"Bir bakista hangi coinler yukseliyor, hangileri dusuyor gorebilirsiniz.</p>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -5306,15 +5784,25 @@ def render_heatmap_tab():
 
 
 def render_monte_carlo_tab():
-    """GOD MODE: Monte Carlo simulation for price prediction."""
+    """Monte Carlo simulation for price prediction."""
     st.markdown(
-        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Monte Carlo Simulation</h2>",
+        f"<h2 style='color:{ACCENT};'>Monte Carlo Simulation</h2>",
         unsafe_allow_html=True,
     )
     st.markdown(
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
-        "Stochastic price simulation using historical return distributions. "
-        "Generates thousands of possible price paths to estimate probability ranges and risk.</p>",
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>Bu sekme ne gosterir?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"{_tip('Monte Carlo Simulasyonu', 'Istatistiksel bir yontemdir. Gecmis fiyat hareketlerinden ortalama ve standart sapma hesaplanir, sonra bu dagilima gore binlerce rastgele fiyat yolu uretilir.')} "
+        f"gecmis fiyat hareketlerini analiz ederek gelecekte fiyatin nereye gidebilecegini tahmin eder. "
+        f"Tek bir tahmin yerine binlerce olasilik yolu uretir.</p>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
+        f"<b>Goreceginiz metrikler:</b> "
+        f"{_tip('Profit Probability', 'Simulasyonlarin yuzde kaci mevcut fiyatin uzerinde bitti. %60 ise, 1000 simulasyonun 600 u kar ile sonuclandi demektir.')} — Kar olasiligi, "
+        f"{_tip('Expected Return', 'Tum simulasyonlarin ortalama getirisi. Ornegin +5% ise, ortalamada %5 kar beklenir.')} — Beklenen getiri, "
+        f"{_tip('VaR 95%', 'Value at Risk. En kotu senaryolarin %95 ini kapsayan kayip orani. Ornegin -12% ise, %95 olasilikla bundan fazla kaybetmezsiniz.')} — Risk degeri, "
+        f"{_tip('Median Target', 'Tum simulasyonlarin ortanca (median) bitis fiyati. Ortalamadan farkli olarak asiri degerlere duyarsizdir.')} — Ortanca hedef fiyat.</p>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -5449,15 +5937,24 @@ def render_monte_carlo_tab():
 
 
 def render_fibonacci_tab():
-    """GOD MODE: Fibonacci retracement and extension analysis."""
+    """Fibonacci retracement and extension analysis."""
     st.markdown(
-        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Fibonacci Analysis</h2>",
+        f"<h2 style='color:{ACCENT};'>Fibonacci Analysis</h2>",
         unsafe_allow_html=True,
     )
     st.markdown(
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
-        "Auto-calculated Fibonacci retracement and extension levels with divergence detection "
-        "and volume profile overlay.</p>",
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>Bu sekme ne gosterir?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"{_tip('Fibonacci seviyeleri', 'Fibonacci sayilari dogada bulunan bir oranti dizisidir. Finans piyasalarinda fiyat geri cekilmeleri ve uzantilar icin destek/direnç seviyeleri olarak kullanilir. En onemli seviyeler: %38.2, %50, %61.8.')} "
+        f"fiyatin nereye kadar geri cekilebilecegini veya nereye kadar uzanabilecegini gosterir. "
+        f"Ayrica {_tip('divergence (sapma)', 'Fiyat yeni bir dip/tepe yaparken RSI veya MACD bunu onaylamiyorsa, yon degisikligi (reversal) gelme olasiligi artar.')} tespiti "
+        f"ve {_tip('volume profile', 'Hangi fiyat seviyesinde ne kadar islem hacmi oldugunu gosterir. En yuksek hacimli seviye POC (Point of Control) olarak isretlenir ve guclu destek/direnc gorevi gorur.')} analizi de yapar.</p>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
+        f"<b>Ek bilgiler:</b> "
+        f"{_tip('Regime', 'Piyasanin mevcut durumu: Trending (trendli), Ranging (yatay), Compression (daralma, patlama beklenir), High Volatility (yuksek oynaklk).')} — Piyasa rejimi, "
+        f"{_tip('EXT', 'Extension (uzanti). Fiyat %100 seviyesini gectiginde, sonraki hedef seviyeleri gosterir: %127.2, %161.8, %200, %261.8.')} — Uzanti seviyeleri.</p>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -5582,15 +6079,27 @@ def render_fibonacci_tab():
 
 
 def render_risk_analytics_tab():
-    """GOD MODE: Advanced risk analytics."""
+    """Advanced risk analytics."""
     st.markdown(
-        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Risk Analytics</h2>",
+        f"<h2 style='color:{ACCENT};'>Risk Analytics</h2>",
         unsafe_allow_html=True,
     )
     st.markdown(
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
-        "Institutional-grade risk metrics: VaR, Sharpe/Sortino/Calmar ratios, "
-        "max drawdown analysis, return distribution.</p>",
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>Bu sekme ne gosterir?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"Sectiginiz coin icin profesyonel risk metriklerini hesaplar. "
+        f"Bir varliga yatirim yapmanin ne kadar riskli oldugunu rakamlara doker.</p>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
+        f"<b>Metrikler:</b> "
+        f"{_tip('Sharpe Ratio', 'Risk basina getiri. 1 ustu iyi, 2 ustu mukemmel. Negatifse alinan risk karsiliginda kayip edilmis demektir.')} | "
+        f"{_tip('Sortino Ratio', 'Sharpe gibi ama sadece dusus (kayip) volatilitesini cezalandirir. Yukselen fiyatlari cezalandirmaz. Daha adaletli bir olcut.')} | "
+        f"{_tip('Max Drawdown', 'En yuksek noktadan en dusuk noktaya kadar olan kayip yuzdesi. %15 altinda iyi, %30 uzerinde tehlikeli.')} | "
+        f"{_tip('VaR 95%', 'Value at Risk. Herhangi bir gunde %95 olasilikla bu kadardan fazla kaybetmezsiniz. Ornegin -3% ise, 100 gunun 95 inde kayip %3 ten az olur.')} | "
+        f"{_tip('Calmar Ratio', 'Yillik getiri bolü maksimum drawdown. Kazancin riske oranini gosterir. 1 ustu iyi.')} | "
+        f"{_tip('Skewness', 'Getiri dagılimının carpikligi. Negatifse buyuk kayiplar daha sik, pozitifse buyuk kazanclar daha sik.')} | "
+        f"{_tip('Kurtosis', 'Getiri dagılimının sivriligi. Yuksekse asiri hareketler (kuyruck riski) normalden fazla.')} </p>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -5725,14 +6234,23 @@ def render_risk_analytics_tab():
 
 
 def render_whale_tab():
-    """GOD MODE: Whale tracking and momentum signals."""
+    """Whale tracking and momentum signals."""
     st.markdown(
-        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Whale Tracker</h2>",
+        f"<h2 style='color:{ACCENT};'>Whale Tracker</h2>",
         unsafe_allow_html=True,
     )
     st.markdown(
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
-        "Track trending coins, top gainers/losers, and volume surges.</p>",
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>Bu sekme ne gosterir?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"Piyasadaki buyuk hareketleri ve {_tip('trendleri', 'CoinGecko Trending listesi, kullanici aramalarindaki ani artislara dayanir. Bir coin trending ise, ilgi hizla artiyor demektir.')} takip eder. "
+        f"Uc ana bolumden olusur:</p>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
+        f"<b>1. Trending Coins</b> — CoinGecko'da en cok aranan ve ilgi goren coinler.<br>"
+        f"<b>2. Top Gainers / Losers</b> — Son 24 saatte en cok yukselen ve en cok dusen coinler.<br>"
+        f"<b>3. {_tip('Volume Surge Scanner', 'Son mum hacmini son 20 mumun ortalamasiyla karsilastirir. 1.5x uzeriyse Volume Surge (hacim patlamasi) olarak isaretler. Buyuk oyuncularin alisverisi icin erken sinyal olabilir.')}:</b> "
+        f"Anormal hacim artisi gosterir — buyuk oyuncularin (balinaların) harekete gectigine isaret edebilir.</p>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -5834,14 +6352,24 @@ def render_whale_tab():
 
 
 def render_screener_tab():
-    """GOD MODE: Advanced multi-condition screener."""
+    """Advanced multi-condition screener."""
     st.markdown(
-        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Advanced Screener</h2>",
+        f"<h2 style='color:{ACCENT};'>Advanced Screener</h2>",
         unsafe_allow_html=True,
     )
     st.markdown(
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
-        "Scan the market for coins matching your exact criteria.</p>",
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>Bu sekme ne gosterir?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"Belirlediginiz kriterlere uyan coinleri tum piyasada tarar. Birden fazla filtreyi ayni anda uygulayabilirsiniz.</p>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
+        f"<b>Filtreler:</b> "
+        f"{_tip('Min Confidence', 'Minimum guven skoru. Ornegin %60 secerseniz, sadece %60 ve ustunde guven skoru olan coinler gosterilir.')} | "
+        f"{_tip('Signal Filter', 'Hangi sinyal turlerini gormek istediginizi secin. STRONG BUY, BUY, SELL, vb.')} | "
+        f"{_tip('Min ADX', 'Minimum trend gucu. ADX 20 uzeriyse trendli piyasa vardir. 25+ guclu trend.')} | "
+        f"{_tip('RSI Range', 'RSI araligini belirler. 30-70 arasi notr bolge, 30 alti asiri satilmis, 70 ustu asiri alinmis.')} | "
+        f"{_tip('Volume Spike Only', 'Isaretlenirse sadece anormal hacim artisi gosteren coinler listelenir.')} </p>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -5933,14 +6461,27 @@ def render_screener_tab():
 
 
 def render_ensemble_ml_tab():
-    """GOD MODE: Enhanced ensemble ML prediction."""
+    """Enhanced ensemble ML prediction."""
     st.markdown(
-        f"<h2 style='color:{ACCENT};'><span class='god-mode-badge'>GOD MODE</span> Ensemble AI</h2>",
+        f"<h2 style='color:{ACCENT};'>Ensemble AI</h2>",
         unsafe_allow_html=True,
     )
     st.markdown(
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem;'>"
-        "Triple-model ensemble: Gradient Boosting + Random Forest + Logistic Regression with weighted voting.</p>",
+        f"<div class='panel-box'>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>Bu sekme ne gosterir?</b>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
+        f"Tek bir model yerine uc farkli {_tip('makine ogrenimi modeli', 'Bilgisayarin gecmis verilerdeki kaliplari ogrenerek gelecek icin tahmin yaptigi yontemlerdir.')} egitir "
+        f"ve bunlarin agirlikli oylamasiyla birlesik bir tahmin uretir. "
+        f"Tek modele gore daha guvenilirdir, cunku modeller birbirlerinin hatalarini dengeler.</p>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
+        f"<b>Modeller:</b> "
+        f"{_tip('Gradient Boosting', 'Adim adim hatalari duzeltmeye calisan agac yapili bir model. En yuksek agirliga sahiptir (%45). Detaylari iyi yakalar.')} (%45 agirlik) | "
+        f"{_tip('Random Forest', 'Yuzlerce karar agacinin ortalama sonucunu alir. Asiri uyuma (overfitting) karsi dayaniklidir. %35 agirlik.')} (%35 agirlik) | "
+        f"{_tip('Logistic Regression', 'En basit model. Lineer bir sinir cizer. Stabilize edici etki yapar. %20 agirlik.')} (%20 agirlik)</p>"
+        f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px;'>"
+        f"{_tip('Model Agreement', 'Uc modelden kac tanesi ayni yonde (LONG veya SHORT) tahmin yapiyor. %100 = uc model de hemfikir. %33 = sadece biri farkli dusuyor.')} "
+        f"tum modellerin ne kadar hemfikir oldugunu gosterir.</p>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -6031,19 +6572,13 @@ def render_ensemble_ml_tab():
 
 
 def main():
-    """Entry point for the GOD MODE Streamlit app."""
+    """Entry point for the Streamlit app."""
 
-    # GOD MODE Sidebar
     with st.sidebar:
         st.markdown(
-            f"<div style='text-align:center; padding:12px;'>"
-            f"<span class='god-mode-badge'>GOD MODE ACTIVE</span></div>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
             f"<div style='text-align:center; margin:8px 0;'>"
-            f"<span style='color:{NEON_BLUE}; font-size:1.2rem; font-weight:700;'>"
-            f"CRYPTO COMMAND CENTER</span></div>",
+            f"<span style='color:{ACCENT}; font-size:1.1rem; font-weight:700;'>"
+            f"Crypto Command Center</span></div>",
             unsafe_allow_html=True,
         )
 
@@ -6059,7 +6594,7 @@ def main():
             time.sleep(refresh_interval)
             st.rerun()
 
-    # All tabs: Original + GOD MODE
+    # All tabs
     tabs = st.tabs([
         "Market", "Spot", "Position", "AI Prediction",
         "Ensemble AI", "Heatmap", "Monte Carlo",
