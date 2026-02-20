@@ -11,6 +11,46 @@ class AnalysisLike(Protocol):
     confidence: float
 
 
+def _infer_regime(df_slice: pd.DataFrame, analysis_obj: AnalysisLike) -> tuple[str, float]:
+    """Classify local market regime at entry time.
+
+    Priority:
+    1) ADX from analysis object (if available)
+    2) Price-structure fallback using drift/noise ratio
+    """
+    adx_raw = getattr(analysis_obj, "adx", np.nan)
+    try:
+        adx_val = float(adx_raw)
+    except Exception:
+        adx_val = np.nan
+
+    if np.isfinite(adx_val):
+        if adx_val >= 25:
+            return "TREND", float(np.clip((adx_val - 20.0) * 4.0 + 60.0, 0.0, 100.0))
+        if adx_val <= 18:
+            return "RANGE", float(np.clip(70.0 - (adx_val - 10.0) * 3.0, 0.0, 100.0))
+        return "MIXED", 50.0
+
+    close = pd.to_numeric(df_slice["close"], errors="coerce").dropna()
+    if len(close) < 15:
+        return "MIXED", 50.0
+
+    lookback = close.iloc[-30:] if len(close) >= 30 else close
+    rets = lookback.pct_change().dropna()
+    if rets.empty:
+        return "MIXED", 50.0
+
+    drift = abs(float(lookback.iloc[-1] / lookback.iloc[0] - 1.0))
+    noise = float(rets.std()) * np.sqrt(len(rets))
+    trend_ratio = drift / (noise + 1e-9)
+
+    if trend_ratio >= 1.2:
+        return "TREND", float(np.clip(60.0 + (trend_ratio - 1.2) * 35.0, 0.0, 100.0))
+    if trend_ratio <= 0.6:
+        return "RANGE", float(np.clip(70.0 + (0.6 - trend_ratio) * 40.0, 0.0, 100.0))
+    return "MIXED", 50.0
+
+
 def run_backtest(
     df: pd.DataFrame,
     analyzer: Callable[[pd.DataFrame], AnalysisLike],
@@ -25,6 +65,7 @@ def run_backtest(
     - LONG if confidence >= threshold
     - SHORT if confidence <= (100 - threshold)
     """
+    exit_after = max(1, int(exit_after))
     results = []
     equity_curve = [10000.0]
     peak = 10000.0
@@ -69,6 +110,7 @@ def run_backtest(
             pnl = ((future_price - entry_price) / entry_price - total_cost) * 100
         else:
             pnl = ((entry_price - future_price) / entry_price - total_cost) * 100
+        regime, regime_score = _infer_regime(df_slice, result)
 
         equity = equity_curve[-1] * (1 + pnl / 100)
         equity_curve.append(equity)
@@ -92,6 +134,8 @@ def run_backtest(
                 "Exit": future_price,
                 "PnL (%)": round(pnl, 2),
                 "Equity": round(equity, 2),
+                "Regime": regime,
+                "Regime Score": round(regime_score, 1),
             }
         )
 
@@ -127,9 +171,20 @@ def run_backtest(
     returns = df_results["PnL (%)"].astype(float) / 100.0
     mean_return = float(returns.mean())
     std_return = float(returns.std())
-    sharpe_ratio = (
-        (mean_return / (std_return + 1e-9)) * np.sqrt(365 / exit_after) if std_return > 0 else 0.0
-    )
+    # Approximate annualization by timeframe implied from candle timestamps.
+    ann_factor = 365.0
+    if len(df) >= 2 and "timestamp" in df.columns:
+        try:
+            dt_hours = (df["timestamp"].iloc[1] - df["timestamp"].iloc[0]).total_seconds() / 3600.0
+            if dt_hours > 0:
+                periods_per_day = 24.0 / dt_hours
+                ann_factor = periods_per_day * 365.0 / exit_after
+        except Exception:
+            ann_factor = 365.0 / exit_after
+    else:
+        ann_factor = 365.0 / exit_after
+
+    sharpe_ratio = (mean_return / (std_return + 1e-9)) * np.sqrt(ann_factor) if std_return > 0 else 0.0
 
     summary_html = f"""
     <div style='margin-top:1rem; background-color:#16213E; padding:20px; border-radius:10px;'>
@@ -140,4 +195,3 @@ def run_backtest(
     </div>
     """
     return df_results, summary_html
-
