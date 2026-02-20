@@ -15,6 +15,7 @@ from tabs.ml_tab import render as render_ml_tab_ui
 from tabs.monte_carlo_tab import render as render_monte_carlo_tab_ui
 from tabs.multitf_tab import render as render_multitf_tab_ui
 from tabs.position_tab import render as render_position_tab_ui
+from tabs.rapid_tab import render as render_rapid_tab_ui
 from tabs.risk_tab import render as render_risk_analytics_tab_ui
 from tabs.screener_tab import render as render_screener_tab_ui
 from tabs.sessions_tab import render as render_sessions_tab_ui
@@ -24,7 +25,7 @@ from tabs.whale_tab import render as render_whale_tab_ui
 
 
 TAB_TITLES = [
-    "Market", "Spot", "Position", "AI Lab",
+    "Market", "Rapid ⚡", "Spot", "Position", "AI Lab",
     "Ensemble AI", "Heatmap", "Monte Carlo",
     "Fibonacci", "Risk Analytics", "Whale Tracker",
     "Screener", "Multi-TF", "Correlation",
@@ -43,6 +44,15 @@ _TAB_DEPS = [
             "signal_plain", "confidence_score_badge", "readable_market_cap", "leverage_badge",
             "format_delta", "format_trend", "format_adx", "format_stochrsi",
             "style_signal", "style_confidence", "style_scalp_opp", "style_delta", "_debug",
+        ],
+    ),
+    (
+        render_rapid_tab_ui,
+        [
+            "ACCENT", "TEXT_MUTED", "CARD_BG", "POSITIVE", "NEGATIVE", "WARNING",
+            "_tip", "get_top_volume_usdt_symbols", "fetch_ohlcv", "analyse",
+            "get_scalping_entry_target", "ml_ensemble_predict", "_calc_conviction",
+            "signal_plain", "readable_market_cap", "_debug",
         ],
     ),
     (
