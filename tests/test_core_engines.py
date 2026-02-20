@@ -97,6 +97,9 @@ class CoreEngineTests(unittest.TestCase):
         self.assertGreater(len(out), 1)
         step_hours = out["Date"].diff().dropna().dt.total_seconds() / 3600
         self.assertTrue((step_hours >= 5).all())
+        self.assertIn("Regime", out.columns)
+        self.assertIn("Regime Score", out.columns)
+        self.assertTrue(out["Regime"].isin({"TREND", "RANGE", "MIXED"}).all())
 
     def test_signals_engine_returns_expected_fields(self) -> None:
         df = self._sample_df()
