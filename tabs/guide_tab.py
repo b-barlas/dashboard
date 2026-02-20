@@ -170,7 +170,30 @@ Conviction is based on Signal + AI alignment + confidence quality.
             "core",
         ),
         (
-            "8) Spot and Position tabs",
+            "8) Rapid tab (fast decision feed)",
+            """
+**Rapid** is a speed-focused tab for short-horizon opportunities.
+It scans a liquid universe and ranks candidates with a single **Rapid Score (0-100)**.
+
+Rapid Score combines:
+- Confidence (30%)
+- Setup quality (20%)
+- AI quality: direction fit + agreement (20%)
+- Trend quality via ADX (15%)
+- Execution quality via R:R (15%)
+- Penalty for weak/conflicting conviction
+
+Outputs:
+- Action: READY / WAIT / SKIP
+- Direction, Score, Grade, Entry / SL / TP1, R:R
+- "Why now?" bullets for quick context
+
+Use Rapid for speed, then verify final execution discipline in Position tab.
+            """,
+            "core",
+        ),
+        (
+            "9) Spot and Position tabs",
             """
 **Spot tab**:
 - Single-coin deep analysis for non-leveraged decisions
@@ -189,7 +212,7 @@ Both use Ensemble AI for directional confirmation.
             "core",
         ),
         (
-            "9) Screener tab",
+            "10) Screener tab",
             """
 Screener scans predefined liquid symbols with filters:
 - Min confidence
@@ -204,7 +227,7 @@ Use this to shortlist candidates, then validate in Spot/Position/Fibonacci.
             "core",
         ),
         (
-            "10) Fibonacci, Monte Carlo, Risk Analytics",
+            "11) Fibonacci, Monte Carlo, Risk Analytics",
             """
 **Fibonacci tab**:
 - Retracement/extension levels
@@ -225,7 +248,7 @@ Use this to shortlist candidates, then validate in Spot/Position/Fibonacci.
             "core",
         ),
         (
-            "11) Backtest tab",
+            "12) Backtest tab",
             """
 Backtest replays strategy logic on historical candles:
 - Entry by signal+confidence rules
@@ -243,7 +266,7 @@ A high win rate with bad drawdown is not necessarily good.
             "risk",
         ),
         (
-            "12) Tools tab (risk/reward + liquidation)",
+            "13) Tools tab (risk/reward + liquidation)",
             """
 Tools help pre-trade planning:
 - Risk/Reward calculator
@@ -260,7 +283,7 @@ Always define risk before entry:
             "risk",
         ),
         (
-            "13) Correlation, Sessions, Heatmap, Whale",
+            "14) Correlation, Sessions, Heatmap, Whale",
             """
 - **Correlation**: co-movement matrix for diversification
 - **Sessions**: behavior by Asia/Europe/US market windows
@@ -272,7 +295,7 @@ These tabs help with **context**, not standalone entries.
             "info",
         ),
         (
-            "14) Leverage guidance",
+            "15) Leverage guidance",
             """
 Leverage suggestions are ceilings, not targets.
 Use lower leverage when:
@@ -288,7 +311,7 @@ Best practice:
             "risk",
         ),
         (
-            "15) Data sources and UK-safe policy",
+            "16) Data sources and UK-safe policy",
             """
 Primary exchange fallback list is intentionally UK-safe for this setup:
 - Kraken
@@ -305,7 +328,7 @@ This is intentional to avoid blank panels during transient outages.
             "info",
         ),
         (
-            "16) How to run with Streamlit",
+            "17) How to run with Streamlit",
             """
 Run locally:
 1. Install dependencies from `requirements.txt`
@@ -319,15 +342,16 @@ If data looks stale:
             "info",
         ),
         (
-            "17) Practical workflow (recommended)",
+            "18) Practical workflow (recommended)",
             """
 Recommended daily flow:
 1. Market tab: check regime + scanner shortlist
-2. Spot: validate setup and read the Action Plan
-3. Position: if already in trade, follow Hard Invalidation + Position Health first
-4. Fibonacci/Risk: validate structure and downside risk
-5. Tools: confirm R:R and liquidation distance
-6. Backtest: validate settings before using new setup live
+2. Rapid tab: check READY candidates and pre-built plans
+3. Spot: validate setup and read the Action Plan
+4. Position: if already in trade, follow Hard Invalidation + Position Health first
+5. Fibonacci/Risk: validate structure and downside risk
+6. Tools: confirm R:R and liquidation distance
+7. Backtest: validate settings before using new setup live
 
 Quick rule:
 - If Signal/AI conflict and Health says REDUCE or EXIT, reduce risk first.
@@ -336,7 +360,7 @@ Quick rule:
             "core",
         ),
         (
-            "18) Limitations and responsibility",
+            "19) Limitations and responsibility",
             """
 No model can predict news shocks, listing events, outages, or sudden regime breaks.
 Treat all outputs as probabilistic guidance.
@@ -352,7 +376,7 @@ This dashboard is **not financial advice**.
             "warn",
         ),
         (
-            "19) Quick Smoke Checklist (before daily use)",
+            "20) Quick Smoke Checklist (before daily use)",
             """
 Use this 60-second checklist:
 
@@ -364,16 +388,20 @@ Use this 60-second checklist:
 - Analyse runs and shows Signal + Confidence + AI + Conviction
 - Spot Action Plan appears
 
-3. **Position tab**
+3. **Rapid tab**
+- Rapid table loads with Action / Score / Entry-SL-TP columns
+- If no qualified rows, near-miss watchlist appears
+
+4. **Position tab**
 - Raw/Levered PnL and Net PnL render correctly
 - Hard Invalidation and Position Health are visible
 - Excel report downloads without resetting analysis view
 
-4. **AI Lab**
+5. **AI Lab**
 - Predict fills timeframe matrix
 - AI Entry and Non-AI Entry columns populate logically
 
-5. **Fallback check**
+6. **Fallback check**
 - If any live endpoint fails, cached snapshot warning with UTC timestamp appears
             """,
             "info",
