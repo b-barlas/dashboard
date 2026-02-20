@@ -52,7 +52,7 @@ def render(ctx: dict) -> None:
         f"Track and manage open positions. Enter your entry price, leverage, and direction to see "
         f"{_tip('PnL', 'Profit and Loss — your current gain or loss percentage based on entry price vs current price, multiplied by leverage.')} in real-time, "
         f"{_tip('Stop-Loss / Take-Profit', 'Automatically calculated based on ATR (Average True Range). Stop-loss protects against excessive loss, take-profit locks in gains.')} levels, "
-        f"and {_tip('liquidation distance', 'How far the price needs to move against you before your position is liquidated. Lower leverage = safer distance.')}. "
+        f"and {_tip('liquidation distance', 'How far the price needs to move against you before your position is liquidated at the selected position settings.')}. "
         f"Also shows updated technical signals for the coin while your position is open.</p>"
         f"</div>",
         unsafe_allow_html=True,
@@ -192,8 +192,8 @@ def render(ctx: dict) -> None:
                         f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
                         f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
                         f"<span style='color:{NEGATIVE}; font-weight:600;'>Liquidation Risk</span>"
-                        f"<span style='color:{TEXT_MUTED};'> — With x{leverage}, liquidation is only "
-                        f"{liq_dist_pct:.2f}% away. Reduce leverage or tighten risk controls.</span></div>",
+                        f"<span style='color:{TEXT_MUTED};'> — With current settings, liquidation is only "
+                        f"{liq_dist_pct:.2f}% away. Tighten risk controls.</span></div>",
                         unsafe_allow_html=True,
                     )
 

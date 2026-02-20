@@ -36,7 +36,6 @@ def render(ctx: dict) -> None:
     signal_plain = get_ctx(ctx, "signal_plain")
     confidence_score_badge = get_ctx(ctx, "confidence_score_badge")
     readable_market_cap = get_ctx(ctx, "readable_market_cap")
-    leverage_badge = get_ctx(ctx, "leverage_badge")
     format_delta = get_ctx(ctx, "format_delta")
     format_trend = get_ctx(ctx, "format_trend")
     format_adx = get_ctx(ctx, "format_adx")
@@ -355,6 +354,11 @@ def render(ctx: dict) -> None:
 
     def _style_trend_state(v: str) -> str:
         s = str(v)
+        # ADX-specific states first (string comes from format_adx helper).
+        if "Very Strong" in s or "Extreme" in s or "(Strong)" in s:
+            return f"color:{POSITIVE}; font-weight:700;"
+        if "Weak" in s or "Starting" in s:
+            return f"color:{WARNING}; font-weight:700;"
         if "Bullish" in s or "Above" in s or "Oversold" in s or "Near Bottom" in s or "Low" in s:
             return f"color:{POSITIVE}; font-weight:700;"
         if "Bearish" in s or "Below" in s or "Overbought" in s or "Near Top" in s or "High" in s:
@@ -362,6 +366,66 @@ def render(ctx: dict) -> None:
         if "Neutral" in s or "Moderate" in s or "Near VWAP" in s or "Starting" in s:
             return f"color:{WARNING}; font-weight:700;"
         return f"color:{TEXT_MUTED};"
+
+    def _fmt_price(v: float) -> str:
+        try:
+            p = float(v)
+        except Exception:
+            return ""
+        if p >= 1000:
+            return f"${p:,.2f}"
+        if p >= 1:
+            return f"${p:,.4f}"
+        if p >= 0.01:
+            return f"${p:,.6f}"
+        if p >= 0.0001:
+            return f"${p:,.8f}"
+        return f"${p:,.10f}"
+
+    def _action_decision(
+        signal_dir: str,
+        confidence: float,
+        setup_badge: str,
+        conviction_label: str,
+        agreement: float,
+        adx_val: float,
+        has_plan: bool,
+    ) -> str:
+        if signal_dir not in {"LONG", "SHORT"}:
+            return "⛔ SKIP"
+        if not has_plan:
+            return "⏳ WAIT"
+        if "No Setup" in setup_badge or conviction_label == "CONFLICT" or confidence < 55:
+            return "⛔ SKIP"
+
+        strict_ok = (
+            confidence >= 65
+            and "Aligned" in setup_badge
+            and conviction_label == "HIGH"
+            and agreement >= 0.65
+            and (pd.isna(adx_val) or adx_val >= 18)
+        )
+        if strict_ok:
+            return "✅ ENTER"
+
+        weak_count = 0
+        if "Draft" in setup_badge or "Tech-Only" in setup_badge:
+            weak_count += 1
+        if conviction_label in {"LOW", "MEDIUM"}:
+            weak_count += 1
+        if agreement < 0.55:
+            weak_count += 1
+        if pd.notna(adx_val) and adx_val < 18:
+            weak_count += 1
+        return "⏳ WAIT" if weak_count >= 1 else "✅ ENTER"
+
+    def _style_action(v: str) -> str:
+        s = str(v)
+        if "ENTER" in s:
+            return f"color:{POSITIVE}; font-weight:800;"
+        if "WAIT" in s:
+            return f"color:{WARNING}; font-weight:800;"
+        return f"color:{NEGATIVE}; font-weight:800;"
 
     scan_sig = (timeframe, signal_filter, int(top_n))
     last_sig = st.session_state.get("market_scan_sig")
@@ -431,7 +495,7 @@ def render(ctx: dict) -> None:
                 price_change = get_price_change(sym)
 
                 a = analyse(df_eval)
-                signal, lev, volume_spike = a.signal, a.leverage, a.volume_spike
+                signal, volume_spike = a.signal, a.volume_spike
                 atr_comment_v, candle_pattern_v, confidence_score_v = a.atr_comment, a.candle_pattern, a.confidence
                 adx_val_v, supertrend_trend_v, ichimoku_trend_v = a.adx, a.supertrend, a.ichimoku
                 stochrsi_k_val_v, bollinger_bias_v, vwap_label_v = a.stochrsi_k, a.bollinger, a.vwap
@@ -467,11 +531,22 @@ def render(ctx: dict) -> None:
                 _emoji_map = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "⚪", "CONFLICT": "🔴"}
                 conviction = f"{_emoji_map.get(_conv_lbl, '')} {_conv_lbl}" if _conv_lbl else ""
                 setup_badge = _setup_badge(scalp_direction or "", signal_direction, ai_direction)
+                has_trade_plan = bool(entry_price and target_price and stop_s)
+                action = _action_decision(
+                    signal_direction,
+                    float(confidence_score_v),
+                    setup_badge,
+                    str(_conv_lbl),
+                    float(agreement),
+                    float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
+                    has_trade_plan,
+                )
 
                 return {
                     'Coin': base,
-                    'Price ($)': f"{price:,.2f}",
+                    'Price ($)': _fmt_price(price),
                     'Δ (%)': format_delta(price_change) if price_change is not None else '',
+                    'Action': action,
                     'Signal': signal_plain(signal),
                     'Confidence': confidence_score_badge(confidence_score_v),
                     'Confidence Band': _confidence_band(confidence_score_v),
@@ -481,9 +556,9 @@ def render(ctx: dict) -> None:
                     'Conviction': conviction,
                     'Setup': setup_badge,
                     'Scalp Opportunity': scalp_direction or "",
-                    'Leverage': leverage_badge(lev) if (entry_price and target_price) else '',
-                    'Entry Price': f"${entry_price:,.2f}" if entry_price else '',
-                    'Target Price': f"${target_price:,.2f}" if target_price else '',
+                    'Entry Zone': _fmt_price(entry_price) if entry_price else '',
+                    'Invalidation (SL)': _fmt_price(stop_s) if stop_s else '',
+                    'Target (TP)': _fmt_price(target_price) if target_price else '',
                     'Market Cap ($)': readable_market_cap(mcap_val),
                     'Spike Alert': '▲ Spike' if volume_spike else '',
                     'ADX': round(adx_val_v, 1) if pd.notna(adx_val_v) else float("nan"),
@@ -519,6 +594,7 @@ def render(ctx: dict) -> None:
                 st.session_state["market_scan_results"] = fresh_results
                 st.session_state["market_scan_sig"] = scan_sig
                 st.session_state["market_scan_cache_ts"] = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+                st.session_state["market_scan_cache_sig"] = scan_sig
                 results = fresh_results
             else:
                 # Keep last non-empty snapshot when APIs temporarily fail/rate-limit.
@@ -526,7 +602,14 @@ def render(ctx: dict) -> None:
                 results = prev_results
                 if prev_results:
                     ts = st.session_state.get("market_scan_cache_ts", "unknown time")
-                    st.warning(f"Live scan returned no rows. Showing last successful snapshot from {ts}.")
+                    cache_sig = st.session_state.get("market_scan_cache_sig")
+                    if cache_sig and tuple(cache_sig) != tuple(scan_sig):
+                        st.warning(
+                            f"Live scan returned no rows. Showing snapshot from {ts} "
+                            f"(different filter/timeframe: {cache_sig})."
+                        )
+                    else:
+                        st.warning(f"Live scan returned no rows. Showing last successful snapshot from {ts}.")
 
     # Prepare DataFrame for display
     if results:
@@ -535,26 +618,39 @@ def render(ctx: dict) -> None:
             f"<summary style='color:{ACCENT}; cursor:pointer; font-size:0.9rem;'>"
             f"How to read quickly (?)</summary>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; padding:0.4rem 0.2rem;'>"
-            f"<b>1.</b> Prioritize <b>Setup = Aligned</b> + <b>Conviction = HIGH</b> + <b>AI Stability = Strong</b>.<br>"
-            f"<b>2.</b> If Signal is LONG/SHORT but AI shows divergence, treat as lower-quality setup.<br>"
-            f"<b>3.</b> Use entry/target as draft levels; validate full indicator context in Spot/Position."
+            f"<b>1.</b> Read <b>Action</b> first: ✅ ENTER, ⏳ WAIT, ⛔ SKIP.<br>"
+            f"<b>2.</b> Confirm with <b>Confidence</b> + <b>Setup</b> + <b>Invalidation (SL)</b>.<br>"
+            f"<b>3.</b> Open <b>+ Show advanced columns</b> only when you need deeper diagnostics."
             f"</div></details>",
             unsafe_allow_html=True,
         )
+        show_advanced = st.checkbox("+ Show advanced columns", value=False, key="market_show_adv_cols")
         st.markdown(
             f"<details style='margin-bottom:0.8rem;'>"
             f"<summary style='color:{ACCENT}; cursor:pointer; font-size:0.9rem;'>"
             f"ℹ️ Column Guide (click to expand)</summary>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; padding:0.5rem;'>"
-            "<b>Signal</b> — Final technical direction (LONG/SHORT/WAIT) from weighted indicator blocks.<br>"
-            "<b>Confidence</b> / <b>Confidence Band</b> — Score (0-100) and its quality bucket.<br>"
-            "<b>AI Ensemble</b> / <b>AI Agree</b> / <b>AI Stability</b> — AI direction, internal agreement %, and stability class.<br>"
-            "<b>Conviction</b> — Alignment quality between technical signal, AI direction, and confidence.<br>"
-            "<b>Setup</b> — Entry readiness quality: Aligned / Tech-Only / Draft / No Setup.<br>"
-            "<b>Scalp Opportunity</b>, <b>Leverage</b>, <b>Entry Price</b>, <b>Target Price</b> — strict setup planner outputs.<br>"
-            "<b>ADX</b>, <b>SuperTrend</b>, <b>Ichimoku</b>, <b>VWAP</b>, <b>Bollinger</b>, <b>Stochastic RSI</b> — trend/momentum context fields.<br>"
-            "<b>Volatility</b>, <b>PSAR</b>, <b>Williams %R</b>, <b>CCI</b>, <b>Candle Pattern</b> — secondary confirmation context.<br>"
-            "<b>Spike Alert</b> — abnormal volume detection flag. <b>Δ (%)</b> — latest 24h price change."
+            "<b>Action</b> — The final quick decision. "
+            "✅ ENTER = conditions are strong enough, ⏳ WAIT = setup is forming/unclear, ⛔ SKIP = low-quality or conflicting setup.<br>"
+            "<b>Signal</b> — Technical direction only (LONG/SHORT/WAIT). "
+            "This is not a full trade plan by itself.<br>"
+            "<b>Confidence</b> — Strength score (0-100). Higher = stronger technical evidence.<br>"
+            "<b>Confidence Band</b> — Quick quality label for confidence (Weak/Mixed/Good/Strong).<br>"
+            "<b>Setup</b> — Trade-readiness check. "
+            "Aligned = strongest, Tech-Only/Draft = partial, No Setup = no valid plan yet.<br>"
+            "<b>Entry Zone</b> — Suggested area to enter (draft level).<br>"
+            "<b>Invalidation (SL)</b> — Price where the setup is considered broken. "
+            "If hit, the trade idea is wrong and should be exited.<br>"
+            "<b>Target (TP)</b> — First planned take-profit area if the move works.<br>"
+            "<b>AI Ensemble</b> — AI model direction (LONG/SHORT/NEUTRAL).<br>"
+            "<b>AI Agree</b> — Percentage of AI model agreement. Higher = models agree more.<br>"
+            "<b>AI Stability</b> — Agreement quality bucket (Strong/Medium/Weak).<br>"
+            "<b>Conviction</b> — How well technical Signal + AI direction + confidence align.<br>"
+            "<b>Scalp Opportunity</b> — Direction from strict entry model (if available).<br>"
+            "<b>ADX</b> — Trend strength. Low = ranging, higher = stronger trend.<br>"
+            "<b>SuperTrend / Ichimoku / VWAP / Bollinger / Stochastic RSI</b> — Trend and momentum context fields.<br>"
+            "<b>Volatility / PSAR / Williams %R / CCI / Candle Pattern</b> — secondary confirmation fields.<br>"
+            "<b>Spike Alert</b> — Abnormal volume flag. <b>Δ (%)</b> — latest 24h price change."
             "</div></details>",
             unsafe_allow_html=True,
         )
@@ -567,10 +663,21 @@ def render(ctx: dict) -> None:
         df_results["Ichimoku"] = df_results["Ichimoku"].apply(format_trend)
         df_results["Stochastic RSI"] = df_results["Stochastic RSI"].apply(format_stochrsi)
 
+        primary_cols = [
+            "Coin",
+            "Signal",
+            "Confidence",
+            "Setup",
+            "Entry Zone",
+            "Invalidation (SL)",
+            "Target (TP)",
+            "Action",
+        ]
         all_cols = [
             "Coin",
             "Price ($)",
             "Δ (%)",
+            "Action",
             "Signal",
             "Confidence",
             "Confidence Band",
@@ -579,9 +686,9 @@ def render(ctx: dict) -> None:
             "AI Stability",
             "Conviction",
             "Setup",
-            "Leverage",
-            "Entry Price",
-            "Target Price",
+            "Entry Zone",
+            "Invalidation (SL)",
+            "Target (TP)",
             "Scalp Opportunity",
             "Spike Alert",
             "Market Cap ($)",
@@ -597,16 +704,21 @@ def render(ctx: dict) -> None:
             "CCI",
             "Candle Pattern",
         ]
-        df_display = df_results[all_cols].copy()
+        display_cols = all_cols if show_advanced else primary_cols
+        df_display = df_results[display_cols].copy()
 
         styled_summary = (
             df_display.style
-            .map(style_signal, subset=["Signal", "AI Ensemble"])
-            .map(style_confidence, subset=["Confidence"])
-            .map(style_scalp_opp, subset=["Scalp Opportunity"])
-            .map(style_delta, subset=["Δ (%)"])
-            .map(_style_setup, subset=["Setup"])
-            .map(_style_trend_state, subset=["SuperTrend", "Ichimoku", "VWAP", "Bollinger", "Volatility", "ADX", "Stochastic RSI"])
+            .map(style_signal, subset=[c for c in ["Signal", "AI Ensemble"] if c in df_display.columns])
+            .map(style_confidence, subset=[c for c in ["Confidence"] if c in df_display.columns])
+            .map(style_scalp_opp, subset=[c for c in ["Scalp Opportunity"] if c in df_display.columns])
+            .map(style_delta, subset=[c for c in ["Δ (%)"] if c in df_display.columns])
+            .map(_style_setup, subset=[c for c in ["Setup"] if c in df_display.columns])
+            .map(_style_action, subset=[c for c in ["Action"] if c in df_display.columns])
+            .map(
+                _style_trend_state,
+                subset=[c for c in ["SuperTrend", "Ichimoku", "VWAP", "Bollinger", "Volatility", "ADX", "Stochastic RSI"] if c in df_display.columns],
+            )
         )
         st.dataframe(styled_summary, width="stretch", hide_index=True)
 

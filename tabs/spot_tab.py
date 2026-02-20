@@ -84,7 +84,7 @@ def render(ctx: dict) -> None:
             return
 
         a = analyse(df_eval)
-        signal, lev, comment, volume_spike = a.signal, a.leverage, a.comment, a.volume_spike
+        signal, comment, volume_spike = a.signal, a.comment, a.volume_spike
         atr_comment, candle_pattern, confidence_score = a.atr_comment, a.candle_pattern, a.confidence
         adx_val, supertrend_trend, ichimoku_trend = a.adx, a.supertrend, a.ichimoku
         stochrsi_k_val, bollinger_bias, vwap_label = a.stochrsi_k, a.bollinger, a.vwap
@@ -148,18 +148,6 @@ def render(ctx: dict) -> None:
                 f"<span style='color:{WARNING}; font-weight:600;'>Market Ranging (ADX {adx_val:.0f})</span>"
                 f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'> — Trend signals are less reliable. "
                 f"Confidence discounted. Consider smaller positions or waiting for a clear trend.</span></div>",
-                unsafe_allow_html=True,
-            )
-
-        # Risk alert: model risk profile suggests aggression while confidence is weak.
-        if lev >= 6 and confidence_score < 55:
-            st.markdown(
-                f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
-                f"padding:8px 12px; border-radius:4px; margin:6px 0;'>"
-                f"<span style='color:{NEGATIVE}; font-weight:600;'>Risk Warning</span>"
-                f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'> — The model risk profile is aggressive "
-                f"(x{lev}) but confidence is only {confidence_score:.0f}%. For spot, treat this as unstable conditions "
-                f"and avoid oversized entries.</span></div>",
                 unsafe_allow_html=True,
             )
 
