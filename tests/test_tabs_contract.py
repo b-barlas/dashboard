@@ -23,6 +23,7 @@ TAB_MODULES = [
     "tabs.monte_carlo_tab",
     "tabs.multitf_tab",
     "tabs.position_tab",
+    "tabs.rapid_tab",
     "tabs.risk_tab",
     "tabs.screener_tab",
     "tabs.sessions_tab",
