@@ -4,10 +4,11 @@ from ui.ctx import get_ctx
 
 import numpy as np
 import plotly.graph_objs as go
-import streamlit as st
+from ui.snapshot_cache import live_or_snapshot
 
 
 def render(ctx: dict) -> None:
+    st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
     TEXT_MUTED = get_ctx(ctx, "TEXT_MUTED")
     POSITIVE = get_ctx(ctx, "POSITIVE")
@@ -31,6 +32,16 @@ def render(ctx: dict) -> None:
         "<li>This tests whether the dashboard's signal + confidence system would have been profitable "
         "on the chosen coin and timeframe. Use it to calibrate your confidence threshold and hold duration.</li>"
         "</ul></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<details style='margin-bottom:0.7rem;'>"
+        f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
+        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
+        f"<b>1.</b> Start with <b>Profit Factor</b>, <b>Max Drawdown</b>, and <b>Total Return</b> together.<br>"
+        f"<b>2.</b> A high win rate with weak profit factor is usually not robust.<br>"
+        f"<b>3.</b> Increase threshold until drawdown becomes acceptable without killing trade count."
+        f"</div></details>",
         unsafe_allow_html=True,
     )
 
@@ -83,14 +94,23 @@ def render(ctx: dict) -> None:
         return
 
     st.info("Fetching data and running comprehensive analysis...")
-    df = fetch_ohlcv(coin, timeframe, limit)
+    df_live = fetch_ohlcv(coin, timeframe, limit)
+    df, used_cache, cache_ts = live_or_snapshot(st, f"backtest_df::{coin}::{timeframe}::{limit}", df_live)
+    if used_cache:
+        st.warning(f"Live data unavailable. Using cached snapshot from {cache_ts}.")
     if df is None or df.empty:
         st.error("Failed to fetch historical data. Please check the symbol or connection.")
         return
 
     st.success(f"✅ Fetched {len(df)} candles. Running backtest...")
     try:
-        result_df, _summary_html = run_backtest(df, threshold, exit_after, commission, slippage)
+        result_df, _summary_html = run_backtest(
+            df,
+            threshold=threshold,
+            exit_after=exit_after,
+            commission=commission,
+            slippage=slippage,
+        )
     except Exception as e:
         st.error(f"Error during backtest: {e}")
         return
@@ -150,6 +170,34 @@ def render(ctx: dict) -> None:
     with c6:
         st.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}", "Target: >1.0")
 
+    if "Regime" in result_df.columns:
+        st.markdown(f"<h3 style='color:{ACCENT}; margin-top:1.4rem;'>🧭 Regime Comparison</h3>", unsafe_allow_html=True)
+        st.markdown(
+            f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; margin-bottom:0.45rem;'>"
+            f"TREND = directional market, RANGE = mean-reversion market, MIXED = transition."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        reg = result_df.copy()
+        reg["is_win"] = (reg["PnL (%)"] > 0).astype(int)
+        regime_stats = (
+            reg.groupby("Regime", dropna=False)
+            .agg(
+                Trades=("PnL (%)", "count"),
+                WinRate=("is_win", "mean"),
+                AvgPnL=("PnL (%)", "mean"),
+                TotalPnL=("PnL (%)", "sum"),
+                AvgRegimeScore=("Regime Score", "mean"),
+            )
+            .reset_index()
+        )
+        regime_stats["WinRate"] = regime_stats["WinRate"] * 100.0
+        regime_stats["WinRate"] = regime_stats["WinRate"].map(lambda v: f"{v:.1f}%")
+        regime_stats["AvgPnL"] = regime_stats["AvgPnL"].map(lambda v: f"{v:+.2f}%")
+        regime_stats["TotalPnL"] = regime_stats["TotalPnL"].map(lambda v: f"{v:+.2f}%")
+        regime_stats["AvgRegimeScore"] = regime_stats["AvgRegimeScore"].map(lambda v: f"{v:.1f}")
+        st.dataframe(regime_stats, width="stretch", hide_index=True)
+
     if "Equity" in result_df.columns:
         st.markdown(f"<h3 style='color:{ACCENT}; margin-top:2rem;'>💰 Equity Curve</h3>", unsafe_allow_html=True)
         equity_fig = go.Figure()
@@ -184,6 +232,8 @@ def render(ctx: dict) -> None:
     styled_df["Exit"] = styled_df["Exit"].apply(lambda x: f"${x:,.4f}")
     styled_df["PnL (%)"] = styled_df["PnL (%)"].apply(lambda x: f"{x:+.2f}%")
     styled_df["Confidence"] = styled_df["Confidence"].apply(lambda x: f"{x:.1f}%")
+    if "Regime Score" in styled_df.columns:
+        styled_df["Regime Score"] = styled_df["Regime Score"].apply(lambda x: f"{x:.1f}")
     if "Equity" in styled_df.columns:
         styled_df["Equity"] = styled_df["Equity"].apply(lambda x: f"${x:,.2f}")
     st.dataframe(styled_df, width="stretch")
@@ -196,4 +246,3 @@ def render(ctx: dict) -> None:
         file_name=filename,
         mime="text/csv",
     )
-
