@@ -182,6 +182,26 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
         else:
             _inferred_tf = "1d"
 
+    # Timeframe-adaptive oscillator thresholds.
+    if _inferred_tf in {"1m", "3m", "5m"}:
+        rsi_ob, rsi_os = 75.0, 25.0
+        stoch_ob_ext, stoch_ob_soft = 0.92, 0.85
+        stoch_os_soft, stoch_os_ext = 0.15, 0.08
+        williams_ob, williams_os = -15.0, -85.0
+        cci_ob, cci_os = 130.0, -130.0
+    elif _inferred_tf in {"4h", "1d"}:
+        rsi_ob, rsi_os = 68.0, 32.0
+        stoch_ob_ext, stoch_ob_soft = 0.88, 0.78
+        stoch_os_soft, stoch_os_ext = 0.22, 0.12
+        williams_ob, williams_os = -22.0, -78.0
+        cci_ob, cci_os = 90.0, -90.0
+    else:
+        rsi_ob, rsi_os = 70.0, 30.0
+        stoch_ob_ext, stoch_ob_soft = 0.90, 0.80
+        stoch_os_soft, stoch_os_ext = 0.20, 0.10
+        williams_ob, williams_os = -20.0, -80.0
+        cci_ob, cci_os = 100.0, -100.0
+
     df["ema5"] = ta.trend.ema_indicator(df["close"], window=5)
     df["ema9"] = ta.trend.ema_indicator(df["close"], window=9)
     df["ema21"] = ta.trend.ema_indicator(df["close"], window=21)
@@ -218,8 +238,12 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
     df["senkou_a"] = ichimoku.ichimoku_a()
     df["senkou_b"] = ichimoku.ichimoku_b()
 
-    latest_idx = -2 if len(df) >= 2 else -1
+    # Standard policy: callers pass a closed-candle frame (live candle removed upstream).
+    # Therefore latest bar for analysis is always the last row.
+    latest_idx = -1
+    latest_pos = len(df) - 1
     latest = df.iloc[latest_idx]
+    closed_df = df
 
     vwap_val = latest.get("vwap", np.nan)
     if pd.isna(vwap_val):
@@ -231,8 +255,8 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
     else:
         vwap_label = "→ Near VWAP"
 
-    volume_spike = detect_volume_spike(df)
-    candle_pattern = detect_candle_pattern(df)
+    volume_spike = detect_volume_spike(closed_df)
+    candle_pattern = detect_candle_pattern(closed_df)
 
     atr_latest = latest["atr"]
     if atr_latest > latest["close"] * 0.05:
@@ -324,6 +348,25 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
             trend_signals.append(-0.3)
             psar_trend = "▼ Bearish"
 
+    # Trend slope confirmation helps reduce whipsaw when level-only signals are mixed.
+    if latest_pos >= 3:
+        ema9_prev = float(df["ema9"].iloc[latest_pos - 3])
+        ema9_now = float(df["ema9"].iloc[latest_pos])
+        ema21_prev = float(df["ema21"].iloc[latest_pos - 3])
+        ema21_now = float(df["ema21"].iloc[latest_pos])
+        if np.isfinite(ema9_prev) and np.isfinite(ema9_now) and abs(ema9_prev) > 1e-12:
+            ema9_slope = (ema9_now / ema9_prev) - 1.0
+            if ema9_slope > 0.001:
+                trend_signals.append(0.25)
+            elif ema9_slope < -0.001:
+                trend_signals.append(-0.25)
+        if np.isfinite(ema21_prev) and np.isfinite(ema21_now) and abs(ema21_prev) > 1e-12:
+            ema21_slope = (ema21_now / ema21_prev) - 1.0
+            if ema21_slope > 0.0007:
+                trend_signals.append(0.2)
+            elif ema21_slope < -0.0007:
+                trend_signals.append(-0.2)
+
     if adx_val >= 25:
         trend_strength = min(adx_val / 50, 1.0)
         trend_signals = [s * (1 + trend_strength * 0.5) for s in trend_signals]
@@ -331,13 +374,15 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
     trend_score = np.clip(np.mean(trend_signals) if trend_signals else 0.0, -1, 1)
 
     momentum_signals = []
+    trend_hint = 1 if latest["ema5"] > latest["ema21"] else (-1 if latest["ema5"] < latest["ema21"] else 0)
+    strong_trend = bool(pd.notna(adx_val) and adx_val >= 25)
     rsi_val = latest["rsi"]
-    if rsi_val > 70:
-        momentum_signals.append(-0.5)
+    if rsi_val > rsi_ob:
+        momentum_signals.append(-0.2 if strong_trend and trend_hint > 0 else -0.5)
     elif rsi_val > 55:
         momentum_signals.append(0.5)
-    elif rsi_val < 30:
-        momentum_signals.append(0.5)
+    elif rsi_val < rsi_os:
+        momentum_signals.append(0.2 if strong_trend and trend_hint < 0 else 0.5)
     elif rsi_val < 45:
         momentum_signals.append(-0.5)
     else:
@@ -352,37 +397,54 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
     elif latest["macd"] < latest["macd_signal"]:
         momentum_signals.append(-0.5)
 
-    if stochrsi_k_val >= 0.9:
+    if latest_pos >= 1:
+        macd_now = float(df["macd_diff"].iloc[latest_pos])
+        macd_prev = float(df["macd_diff"].iloc[latest_pos - 1])
+        if np.isfinite(macd_now) and np.isfinite(macd_prev):
+            macd_slope = macd_now - macd_prev
+            if macd_slope > 0:
+                momentum_signals.append(0.2)
+            elif macd_slope < 0:
+                momentum_signals.append(-0.2)
+
+    if stochrsi_k_val >= stoch_ob_ext:
         momentum_signals.append(-0.5)
-    elif stochrsi_k_val <= 0.1:
+    elif stochrsi_k_val <= stoch_os_ext:
         momentum_signals.append(0.5)
-    elif stochrsi_k_val >= 0.8:
+    elif stochrsi_k_val >= stoch_ob_soft:
         momentum_signals.append(-0.3)
-    elif stochrsi_k_val <= 0.2:
+    elif stochrsi_k_val <= stoch_os_soft:
         momentum_signals.append(0.3)
 
-    if williams_val < -80:
+    if williams_val < williams_os:
         momentum_signals.append(0.5)
-    elif williams_val > -20:
+    elif williams_val > williams_ob:
         momentum_signals.append(-0.5)
 
-    if cci_val > 100:
+    if cci_val > cci_ob:
         momentum_signals.append(-0.5)
-    elif cci_val < -100:
+    elif cci_val < cci_os:
         momentum_signals.append(0.5)
 
     momentum_score = np.clip(np.mean(momentum_signals) if momentum_signals else 0.0, -1, 1)
 
     volume_signals = []
-    _obv_back = min(5, len(df) - 1)
+    _obv_back = min(5, len(closed_df) - 1)
     if _obv_back > 0:
-        if df["obv"].iloc[-1] > df["obv"].iloc[-_obv_back]:
+        if closed_df["obv"].iloc[-1] > closed_df["obv"].iloc[-_obv_back]:
             volume_signals.append(0.5)
-        elif df["obv"].iloc[-1] < df["obv"].iloc[-_obv_back]:
+        elif closed_df["obv"].iloc[-1] < closed_df["obv"].iloc[-_obv_back]:
             volume_signals.append(-0.5)
 
     if volume_spike:
         volume_signals.append(0.5 if latest["close"] > latest["open"] else -0.5)
+
+    vol_ma = float(closed_df["volume"].tail(20).mean()) if len(closed_df) >= 20 else float(closed_df["volume"].mean())
+    vol_ratio = float(latest["volume"] / max(vol_ma, 1e-9))
+    if vol_ratio >= 1.5:
+        volume_signals.append(0.3 if latest["close"] >= latest["open"] else -0.3)
+    elif vol_ratio <= 0.7:
+        volume_signals.append(-0.2 if latest["close"] >= latest["open"] else 0.2)
 
     if latest["close"] > latest["vwap"]:
         volume_signals.append(0.5)
@@ -404,19 +466,44 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
         volatility_signals.append(-0.5)
     volatility_score = np.clip(np.mean(volatility_signals) if volatility_signals else 0.0, -1, 1)
 
-    final_score = trend_score * 0.40 + momentum_score * 0.30 + volume_score * 0.20 + volatility_score * 0.10
+    # Regime-aware category weights improve robustness across trend vs range environments.
+    if pd.notna(adx_val) and adx_val >= 25:
+        w_trend, w_momentum, w_volume, w_volatility = 0.50, 0.25, 0.15, 0.10
+    elif pd.notna(adx_val) and adx_val < 18:
+        w_trend, w_momentum, w_volume, w_volatility = 0.30, 0.35, 0.20, 0.15
+    else:
+        w_trend, w_momentum, w_volume, w_volatility = 0.40, 0.30, 0.20, 0.10
+
+    final_score = (
+        trend_score * w_trend
+        + momentum_score * w_momentum
+        + volume_score * w_volume
+        + volatility_score * w_volatility
+    )
+
+    # Penalize setups where trend and momentum strongly disagree.
+    if abs(trend_score) >= 0.45 and abs(momentum_score) >= 0.35 and np.sign(trend_score) != np.sign(momentum_score):
+        final_score *= 0.85
+
+    # Small confirmation boost when trend and volume align in direction.
+    if abs(trend_score) >= 0.35 and abs(volume_score) >= 0.30 and np.sign(trend_score) == np.sign(volume_score):
+        final_score += 0.05 * float(np.sign(trend_score))
+
+    final_score = float(np.clip(final_score, -1.0, 1.0))
     confidence_score = float(np.clip(round((final_score + 1) / 2 * 100, 1), 0, 100))
 
     if not pd.isna(adx_val) and adx_val < 20:
         _regime_discount = np.interp(adx_val, [0, 20], [0.70, 1.0])
         confidence_score = float(np.clip(round(confidence_score * _regime_discount, 1), 0, 100))
 
-    if volatility_score < -0.3:
-        buy_threshold, sell_threshold = 70, 30
-    elif adx_val < 20:
-        buy_threshold, sell_threshold = 75, 25
+    if volatility_score < -0.35:
+        buy_threshold, sell_threshold = 72, 28
+    elif pd.notna(adx_val) and adx_val >= 30:
+        buy_threshold, sell_threshold = 62, 38
+    elif pd.notna(adx_val) and adx_val < 18:
+        buy_threshold, sell_threshold = 76, 24
     else:
-        buy_threshold, sell_threshold = 65, 35
+        buy_threshold, sell_threshold = 66, 34
 
     if confidence_score >= buy_threshold:
         base_signal = "BUY"
@@ -464,17 +551,17 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
 
     if np.isnan(williams_val):
         williams_label = ""
-    elif williams_val < -80:
+    elif williams_val < williams_os:
         williams_label = "🟢 Oversold"
-    elif williams_val > -20:
+    elif williams_val > williams_ob:
         williams_label = "🔴 Overbought"
     else:
         williams_label = "🟡 Neutral"
 
     cci_label = "🟡 Neutral"
-    if cci_val > 100:
+    if cci_val > cci_ob:
         cci_label = "🔴 Overbought"
-    elif cci_val < -100:
+    elif cci_val < cci_os:
         cci_label = "🟢 Oversold"
 
     bollinger_bias = "→ Neutral"
@@ -487,20 +574,20 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
     elif close_price < bb_lower:
         bollinger_bias = "→ Near Bottom"
 
-    bollinger_width = df["bb_upper"].iloc[-1] - df["bb_lower"].iloc[-1]
+    bollinger_width = df["bb_upper"].iloc[latest_idx] - df["bb_lower"].iloc[latest_idx]
     volatility_factor = min(bollinger_width / max(latest["close"], 1e-9), 0.1)
-    rsi_factor = 0.1 if latest["rsi"] > 70 or latest["rsi"] < 30 else 0
-    _obv_back_lev = min(5, len(df) - 1)
+    rsi_factor = 0.1 if latest["rsi"] > rsi_ob or latest["rsi"] < rsi_os else 0
+    _obv_back_lev = min(5, len(closed_df) - 1)
     obv_factor = (
         0.1
         if (
             _obv_back_lev > 0
-            and df["obv"].iloc[-1] > df["obv"].iloc[-_obv_back_lev]
+            and closed_df["obv"].iloc[-1] > closed_df["obv"].iloc[-_obv_back_lev]
             and latest["close"] > latest["ema21"]
         )
         else 0
     )
-    recent = df.tail(sr_lookback(_inferred_tf))
+    recent = closed_df.tail(sr_lookback(_inferred_tf))
     support = recent["low"].min()
     resistance = recent["high"].max()
     current_price = latest["close"]

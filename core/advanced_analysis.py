@@ -53,19 +53,43 @@ def calculate_fibonacci_levels(df: pd.DataFrame, lookback: int = 100) -> dict:
 def monte_carlo_simulation(df: pd.DataFrame, num_simulations: int = 500, num_days: int = 30) -> dict:
     if df is None or len(df) < 30:
         return {}
+    num_simulations = int(max(50, min(20000, num_simulations)))
+    num_days = int(max(1, min(3650, num_days)))
 
-    returns = df["close"].pct_change().dropna()
-    mu = returns.mean()
-    sigma = returns.std()
-    last_price = float(df["close"].iloc[-1])
+    close = pd.to_numeric(df.get("close"), errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    close = close[close > 0]
+    if len(close) < 30:
+        return {}
+    # Use closed-candle anchor when possible to avoid partial-candle noise.
+    if len(close) > 40:
+        close_eval = close.iloc[:-1].copy()
+    else:
+        close_eval = close.copy()
 
-    simulations = np.zeros((num_simulations, num_days))
-    for i in range(num_simulations):
-        daily_returns = np.random.normal(mu, sigma, num_days)
-        price_path = last_price * np.cumprod(1 + daily_returns)
-        simulations[i] = price_path
+    returns = close_eval.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    if len(returns) < 20:
+        return {}
+    returns = returns.clip(lower=-0.95, upper=0.95)
+    mu = float(returns.mean())
+    sigma = float(returns.std(ddof=1))
+    last_price = float(close_eval.iloc[-1])
+    if last_price <= 0:
+        return {}
+
+    rng = np.random.default_rng()
+    hist = returns.to_numpy(dtype=float)
+    # Robust path generation: blend empirical bootstrap shocks with Gaussian shocks.
+    boot = rng.choice(hist, size=(num_simulations, num_days), replace=True)
+    gauss = rng.normal(loc=mu, scale=max(sigma, 1e-9), size=(num_simulations, num_days))
+    daily_returns = np.clip(0.70 * boot + 0.30 * gauss, -0.95, 0.95)
+
+    simulations = last_price * np.cumprod(1.0 + daily_returns, axis=1)
 
     final_prices = simulations[:, -1]
+    term_rets = final_prices / last_price - 1.0
+    var_95 = float(np.percentile(term_rets, 5))
+    tail = term_rets[term_rets <= var_95]
+    cvar_95 = float(tail.mean()) if len(tail) > 0 else var_95
     return {
         "simulations": simulations,
         "last_price": last_price,
@@ -79,7 +103,8 @@ def monte_carlo_simulation(df: pd.DataFrame, num_simulations: int = 500, num_day
         "max_price": float(np.max(final_prices)),
         "prob_profit": float(np.mean(final_prices > last_price)),
         "expected_return": float((np.mean(final_prices) - last_price) / last_price * 100),
-        "var_95": float(np.percentile(final_prices / last_price - 1, 5) * 100),
+        "var_95": float(var_95 * 100),
+        "cvar_95": float(cvar_95 * 100),
     }
 
 
@@ -199,14 +224,29 @@ def detect_market_regime(
     if df is None or len(df) < 30:
         return {"regime": "UNKNOWN", "color": text_muted_color}
 
-    adx = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
-    adx_val = float(adx.iloc[-1]) if not adx.empty else 0
+    try:
+        adx = ta.trend.adx(df["high"], df["low"], df["close"], window=14)
+        adx_val = float(adx.iloc[-1]) if not adx.empty and not pd.isna(adx.iloc[-1]) else 0.0
+    except Exception:
+        adx_val = 0.0
 
-    bb = ta.volatility.BollingerBands(df["close"], window=20)
-    bb_width = float(((bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg()).iloc[-1])
+    try:
+        bb = ta.volatility.BollingerBands(df["close"], window=20)
+        hband = bb.bollinger_hband()
+        lband = bb.bollinger_lband()
+        mavg = bb.bollinger_mavg().replace(0, np.nan)
+        bb_width_raw = ((hband - lband) / mavg).iloc[-1]
+        bb_width = float(bb_width_raw) if not pd.isna(bb_width_raw) else 0.0
+    except Exception:
+        bb_width = 0.0
 
-    atr = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14)
-    atr_pct = float(atr.iloc[-1] / df["close"].iloc[-1])
+    try:
+        atr = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14)
+        close_last = float(df["close"].iloc[-1])
+        atr_last = float(atr.iloc[-1]) if not atr.empty and not pd.isna(atr.iloc[-1]) else 0.0
+        atr_pct = float(atr_last / close_last) if close_last > 0 else 0.0
+    except Exception:
+        atr_pct = 0.0
 
     if adx_val > 40:
         regime = "STRONG TREND"

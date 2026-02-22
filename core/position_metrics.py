@@ -75,7 +75,7 @@ def compute_health_decision(
     *,
     direction: str,
     signal_direction: str,
-    confidence: float,
+    strength: float,
     conviction_label: str,
     liq_distance_pct: float | None,
     invalidated: bool,
@@ -91,12 +91,12 @@ def compute_health_decision(
         health_score -= 15
         notes.append("no clear technical edge")
 
-    if confidence < 50:
+    if strength < 50:
         health_score -= 20
-        notes.append("low confidence")
-    elif confidence < 60:
+        notes.append("low strength")
+    elif strength < 60:
         health_score -= 10
-        notes.append("medium confidence")
+        notes.append("medium strength")
 
     if conviction_label == "CONFLICT":
         health_score -= 25

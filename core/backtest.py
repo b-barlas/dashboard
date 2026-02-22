@@ -4,6 +4,7 @@ from typing import Callable, Protocol, Tuple
 
 import numpy as np
 import pandas as pd
+from core.signal_contract import strength_from_bias
 
 
 class AnalysisLike(Protocol):
@@ -61,11 +62,13 @@ def run_backtest(
 ) -> Tuple[pd.DataFrame, str]:
     """Run single-position backtest over a price series.
 
-    Entry filter is direction-aware:
-    - LONG if confidence >= threshold
-    - SHORT if confidence <= (100 - threshold)
+    Entry filter is direction-agnostic:
+    - Compute strength from directional bias (confidence)
+    - Enter LONG/SHORT only when strength >= threshold
     """
     exit_after = max(1, int(exit_after))
+    commission = max(0.0, float(commission))
+    slippage = max(0.0, float(slippage))
     results = []
     equity_curve = [10000.0]
     peak = 10000.0
@@ -75,7 +78,8 @@ def run_backtest(
     window_size = 200
 
     i = 55
-    while i < len(df) - exit_after:
+    # Signal is computed on bar i close. Execution starts on next bar open.
+    while i < len(df) - exit_after - 1:
         start_idx = max(0, i - window_size)
         df_slice = df.iloc[start_idx : i + 1]
         if len(df_slice) < 55:
@@ -85,7 +89,8 @@ def run_backtest(
         try:
             result = analyzer(df_slice)
             raw_signal = result.signal
-            conf_score = float(result.confidence)
+            bias_score = float(result.confidence)
+            strength_score = float(strength_from_bias(bias_score))
         except Exception:
             i += 1
             continue
@@ -96,20 +101,34 @@ def run_backtest(
             else ("SHORT" if raw_signal in ["STRONG SELL", "SELL"] else "WAIT")
         )
 
-        long_ok = sig_plain == "LONG" and conf_score >= threshold
-        short_ok = sig_plain == "SHORT" and conf_score <= (100 - threshold)
+        long_ok = sig_plain == "LONG" and strength_score >= threshold
+        short_ok = sig_plain == "SHORT" and strength_score >= threshold
         if not (long_ok or short_ok):
             i += 1
             continue
 
-        entry_price = float(df["close"].iloc[i])
-        future_price = float(df["close"].iloc[i + exit_after])
-        total_cost = 2 * commission + 2 * slippage
+        entry_idx = i + 1
+        exit_idx = entry_idx + exit_after
+        if exit_idx >= len(df):
+            break
+
+        entry_open = float(df["open"].iloc[entry_idx]) if "open" in df.columns else float(df["close"].iloc[entry_idx])
+        exit_open = float(df["open"].iloc[exit_idx]) if "open" in df.columns else float(df["close"].iloc[exit_idx])
+        if entry_open <= 0 or exit_open <= 0:
+            i += 1
+            continue
 
         if sig_plain == "LONG":
-            pnl = ((future_price - entry_price) / entry_price - total_cost) * 100
+            entry_exec = entry_open * (1.0 + slippage)
+            exit_exec = exit_open * (1.0 - slippage)
+            gross_ret = (exit_exec - entry_exec) / entry_exec
         else:
-            pnl = ((entry_price - future_price) / entry_price - total_cost) * 100
+            entry_exec = entry_open * (1.0 - slippage)
+            exit_exec = exit_open * (1.0 + slippage)
+            gross_ret = (entry_exec - exit_exec) / entry_exec
+
+        net_ret = gross_ret - 2.0 * commission
+        pnl = net_ret * 100.0
         regime, regime_score = _infer_regime(df_slice, result)
 
         equity = equity_curve[-1] * (1 + pnl / 100)
@@ -128,18 +147,22 @@ def run_backtest(
         results.append(
             {
                 "Date": df["timestamp"].iloc[i],
-                "Confidence": round(conf_score, 1),
+                "Signal Time": df["timestamp"].iloc[i],
+                "Strength": round(strength_score, 1),
+                "Bias": round(bias_score, 1),
                 "Signal": sig_plain,
-                "Entry": entry_price,
-                "Exit": future_price,
+                "Entry": entry_exec,
+                "Exit": exit_exec,
                 "PnL (%)": round(pnl, 2),
                 "Equity": round(equity, 2),
                 "Regime": regime,
                 "Regime Score": round(regime_score, 1),
+                "Holding Bars": int(exit_after),
             }
         )
 
-        i += exit_after
+        # Single-position mode: next signal evaluation starts at exit bar.
+        i = exit_idx
 
     df_results = pd.DataFrame(results)
     if df_results.empty:
@@ -147,7 +170,7 @@ def run_backtest(
             df_results,
             "<div style='color:#FFB000;margin-top:1rem;'>"
             "<p><b>⚠️ No Signals:</b> No trades met the threshold criteria</p>"
-            "<p>Try lowering the confidence threshold or using more data</p>"
+            "<p>Try lowering the strength threshold or using more data</p>"
             "</div>",
         )
 
