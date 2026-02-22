@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest ruff mypy
+
+      - name: Compile check
+        run: python -m compileall -q core tabs ui crypto_meta2.py
+
+      - name: Ruff (critical checks)
+        run: ruff check . --select E9,F63,F7,F82
+
+      - name: Mypy (core engine contracts)
+        run: mypy --config-file mypy.ini core/signal_contract.py core/rapid_engine.py core/scalping.py
+
+      - name: Run tests
+        run: python -m pytest -q
