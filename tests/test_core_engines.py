@@ -62,27 +62,27 @@ class CoreEngineTests(unittest.TestCase):
         df = self._sample_df()
 
         def analyzer(_slice: pd.DataFrame) -> DummyAnalysis:
-            return DummyAnalysis(signal="BUY", confidence=80.0)
+            return DummyAnalysis(signal="BUY", confidence=95.0)
 
         out, _summary = run_backtest(df, analyzer=analyzer, threshold=70, exit_after=5)
         self.assertGreater(len(out), 0)
         self.assertTrue((out["Signal"] == "LONG").all())
 
-    def test_backtest_short_entries_use_inverse_threshold(self) -> None:
+    def test_backtest_short_entries_use_strength_threshold(self) -> None:
         df = self._sample_df()
 
         def analyzer(_slice: pd.DataFrame) -> DummyAnalysis:
-            return DummyAnalysis(signal="SELL", confidence=20.0)
+            return DummyAnalysis(signal="SELL", confidence=10.0)
 
         out, _summary = run_backtest(df, analyzer=analyzer, threshold=70, exit_after=5)
         self.assertGreater(len(out), 0)
         self.assertTrue((out["Signal"] == "SHORT").all())
 
-    def test_backtest_short_is_blocked_when_confidence_is_high(self) -> None:
+    def test_backtest_short_is_blocked_when_strength_is_low(self) -> None:
         df = self._sample_df()
 
         def analyzer(_slice: pd.DataFrame) -> DummyAnalysis:
-            return DummyAnalysis(signal="SELL", confidence=80.0)
+            return DummyAnalysis(signal="SELL", confidence=40.0)
 
         out, _summary = run_backtest(df, analyzer=analyzer, threshold=70, exit_after=5)
         self.assertEqual(len(out), 0)
@@ -91,7 +91,7 @@ class CoreEngineTests(unittest.TestCase):
         df = self._sample_df()
 
         def analyzer(_slice: pd.DataFrame) -> DummyAnalysis:
-            return DummyAnalysis(signal="BUY", confidence=80.0)
+            return DummyAnalysis(signal="BUY", confidence=95.0)
 
         out, _summary = run_backtest(df, analyzer=analyzer, threshold=70, exit_after=5)
         self.assertGreater(len(out), 1)
