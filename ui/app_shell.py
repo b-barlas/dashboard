@@ -17,7 +17,17 @@ def render_app(deps: dict) -> None:
         st.markdown(
             f"<div style='text-align:center; margin:8px 0;'>"
             f"<span style='color:{ACCENT}; font-size:1.1rem; font-weight:700;'>"
-            f"Crypto Command Center</span></div>",
+            f"Crypto Market Intelligence Hub</span></div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<div style='font-size:0.78rem; color:#8CA1B6; line-height:1.55; "
+            "border:1px solid rgba(0,212,255,0.25); border-radius:8px; padding:8px; margin-bottom:8px;'>"
+            "<b style='color:#00D4FF;'>Core Workflow</b><br>"
+            "1) Market: scan universe<br>"
+            "2) Rapid: pick best setup<br>"
+            "3) Position: execute/manage"
+            "</div>",
             unsafe_allow_html=True,
         )
 

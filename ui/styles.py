@@ -18,11 +18,131 @@ from ui.theme import (
 def app_css() -> str:
     return f"""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Manrope:wght@400;500;600;700&display=swap');
+
 /* Global styles */
 .stApp {{
     background-color: {PRIMARY_BG};
     color: {TEXT_LIGHT};
-    font-family: 'Inter', 'Segoe UI', sans-serif;
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+}}
+
+/* Global typography system (all tabs) */
+h1, h2, h3, h4, h5, h6,
+.stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4, .stMarkdown h5, .stMarkdown h6 {{
+    font-family: 'Space Grotesk', 'Manrope', sans-serif !important;
+    letter-spacing: 0.1px;
+}}
+.stMarkdown p,
+.stMarkdown li,
+.stMarkdown label,
+.stCaption,
+div[data-testid="stCaptionContainer"] {{
+    font-family: 'Manrope', 'Segoe UI', sans-serif !important;
+}}
+.stMarkdown summary {{
+    font-family: 'Space Grotesk', 'Manrope', sans-serif !important;
+}}
+
+/* Market shared typography/components */
+.market-intro-title {{
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 1.02rem;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+}}
+.market-intro-body {{
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.9rem;
+    line-height: 1.62;
+    margin-top: 6px;
+}}
+.market-section-title {{
+    color: inherit;
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 1.62rem;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    margin-bottom: 0.45rem;
+}}
+.market-gauge-chip-wrap {{
+    text-align: center;
+    margin-top: -6px;
+}}
+.market-gauge-chip {{
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+    padding: 2px 10px;
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.15px;
+}}
+.market-inline-chip {{
+    display: inline-block;
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.15px;
+}}
+.market-note-box {{
+    border-radius: 10px;
+    padding: 8px 10px;
+    margin: 0 0 0.6rem 0;
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.83rem;
+    line-height: 1.55;
+}}
+.market-details summary {{
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 0.92rem;
+    font-weight: 600;
+    cursor: pointer;
+}}
+.market-details-body {{
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.84rem;
+    line-height: 1.72;
+    padding: 0.4rem 0.2rem;
+}}
+.market-criteria-chip {{
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.15px;
+}}
+
+/* Global heading scale */
+h1, .stMarkdown h1 {{
+    font-size: 2.35rem !important;
+    font-weight: 800 !important;
+    line-height: 1.15 !important;
+}}
+h2, .stMarkdown h2 {{
+    font-size: 1.62rem !important;
+    font-weight: 700 !important;
+    line-height: 1.2 !important;
+}}
+h3, .stMarkdown h3 {{
+    font-size: 1.22rem !important;
+    font-weight: 700 !important;
+    line-height: 1.25 !important;
+}}
+h4, .stMarkdown h4 {{
+    font-size: 1.02rem !important;
+    font-weight: 650 !important;
+    line-height: 1.3 !important;
+}}
+h5, .stMarkdown h5, h6, .stMarkdown h6 {{
+    font-size: 0.9rem !important;
+    font-weight: 600 !important;
+    line-height: 1.35 !important;
 }}
 
 /* Custom scrollbar */
@@ -50,19 +170,11 @@ h1.title {{
     font-size: 2.8rem;
     font-weight: 800;
     background: linear-gradient(135deg, {ACCENT}, {NEON_BLUE}, {NEON_PURPLE});
-    background-size: 200% 200%;
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
-    animation: titleGlow 3s ease infinite;
     margin-bottom: 0.4rem;
     letter-spacing: -0.5px;
-}}
-
-@keyframes titleGlow {{
-    0% {{ background-position: 0% 50%; }}
-    50% {{ background-position: 100% 50%; }}
-    100% {{ background-position: 0% 50%; }}
 }}
 
 p.subtitle {{
@@ -352,6 +464,150 @@ div[data-testid="stVerticalBlock"] > div {{
     border-radius: 0 8px 8px 0;
 }}
 
+/* Elite shared components */
+.elite-card {{
+    background: linear-gradient(140deg, rgba(4, 10, 18, 0.96), rgba(2, 5, 11, 0.96));
+    border: 1px solid rgba(0, 212, 255, 0.16);
+    border-radius: 14px;
+    padding: 14px 16px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}}
+.elite-label {{
+    color: {TEXT_MUTED};
+    font-size: 0.72rem;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    font-weight: 600;
+}}
+.elite-value {{
+    color: {ACCENT};
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 1.55rem;
+    font-weight: 700;
+    margin-top: 4px;
+}}
+.elite-sub {{
+    color: {TEXT_MUTED};
+    font-size: 0.8rem;
+    margin-top: 4px;
+}}
+.elite-chip {{
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.74rem;
+    font-weight: 700;
+    border-radius: 999px;
+    padding: 3px 10px;
+    border: 1px solid rgba(255,255,255,0.15);
+}}
+.elite-chip-positive {{
+    color: {POSITIVE};
+    border-color: rgba(0,255,136,0.35);
+    background: rgba(0,255,136,0.08);
+}}
+.elite-chip-warning {{
+    color: {WARNING};
+    border-color: rgba(255,209,102,0.35);
+    background: rgba(255,209,102,0.08);
+}}
+.elite-chip-negative {{
+    color: {NEGATIVE};
+    border-color: rgba(255,51,102,0.35);
+    background: rgba(255,51,102,0.08);
+}}
+.elite-hero {{
+    background: radial-gradient(120% 160% at 0% 0%, rgba(0, 212, 255, 0.08), transparent 40%),
+        radial-gradient(120% 180% at 100% 100%, rgba(178, 75, 243, 0.08), transparent 38%),
+        rgba(2, 7, 14, 0.96);
+    border: 1px solid rgba(0, 212, 255, 0.22);
+    border-radius: 14px;
+    padding: 16px;
+}}
+.elite-hero-title {{
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: {ACCENT};
+}}
+.elite-grid {{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}}
+.elite-mini {{
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 10px;
+    padding: 8px 10px;
+    background: rgba(0,0,0,0.42);
+}}
+
+/* Rapid watch cards */
+.rapid-watch-card {{
+    background: linear-gradient(180deg, rgba(6, 12, 20, 0.95), rgba(4, 8, 14, 0.98));
+    border: 1px solid rgba(0, 212, 255, 0.22);
+    border-radius: 14px;
+    padding: 12px 14px;
+    min-height: 200px;
+}}
+.rapid-watch-head {{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}}
+.rapid-watch-symbol {{
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-weight: 700;
+    color: {ACCENT};
+    font-size: 1.05rem;
+}}
+.rapid-watch-chip-row {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+}}
+.rapid-watch-grid {{
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 14px;
+    margin: 8px 0;
+}}
+.rapid-watch-k {{
+    color: {TEXT_MUTED};
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+}}
+.rapid-watch-v {{
+    color: {TEXT_LIGHT};
+    font-size: 0.9rem;
+    font-weight: 600;
+}}
+.rapid-watch-bar {{
+    height: 7px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 999px;
+    overflow: hidden;
+    margin: 6px 0 10px 0;
+}}
+.rapid-watch-bar > span {{
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+}}
+.rapid-watch-note {{
+    color: {TEXT_MUTED};
+    font-size: 0.78rem;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    margin-top: 8px;
+    padding-top: 8px;
+    line-height: 1.45;
+}}
+
 /* Pulse animation for live data */
 .pulse {{
     animation: pulse 2s ease infinite;
@@ -466,6 +722,15 @@ div[data-testid="stVerticalBlock"] > div {{
     h1.title {{
         font-size: 2rem;
         line-height: 1.15;
+    }}
+    h1, .stMarkdown h1 {{
+        font-size: 1.9rem !important;
+    }}
+    h2, .stMarkdown h2 {{
+        font-size: 1.35rem !important;
+    }}
+    h3, .stMarkdown h3 {{
+        font-size: 1.08rem !important;
     }}
     .panel-box {{
         padding: 16px;

@@ -160,7 +160,7 @@ _TAB_DEPS = [
         render_backtest_tab_ui,
         [
             "ACCENT", "TEXT_MUTED", "POSITIVE", "WARNING", "_normalize_coin_input", "_validate_coin_symbol",
-            "fetch_ohlcv", "run_backtest",
+            "fetch_ohlcv", "run_backtest", "analyse",
         ],
     ),
     (render_guide_tab_ui, []),
