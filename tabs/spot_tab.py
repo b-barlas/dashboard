@@ -4,6 +4,7 @@ import numpy as np
 import plotly.graph_objs as go
 import ta
 from core.metric_catalog import ai_stability_bucket
+from core.signal_contract import strength_from_bias, strength_bucket
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -44,7 +45,7 @@ def render(ctx: dict) -> None:
         f"{_tip('Momentum', 'RSI, MACD, Stochastic RSI, Williams %R, and CCI indicators.')} (30%), "
         f"{_tip('Volume', 'OBV direction, volume spikes, and VWAP positioning.')} (20%), and "
         f"{_tip('Volatility', 'Bollinger Band width, ATR level, and Keltner Channel breakouts.')} (10%) "
-        f"into a single signal (BUY / SELL / WAIT) with a confidence score from 0-100%. "
+        f"into a single signal (BUY / SELL / WAIT) with a direction-agnostic strength score from 0-100%. "
         f"Designed for spot trading without leverage.</p>"
         f"</div>",
         unsafe_allow_html=True,
@@ -53,7 +54,7 @@ def render(ctx: dict) -> None:
         f"<details style='margin-bottom:0.7rem;'>"
         f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
         f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.45rem;'>"
-        f"<b>1.</b> Start with Signal + Confidence + AI Ensemble + Conviction.<br>"
+        f"<b>1.</b> Start with Signal + Strength + AI Ensemble + Alignment.<br>"
         f"<b>2.</b> If technical Signal and AI disagree, treat setup as weaker.<br>"
         f"<b>3.</b> Use indicator grid and snapshot for context, not standalone entry triggers."
         f"</div></details>",
@@ -85,7 +86,8 @@ def render(ctx: dict) -> None:
 
         a = analyse(df_eval)
         signal, comment, volume_spike = a.signal, a.comment, a.volume_spike
-        atr_comment, candle_pattern, confidence_score = a.atr_comment, a.candle_pattern, a.confidence
+        atr_comment, candle_pattern, bias_score = a.atr_comment, a.candle_pattern, a.confidence
+        strength_score = float(strength_from_bias(float(bias_score)))
         adx_val, supertrend_trend, ichimoku_trend = a.adx, a.supertrend, a.ichimoku
         stochrsi_k_val, bollinger_bias, vwap_label = a.stochrsi_k, a.bollinger, a.vwap
         psar_trend, williams_label, cci_label = a.psar, a.williams, a.cci
@@ -102,12 +104,13 @@ def render(ctx: dict) -> None:
             ai_agree = 0.0
 
         sig_dir_s = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "WAIT")
-        conv_lbl_s, conv_c_s = _calc_conviction(sig_dir_s, ai_dir_s, confidence_score)
+        conv_lbl_s, conv_c_s = _calc_conviction(sig_dir_s, ai_dir_s, strength_score)
         ai_stability = ai_stability_bucket(ai_agree / 100.0)
 
         sig_c_s = POSITIVE if "LONG" in signal_clean else (NEGATIVE if "SHORT" in signal_clean else WARNING)
         ai_c_s = POSITIVE if ai_dir_s == "LONG" else (NEGATIVE if ai_dir_s == "SHORT" else WARNING)
-        conf_c_s = POSITIVE if confidence_score >= 70 else (WARNING if confidence_score >= 50 else NEGATIVE)
+        _s_bucket = strength_bucket(strength_score)
+        conf_c_s = POSITIVE if _s_bucket in {"STRONG", "GOOD"} else (WARNING if _s_bucket == "MIXED" else NEGATIVE)
         ai_stab_c = POSITIVE if ai_stability == "Strong" else (WARNING if ai_stability == "Medium" else TEXT_MUTED)
         st.markdown(
             f"<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); "
@@ -116,8 +119,8 @@ def render(ctx: dict) -> None:
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Signal</div>"
             f"<div style='color:{sig_c_s}; font-size:0.85rem; font-weight:600;'>{signal_clean}</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
-            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Confidence</div>"
-            f"<div style='color:{conf_c_s}; font-size:0.85rem; font-weight:600;'>{confidence_score:.0f}%</div></div>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Strength</div>"
+            f"<div style='color:{conf_c_s}; font-size:0.85rem; font-weight:600;'>{strength_score:.0f}%</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Ensemble</div>"
             f"<div style='color:{ai_c_s}; font-size:0.85rem; font-weight:600;'>{ai_dir_s}</div></div>"
@@ -125,15 +128,15 @@ def render(ctx: dict) -> None:
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Stability</div>"
             f"<div style='color:{ai_stab_c}; font-size:0.85rem; font-weight:600;'>{ai_stability} ({ai_agree:.0f}%)</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
-            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Conviction</div>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Alignment</div>"
             f"<div style='color:{conv_c_s}; font-size:0.85rem; font-weight:600;'>{conv_lbl_s}</div></div>"
             f"</div>",
             unsafe_allow_html=True,
         )
         st.markdown(
             f"<div style='color:{TEXT_MUTED}; font-size:0.82rem; margin:0.15rem 0 0.55rem 0;'>"
-            f"<b>Signal</b> = technical direction, <b>Confidence</b> = score strength, "
-            f"<b>AI Stability</b> = model agreement quality, <b>Conviction</b> = technical+AI alignment."
+            f"<b>Signal</b> = technical direction, <b>Strength</b> = direction-agnostic signal power, "
+            f"<b>AI Stability</b> = model agreement quality, <b>Alignment</b> = technical+AI alignment."
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -147,7 +150,7 @@ def render(ctx: dict) -> None:
                 f"padding:8px 12px; border-radius:4px; margin:6px 0;'>"
                 f"<span style='color:{WARNING}; font-weight:600;'>Market Ranging (ADX {adx_val:.0f})</span>"
                 f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'> — Trend signals are less reliable. "
-                f"Confidence discounted. Consider smaller positions or waiting for a clear trend.</span></div>",
+                f"Strength discounted. Consider smaller positions or waiting for a clear trend.</span></div>",
                 unsafe_allow_html=True,
             )
 
@@ -161,8 +164,14 @@ def render(ctx: dict) -> None:
             st.markdown(_grid_html, unsafe_allow_html=True,
             )
 
-        # Price box
-        st.markdown(f"<div class='metric-card'><div class='metric-label'>Current Price</div><div class='metric-value'>${current_price:,.2f}</div></div>", unsafe_allow_html=True)
+        # Price box (compact, premium)
+        st.markdown(
+            f"<div class='elite-card' style='margin:0.25rem 0 0.55rem 0;'>"
+            f"<div class='elite-label'>Current Price</div>"
+            f"<div class='elite-value'>${current_price:,.2f}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
         # Action plan (beginner-friendly, spot-only, conditional playbook)
         try:
@@ -244,6 +253,7 @@ def render(ctx: dict) -> None:
             "Price Bias Proxy is derived from 24h price change (not social-media/NLP sentiment). "
             "Use as a light context signal only."
         )
+        st.markdown("<div style='height:0.2rem;'></div>", unsafe_allow_html=True)
         # Plot candlestick with EMAs
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
@@ -276,106 +286,104 @@ def render(ctx: dict) -> None:
             legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
         )
         st.plotly_chart(fig, width="stretch")
-        # RSI chart
-        rsi_fig = go.Figure()
-        for period, color in [(6, '#D8B4FE'), (14, '#A78BFA'), (24, '#818CF8')]:
-            rsi_series = ta.momentum.rsi(df['close'], window=period)
-            rsi_fig.add_trace(go.Scatter(
-                x=df['timestamp'], y=rsi_series, mode='lines', name=f"RSI {period}",
-                line=dict(color=color, width=2)
+        with st.expander("Advanced Chart Pack"):
+            # RSI chart
+            rsi_fig = go.Figure()
+            for period, color in [(6, '#D8B4FE'), (14, '#A78BFA'), (24, '#818CF8')]:
+                rsi_series = ta.momentum.rsi(df['close'], window=period)
+                rsi_fig.add_trace(go.Scatter(
+                    x=df['timestamp'], y=rsi_series, mode='lines', name=f"RSI {period}",
+                    line=dict(color=color, width=2)
+                ))
+            rsi_fig.add_hline(y=70, line=dict(color=NEGATIVE, dash='dot', width=1), name="Overbought")
+            rsi_fig.add_hline(y=30, line=dict(color=POSITIVE, dash='dot', width=1), name="Oversold")
+            rsi_fig.update_layout(
+                height=180,
+                template='plotly_dark',
+                margin=dict(l=20, r=20, t=20, b=30),
+                yaxis=dict(title="RSI"),
+                showlegend=True,
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
+            )
+            st.plotly_chart(rsi_fig, width="stretch")
+
+            # MACD chart
+            macd_ind = ta.trend.MACD(df['close'])
+            df['macd'] = macd_ind.macd()
+            df['macd_signal'] = macd_ind.macd_signal()
+            df['macd_diff'] = macd_ind.macd_diff()
+            macd_fig = go.Figure()
+            macd_fig.add_trace(go.Scatter(
+                x=df['timestamp'], y=df['macd'], name="MACD",
+                line=dict(color=ACCENT, width=2)
             ))
-        # Add overbought/oversold bands
-        rsi_fig.add_hline(y=70, line=dict(color=NEGATIVE, dash='dot', width=1), name="Overbought")
-        rsi_fig.add_hline(y=30, line=dict(color=POSITIVE, dash='dot', width=1), name="Oversold")
-        rsi_fig.update_layout(
-            height=180,
-            template='plotly_dark',
-            margin=dict(l=20, r=20, t=20, b=30),
-            yaxis=dict(title="RSI"),
-            showlegend=True,
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
-        )
-        st.plotly_chart(rsi_fig, width="stretch")
+            macd_fig.add_trace(go.Scatter(
+                x=df['timestamp'], y=df['macd_signal'], name="Signal",
+                line=dict(color=WARNING, width=2, dash='dot')
+            ))
+            macd_fig.add_trace(go.Bar(
+                x=df['timestamp'], y=df['macd_diff'], name="Histogram",
+                marker_color=CARD_BG
+            ))
+            macd_fig.update_layout(
+                height=200,
+                template='plotly_dark',
+                margin=dict(l=20, r=20, t=20, b=30),
+                yaxis=dict(title="MACD"),
+                showlegend=True,
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
+            )
+            st.plotly_chart(macd_fig, width="stretch")
 
-        # MACD chart
-        macd_ind = ta.trend.MACD(df['close'])
-        df['macd'] = macd_ind.macd()
-        df['macd_signal'] = macd_ind.macd_signal()
-        df['macd_diff'] = macd_ind.macd_diff()
-        macd_fig = go.Figure()
-        macd_fig.add_trace(go.Scatter(
-            x=df['timestamp'], y=df['macd'], name="MACD",
-            line=dict(color=ACCENT, width=2)
-        ))
-        macd_fig.add_trace(go.Scatter(
-            x=df['timestamp'], y=df['macd_signal'], name="Signal",
-            line=dict(color=WARNING, width=2, dash='dot')
-        ))
-        macd_fig.add_trace(go.Bar(
-            x=df['timestamp'], y=df['macd_diff'], name="Histogram",
-            marker_color=CARD_BG
-        ))
-        macd_fig.update_layout(
-            height=200,
-            template='plotly_dark',
-            margin=dict(l=20, r=20, t=20, b=30),
-            yaxis=dict(title="MACD"),
-            showlegend=True,
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
-        )
-        st.plotly_chart(macd_fig, width="stretch")
+            # Volume & OBV chart
+            df['obv'] = ta.volume.on_balance_volume(df['close'], df['volume'])
+            volume_fig = go.Figure()
+            volume_fig.add_trace(go.Bar(
+                x=df['timestamp'], y=df['volume'], name="Volume", marker_color="#6B7280"
+            ))
+            volume_fig.add_trace(go.Scatter(
+                x=df['timestamp'], y=df['obv'], name="OBV",
+                line=dict(color=WARNING, width=1.5, dash='dot'),
+                yaxis='y2'
+            ))
+            volume_fig.update_layout(
+                height=180,
+                template='plotly_dark',
+                margin=dict(l=20, r=20, t=20, b=30),
+                yaxis=dict(title="Volume"),
+                yaxis2=dict(overlaying='y', side='right', title='OBV', showgrid=False),
+                showlegend=True,
+                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
+            )
+            st.plotly_chart(volume_fig, width="stretch")
 
-        # Volume & OBV chart
-        df['obv'] = ta.volume.on_balance_volume(df['close'], df['volume'])
-        volume_fig = go.Figure()
-        volume_fig.add_trace(go.Bar(
-            x=df['timestamp'], y=df['volume'], name="Volume", marker_color="#6B7280"
-        ))
-        volume_fig.add_trace(go.Scatter(
-            x=df['timestamp'], y=df['obv'], name="OBV",
-            line=dict(color=WARNING, width=1.5, dash='dot'),
-            yaxis='y2'
-        ))
-        volume_fig.update_layout(
-            height=180,
-            template='plotly_dark',
-            margin=dict(l=20, r=20, t=20, b=30),
-            yaxis=dict(title="Volume"),
-            yaxis2=dict(overlaying='y', side='right', title='OBV', showgrid=False),
-            showlegend=True,
-            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
-        )
-        st.plotly_chart(volume_fig, width="stretch")
-
-        # Technical snapshot
-        # Compute indicators for snapshot
-        df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
-        df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
-        df['rsi14'] = ta.momentum.rsi(df['close'], window=14)
-        latest = df.iloc[-1]
-        ema9 = latest['ema9']
-        ema21 = latest['ema21']
-        macd_val = df['macd'].iloc[-1]
-        rsi_val = latest['rsi14']
-        _obv_back_pos = min(5, len(df) - 1)
-        obv_change = ((df['obv'].iloc[-1] - df['obv'].iloc[-_obv_back_pos]) / abs(df['obv'].iloc[-_obv_back_pos]) * 100) if (_obv_back_pos > 0 and df['obv'].iloc[-_obv_back_pos] != 0) else 0
-        recent = df.tail(_sr_lookback(timeframe))
-        support = recent['low'].min()
-        resistance = recent['high'].max()
-        current_price = latest['close']
-        support_dist = abs(current_price - support) / current_price * 100
-        resistance_dist = abs(current_price - resistance) / current_price * 100
-        # Build snapshot HTML
-        snapshot_html = f"""
-        <div class='panel-box'>
-          <b style='color:{ACCENT}; font-size:1.05rem;'>📊 Technical Snapshot</b><br>
-          <ul style='color:{TEXT_MUTED}; font-size:0.9rem; line-height:1.5; list-style-position:inside; margin-top:6px;'>
-            <li>EMA Trend (9 vs 21): <b>{ema9:.2f}</b> vs <b>{ema21:.2f}</b> {('🟢' if ema9 > ema21 else '🔴')} — When EMA9 is above EMA21 the short‑term trend is bullish; otherwise bearish.</li>
-            <li>MACD: <b>{macd_val:.2f}</b> {('🟢' if macd_val > 0 else '🔴')} — Positive MACD indicates upward momentum; negative values suggest downward pressure.</li>
-            <li>RSI (14): <b>{rsi_val:.2f}</b> {('🟢' if rsi_val > 55 else ('🟠' if 45 <= rsi_val <= 55 else '🔴'))} — Above 70 may signal overbought, below 30 oversold. Values above 50 favour bulls.</li>
-            <li>OBV change (last 5 candles): <b>{obv_change:+.2f}%</b> {('🟢' if obv_change > 0 else '🔴')} — Rising OBV supports the price move; falling OBV warns against continuation.</li>
-            <li>Support / Resistance: support at <b>${support:,.2f}</b> ({support_dist:.2f}% away), resistance at <b>${resistance:,.2f}</b> ({resistance_dist:.2f}% away).</li>
-          </ul>
-        </div>
-        """
-        st.markdown(snapshot_html, unsafe_allow_html=True)
+            # Technical snapshot
+            df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
+            df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
+            df['rsi14'] = ta.momentum.rsi(df['close'], window=14)
+            latest = df.iloc[-1]
+            ema9 = latest['ema9']
+            ema21 = latest['ema21']
+            macd_val = df['macd'].iloc[-1]
+            rsi_val = latest['rsi14']
+            _obv_back_pos = min(5, len(df) - 1)
+            obv_change = ((df['obv'].iloc[-1] - df['obv'].iloc[-_obv_back_pos]) / abs(df['obv'].iloc[-_obv_back_pos]) * 100) if (_obv_back_pos > 0 and df['obv'].iloc[-_obv_back_pos] != 0) else 0
+            recent = df.tail(_sr_lookback(timeframe))
+            support = recent['low'].min()
+            resistance = recent['high'].max()
+            current_price = latest['close']
+            support_dist = abs(current_price - support) / current_price * 100
+            resistance_dist = abs(current_price - resistance) / current_price * 100
+            snapshot_html = f"""
+            <div class='panel-box'>
+              <b style='color:{ACCENT}; font-size:1.05rem;'>📊 Technical Snapshot</b><br>
+              <ul style='color:{TEXT_MUTED}; font-size:0.9rem; line-height:1.5; list-style-position:inside; margin-top:6px;'>
+                <li>EMA Trend (9 vs 21): <b>{ema9:.2f}</b> vs <b>{ema21:.2f}</b> {('🟢' if ema9 > ema21 else '🔴')} — When EMA9 is above EMA21 the short-term trend is bullish; otherwise bearish.</li>
+                <li>MACD: <b>{macd_val:.2f}</b> {('🟢' if macd_val > 0 else '🔴')} — Positive MACD indicates upward momentum; negative values suggest downward pressure.</li>
+                <li>RSI (14): <b>{rsi_val:.2f}</b> {('🟢' if rsi_val > 55 else ('🟠' if 45 <= rsi_val <= 55 else '🔴'))} — Above 70 may signal overbought, below 30 oversold. Values above 50 favour bulls.</li>
+                <li>OBV change (last 5 candles): <b>{obv_change:+.2f}%</b> {('🟢' if obv_change > 0 else '🔴')} — Rising OBV supports the price move; falling OBV warns against continuation.</li>
+                <li>Support / Resistance: support at <b>${support:,.2f}</b> ({support_dist:.2f}% away), resistance at <b>${resistance:,.2f}</b> ({resistance_dist:.2f}% away).</li>
+              </ul>
+            </div>
+            """
+            st.markdown(snapshot_html, unsafe_allow_html=True)

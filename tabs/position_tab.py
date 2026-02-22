@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
 import ta
+from core.signal_contract import strength_from_bias, strength_bucket
 from core.position_metrics import (
     compute_hard_invalidation,
     compute_health_decision,
@@ -57,6 +58,43 @@ def render(ctx: dict) -> None:
         f"</div>",
         unsafe_allow_html=True,
     )
+    st.markdown(
+        f"<details style='margin:0.15rem 0 0.7rem 0;'>"
+        f"<summary style='color:{ACCENT}; cursor:pointer; font-size:0.9rem;'>How to read quickly</summary>"
+        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.65; margin-top:0.4rem;'>"
+        f"1) Confirm <b>PnL + Liquidation Distance</b> first. "
+        f"2) Check <b>Signal / Strength / AI / Alignment</b>. "
+        f"3) Respect <b>Technical Invalidation</b> as hard risk line. "
+        f"4) Follow the <b>Decision Model</b> action (HOLD / REDUCE / EXIT style)."
+        f"</div></details>",
+        unsafe_allow_html=True,
+    )
+    prefill = st.session_state.get("position_prefill_plan")
+    if isinstance(prefill, dict):
+        try:
+            plan_coin = str(prefill.get("coin") or "").strip().upper()
+            plan_dir = str(prefill.get("direction") or "LONG").strip().upper()
+            plan_entry = float(prefill.get("entry") or 0.0)
+            if plan_coin:
+                st.session_state["position_coin_input"] = plan_coin
+            if plan_dir in {"LONG", "SHORT"}:
+                st.session_state["position_direction_input"] = plan_dir
+            if plan_entry > 0:
+                st.session_state["position_entry_input"] = plan_entry
+            st.session_state["position_prefill_note"] = (
+                f"Loaded from {prefill.get('source', 'Rapid')}: "
+                f"{plan_coin} {plan_dir} | Entry {plan_entry:.6f} | "
+                f"SL {prefill.get('sl', 'N/A')} | TP1 {prefill.get('tp1', 'N/A')}"
+            )
+        except Exception:
+            pass
+        finally:
+            st.session_state.pop("position_prefill_plan", None)
+
+    if st.session_state.get("position_prefill_note"):
+        st.info(st.session_state.get("position_prefill_note"))
+        st.session_state.pop("position_prefill_note", None)
+
     # Assign a unique key to avoid StreamlitDuplicateElementId errors
     coin = _normalize_coin_input(st.text_input(
         "Coin (e.g. BTC, ETH, TAO)",
@@ -74,9 +112,23 @@ def render(ctx: dict) -> None:
         except Exception:
             continue
 
-    entry_price = st.number_input("Entry Price", min_value=0.0, format="%.4f", value=default_entry_price)
+    # Auto-refresh entry field when coin changes (unless value was prefilled from Rapid plan).
+    prev_coin = str(st.session_state.get("position_last_coin", "")).strip().upper()
+    if coin and coin != prev_coin and default_entry_price > 0:
+        st.session_state["position_entry_input"] = float(default_entry_price)
+        st.session_state["position_last_coin"] = coin
+    elif coin and not prev_coin:
+        st.session_state["position_last_coin"] = coin
+
+    entry_price = st.number_input(
+        "Entry Price",
+        min_value=0.0,
+        format="%.4f",
+        value=float(st.session_state.get("position_entry_input", default_entry_price)),
+        key="position_entry_input",
+    )
     leverage = st.number_input("Leverage (x)", min_value=1, max_value=125, value=5, step=1)
-    direction = st.selectbox("Position Direction", ["LONG", "SHORT"])
+    direction = st.selectbox("Position Direction", ["LONG", "SHORT"], key="position_direction_input")
     p1, p2 = st.columns(2)
     with p1:
         margin_used = st.number_input("Margin Used ($)", min_value=0.0, value=1000.0, step=100.0)
@@ -128,7 +180,8 @@ def render(ctx: dict) -> None:
 
                 a = analyse(df_eval)
                 signal, comment, volume_spike = a.signal, a.comment, a.volume_spike
-                atr_comment, candle_pattern, confidence_score = a.atr_comment, a.candle_pattern, a.confidence
+                atr_comment, candle_pattern, bias_score = a.atr_comment, a.candle_pattern, a.confidence
+                strength_score = float(strength_from_bias(float(bias_score)))
                 adx_val, supertrend_trend, ichimoku_trend = a.adx, a.supertrend, a.ichimoku
                 stochrsi_k_val, bollinger_bias, vwap_label = a.stochrsi_k, a.bollinger, a.vwap
                 psar_trend, williams_label, cci_label = a.psar, a.williams, a.cci
@@ -163,10 +216,16 @@ def render(ctx: dict) -> None:
                 icon = '🟢' if pnl_percent > 0 else ('🟠' if abs(pnl_percent) < 1 else '🔴')
 
                 st.markdown(
-                    f"<div class='panel-box' style='background-color:{col};color:{PRIMARY_BG};'>"
-                    f"  {icon} <strong>{direction} Position ({tf})</strong><br>"
-                    f"  Entry: ${entry_price:,.4f} | Current: ${current_price:,.4f} "
-                    f"(Raw {pnl_percent_raw:+.2f}% | Levered {pnl_percent:+.2f}%)"
+                    f"<div class='panel-box' style='border-left:4px solid {col}; padding:16px 18px;'>"
+                    f"  <div style='display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;'>"
+                    f"    <span style='color:{col}; font-weight:800;'>{icon} {direction} Position ({tf})</span>"
+                    f"    <span style='color:{col}; font-weight:800;'>Levered {pnl_percent:+.2f}%</span>"
+                    f"  </div>"
+                    f"  <div style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px;'>"
+                    f"    Entry: <b style='color:{ACCENT};'>${entry_price:,.4f}</b> | "
+                    f"Current: <b style='color:{ACCENT};'>${current_price:,.4f}</b> | "
+                    f"Raw Move: <b style='color:{ACCENT};'>{pnl_percent_raw:+.2f}%</b>"
+                    f"  </div>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
@@ -205,26 +264,27 @@ def render(ctx: dict) -> None:
                 except Exception:
                     ai_dir = "NEUTRAL"
 
-                # Conviction: alignment of Signal + AI + Confidence
+                # Alignment: alignment of Signal + AI + Strength
                 sig_direction = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "WAIT")
-                conviction_lbl, conviction_c = _calc_conviction(sig_direction, ai_dir, confidence_score)
+                conviction_lbl, conviction_c = _calc_conviction(sig_direction, ai_dir, strength_score)
 
-                # Signal / Confidence / AI / Conviction summary grid
+                # Signal / Strength / AI / Alignment summary grid
                 sig_color = POSITIVE if "LONG" in signal_clean else (NEGATIVE if "SHORT" in signal_clean else WARNING)
                 ai_color = POSITIVE if ai_dir == "LONG" else (NEGATIVE if ai_dir == "SHORT" else WARNING)
-                conf_color = POSITIVE if confidence_score >= 70 else (WARNING if confidence_score >= 50 else NEGATIVE)
+                _s_bucket = strength_bucket(strength_score)
+                conf_color = POSITIVE if _s_bucket in {"STRONG", "GOOD"} else (WARNING if _s_bucket == "MIXED" else NEGATIVE)
                 summary_row = (
                     f"<div style='text-align:center; padding:6px;'>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Signal</div>"
                     f"<div style='color:{sig_color}; font-size:0.85rem; font-weight:600;'>{signal_clean}</div></div>"
                     f"<div style='text-align:center; padding:6px;'>"
-                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Confidence</div>"
-                    f"<div style='color:{conf_color}; font-size:0.85rem; font-weight:600;'>{confidence_score:.0f}%</div></div>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Strength</div>"
+                    f"<div style='color:{conf_color}; font-size:0.85rem; font-weight:600;'>{strength_score:.0f}%</div></div>"
                     f"<div style='text-align:center; padding:6px;'>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Ensemble</div>"
                     f"<div style='color:{ai_color}; font-size:0.85rem; font-weight:600;'>{ai_dir}</div></div>"
                     f"<div style='text-align:center; padding:6px;'>"
-                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Conviction</div>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Alignment</div>"
                     f"<div style='color:{conviction_c}; font-size:0.85rem; font-weight:600;'>{conviction_lbl}</div></div>"
                 )
                 st.markdown(
@@ -247,13 +307,13 @@ def render(ctx: dict) -> None:
                     )
 
                 # Risk alert for position
-                if direction == sig_direction and confidence_score < 50:
+                if direction == sig_direction and strength_score < 50:
                     st.markdown(
                         f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
                         f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
-                        f"<span style='color:{NEGATIVE}; font-weight:600;'>Low Confidence</span>"
-                        f"<span style='color:{TEXT_MUTED};'> — Position direction matches signal but confidence "
-                        f"is only {confidence_score:.0f}%. Consider tightening stop-loss.</span></div>",
+                        f"<span style='color:{NEGATIVE}; font-weight:600;'>Low Strength</span>"
+                        f"<span style='color:{TEXT_MUTED};'> — Position direction matches signal but strength "
+                        f"is only {strength_score:.0f}%. Consider tightening stop-loss.</span></div>",
                         unsafe_allow_html=True,
                     )
                 elif direction != sig_direction and sig_direction != "WAIT":
@@ -265,15 +325,6 @@ def render(ctx: dict) -> None:
                         f"the current {sig_direction} signal. Review position validity.</span></div>",
                         unsafe_allow_html=True,
                     )
-
-                # -- Indicator grid (professional card layout) --
-                _grid_html = _build_indicator_grid(
-                    supertrend_trend, ichimoku_trend, vwap_label, adx_val, bollinger_bias,
-                    stochrsi_k_val, psar_trend, williams_label, cci_label,
-                    volume_spike, atr_comment, candle_pattern,
-                )
-                if _grid_html:
-                    st.markdown(_grid_html, unsafe_allow_html=True)
 
                 df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
                 df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
@@ -307,11 +358,18 @@ def render(ctx: dict) -> None:
                 inv_color = NEGATIVE if invalidated else WARNING
                 inv_state = "BROKEN" if invalidated else "ACTIVE"
                 inv_action = "EXIT / HEDGE immediately." if invalidated else "Keep as hard risk line."
+                inv_side = "above entry" if invalidation > float(entry_price) else "below entry"
+                if direction == "LONG":
+                    inv_profile = "profit-protect (trailing)" if invalidation > float(entry_price) else "loss-control"
+                else:
+                    inv_profile = "profit-protect (trailing)" if invalidation < float(entry_price) else "loss-control"
                 st.markdown(
                     f"<div class='panel-box' style='border-left:4px solid {inv_color};'>"
-                    f"<b style='color:{inv_color};'>Hard Invalidation ({tf}): {inv_state}</b><br>"
+                    f"<b style='color:{inv_color};'>Technical Invalidation Line ({tf}): {inv_state}</b><br>"
                     f"<span style='color:{TEXT_MUTED}; font-size:0.84rem;'>"
                     f"Level: <b>${invalidation:,.4f}</b> (ATR buffer {inv_buffer:,.4f}). Action: <b>{inv_action}</b>"
+                    f"<br><span style='color:{TEXT_MUTED};'>Relative to entry: <b>{inv_side}</b> "
+                    f"({inv_profile}).</span>"
                     f"</span></div>",
                     unsafe_allow_html=True,
                 )
@@ -319,7 +377,7 @@ def render(ctx: dict) -> None:
                 health_pack = compute_health_decision(
                     direction=direction,
                     signal_direction=sig_direction,
-                    confidence=float(confidence_score),
+                    strength=float(strength_score),
                     conviction_label=conviction_lbl,
                     liq_distance_pct=liq_dist_pct,
                     invalidated=invalidated,
@@ -332,14 +390,6 @@ def render(ctx: dict) -> None:
                 health_color = POSITIVE if health_label == "HOLD" else (WARNING if health_label == "REDUCE" else NEGATIVE)
 
                 notes_txt = ", ".join(health_notes) if health_notes else "no major risk flags"
-                st.markdown(
-                    f"<div class='panel-box' style='border-left:4px solid {health_color};'>"
-                    f"<b style='color:{health_color};'>Position Health: {health_label} ({health_score}/100)</b><br>"
-                    f"<span style='color:{TEXT_MUTED}; font-size:0.84rem;'>"
-                    f"{health_action} Main drivers: {notes_txt}."
-                    f"</span></div>",
-                    unsafe_allow_html=True,
-                )
                 report_rows.append(
                     {
                         "Timestamp (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -360,10 +410,10 @@ def render(ctx: dict) -> None:
                         "Est. Liquidation": (round(float(liq_price), 6) if liq_price is not None else None),
                         "Liq Distance (%)": (round(float(liq_dist_pct), 4) if liq_dist_pct is not None else None),
                         "Signal": signal_clean,
-                        "Confidence (%)": round(float(confidence_score), 2),
+                        "Strength (%)": round(float(strength_score), 2),
                         "AI Direction": ai_dir,
-                        "Conviction": conviction_lbl,
-                        "Hard Invalidation": round(float(invalidation), 6),
+                        "Alignment": conviction_lbl,
+                        "Technical Invalidation": round(float(invalidation), 6),
                         "Invalidation State": inv_state,
                         "Health Label": health_label,
                         "Health Score": int(health_score),
@@ -417,12 +467,9 @@ def render(ctx: dict) -> None:
                             f"<b>Consider taking partial profits or holding to maximise gain.</b>"
                         )
 
-                st.markdown(
-                    f"<div class='panel-box'>"
-                    f"  <b style='color:{ACCENT}; font-size:1.05rem;'>🧠 Strategy Suggestion ({tf})</b><br>"
-                    f"  <p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px;'>{suggestion}</p>"
-                    f"</div>",
-                    unsafe_allow_html=True
+                st.caption(
+                    f"{tf} decision model: {health_label} ({health_score}/100) — {health_action} "
+                    f"Drivers: {notes_txt}."
                 )
 
                 # === Scalping Setup ===
@@ -459,15 +506,14 @@ def render(ctx: dict) -> None:
                 
                     scalping_snapshot_html = f"""
                     <div class='panel-box'>
-                      <b style='color:{ACCENT}; font-size:1.05rem;'>📊 Technical Snapshot (Scalping)</b><br>
-                      <ul style='color:{TEXT_MUTED}; font-size:0.9rem; line-height:1.5; list-style-position:inside; margin-top:6px;'>
-                        <li>EMA Trend (5 vs 13): <b>${ema5_val:,.2f}</b> vs <b>${ema13_val:,.2f}</b> {('🟢' if ema5_val > ema13_val else '🔴')}</li>
-                        <li>MACD Histogram: <b>{macd_hist_s:.2f}</b> {('🟢' if macd_hist_s > 0 else '🔴')}</li>
-                        <li>RSI (14): <b>{rsi14_val:.2f}</b> {('🟢' if rsi14_val > 50 else '🔴')}</li>
-                        <li>OBV Change (last 5 candles): <b>{obv_change_s:+.2f}%</b> {('🟢' if obv_change_s > 0 else '🔴')}</li>
-                        <li>Support / Resistance: support at <b>${support_s:,.4f}</b> ({support_dist_s:.2f}% away),
-                             resistance at <b>${resistance_s:,.4f}</b> ({resistance_dist_s:.2f}% away)</li>
-                      </ul>
+                      <b style='color:{ACCENT}; font-size:1.02rem;'>Technical Snapshot ({tf})</b><br>
+                      <div style='color:{TEXT_MUTED}; font-size:0.86rem; line-height:1.65; margin-top:6px;'>
+                        EMA 5/13: <b>${ema5_val:,.2f}</b> / <b>${ema13_val:,.2f}</b> {('🟢' if ema5_val > ema13_val else '🔴')}<br>
+                        MACD Hist: <b>{macd_hist_s:.2f}</b> {('🟢' if macd_hist_s > 0 else '🔴')} |
+                        RSI14: <b>{rsi14_val:.2f}</b> {('🟢' if rsi14_val > 50 else '🔴')} |
+                        OBV Δ: <b>{obv_change_s:+.2f}%</b> {('🟢' if obv_change_s > 0 else '🔴')}<br>
+                        S/R: <b>${support_s:,.4f}</b> ({support_dist_s:.2f}%) / <b>${resistance_s:,.4f}</b> ({resistance_dist_s:.2f}%)
+                      </div>
                     </div>
                     """
                 
@@ -475,7 +521,7 @@ def render(ctx: dict) -> None:
                     # === Scalping Strategy Call ===
                     scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note = get_scalping_entry_target(
                         df_scalp,
-                        confidence_score,
+                        bias_score,
                         supertrend_trend,
                         ichimoku_trend,
                         vwap_label,
@@ -489,21 +535,51 @@ def render(ctx: dict) -> None:
                         icon = "🟢" if scalp_direction == "LONG" else "🔴"
                         st.markdown(
                             f"""
-                            <div class='panel-box' style='background-color:{color};color:{PRIMARY_BG};'>
-                              {icon} <b>Scalping {scalp_direction}</b><br>
-                              Entry: <b>${entry_s:,.4f}</b><br>
-                              Stop Loss: <b>${stop_s:,.4f}</b><br>
-                              Target: <b>${target_s:,.4f}</b><br>
-                              Risk/Reward: <b>{rr_ratio:.2f}</b> — {'✅ Good' if rr_ratio >= 1.5 else '⚠️ Too low (ideal ≥ 1.5)'}
+                            <div class='panel-box' style='border-left:4px solid {color};'>
+                              <div style='display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;'>
+                                <span style='color:{color}; font-weight:800;'>{icon} Scalping {scalp_direction}</span>
+                                <span style='color:{color}; font-weight:700;'>R:R {rr_ratio:.2f}</span>
+                              </div>
+                              <div style='color:{TEXT_MUTED}; font-size:0.88rem; margin-top:6px; line-height:1.65;'>
+                                Your Entry <b style='color:{ACCENT};'>${entry_price:,.4f}</b> |
+                                Model Entry <b style='color:{ACCENT};'>${entry_s:,.4f}</b><br>
+                                Stop <b style='color:{NEGATIVE};'>${stop_s:,.4f}</b> |
+                                Target <b style='color:{POSITIVE};'>${target_s:,.4f}</b><br>
+                                {'Good setup quality (R:R ≥ 1.5).' if rr_ratio >= 1.5 else 'R:R is below ideal threshold (1.5).'}
+                              </div>
                             </div>
                             """,
                             unsafe_allow_html=True
                         )
                     else:
                         msg = breakout_note or "No valid scalping setup with current filters."
-                        st.info(msg)
-                
-                    st.markdown(scalping_snapshot_html, unsafe_allow_html=True)
+                        if msg in {"Invalid plan levels", "Invalid ATR/price"}:
+                            msg = "No valid plan on current candle structure."
+                        st.markdown(
+                            f"<div class='panel-box' style='border-left:4px solid {WARNING};'>"
+                            f"<b style='color:{WARNING};'>Scalping Opportunity: Not Available</b><br>"
+                            f"<span style='color:{TEXT_MUTED}; font-size:0.86rem;'>Reason: {msg}</span>"
+                            f"</div>",
+                            unsafe_allow_html=True,
+                        )
+                    with st.expander("Advanced Context"):
+                        # -- Indicator grid (professional card layout) --
+                        _grid_html = _build_indicator_grid(
+                            supertrend_trend, ichimoku_trend, vwap_label, adx_val, bollinger_bias,
+                            stochrsi_k_val, psar_trend, williams_label, cci_label,
+                            volume_spike, atr_comment, candle_pattern,
+                        )
+                        if _grid_html:
+                            st.markdown(_grid_html, unsafe_allow_html=True)
+                        st.markdown(scalping_snapshot_html, unsafe_allow_html=True)
+                else:
+                    st.markdown(
+                        f"<div class='panel-box' style='border-left:4px solid {WARNING};'>"
+                        f"<b style='color:{WARNING};'>Scalping Opportunity: Not Available</b><br>"
+                        f"<span style='color:{TEXT_MUTED}; font-size:0.86rem;'>Reason: Not enough recent candles for scalping model.</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
 
         df_candle_live = fetch_ohlcv(coin, largest_tf, limit=100)
         df_candle, used_candle_cache, candle_cache_ts = live_or_snapshot(

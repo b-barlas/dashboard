@@ -58,16 +58,21 @@ def render(ctx: dict) -> None:
             st.error("Not enough data.")
             return
 
-        levels = calculate_fibonacci_levels(df, lookback=fib_lookback)
+        df_eval = df.iloc[:-1].copy() if len(df) > 30 else df.copy()
+        if df_eval is None or len(df_eval) < 20:
+            st.error("Not enough closed-candle data.")
+            return
+
+        levels = calculate_fibonacci_levels(df_eval, lookback=fib_lookback)
         if not levels:
             st.error("Could not calculate levels.")
             return
 
-        divergences = detect_divergence(df)
-        vp = calculate_volume_profile(df)
-        regime = detect_market_regime(df)
+        divergences = detect_divergence(df_eval)
+        vp = calculate_volume_profile(df_eval)
+        regime = detect_market_regime(df_eval)
 
-    current = float(df["close"].iloc[-1])
+    current = float(df_eval["close"].iloc[-1])
     is_uptrend = bool(levels.get("_is_uptrend", True))
     regime_name = str(regime.get("regime", "UNKNOWN"))
     regime_desc = str(regime.get("description", ""))
@@ -94,19 +99,23 @@ def render(ctx: dict) -> None:
         decision = "Setup quality: STRONG"
         decision_color = POSITIVE
         decision_note = f"Price is near {nearest_level} with no strong divergence conflict."
+        action_hint = "Action: execution-ready zone. Wait for trigger confirmation."
     elif nearest_dist <= 2.5:
         decision = "Setup quality: MODERATE"
         decision_color = WARNING
         decision_note = f"Price is near {nearest_level}, but confirmation is still needed."
+        action_hint = "Action: partial size only after confirmation."
     else:
         decision = "Setup quality: WEAK"
         decision_color = NEGATIVE
         decision_note = f"Price is far from key Fib zones ({nearest_level} is {nearest_dist:.2f}% away)."
+        action_hint = "Action: stand aside until price reaches a key zone."
 
     st.markdown(
         f"<div class='panel-box' style='border-left:4px solid {decision_color};'>"
         f"<b style='color:{decision_color};'>{decision}</b><br>"
         f"<span style='color:{TEXT_MUTED};'>{trend_text} | Regime: {regime_name} | {decision_note}</span>"
+        f"<br><span style='color:{decision_color}; font-size:0.84rem;'><b>{action_hint}</b></span>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -142,15 +151,16 @@ def render(ctx: dict) -> None:
     regime_icon = "▲" if "TREND" in regime_name else ("■" if regime_name in {"RANGING", "COMPRESSION"} else "▼")
     context_df = pd.DataFrame(
         [
-            {"Metric": "Trend Bias (?)", "Value": ("▲ Bullish" if is_uptrend else "▼ Bearish"), "Status": ("● Supportive" if is_uptrend else "▼ Caution")},
-            {"Metric": "Regime (?)", "Value": f"{regime_icon} {regime_name}", "Status": ("● Trend-Friendly" if "TREND" in regime_name else ("■ Neutral" if regime_name in {"RANGING", "COMPRESSION"} else "▼ Risky"))},
-            {"Metric": "POC Distance (?)", "Value": f"{poc_dist:+.2f}%", "Status": poc_status},
-            {"Metric": "Divergence Alerts (?)", "Value": str(div_count), "Status": div_status},
+            {"Metric": "Trend Bias", "Value": ("▲ Bullish" if is_uptrend else "▼ Bearish"), "Status": ("● Supportive" if is_uptrend else "▼ Caution")},
+            {"Metric": "Regime", "Value": f"{regime_icon} {regime_name}", "Status": ("● Trend-Friendly" if "TREND" in regime_name else ("■ Neutral" if regime_name in {"RANGING", "COMPRESSION"} else "▼ Risky"))},
+            {"Metric": "POC Distance", "Value": f"{poc_dist:+.2f}%", "Status": poc_status},
+            {"Metric": "Divergence Alerts", "Value": str(div_count), "Status": div_status},
         ]
     )
     st.markdown(
         f"<div style='color:{TEXT_MUTED}; font-size:0.83rem; margin:2px 0 8px 0; line-height:1.6;'>"
         f"<b style='color:{ACCENT};'>Metric Guide:</b> "
+        f"{_tip('Trend Bias', 'Directional structure from swing context used for Fib mapping. Bullish bias favours pullback buys; bearish bias favours rebound sells.')} | "
         f"{_tip('Regime', 'Current market state. Trending regimes support continuation; ranging/compression require patience.')} | "
         f"{_tip('POC Distance', 'Distance to highest-volume price node. Near POC often means price magnet/decision area.')} | "
         f"{_tip('Divergence Alerts', 'Momentum disagreement count. Higher count increases reversal/conflict risk.')}"
@@ -177,6 +187,7 @@ def render(ctx: dict) -> None:
 
     # Block 2: Execution levels
     st.markdown(f"<b style='color:{ACCENT};'>2) Execution Levels</b>", unsafe_allow_html=True)
+    st.caption("Focus first on 38.2%, 50%, 61.8%. 100%/161.8% are extension targets.")
     exec_rows = []
     for lv in key_levels:
         p = float(levels.get(lv, 0) or 0)
@@ -221,6 +232,7 @@ def render(ctx: dict) -> None:
                 }
             )
         st.dataframe(pd.DataFrame(warn_rows), width="stretch", hide_index=True)
+        st.caption("If warnings increase, reduce size and wait extra confirmation.")
     else:
         st.success("No major divergence warning in selected lookback.")
 

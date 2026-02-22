@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import pandas as pd
 import ta
+from core.signal_contract import strength_from_bias, strength_bucket
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -65,12 +66,12 @@ def render(ctx: dict) -> None:
         f"Use it to shortlist candidates before deep validation in Spot/Position/Fibonacci.</p>"
         f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
         f"<b>Filters:</b> "
-        f"{_tip('Min Confidence', 'Minimum confidence score. E.g. setting 60% shows only coins with 60%+ confidence.')} | "
+        f"{_tip('Min Strength', 'Direction-agnostic signal strength. High values can come from strong LONG or strong SHORT regimes.')} | "
         f"{_tip('Signal Filter', 'Choose which signal types to display: STRONG BUY, BUY, SELL, etc.')} | "
         f"{_tip('Min ADX', 'Minimum trend strength. ADX above 20 means a trending market. 25+ is a strong trend.')} | "
         f"{_tip('RSI Range', 'Sets the RSI range. 30-70 is neutral, below 30 is oversold, above 70 is overbought.')} | "
         f"{_tip('Volume Spike Only', 'When checked, only coins showing abnormal volume increases are listed.')} | "
-        f"{_tip('AI Agree', 'Agreement inside Ensemble AI models. Higher agreement means more stable AI direction.')} </p>"
+        f"{_tip('AI Agree', 'Model vote agreement inside Ensemble AI, shown as x/3. 2/3+ is usually more stable than 1/3 splits.')} </p>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -78,7 +79,7 @@ def render(ctx: dict) -> None:
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         scr_tf = st.selectbox("Timeframe", ['5m', '15m', '1h', '4h', '1d'], index=2, key="scr_tf")
-        min_confidence = st.slider("Min Confidence %", 0, 100, 60, key="scr_conf")
+        min_strength = st.slider("Min Strength %", 0, 100, 55, key="scr_strength")
     with col2:
         signal_filter = st.multiselect("Signal Filter", ['STRONG BUY', 'BUY', 'WAIT', 'SELL', 'STRONG SELL'],
                                         default=['STRONG BUY', 'BUY'], key="scr_signal")
@@ -93,7 +94,7 @@ def render(ctx: dict) -> None:
     st.markdown(
         f"<div class='scr-kpi-grid'>"
         f"<div class='scr-kpi'><div class='scr-kpi-label'>Timeframe</div><div class='scr-kpi-value'>{scr_tf}</div></div>"
-        f"<div class='scr-kpi'><div class='scr-kpi-label'>Confidence Floor</div><div class='scr-kpi-value'>{min_confidence}%</div></div>"
+        f"<div class='scr-kpi'><div class='scr-kpi-label'>Strength Floor</div><div class='scr-kpi-value'>{min_strength}%</div></div>"
         f"<div class='scr-kpi'><div class='scr-kpi-label'>ADX Floor</div><div class='scr-kpi-value'>{min_adx}</div></div>"
         f"<div class='scr-kpi'><div class='scr-kpi-label'>RSI Window</div><div class='scr-kpi-value'>{rsi_range[0]}-{rsi_range[1]}</div></div>"
         f"</div>",
@@ -120,35 +121,39 @@ def render(ctx: dict) -> None:
                     df = fetch_ohlcv(sym, scr_tf, limit=120)
                     if df is None or len(df) < 55:
                         return False, None
-                    a = analyse(df)
-                    if a.confidence < min_confidence:
+                    df_eval = df.iloc[:-1].copy() if len(df) > 60 else df.copy()
+                    if df_eval is None or len(df_eval) < 55:
+                        return False, None
+                    a = analyse(df_eval)
+                    bias = float(a.confidence)
+                    strength = float(strength_from_bias(bias))
+                    if strength < min_strength:
                         return True, None
                     if signal_filter and a.signal not in signal_filter:
                         return True, None
                     if not np.isnan(a.adx) and a.adx < min_adx:
                         return True, None
-                    rsi_val = ta.momentum.rsi(df['close'], window=14).iloc[-1]
+                    rsi_val = ta.momentum.rsi(df_eval['close'], window=14).iloc[-1]
                     if rsi_val < rsi_range[0] or rsi_val > rsi_range[1]:
                         return True, None
                     if volume_spike_only and not a.volume_spike:
                         return True, None
                     try:
-                        ai_prob, ai_dir, ai_details = ml_ensemble_predict(df)
+                        _ai_prob, ai_dir, ai_details = ml_ensemble_predict(df_eval)
                     except Exception:
-                        ai_prob, ai_dir, ai_details = 0.5, "NEUTRAL", {}
+                        _ai_prob, ai_dir, ai_details = 0.5, "NEUTRAL", {}
                     ai_agree = float(ai_details.get("agreement", 0.0)) if isinstance(ai_details, dict) else 0.0
+                    ai_votes = max(0, min(3, int(round(ai_agree * 3.0))))
                     row = {
                         "Symbol": sym.split("/")[0],
-                        "Price": float(df["close"].iloc[-1]),
+                        "Price": float(df_eval["close"].iloc[-1]),
                         "Signal": a.signal,
-                        "Confidence": float(a.confidence),
+                        "Strength": strength,
                         "AI Ensemble": ai_dir,
-                        "AI Prob %": ai_prob * 100.0,
-                        "AI Agree %": ai_agree * 100.0,
+                        "AI Agree": f"{ai_votes}/3",
                         "RSI": round(float(rsi_val), 1),
                         "ADX": round(float(a.adx), 1) if not np.isnan(a.adx) else 0.0,
                         "Volume Spike": "Yes" if a.volume_spike else "No",
-                        "Leverage": int(a.leverage),
                     }
                     return True, row
                 except Exception:
@@ -167,7 +172,7 @@ def render(ctx: dict) -> None:
         if data_hits == 0:
             results, from_cache, cache_ts = live_or_snapshot(
                 st,
-                f"screener_results::{scr_tf}::{min_confidence}::{min_adx}::{rsi_range[0]}-{rsi_range[1]}::{volume_spike_only}::{universe_mode}::{universe_size}",
+                f"screener_results::{scr_tf}::{min_strength}::{min_adx}::{rsi_range[0]}-{rsi_range[1]}::{volume_spike_only}::{universe_mode}::{universe_size}",
                 results,
             )
             if from_cache:
@@ -175,11 +180,31 @@ def render(ctx: dict) -> None:
         elif results:
             live_or_snapshot(
                 st,
-                f"screener_results::{scr_tf}::{min_confidence}::{min_adx}::{rsi_range[0]}-{rsi_range[1]}::{volume_spike_only}::{universe_mode}::{universe_size}",
+                f"screener_results::{scr_tf}::{min_strength}::{min_adx}::{rsi_range[0]}-{rsi_range[1]}::{volume_spike_only}::{universe_mode}::{universe_size}",
                 results,
             )
 
         if results:
+            df_results = pd.DataFrame(results).sort_values(by="Strength", ascending=False).reset_index(drop=True)
+            buy_sell = df_results["Signal"].astype(str).str.upper()
+            ai_side = df_results["AI Ensemble"].astype(str).str.upper()
+            aligned_mask = (
+                ((buy_sell.isin(["STRONG BUY", "BUY"])) & (ai_side == "LONG"))
+                | ((buy_sell.isin(["STRONG SELL", "SELL"])) & (ai_side == "SHORT"))
+            )
+            aligned_share = float(aligned_mask.mean() * 100.0) if len(df_results) else 0.0
+            avg_strength = float(df_results["Strength"].mean()) if len(df_results) else 0.0
+            spike_share = float((df_results["Volume Spike"] == "Yes").mean() * 100.0) if len(df_results) else 0.0
+            if aligned_share >= 65 and avg_strength >= 65:
+                prof = "Cleaner shortlist"
+                prof_text = "Signal and AI are broadly aligned. Prioritize top-strength rows first."
+            elif aligned_share >= 45:
+                prof = "Mixed shortlist"
+                prof_text = "Some candidates align, but quality is uneven. Validate carefully in Spot/Position."
+            else:
+                prof = "Noisy shortlist"
+                prof_text = "Alignment is weak. Consider stricter filters (higher strength/ADX)."
+
             st.markdown(
                 f"<div style='background:rgba(0,255,136,0.08); border:1px solid rgba(0,255,136,0.3); "
                 f"border-radius:10px; padding:12px; margin:10px 0; text-align:center;'>"
@@ -188,12 +213,28 @@ def render(ctx: dict) -> None:
                 unsafe_allow_html=True,
             )
             st.markdown(
+                f"<div class='scr-kpi-grid'>"
+                f"<div class='scr-kpi'><div class='scr-kpi-label'>Avg Strength</div><div class='scr-kpi-value'>{avg_strength:.0f}%</div></div>"
+                f"<div class='scr-kpi'><div class='scr-kpi-label'>AI-Technical Alignment</div><div class='scr-kpi-value'>{aligned_share:.0f}%</div></div>"
+                f"<div class='scr-kpi'><div class='scr-kpi-label'>Volume Spike Share</div><div class='scr-kpi-value'>{spike_share:.0f}%</div></div>"
+                f"<div class='scr-kpi'><div class='scr-kpi-label'>Screen Profile</div><div class='scr-kpi-value'>{prof}</div></div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div style='border:1px solid rgba(0,212,255,0.18); border-left:4px solid {ACCENT}; border-radius:12px; "
+                f"padding:10px 12px; margin:2px 0 10px 0; background:linear-gradient(140deg, rgba(0,0,0,0.72), rgba(10,18,30,0.88)); "
+                f"color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.55;'>"
+                f"<b style='color:{ACCENT};'>Quick Interpretation:</b> {prof_text}</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
                 f"<details style='margin-bottom:0.6rem;'>"
                 f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
                 f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-                f"<b>1.</b> Start from highest <b>Confidence</b> rows.<br>"
+                f"<b>1.</b> Start from highest <b>Strength</b> rows.<br>"
                 f"<b>2.</b> Prefer rows where <b>Signal</b> and <b>AI Ensemble</b> agree.<br>"
-                f"<b>3.</b> Look for <b>AI Agree % >= 66%</b> to avoid noisy model splits.<br>"
+                f"<b>3.</b> Prefer <b>AI Agree >= 2/3</b> to avoid noisy model splits.<br>"
                 f"<b>4.</b> Keep <b>ADX</b> above your floor and avoid extreme RSI edges unless intentional.<br>"
                 f"<b>5.</b> Treat Screener as shortlist only; validate in Spot/Position before acting."
                 f"</div></details>",
@@ -204,23 +245,18 @@ def render(ctx: dict) -> None:
                 f"<summary style='color:{ACCENT}; cursor:pointer;'>Column Guide</summary>"
                 f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:0.5rem;'>"
                 f"<b>Signal</b>: technical engine output (BUY/SELL/WAIT).<br>"
-                f"<b>Confidence</b>: strength of technical alignment.<br>"
+                f"<b>Strength</b>: direction-agnostic signal power from directional bias (0-100).<br>"
                 f"<b>AI Ensemble</b>: 3-model combined direction.<br>"
-                f"<b>AI Prob %</b>: ensemble probability of upward move.<br>"
-                f"<b>AI Agree %</b>: model agreement inside the ensemble.<br>"
+                f"<b>AI Agree</b>: model vote agreement inside the ensemble (x/3).<br>"
                 f"<b>Volume Spike</b>: latest volume anomaly flag.<br>"
-                f"<b>Leverage</b>: risk-based suggestion cap."
+                f"<b>RSI</b>: momentum location in the 0-100 range."
                 f"</div></details>",
                 unsafe_allow_html=True,
             )
 
-            df_results = pd.DataFrame(results).sort_values(by="Confidence", ascending=False).reset_index(drop=True)
             df_show = df_results.copy()
             df_show["Price"] = df_show["Price"].map(lambda x: f"${x:,.4f}")
-            df_show["Confidence"] = df_show["Confidence"].map(lambda x: f"{x:.0f}%")
-            df_show["AI Prob %"] = df_show["AI Prob %"].map(lambda x: f"{x:.1f}%")
-            df_show["AI Agree %"] = df_show["AI Agree %"].map(lambda x: f"{x:.0f}%")
-            df_show["Leverage"] = df_show["Leverage"].map(lambda x: f"x{x}")
+            df_show["Strength"] = df_show["Strength"].map(lambda x: f"{x:.0f}%")
 
             def _sig_style(v: str) -> str:
                 if v in {"STRONG BUY", "BUY"}:
@@ -238,9 +274,21 @@ def render(ctx: dict) -> None:
 
             def _conf_style(v: str) -> str:
                 n = float(str(v).replace("%", ""))
-                if n >= 70:
+                b = strength_bucket(n)
+                if b in {"STRONG", "GOOD"}:
                     return f"color:{POSITIVE}; font-weight:700;"
-                if n >= 50:
+                if b == "MIXED":
+                    return f"color:{WARNING}; font-weight:700;"
+                return f"color:{NEGATIVE}; font-weight:700;"
+
+            def _agree_style(v: str) -> str:
+                try:
+                    n = int(str(v).split("/")[0])
+                except Exception:
+                    return f"color:{TEXT_MUTED};"
+                if n >= 3:
+                    return f"color:{POSITIVE}; font-weight:700;"
+                if n >= 2:
                     return f"color:{WARNING}; font-weight:700;"
                 return f"color:{NEGATIVE}; font-weight:700;"
 
@@ -248,7 +296,8 @@ def render(ctx: dict) -> None:
                 df_show.style
                 .map(_sig_style, subset=["Signal"])
                 .map(_ai_style, subset=["AI Ensemble"])
-                .map(_conf_style, subset=["Confidence", "AI Agree %"])
+                .map(_conf_style, subset=["Strength"])
+                .map(_agree_style, subset=["AI Agree"])
             )
             st.dataframe(styled, width="stretch")
         else:

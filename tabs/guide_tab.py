@@ -43,6 +43,18 @@ def render(ctx: dict) -> None:
 
     sections = [
         (
+            "0) Quick Start (Core 3-Step Workflow)",
+            """
+If you want a clean, fast workflow, use this sequence first:
+1. **Market**: scan broad universe and shortlist
+2. **Rapid**: pick best candidate with ready action plan
+3. **Position**: execute with invalidation discipline and health checks
+
+Treat the other tabs as **advanced validation tools** (optional when needed), not mandatory every trade.
+            """,
+            "info",
+        ),
+        (
             "1) What this dashboard is",
             """
 This app is a **decision-support dashboard** for crypto markets. It combines:
@@ -64,32 +76,48 @@ The signal engine computes 4 category scores in range **[-1, +1]**:
 - Volume
 - Volatility
 
-Weighted score:
-`final_score = trend*0.40 + momentum*0.30 + volume*0.20 + volatility*0.10`
+Regime-aware weighted score:
+- Strong trend (high ADX): trend weight increases
+- Weak trend / range: momentum and volatility weights increase
+- Normal regime: balanced baseline weights
 
-Confidence conversion:
-`confidence = (final_score + 1) / 2 * 100`
+Directional bias conversion:
+`bias = (final_score + 1) / 2 * 100`
+
+Strength conversion (direction-agnostic):
+`strength = (abs(bias - 50) / 50) ^ 0.70 * 100`
+
+Strength bands (dashboard standard):
+- 0-39: Weak
+- 40-59: Mixed
+- 60-74: Good
+- 75-100: Strong
 
 Meaning:
-- Near 100: strong bullish alignment
-- Near 0: strong bearish alignment
-- Around 50: mixed/no edge
+- Bias near 100: strong bullish alignment
+- Bias near 0: strong bearish alignment
+- Strength near 100: strong edge (either long or short)
+- Strength near 0: mixed/no edge
             """,
             "core",
         ),
         (
             "3) Quality gates and adaptive thresholds",
             """
-High confidence alone is not enough. Signals pass extra filters:
+High strength alone is not enough. Signals pass extra filters:
 - Trend confirmation (avoid counter-trend forcing)
 - Momentum sanity checks
 - Volume confirmation
 - Volatility/risk gating
+- Trend-momentum conflict penalty
+- Trend-volume alignment bonus
 
 Adaptive threshold logic (stricter in harder regimes):
 - Normal market: less strict
 - High volatility: stricter
 - Weak trend (low ADX): strictest
+- Oscillator extremes (RSI/StochRSI/Williams/CCI) are timeframe-adaptive
+  to reduce lower-timeframe noise and improve higher-timeframe responsiveness.
 
 If filters fail, output becomes **WAIT**.
             """,
@@ -104,7 +132,7 @@ Main indicators used across tabs:
 - **Volume**: OBV, volume spike checks, VWAP context
 - **Volatility**: ATR and Bollinger width
 
-These are combined into category scores, then into final confidence.
+These are combined into category scores, then into final bias/strength.
             """,
             "core",
         ),
@@ -124,7 +152,7 @@ Direction mapping (ensemble):
 - SHORT if probability <= 0.42
 - NEUTRAL in the 0.42-0.58 zone
 
-`AI Agree` = model agreement ratio inside the ensemble.
+`AI Agree` = model vote agreement inside the ensemble, shown as x/3.
             """,
             "core",
         ),
@@ -151,21 +179,23 @@ Use case:
 Market tab includes:
 - Live BTC/ETH, market cap, Fear & Greed
 - Dominance gauges (BTC/ETH)
-- AI market outlook (dominance-weighted)
+- AI direction bias (dominance-weighted)
 - Coin scanner table
 
 Scanner table key columns:
 - Signal
-- Confidence
-- Confidence Band
+- Strength
 - AI Ensemble
-- AI Agree
-- AI Stability
-- Conviction
+- Tech vs AI Alignment
 - Setup
 - Indicator snapshots (ADX, Ichimoku, StochRSI, VWAP, Candle Pattern, etc.)
 
-Conviction is based on Signal + AI alignment + confidence quality.
+Important execution note:
+- Signal/Strength/plan levels are computed on closed candles.
+- Price column can show the latest live tick.
+- This is intentional to avoid repaint risk in decision logic.
+
+Tech vs AI Alignment is based on Signal + AI alignment + strength quality.
             """,
             "core",
         ),
@@ -176,17 +206,18 @@ Conviction is based on Signal + AI alignment + confidence quality.
 It scans a liquid universe and ranks candidates with a single **Rapid Score (0-100)**.
 
 Rapid Score combines:
-- Confidence (30%)
+- Strength (30%)
 - Setup quality (20%)
 - AI quality: direction fit + agreement (20%)
 - Trend quality via ADX (15%)
 - Execution quality via R:R (15%)
-- Penalty for weak/conflicting conviction
+- Penalty for weak/conflicting alignment
 
 Outputs:
 - Action: READY / WAIT / SKIP
 - Direction, Score, Grade, Entry / SL / TP1, R:R
 - "Why now?" bullets for quick context
+- Last-50 quality tracker: READY rate, average best score, trend-friendly share
 
 Use Rapid for speed, then verify final execution discipline in Position tab.
             """,
@@ -204,8 +235,8 @@ Use Rapid for speed, then verify final execution discipline in Position tab.
 - Raw and levered PnL context + current signal regime
 - Scalping setup, support/resistance distance, risk warnings
 - Estimated liquidation price/distance (simple estimate)
-- Net PnL view (funding impact) and a Hard Invalidation line
-- Position Health Score with action bias (HOLD / REDUCE / EXIT)
+- Net PnL view (funding impact) and a Technical Invalidation line
+- Compact decision model guidance for HOLD / REDUCE / EXIT style actions
 
 Both use Ensemble AI for directional confirmation.
             """,
@@ -215,7 +246,7 @@ Both use Ensemble AI for directional confirmation.
             "10) Screener tab",
             """
 Screener scans predefined liquid symbols with filters:
-- Min confidence
+- Min strength
 - Signal types
 - Min ADX
 - RSI range
@@ -251,7 +282,7 @@ Use this to shortlist candidates, then validate in Spot/Position/Fibonacci.
             "12) Backtest tab",
             """
 Backtest replays strategy logic on historical candles:
-- Entry by signal+confidence rules
+- Entry by signal+strength rules
 - Exit after configured hold window
 - Commission/slippage assumptions
 
@@ -299,14 +330,14 @@ These tabs help with **context**, not standalone entries.
             """
 Leverage suggestions are ceilings, not targets.
 Use lower leverage when:
-- Confidence is medium
+- Strength is medium
 - ADX is weak
 - Volatility is high
 - Signal/AI disagree
 
 Best practice:
 - Risk 1-2% account per trade
-- Avoid over-sizing from high-confidence overtrust
+- Avoid over-sizing from high-strength overtrust
             """,
             "risk",
         ),
@@ -348,7 +379,7 @@ Recommended daily flow:
 1. Market tab: check regime + scanner shortlist
 2. Rapid tab: check READY candidates and pre-built plans
 3. Spot: validate setup and read the Action Plan
-4. Position: if already in trade, follow Hard Invalidation + Position Health first
+4. Position: if already in trade, follow Technical Invalidation + decision model first
 5. Fibonacci/Risk: validate structure and downside risk
 6. Tools: confirm R:R and liquidation distance
 7. Backtest: validate settings before using new setup live
@@ -385,7 +416,7 @@ Use this 60-second checklist:
 - Signal / AI / Setup columns are not empty
 
 2. **Spot tab**
-- Analyse runs and shows Signal + Confidence + AI + Conviction
+- Analyse runs and shows Signal + Strength + AI + Tech vs AI Alignment
 - Spot Action Plan appears
 
 3. **Rapid tab**
@@ -394,12 +425,13 @@ Use this 60-second checklist:
 
 4. **Position tab**
 - Raw/Levered PnL and Net PnL render correctly
-- Hard Invalidation and Position Health are visible
+- Technical Invalidation line is visible
 - Excel report downloads without resetting analysis view
 
 5. **AI Lab**
 - Predict fills timeframe matrix
-- AI Entry and Non-AI Entry columns populate logically
+- Plan Entry / Plan Target / Plan Source columns populate logically
+- AI Entry / Non-AI Entry appear in debug diagnostics
 
 6. **Fallback check**
 - If any live endpoint fails, cached snapshot warning with UTC timestamp appears

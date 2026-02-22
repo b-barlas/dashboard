@@ -78,6 +78,7 @@ def render(ctx: dict) -> None:
         f"{_tip('Profit Probability', 'Share of simulated paths ending above current price at horizon.')} | "
         f"{_tip('Expected Return', 'Average terminal return across all simulations.')} | "
         f"{_tip('VaR 95%', '5th percentile terminal return: downside threshold in bad scenarios.')} | "
+        f"{_tip('CVaR 95%', 'Average return of the worst 5% terminal outcomes; captures tail severity beyond VaR.')} | "
         f"{_tip('Median Target', 'Middle terminal price; more robust than mean against outliers.')}"
         f"</p>"
         f"</div>",
@@ -120,6 +121,7 @@ def render(ctx: dict) -> None:
     prob = float(result["prob_profit"]) * 100.0
     exp_ret = float(result["expected_return"])
     var95 = float(result["var_95"])
+    cvar95 = float(result.get("cvar_95", var95))
     median_price = float(result["median_price"])
     last_price = float(result["last_price"])
     median_ret = ((median_price / last_price) - 1.0) * 100.0 if last_price > 0 else 0.0
@@ -127,7 +129,21 @@ def render(ctx: dict) -> None:
     prob_status = ("Healthy", POSITIVE) if prob >= 60 else (("Watch", WARNING) if prob >= 45 else ("Risky", NEGATIVE))
     ret_status = ("Healthy", POSITIVE) if exp_ret > 3 else (("Watch", WARNING) if exp_ret >= -2 else ("Risky", NEGATIVE))
     var_status = ("Healthy", POSITIVE) if var95 >= -8 else (("Watch", WARNING) if var95 >= -15 else ("Risky", NEGATIVE))
+    cvar_status = ("Healthy", POSITIVE) if cvar95 >= -10 else (("Watch", WARNING) if cvar95 >= -18 else ("Risky", NEGATIVE))
     med_status = ("Healthy", POSITIVE) if median_ret > 2 else (("Watch", WARNING) if median_ret >= -2 else ("Risky", NEGATIVE))
+
+    if prob >= 60 and cvar95 > -12:
+        decision_tone = "Favourable"
+        decision_color = POSITIVE
+        decision_note = "Upside probability is healthy and tail risk is controlled."
+    elif prob < 45 or cvar95 <= -18:
+        decision_tone = "Defensive"
+        decision_color = NEGATIVE
+        decision_note = "Tail-risk profile is heavy. Use smaller size or avoid aggressive positioning."
+    else:
+        decision_tone = "Selective"
+        decision_color = WARNING
+        decision_note = "Mixed profile. Prefer selective entries and tighter risk controls."
 
     st.markdown(
         f"<div class='mc-kpi-grid'>"
@@ -137,8 +153,27 @@ def render(ctx: dict) -> None:
         f"<span class='mc-badge' style='color:{ret_status[1]}; border-color:{ret_status[1]};'><span>&#9679;</span>{ret_status[0]}</span></div>"
         f"<div class='mc-kpi'><div class='mc-kpi-label'>VaR 95%</div><div class='mc-kpi-value'>{var95:.2f}%</div>"
         f"<span class='mc-badge' style='color:{var_status[1]}; border-color:{var_status[1]};'><span>&#9679;</span>{var_status[0]}</span></div>"
+        f"<div class='mc-kpi'><div class='mc-kpi-label'>CVaR 95%</div><div class='mc-kpi-value'>{cvar95:.2f}%</div>"
+        f"<span class='mc-badge' style='color:{cvar_status[1]}; border-color:{cvar_status[1]};'><span>&#9679;</span>{cvar_status[0]}</span></div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='elite-card' style='margin:2px 0 10px 0; border-color:rgba(0,212,255,0.22);'>"
+        f"<div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>"
+        f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>Risk/Reward Profile: "
+        f"<b style='color:{decision_color};'>{decision_tone}</b></span>"
+        f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>"
+        f"<b style='color:{decision_color};'>{decision_note}</b></span>"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='mc-kpi-grid' style='grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:-2px;'>"
         f"<div class='mc-kpi'><div class='mc-kpi-label'>Median Target</div><div class='mc-kpi-value'>${median_price:,.2f}</div>"
         f"<span class='mc-badge' style='color:{med_status[1]}; border-color:{med_status[1]};'><span>&#9679;</span>{med_status[0]}</span></div>"
+        f"<div class='mc-kpi'><div class='mc-kpi-label'>Current Price</div><div class='mc-kpi-value'>${last_price:,.2f}</div>"
+        f"<span class='mc-badge' style='color:{TEXT_MUTED}; border-color:{TEXT_MUTED};'><span>&#9679;</span>Reference</span></div>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -147,8 +182,8 @@ def render(ctx: dict) -> None:
         f"<details style='margin-bottom:0.7rem;'>"
         f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
         f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"<b>1.</b> Check Profit Probability and VaR together, not separately.<br>"
-        f"<b>2.</b> If expected return is positive but VaR is deeply negative, size down.<br>"
+        f"<b>1.</b> Check Profit Probability, VaR and CVaR together, not separately.<br>"
+        f"<b>2.</b> If expected return is positive but CVaR is deeply negative, size down.<br>"
         f"<b>3.</b> Median target is usually better than max/best-case for planning.<br>"
         f"<b>4.</b> This model assumes historical volatility structure persists."
         f"</div></details>",

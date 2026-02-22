@@ -42,6 +42,16 @@ def render(ctx: dict) -> None:
         f"</div>",
         unsafe_allow_html=True,
     )
+    st.markdown(
+        f"<details style='margin-bottom:0.7rem;'>"
+        f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
+        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
+        f"<b>1.</b> Start with Ensemble Direction + Probability.<br>"
+        f"<b>2.</b> Check Model Agreement; low agreement means fragile signal.<br>"
+        f"<b>3.</b> Use model cards to see which model is diverging before taking action."
+        f"</div></details>",
+        unsafe_allow_html=True,
+    )
 
     col1, col2 = st.columns(2)
     with col1:
@@ -68,17 +78,32 @@ def render(ctx: dict) -> None:
         dir_color = POSITIVE if direction == "LONG" else (NEGATIVE if direction == "SHORT" else WARNING)
         agreement_pct = details.get('agreement', 0) * 100
         agreement_color = POSITIVE if agreement_pct >= 66 else (WARNING if agreement_pct >= 33 else NEGATIVE)
+        agreement_votes = max(0, min(3, int(round((details.get('agreement', 0) or 0) * 3.0))))
+        certainty = "High" if prob >= 0.7 or prob <= 0.3 else ("Medium" if prob >= 0.58 or prob <= 0.42 else "Low")
+
+        st.markdown(
+            f"<div class='ailab-kpi-grid'>"
+            f"<div class='ailab-kpi'><div class='ailab-kpi-label'>Direction</div>"
+            f"<div class='ailab-kpi-value' style='color:{dir_color};'>{direction}</div></div>"
+            f"<div class='ailab-kpi'><div class='ailab-kpi-label'>Probability</div>"
+            f"<div class='ailab-kpi-value'>{prob*100:.1f}%</div></div>"
+            f"<div class='ailab-kpi'><div class='ailab-kpi-label'>Agreement</div>"
+            f"<div class='ailab-kpi-value' style='color:{agreement_color};'>{agreement_votes}/3</div></div>"
+            f"<div class='ailab-kpi'><div class='ailab-kpi-label'>Signal Certainty</div>"
+            f"<div class='ailab-kpi-value'>{certainty}</div></div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
         # Big direction display
         st.markdown(
-            f"<div style='text-align:center; padding:24px; background:rgba(15,22,41,0.7); "
-            f"border:2px solid {dir_color}; border-radius:16px; margin:16px 0;'>"
+            f"<div style='text-align:center; padding:18px; background:rgba(15,22,41,0.7); "
+            f"border:1px solid {dir_color}; border-radius:14px; margin:10px 0 14px 0;'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.8rem; letter-spacing:2px;'>ENSEMBLE PREDICTION</div>"
-            f"<div style='color:{dir_color}; font-size:3rem; font-weight:800; margin:8px 0; "
-            f"text-shadow:0 0 20px {dir_color};'>{direction}</div>"
-            f"<div style='color:{ACCENT}; font-size:1.3rem;'>Probability: {prob*100:.1f}%</div>"
+            f"<div style='color:{dir_color}; font-size:2.2rem; font-weight:800; margin:7px 0;'>{direction}</div>"
+            f"<div style='color:{ACCENT}; font-size:1.05rem;'>Probability: {prob*100:.1f}%</div>"
             f"<div style='color:{agreement_color}; font-size:0.9rem; margin-top:6px;'>"
-            f"Model Agreement: {agreement_pct:.0f}%</div></div>",
+            f"Model Agreement: {agreement_pct:.0f}% ({agreement_votes}/3)</div></div>",
             unsafe_allow_html=True,
         )
 
@@ -128,4 +153,3 @@ def render(ctx: dict) -> None:
         fig_gauge.update_layout(height=280, margin=dict(l=30, r=30, t=60, b=20),
                                  template='plotly_dark', paper_bgcolor=PRIMARY_BG)
         st.plotly_chart(fig_gauge, use_container_width=True)
-

@@ -260,11 +260,15 @@ def render(ctx: dict) -> None:
                     df_s = fetch_ohlcv(sym, scan_tf, limit=max(lookback + 5, bars_per_24h + 2, 80))
                     if df_s is None or len(df_s) <= lookback + 1:
                         continue
+                    # Evaluate anomalies on closed candles to avoid partial-candle volume noise.
+                    df_eval = df_s.iloc[:-1].copy() if len(df_s) > (lookback + 2) else df_s.copy()
+                    if df_eval is None or len(df_eval) <= lookback + 1:
+                        continue
 
-                    vol_window = df_s['volume'].iloc[-(lookback + 1):-1]
+                    vol_window = df_eval['volume'].iloc[-(lookback + 1):-1]
                     avg_vol = float(vol_window.mean())
                     std_vol = float(vol_window.std(ddof=0))
-                    last_vol = float(df_s['volume'].iloc[-1])
+                    last_vol = float(df_eval['volume'].iloc[-1])
                     if avg_vol <= 0:
                         continue
 
@@ -273,9 +277,9 @@ def render(ctx: dict) -> None:
                     if ratio < ratio_th and z_score < z_th:
                         continue
 
-                    ret_1 = ((df_s['close'].iloc[-1] / df_s['close'].iloc[-2]) - 1) * 100
-                    if len(df_s) > bars_per_24h:
-                        ret_24h = ((df_s['close'].iloc[-1] / df_s['close'].iloc[-(bars_per_24h + 1)]) - 1) * 100
+                    ret_1 = ((df_eval['close'].iloc[-1] / df_eval['close'].iloc[-2]) - 1) * 100
+                    if len(df_eval) > bars_per_24h:
+                        ret_24h = ((df_eval['close'].iloc[-1] / df_eval['close'].iloc[-(bars_per_24h + 1)]) - 1) * 100
                     else:
                         ret_24h = np.nan
 

@@ -82,9 +82,9 @@ def render(ctx: dict) -> None:
         f"Main app signal uses Ensemble in production."
         f"</p>"
         f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
-        f"{_tip('Probability', 'Estimated chance of upward move from selected model.')} | "
+        f"{_tip('Selected Model Prob', 'Estimated chance of upward move from the model you selected.')} | "
         f"{_tip('Agreement', 'How strongly base models agree on direction in ensemble context.')} | "
-        f"{_tip('Market Outlook', 'Dominance-weighted probability across BTC/ETH/BNB/SOL/ADA/XRP for same timeframe.')}"
+        f"{_tip('AI Direction Bias', 'Same market-wide bias logic used in Market tab: dominance-weighted Ensemble probability across BTC/ETH/BNB/SOL/ADA/XRP for same timeframe.')}"
         f"</p>"
         f"</div>",
         unsafe_allow_html=True,
@@ -115,14 +115,13 @@ def render(ctx: dict) -> None:
         f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
         f"<b>1.</b> Prefer setups where direction is consistent across timeframes.<br>"
         f"<b>2.</b> If Probability is high but Agreement is low, treat as fragile signal.<br>"
-        f"<b>3.</b> Use entry/target only as plan drafts; confirm in Spot/Position tabs."
+        f"<b>3.</b> Use plan levels only as drafts; always validate in Spot/Position tabs."
         f"</div></details>",
         unsafe_allow_html=True,
     )
     st.markdown(
         f"<div style='margin:-2px 0 10px 0; color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.6;'>"
-        f"{_tip('AI Entry / AI Target', 'Technical plan that is kept only when technical direction matches selected AI model direction.')}<br>"
-        f"{_tip('Non-AI Entry / Non-AI Target', 'Raw technical plan from indicators and scalping rules, without AI direction filter.')}"
+        f"{_tip('Plan Entry / Plan Target', 'Primary plan shown in table. If AI and technical direction align, AI-filtered plan is used; otherwise technical fallback is shown.')}"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -167,7 +166,8 @@ def render(ctx: dict) -> None:
             for sym in ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "ADA/USDT", "XRP/USDT"]:
                 dfx = bundle.get(sym)
                 if dfx is not None and not dfx.empty and len(dfx) >= 60:
-                    probs[sym], _, _ = _model_prob_direction(dfx, selected_model)
+                    dfx_eval = dfx.iloc[:-1].copy() if len(dfx) > 60 else dfx.copy()
+                    probs[sym], _, _ = ml_ensemble_predict(dfx_eval)
                 else:
                     probs[sym] = 0.5
             btc_dom, eth_dom, _, _, _, bnb_dom, sol_dom, ada_dom, xrp_dom = get_market_indices()
@@ -201,32 +201,56 @@ def render(ctx: dict) -> None:
                     {
                         "Timeframe": tf,
                         "Direction": "NO DATA",
-                        "Prob %": 0.0,
-                        "Agreement %": 0.0,
-                        "Market %": 50.0,
-                        "Market Dir": "NEUTRAL",
-                        "Entry": "N/A",
-                        "Target": "N/A",
-                        "Leverage": "N/A",
-                        "Status": "• N/A",
-                        "Signal Icon": "•",
+                        "Selected Model Prob %": 0.0,
+                        "AI Agree": "N/A",
+                        "AI Direction Bias %": 50.0,
+                        "AI Direction Bias": "NEUTRAL (50.0%)",
+                        "Plan Entry": "N/A",
+                        "Plan Target": "N/A",
+                        "Plan Source": "N/A",
+                        "AI Entry": "N/A",
+                        "AI Target": "N/A",
+                        "Non-AI Entry": "N/A",
+                        "Non-AI Target": "N/A",
                     }
                 )
                 continue
 
-            prob, direction, details = _model_prob_direction(df, selected_model)
-            agreement = float((details or {}).get("agreement", 0.0)) * 100.0
+            df_eval = df.iloc[:-1].copy() if len(df) > 60 else df.copy()
+            if df_eval is None or len(df_eval) < 55:
+                rows.append(
+                    {
+                        "Timeframe": tf,
+                        "Direction": "NO DATA",
+                        "Selected Model Prob %": 0.0,
+                        "AI Agree": "N/A",
+                        "AI Direction Bias %": 50.0,
+                        "AI Direction Bias": "NEUTRAL (50.0%)",
+                        "Plan Entry": "N/A",
+                        "Plan Target": "N/A",
+                        "Plan Source": "N/A",
+                        "AI Entry": "N/A",
+                        "AI Target": "N/A",
+                        "Non-AI Entry": "N/A",
+                        "Non-AI Target": "N/A",
+                    }
+                )
+                continue
+
+            prob, direction, details = _model_prob_direction(df_eval, selected_model)
+            agreement_ratio = float((details or {}).get("agreement", 0.0))
+            agreement_votes = max(0, min(3, int(round(agreement_ratio * 3.0))))
+            agreement_pct = agreement_ratio * 100.0
             mkt_prob, mkt_dir = _market_outlook_for_tf(tf)
 
             ai_entry_txt = "N/A"
             ai_target_txt = "N/A"
             ta_entry_txt = "N/A"
             ta_target_txt = "N/A"
-            lev_txt = "N/A"
             try:
-                ar = analyse(df)
+                ar = analyse(df_eval)
                 scalp_dir, entry_s, target_s, _, _, _ = get_scalping_entry_target(
-                    df,
+                    df_eval,
                     ar.confidence,
                     ar.supertrend,
                     ar.ichimoku,
@@ -240,42 +264,28 @@ def render(ctx: dict) -> None:
                 if scalp_dir == direction and direction in {"LONG", "SHORT"} and entry_s and target_s:
                     ai_entry_txt = f"${entry_s:,.4f}"
                     ai_target_txt = f"${target_s:,.4f}"
-                    lev_txt = f"{ar.leverage}X"
             except Exception as exc:
                 _debug(f"AI Lab planning block error ({tf}): {exc}")
-
-            if direction == "LONG":
-                status = "▲ Bullish"
-                icon = "↗"
-            elif direction == "SHORT":
-                status = "▼ Bearish"
-                icon = "↘"
-            else:
-                status = "■ Neutral"
-                icon = "→"
 
             rows.append(
                 {
                     "Timeframe": tf,
-                    "Signal Icon": icon,
                     "Direction": direction,
-                    "Status": status,
-                    "Prob %": round(prob * 100.0, 1),
-                    "Prob Badge": _pct_badge(float(prob * 100.0), AI_SHORT_THRESHOLD * 100.0, AI_LONG_THRESHOLD * 100.0),
-                    "Agreement %": round(agreement, 1),
-                    "Agreement Badge": _pct_badge(float(agreement), 40.0, 65.0),
-                    "Market %": round(mkt_prob * 100.0, 1),
-                    "Market Badge": _pct_badge(float(mkt_prob * 100.0), AI_SHORT_THRESHOLD * 100.0, AI_LONG_THRESHOLD * 100.0),
-                    "Market Dir": mkt_dir,
+                    "Selected Model Prob %": round(prob * 100.0, 1),
+                    "AI Agree": f"{agreement_votes}/3",
+                    "AI Direction Bias %": round(mkt_prob * 100.0, 1),
+                    "AI Direction Bias": f"{mkt_dir} ({mkt_prob * 100.0:.1f}%)",
+                    "Plan Entry": ai_entry_txt if ai_entry_txt != "N/A" else ta_entry_txt,
+                    "Plan Target": ai_target_txt if ai_target_txt != "N/A" else ta_target_txt,
+                    "Plan Source": ("AI-Filtered" if ai_entry_txt != "N/A" else ("Technical Fallback" if ta_entry_txt != "N/A" else "No Plan")),
                     "AI Entry": ai_entry_txt,
                     "AI Target": ai_target_txt,
                     "Non-AI Entry": ta_entry_txt,
                     "Non-AI Target": ta_target_txt,
-                    "Leverage": lev_txt,
                 }
             )
             all_probs.append(prob * 100.0)
-            all_agreements.append(agreement)
+            all_agreements.append(agreement_pct)
             all_dirs.append(direction)
 
     live_valid = [r for r in rows if r.get("Direction") != "NO DATA"]
@@ -307,66 +317,98 @@ def render(ctx: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    def _status_style(v: str) -> str:
-        if "Bullish" in str(v):
-            return f"color:{POSITIVE}; font-weight:700;"
-        if "Bearish" in str(v):
-            return f"color:{NEGATIVE}; font-weight:700;"
-        if "Neutral" in str(v):
-            return f"color:{WARNING}; font-weight:700;"
-        return f"color:{TEXT_MUTED};"
-
-    def _icon_style(v: str) -> str:
-        if v == "↗":
-            return f"color:{POSITIVE}; font-weight:700;"
-        if v == "↘":
-            return f"color:{NEGATIVE}; font-weight:700;"
-        if v == "→":
-            return f"color:{WARNING}; font-weight:700;"
-        return f"color:{TEXT_MUTED};"
-
-    def _badge_style(v: str) -> str:
+    def _dir_style(v: str) -> str:
         s = str(v)
-        if "Strong" in s:
+        if "LONG" in s:
             return f"color:{POSITIVE}; font-weight:700;"
-        if "Weak" in s:
+        if "SHORT" in s:
             return f"color:{NEGATIVE}; font-weight:700;"
-        if "Mixed" in s:
+        if "NEUTRAL" in s:
             return f"color:{WARNING}; font-weight:700;"
         return f"color:{TEXT_MUTED};"
 
-    def _lev_style(v: str) -> str:
-        return f"color:{TEXT_MUTED};" if str(v) == "N/A" else f"color:{TEXT_LIGHT}; font-weight:700;"
+    def _prob_style(v: float) -> str:
+        try:
+            x = float(v)
+        except Exception:
+            return f"color:{TEXT_MUTED};"
+        if x >= AI_LONG_THRESHOLD * 100.0:
+            return f"color:{POSITIVE}; font-weight:700;"
+        if x <= AI_SHORT_THRESHOLD * 100.0:
+            return f"color:{NEGATIVE}; font-weight:700;"
+        return f"color:{WARNING}; font-weight:700;"
+
+    def _agree_style(v: str) -> str:
+        try:
+            x = int(str(v).split("/")[0])
+        except Exception:
+            return f"color:{TEXT_MUTED};"
+        if x >= 3:
+            return f"color:{POSITIVE}; font-weight:700;"
+        if x >= 2:
+            return f"color:{WARNING}; font-weight:700;"
+        if x >= 1:
+            return f"color:{NEGATIVE}; font-weight:700;"
+        return f"color:{TEXT_MUTED};"
+
+    def _plan_source_style(v: str) -> str:
+        s = str(v)
+        if "AI-Filtered" in s:
+            return f"color:{POSITIVE}; font-weight:700;"
+        if "Technical Fallback" in s:
+            return f"color:{WARNING}; font-weight:700;"
+        return f"color:{TEXT_MUTED};"
 
     st.markdown(f"<b style='color:{ACCENT};'>AI Lab Timeframe Matrix</b>", unsafe_allow_html=True)
+    st.markdown(
+        f"<details style='margin:0.35rem 0 0.65rem 0;'>"
+        f"<summary style='color:{ACCENT}; cursor:pointer;'>Column Guide</summary>"
+        f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:0.45rem;'>"
+        f"<b>Direction</b>: selected model direction for this timeframe (LONG/SHORT/NEUTRAL).<br>"
+        f"<b>Selected Model Prob %</b>: selected model probability of upward move.<br>"
+        f"<b>AI Agree</b>: ensemble vote agreement (x/3). Higher is usually more stable.<br>"
+        f"<b>AI Direction Bias</b>: same market-wide bias logic as Market tab (dominance-weighted Ensemble), shown as direction + percent.<br>"
+        f"<b>Plan Entry/Plan Target</b>: primary plan to watch.<br>"
+        f"<b>Plan Source</b>: AI-Filtered or Technical Fallback."
+        f"</div></details>",
+        unsafe_allow_html=True,
+    )
     st.dataframe(
         df_out[
             [
                 "Timeframe",
-                "Signal Icon",
                 "Direction",
-                "Status",
-                "Prob %",
-                "Prob Badge",
-                "Agreement %",
-                "Agreement Badge",
-                "Market %",
-                "Market Badge",
-                "Market Dir",
-                "AI Entry",
-                "AI Target",
-                "Non-AI Entry",
-                "Non-AI Target",
-                "Leverage",
+                "Selected Model Prob %",
+                "AI Agree",
+                "AI Direction Bias",
+                "Plan Entry",
+                "Plan Target",
+                "Plan Source",
             ]
-        ].style.format({"Prob %": "{:.1f}", "Agreement %": "{:.1f}", "Market %": "{:.1f}"})
-        .map(_status_style, subset=["Status", "Market Dir"])
-        .map(_icon_style, subset=["Signal Icon"])
-        .map(_badge_style, subset=["Prob Badge", "Agreement Badge", "Market Badge"])
-        .map(_lev_style, subset=["Leverage"]),
+        ].style.format({"Selected Model Prob %": "{:.1f}%"})
+        .map(_dir_style, subset=["Direction"])
+        .map(_prob_style, subset=["Selected Model Prob %"])
+        .map(_dir_style, subset=["AI Direction Bias"])
+        .map(_agree_style, subset=["AI Agree"])
+        .map(_plan_source_style, subset=["Plan Source"]),
         width="stretch",
         hide_index=True,
     )
+
+    with st.expander("Show Plan Debug Columns (AI vs Technical)"):
+        st.dataframe(
+            df_out[
+                [
+                    "Timeframe",
+                    "AI Entry",
+                    "AI Target",
+                    "Non-AI Entry",
+                    "Non-AI Target",
+                ]
+            ],
+            width="stretch",
+            hide_index=True,
+        )
 
     # Probability by timeframe chart.
     df_plot = df_out[df_out["Direction"] != "NO DATA"].copy()
@@ -375,18 +417,18 @@ def render(ctx: dict) -> None:
         fig.add_trace(
             go.Bar(
                 x=df_plot["Timeframe"],
-                y=df_plot["Prob %"],
+                y=df_plot["Selected Model Prob %"],
                 marker_color=[POSITIVE if d == "LONG" else (NEGATIVE if d == "SHORT" else WARNING) for d in df_plot["Direction"]],
-                name="Model Prob %",
+                name="Selected Model Prob %",
             )
         )
         fig.add_trace(
             go.Scatter(
                 x=df_plot["Timeframe"],
-                y=df_plot["Market %"],
+                y=df_plot["AI Direction Bias %"],
                 mode="lines+markers",
                 line=dict(color=ACCENT, width=2),
-                name="Market Outlook %",
+                name="AI Direction Bias %",
             )
         )
         fig.add_hline(y=AI_LONG_THRESHOLD * 100.0, line=dict(color=POSITIVE, dash="dot", width=1), annotation_text="LONG threshold")
@@ -408,7 +450,11 @@ def render(ctx: dict) -> None:
                 st.caption(f"{tf}: no sufficient data.")
                 continue
             try:
-                ar = analyse(df)
+                df_eval = df.iloc[:-1].copy() if len(df) > 60 else df.copy()
+                if df_eval is None or len(df_eval) < 55:
+                    st.caption(f"{tf}: no sufficient closed-candle data.")
+                    continue
+                ar = analyse(df_eval)
                 grid_html = _build_indicator_grid(
                     ar.supertrend,
                     ar.ichimoku,

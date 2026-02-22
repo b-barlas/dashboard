@@ -198,6 +198,19 @@ def render(ctx: dict) -> None:
             best_liquidity = grouped["avg_volume"].idxmax()
             hottest = grouped["avg_range"].idxmax()
             data_coverage = int(grouped["candle_count"].sum())
+            best_score_val = float(grouped.loc[best_score, "session_score"]) if best_score in grouped.index else 0.0
+            if best_score_val >= 70:
+                sess_profile = "Execution-Friendly"
+                sess_color = POSITIVE
+                sess_note = "Good liquidity/volatility balance for cleaner execution."
+            elif best_score_val >= 50:
+                sess_profile = "Selective"
+                sess_color = WARNING
+                sess_note = "Mixed conditions. Use tighter risk control."
+            else:
+                sess_profile = "Risky"
+                sess_color = NEGATIVE
+                sess_note = "Execution quality is weak. Consider standing aside."
             st.markdown(
                 f"<div class='sess-kpi-grid'>"
                 f"<div class='sess-kpi'><div class='sess-kpi-label'>Best Session (Score)</div><div class='sess-kpi-value'>{best_score}</div></div>"
@@ -205,6 +218,15 @@ def render(ctx: dict) -> None:
                 f"<div class='sess-kpi'><div class='sess-kpi-label'>Highest Volatility</div><div class='sess-kpi-value'>{hottest}</div></div>"
                 f"<div class='sess-kpi'><div class='sess-kpi-label'>Candle Coverage</div><div class='sess-kpi-value'>{data_coverage}</div></div>"
                 f"</div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div class='elite-card' style='margin:2px 0 10px 0; border-color:rgba(0,212,255,0.22);'>"
+                f"<div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>"
+                f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>Session Profile: "
+                f"<b style='color:{sess_color};'>{sess_profile}</b></span>"
+                f"<span style='color:{sess_color}; font-size:0.84rem; font-weight:700;'>{sess_note}</span>"
+                f"</div></div>",
                 unsafe_allow_html=True,
             )
 
@@ -236,46 +258,47 @@ def render(ctx: dict) -> None:
                 unsafe_allow_html=True,
             )
 
-            fig_vol = go.Figure()
-            for idx, sess in enumerate(session_order):
-                if sess in grouped.index:
-                    fig_vol.add_trace(go.Bar(
-                        x=[sess], y=[grouped.loc[sess, "avg_volume"]],
-                        name=sess, marker_color=session_colors[idx],
-                    ))
-            fig_vol.update_layout(
-                title="Average Hourly Volume by Session",
-                height=300, template="plotly_dark",
-                margin=dict(l=20, r=20, t=40, b=30),
-                showlegend=False,
-            )
-            st.plotly_chart(fig_vol, width="stretch")
+            with st.expander("Advanced Session Charts"):
+                fig_vol = go.Figure()
+                for idx, sess in enumerate(session_order):
+                    if sess in grouped.index:
+                        fig_vol.add_trace(go.Bar(
+                            x=[sess], y=[grouped.loc[sess, "avg_volume"]],
+                            name=sess, marker_color=session_colors[idx],
+                        ))
+                fig_vol.update_layout(
+                    title="Average Hourly Volume by Session",
+                    height=300, template="plotly_dark",
+                    margin=dict(l=20, r=20, t=40, b=30),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_vol, width="stretch")
 
-            fig_range_ret = go.Figure()
-            fig_range_ret.add_trace(
-                go.Bar(
-                    x=session_order,
-                    y=[grouped.loc[s, "avg_range"] for s in session_order],
-                    name="Avg Range (%)",
-                    marker_color=[WARNING, POSITIVE, NEGATIVE],
+                fig_range_ret = go.Figure()
+                fig_range_ret.add_trace(
+                    go.Bar(
+                        x=session_order,
+                        y=[grouped.loc[s, "avg_range"] for s in session_order],
+                        name="Avg Range (%)",
+                        marker_color=[WARNING, POSITIVE, NEGATIVE],
+                    )
                 )
-            )
-            fig_range_ret.add_trace(
-                go.Scatter(
-                    x=session_order,
-                    y=[grouped.loc[s, "avg_abs_return"] for s in session_order],
-                    name="Avg |Return| (%)",
-                    mode="lines+markers",
-                    line=dict(color=ACCENT, width=2),
+                fig_range_ret.add_trace(
+                    go.Scatter(
+                        x=session_order,
+                        y=[grouped.loc[s, "avg_abs_return"] for s in session_order],
+                        name="Avg |Return| (%)",
+                        mode="lines+markers",
+                        line=dict(color=ACCENT, width=2),
+                    )
                 )
-            )
-            fig_range_ret.update_layout(
-                title="Volatility Profile by Session",
-                height=320, template="plotly_dark",
-                margin=dict(l=20, r=20, t=40, b=30),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-            )
-            st.plotly_chart(fig_range_ret, width="stretch")
+                fig_range_ret.update_layout(
+                    title="Volatility Profile by Session",
+                    height=320, template="plotly_dark",
+                    margin=dict(l=20, r=20, t=40, b=30),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+                )
+                st.plotly_chart(fig_range_ret, width="stretch")
 
             summary_df = grouped.reset_index().rename(
                 columns={

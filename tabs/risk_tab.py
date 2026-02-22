@@ -113,7 +113,10 @@ def render(ctx: dict) -> None:
             st.error("Could not calculate metrics.")
             return
 
-    returns = df["close"].pct_change().dropna()
+    close_eval = pd.to_numeric(df["close"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+    if len(close_eval) > 40:
+        close_eval = close_eval.iloc[:-1]
+    returns = close_eval.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
     rolling_window = min(30, max(10, len(returns) // 5))
     rolling_vol = (returns.rolling(rolling_window).std() * 100.0).dropna()
 
@@ -157,6 +160,16 @@ def render(ctx: dict) -> None:
     cal_s, cal_c = _status(calmar, good=1.2, neutral=0.6)
     vol_s, vol_c = _status(ann_vol, good=45.0, neutral=80.0, lower_better=True)
 
+    if regime == "Lower Risk" and sharpe >= 1.0 and cvar95 > -5.0:
+        profile_text = "Favourable risk profile for selective participation."
+        profile_color = POSITIVE
+    elif regime == "High Risk" or cvar95 <= -8.0:
+        profile_text = "Defensive profile: prioritize capital protection."
+        profile_color = NEGATIVE
+    else:
+        profile_text = "Mixed profile: keep position size controlled."
+        profile_color = WARNING
+
     st.markdown(
         f"<div class='risk-kpi-grid'>"
         f"<div class='risk-kpi'><div class='risk-kpi-label'>Risk Regime</div><div class='risk-kpi-value' style='color:{regime_color};'>{regime}</div>"
@@ -168,6 +181,14 @@ def render(ctx: dict) -> None:
         f"<div class='risk-kpi'><div class='risk-kpi-label'>VaR 95%</div><div class='risk-kpi-value'>{var95:.2f}%</div>"
         f"<span class='risk-badge' style='color:{var_c}; border-color:{var_c};'><span style='color:{var_c};'>&#9679;</span>{var_s}</span></div>"
         f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='elite-card' style='margin:2px 0 10px 0; border-color:rgba(0,212,255,0.22);'>"
+        f"<div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>"
+        f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>Decision Profile:</span>"
+        f"<span style='color:{profile_color}; font-size:0.84rem; font-weight:700;'>{profile_text}</span>"
+        f"</div></div>",
         unsafe_allow_html=True,
     )
 
@@ -285,50 +306,51 @@ def render(ctx: dict) -> None:
     )
     st.plotly_chart(fig_cum, width="stretch")
 
-    # Distribution + rolling volatility (subplots avoided for simpler Streamlit rendering performance).
-    returns_pct = returns * 100.0
-    fig_dist = go.Figure()
-    fig_dist.add_trace(go.Histogram(x=returns_pct, nbinsx=50, marker_color=NEON_PURPLE, opacity=0.72))
-    fig_dist.add_vline(x=0, line=dict(color=ACCENT, dash="dash", width=1))
-    fig_dist.add_vline(
-        x=var95,
-        line=dict(color=NEGATIVE, dash="dot", width=2),
-        annotation_text=f"VaR 95%: {var95:.2f}%",
-    )
-    fig_dist.add_vline(
-        x=cvar95,
-        line=dict(color=WARNING, dash="dot", width=2),
-        annotation_text=f"CVaR 95%: {cvar95:.2f}%",
-    )
-    fig_dist.update_layout(
-        height=250,
-        template="plotly_dark",
-        title="Return Distribution",
-        xaxis_title="Return (%)",
-        yaxis_title="Frequency",
-        margin=dict(l=20, r=20, t=45, b=25),
-        paper_bgcolor=PRIMARY_BG,
-    )
-    st.plotly_chart(fig_dist, width="stretch")
-
-    fig_rv = go.Figure()
-    if not rolling_vol.empty:
-        rv_ts = df["timestamp"].iloc[len(df) - len(rolling_vol):] if "timestamp" in df.columns else list(range(len(rolling_vol)))
-        fig_rv.add_trace(
-            go.Scatter(
-                x=rv_ts,
-                y=rolling_vol.values,
-                mode="lines",
-                line=dict(color=WARNING, width=2),
-                name=f"Rolling Vol ({rolling_window})",
-            )
+    with st.expander("Advanced Risk Charts"):
+        # Distribution + rolling volatility (subplots avoided for simpler Streamlit rendering performance).
+        returns_pct = returns * 100.0
+        fig_dist = go.Figure()
+        fig_dist.add_trace(go.Histogram(x=returns_pct, nbinsx=50, marker_color=NEON_PURPLE, opacity=0.72))
+        fig_dist.add_vline(x=0, line=dict(color=ACCENT, dash="dash", width=1))
+        fig_dist.add_vline(
+            x=var95,
+            line=dict(color=NEGATIVE, dash="dot", width=2),
+            annotation_text=f"VaR 95%: {var95:.2f}%",
         )
-    fig_rv.update_layout(
-        height=250,
-        template="plotly_dark",
-        title=f"Rolling Volatility ({rolling_window} candles)",
-        yaxis_title="Std Dev (%)",
-        margin=dict(l=20, r=20, t=45, b=25),
-        paper_bgcolor=PRIMARY_BG,
-    )
-    st.plotly_chart(fig_rv, width="stretch")
+        fig_dist.add_vline(
+            x=cvar95,
+            line=dict(color=WARNING, dash="dot", width=2),
+            annotation_text=f"CVaR 95%: {cvar95:.2f}%",
+        )
+        fig_dist.update_layout(
+            height=250,
+            template="plotly_dark",
+            title="Return Distribution",
+            xaxis_title="Return (%)",
+            yaxis_title="Frequency",
+            margin=dict(l=20, r=20, t=45, b=25),
+            paper_bgcolor=PRIMARY_BG,
+        )
+        st.plotly_chart(fig_dist, width="stretch")
+
+        fig_rv = go.Figure()
+        if not rolling_vol.empty:
+            rv_ts = df["timestamp"].iloc[len(df) - len(rolling_vol):] if "timestamp" in df.columns else list(range(len(rolling_vol)))
+            fig_rv.add_trace(
+                go.Scatter(
+                    x=rv_ts,
+                    y=rolling_vol.values,
+                    mode="lines",
+                    line=dict(color=WARNING, width=2),
+                    name=f"Rolling Vol ({rolling_window})",
+                )
+            )
+        fig_rv.update_layout(
+            height=250,
+            template="plotly_dark",
+            title=f"Rolling Volatility ({rolling_window} candles)",
+            yaxis_title="Std Dev (%)",
+            margin=dict(l=20, r=20, t=45, b=25),
+            paper_bgcolor=PRIMARY_BG,
+        )
+        st.plotly_chart(fig_rv, width="stretch")

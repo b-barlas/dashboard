@@ -41,6 +41,25 @@ def render(ctx: dict) -> None:
             font-weight:700;
             margin-top:4px;
         }}
+        .corr-decision {{
+            border:1px solid rgba(0,212,255,0.24);
+            border-left:4px solid {ACCENT};
+            border-radius:12px;
+            padding:12px 14px;
+            background:linear-gradient(140deg, rgba(0,0,0,0.74), rgba(8,18,32,0.90));
+            margin:6px 0 12px 0;
+        }}
+        .corr-decision-title {{
+            font-size:0.96rem;
+            font-weight:700;
+            color:{ACCENT};
+            margin-bottom:4px;
+        }}
+        .corr-decision-body {{
+            color:{TEXT_MUTED};
+            font-size:0.86rem;
+            line-height:1.55;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -100,9 +119,14 @@ def render(ctx: dict) -> None:
                         failed_coins.append(sym)
                         continue
                     if "timestamp" in df.columns:
-                        idx = pd.to_datetime(df.loc[rets.index, "timestamp"], unit="ms", errors="coerce")
+                        ts_vals = df.loc[rets.index, "timestamp"]
+                        # Be robust to both exchange-ms integers and already-parsed datetimes.
+                        if pd.api.types.is_numeric_dtype(ts_vals):
+                            idx = pd.to_datetime(ts_vals, unit="ms", errors="coerce", utc=True)
+                        else:
+                            idx = pd.to_datetime(ts_vals, errors="coerce", utc=True)
                     else:
-                        idx = pd.to_datetime(df.index, errors="coerce")
+                        idx = pd.to_datetime(df.index, errors="coerce", utc=True)
                     s = pd.Series(rets.values, index=idx, name=label).dropna()
                     # Remove duplicated timestamps to ensure clean alignment.
                     s = s[~s.index.duplicated(keep="last")]
@@ -169,6 +193,15 @@ def render(ctx: dict) -> None:
             least_corr = min(pairs, key=lambda x: x[2])
             abs_vals = [abs(p[2]) for p in pairs]
             avg_abs_corr = float(np.mean(abs_vals)) if abs_vals else 0.0
+            if avg_abs_corr >= 0.65:
+                corr_profile = "Crowded Basket"
+                corr_action = "Most names move together. Reduce overlap if you want true diversification."
+            elif avg_abs_corr >= 0.40:
+                corr_profile = "Balanced Basket"
+                corr_action = "Moderate co-movement. Diversification is acceptable but still theme-sensitive."
+            else:
+                corr_profile = "Diversified Basket"
+                corr_action = "Co-movement is relatively low. Cross-asset concentration risk is lower."
 
             base = "BTC" if "BTC" in corr.columns else corr.columns[0]
             base_rel = (
@@ -189,11 +222,21 @@ def render(ctx: dict) -> None:
             )
 
             st.markdown(
+                f"<div class='corr-decision'>"
+                f"<div class='corr-decision-title'>Correlation Profile: {corr_profile}</div>"
+                f"<div class='corr-decision-body'>{corr_action}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+            st.markdown(
                 f"<details style='margin-bottom:0.7rem;'>"
                 f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
                 f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
                 f"<b>1.</b> Start with <b>Avg |Corr|</b>: lower value means better diversification across the basket.<br>"
                 f"<b>2.</b> For new positions, avoid adding coins that are already <b>> 0.80</b> correlated with your core holding.<br>"
+                f"<b>Method check:</b> {_tip('Pearson', 'Measures linear co-movement of returns.')} | "
+                f"{_tip('Spearman', 'Measures rank co-movement and is more robust to outliers/non-linear scaling.')}<br>"
                 f"<b>3.</b> Use the <b>Best Diversifier vs {base}</b> insight to reduce single-theme exposure.<br>"
                 f"<b>4.</b> Re-check on 4h/1d before swing decisions; lower timeframes are noisier."
                 f"</div></details>",
@@ -216,12 +259,57 @@ def render(ctx: dict) -> None:
                         ["High Co-Move", "Inverse/Defensive", "Low Co-Move"],
                         default="Medium Co-Move",
                     ),
+                    Signal=lambda d: np.select(
+                        [
+                            d["Correlation"] >= 0.8,
+                            d["Correlation"] >= 0.5,
+                            d["Correlation"] > 0.2,
+                            d["Correlation"] > -0.2,
+                            d["Correlation"] > -0.5,
+                        ],
+                        ["● Tight", "● Linked", "● Mild", "● Neutral", "● Hedge"],
+                        default="● Inverse",
+                    ),
                 )
                 .sort_values("AbsCorr", ascending=False)
             )
+
+            def _corr_color(v: float) -> str:
+                if pd.isna(v):
+                    return "color:#94a3b8;"
+                if v >= 0.8:
+                    return "color:#ff4d6d; font-weight:700;"
+                if v >= 0.5:
+                    return "color:#ffd166; font-weight:700;"
+                if v <= -0.3:
+                    return "color:#00e5a8; font-weight:700;"
+                return "color:#e2e8f0;"
+
+            def _signal_color(txt: str) -> str:
+                if "Tight" in txt:
+                    return "color:#ff4d6d; font-weight:700;"
+                if "Linked" in txt or "Mild" in txt:
+                    return "color:#ffd166; font-weight:700;"
+                if "Hedge" in txt or "Inverse" in txt:
+                    return "color:#00e5a8; font-weight:700;"
+                return "color:#e2e8f0;"
+
+            st.markdown(
+                f"<details style='margin-bottom:0.45rem;'>"
+                f"<summary style='color:{ACCENT}; cursor:pointer;'>Column Guide (?)</summary>"
+                f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
+                f"<b>Correlation</b>: signed co-movement between pair returns (-1 to +1).<br>"
+                f"<b>AbsCorr</b>: strength only (ignores direction). Higher = stronger linkage.<br>"
+                f"<b>Signal</b>: quick badge for pair behavior (Tight, Linked, Hedge, Inverse).<br>"
+                f"<b>Regime</b>: portfolio interpretation of the pair relation."
+                f"</div></details>",
+                unsafe_allow_html=True,
+            )
             st.markdown(f"<b style='color:{ACCENT};'>Pair Table</b>", unsafe_allow_html=True)
             st.dataframe(
-                pair_df.style.format({"Correlation": "{:.2f}", "AbsCorr": "{:.2f}"}),
+                pair_df.style.format({"Correlation": "{:.2f}", "AbsCorr": "{:.2f}"})
+                .applymap(_corr_color, subset=["Correlation", "AbsCorr"])
+                .applymap(_signal_color, subset=["Signal"]),
                 width="stretch",
                 hide_index=True,
             )

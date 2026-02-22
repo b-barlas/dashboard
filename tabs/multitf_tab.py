@@ -3,6 +3,7 @@ from ui.ctx import get_ctx
 import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
+from core.signal_contract import strength_from_bias, strength_bucket
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -111,15 +112,20 @@ def render(ctx: dict) -> None:
             for tf in timeframes:
                 df = fetch_ohlcv(coin, tf, limit=200)
                 if df is None or len(df) < 55:
-                    rows.append({"Timeframe": tf, "Signal": "NO DATA", "Confidence": 0.0,
+                    rows.append({"Timeframe": tf, "Signal": "NO DATA", "Strength": 0.0,
                                  "SuperTrend": "", "Ichimoku": "", "VWAP": "", "ADX": 0.0})
                     continue
-                ar = analyse(df)
+                df_eval = df.iloc[:-1].copy() if len(df) > 60 else df.copy()
+                if df_eval is None or len(df_eval) < 55:
+                    rows.append({"Timeframe": tf, "Signal": "NO DATA", "Strength": 0.0,
+                                 "SuperTrend": "", "Ichimoku": "", "VWAP": "", "ADX": 0.0})
+                    continue
+                ar = analyse(df_eval)
                 direction = _direction_from_signal(ar.signal)
                 rows.append({
                     "Timeframe": tf,
                     "Signal": direction,
-                    "Confidence": round(ar.confidence, 1),
+                    "Strength": round(float(strength_from_bias(float(ar.confidence))), 1),
                     "SuperTrend": format_trend(ar.supertrend),
                     "Ichimoku": format_trend(ar.ichimoku),
                     "VWAP": ar.vwap,
@@ -140,7 +146,7 @@ def render(ctx: dict) -> None:
             long_c = sum(1 for r in valid if r["Signal"] == "LONG")
             short_c = sum(1 for r in valid if r["Signal"] == "SHORT")
             total_valid = len(valid)
-            avg_conf = np.mean([r["Confidence"] for r in valid]) if valid else 0.0
+            avg_conf = np.mean([r["Strength"] for r in valid]) if valid else 0.0
             wait_c = sum(1 for r in valid if r["Signal"] == "WAIT")
 
             if total_valid > 0:
@@ -199,7 +205,7 @@ def render(ctx: dict) -> None:
                 )
             with c3:
                 st.markdown(
-                    f"<div class='metric-card'><div class='metric-label'>Avg Confidence</div>"
+                    f"<div class='metric-card'><div class='metric-label'>Avg Strength</div>"
                     f"<div class='metric-value'>{avg_conf:.1f}%</div></div>",
                     unsafe_allow_html=True,
                 )
@@ -229,7 +235,7 @@ def render(ctx: dict) -> None:
                 unsafe_allow_html=True,
             )
 
-            # Entry quality badge (A/B/C) from weighted confluence, confidence, and uncertainty.
+            # Entry quality badge (A/B/C) from weighted confluence, strength, and uncertainty.
             if weighted_confluence >= 80 and avg_conf >= 70 and wait_c <= 1:
                 quality_grade = "A"
                 quality_color = POSITIVE
@@ -263,13 +269,14 @@ def render(ctx: dict) -> None:
                 "NO DATA": "•",
             }).fillna("•")
 
-            def _confidence_status(row: pd.Series) -> str:
+            def _strength_status(row: pd.Series) -> str:
                 if row["Signal"] == "NO DATA":
                     return "• N/A"
-                x = float(row["Confidence"])
-                if x >= 70:
+                x = float(row["Strength"])
+                b = strength_bucket(x)
+                if b == "STRONG":
                     return "▲ Strong"
-                if x >= 55:
+                if b in {"GOOD", "MIXED"}:
                     return "■ Medium"
                 return "▼ Weak"
 
@@ -283,7 +290,7 @@ def render(ctx: dict) -> None:
                     return "■ Moderate"
                 return "▼ Weak Trend"
 
-            df_mtf["Confidence Status"] = df_mtf.apply(_confidence_status, axis=1)
+            df_mtf["Strength Status"] = df_mtf.apply(_strength_status, axis=1)
             df_mtf["ADX Status"] = df_mtf.apply(_adx_status, axis=1)
             df_mtf["Signal Status"] = df_mtf["Signal"].map(
                 {"LONG": "▲ Bullish", "SHORT": "▼ Bearish", "WAIT": "■ Neutral", "NO DATA": "• N/A"}
@@ -319,7 +326,7 @@ def render(ctx: dict) -> None:
             )
             table_cols = [
                 "Timeframe", "Signal Icon", "Signal", "Signal Status",
-                "Confidence", "Confidence Status", "ADX", "ADX Status",
+                "Strength", "Strength Status", "ADX", "ADX Status",
                 "SuperTrend", "Ichimoku", "VWAP",
             ]
 
@@ -327,7 +334,7 @@ def render(ctx: dict) -> None:
                 df_mtf[table_cols].style
                 .map(style_signal, subset=["Signal"])
                 .map(_style_signal_icon, subset=["Signal Icon"])
-                .map(_style_status, subset=["Signal Status", "Confidence Status", "ADX Status"])
+                .map(_style_status, subset=["Signal Status", "Strength Status", "ADX Status"])
             )
             st.dataframe(styled_mtf, width="stretch")
 

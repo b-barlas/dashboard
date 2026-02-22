@@ -140,6 +140,11 @@ def render(ctx: dict) -> None:
     cap_status = ("Healthy", POSITIVE) if cap_weighted > 0 else ("Risky", NEGATIVE)
     ad_ratio = adv / max(dec, 1)
     adr_status = ("Healthy", POSITIVE) if ad_ratio >= 1.2 else (("Watch", WARNING) if ad_ratio >= 0.85 else ("Risky", NEGATIVE))
+    market_regime = "Risk-On" if (breadth >= 55 and cap_weighted > 0) else ("Risk-Off" if (breadth < 45 and cap_weighted < 0) else "Selective")
+    regime_color = POSITIVE if market_regime == "Risk-On" else (NEGATIVE if market_regime == "Risk-Off" else WARNING)
+    divergence = (breadth >= 50 and cap_weighted < 0) or (breadth < 50 and cap_weighted > 0)
+    divergence_text = "Large-cap / broad-market divergence detected" if divergence else "Broad participation and cap-weighted move are aligned"
+    divergence_color = WARNING if divergence else POSITIVE
 
     st.markdown(
         f"<div class='hm-kpi-grid'>"
@@ -152,6 +157,16 @@ def render(ctx: dict) -> None:
         f"<div class='hm-kpi'><div class='hm-kpi-label'>Cap-Weighted Change</div><div class='hm-kpi-value'>{cap_weighted:+.2f}%</div>"
         f"<span class='hm-badge' style='color:{cap_status[1]}; border-color:{cap_status[1]};'><span>&#9679;</span>{cap_status[0]}</span></div>"
         f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='elite-card' style='margin:2px 0 10px 0; border-color:rgba(0,212,255,0.22);'>"
+        f"<div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>"
+        f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>Market Regime: "
+        f"<b style='color:{regime_color};'>{market_regime}</b></span>"
+        f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>Interpretation: "
+        f"<b style='color:{divergence_color};'>{divergence_text}</b></span>"
+        f"</div></div>",
         unsafe_allow_html=True,
     )
 
