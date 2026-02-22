@@ -74,7 +74,7 @@ def _wma(series: pd.Series, length: int) -> pd.Series:
 
 # Set up page title, icon and wide layout
 st.set_page_config(
-    page_title="Crypto Command Center",
+    page_title="Crypto Market Intelligence Hub",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",

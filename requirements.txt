@@ -1,9 +1,8 @@
-streamlit
-pandas
-numpy
-requests
-plotly
-ccxt
-ta
-scikit-learn
-
+streamlit==1.54.0
+pandas==2.3.3
+numpy==2.2.6
+requests==2.32.3
+plotly==5.24.1
+ccxt==4.5.14
+ta==0.11.0
+scikit-learn==1.6.1
