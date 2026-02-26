@@ -37,6 +37,7 @@ from ui.helpers import (
     format_trend,
     leverage_badge,
     readable_market_cap,
+    direction_label,
     signal_plain,
     style_confidence,
     style_delta,

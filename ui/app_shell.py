@@ -6,6 +6,7 @@ import time
 
 from ui.ctx import get_ctx, get_ctx_callable
 from ui.tab_registry import TAB_TITLES, build_tab_specs
+from core.telemetry import snapshot_summary
 
 
 def render_app(deps: dict) -> None:
@@ -27,6 +28,16 @@ def render_app(deps: dict) -> None:
             "1) Market: scan universe<br>"
             "2) Rapid: pick best setup<br>"
             "3) Position: execute/manage"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        t = snapshot_summary(st)
+        st.markdown(
+            "<div style='font-size:0.76rem; color:#8CA1B6; line-height:1.5; "
+            "border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:8px; margin-bottom:8px;'>"
+            "<b style='color:#7FE7FF;'>System Health</b><br>"
+            f"Events: {t['total_events']} | Errors: {t['error_events']} ({t['error_rate']:.1f}%)<br>"
+            f"Cache hit-rate: {t['cache_hit_rate']:.1f}% | HTTP failures: {t['http_failures']}"
             "</div>",
             unsafe_allow_html=True,
         )

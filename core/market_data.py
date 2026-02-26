@@ -121,26 +121,6 @@ def get_top_volume_usdt_symbols(
                 if matched:
                     break
 
-        # Safety fallback: if CoinGecko->exchange matching is sparse (e.g. alias
-        # differences), fill from available exchange USD/USDT spot pairs so the
-        # scanner can still analyse multiple assets.
-        if len(valid) < max(5, min(20, top_n)):
-            for pair in sorted(markets.keys()):
-                if not isinstance(pair, str):
-                    continue
-                if "/" not in pair or ":" in pair:
-                    continue
-                base, quote = pair.split("/", 1)
-                if quote not in {"USDT", "USD"}:
-                    continue
-                base_u = base.upper()
-                if base_u in {"USD", "USDT", "EUR", "GBP"}:
-                    continue
-                if pair not in valid:
-                    valid.append(pair)
-                if len(valid) >= top_n:
-                    break
-
         return valid, data
     except Exception as exc:
         debug_fn(f"get_top_volume_usdt_symbols error: {exc}")

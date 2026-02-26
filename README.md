@@ -1,4 +1,4 @@
-# Crypto Command Center
+# Crypto Market Intelligence Hub
 
 A Streamlit-based cryptocurrency analytics dashboard with modular architecture (`core/`, `tabs/`, `ui/`).
 
@@ -23,6 +23,28 @@ streamlit run crypto_meta2.py
 
 By default, Streamlit serves the app locally (typically `http://localhost:8501`).
 
+## Deploy Readiness
+
+Run preflight before every deploy:
+
+```bash
+./scripts/preflight.sh
+```
+
+This runs:
+- compile checks
+- full test suite
+- dependency snapshot output
+
+## Production Smoke Test (5 minutes)
+
+After deploy/reboot, validate:
+
+1. `Market` tab: scan loads with non-empty rows.
+2. `Rapid ⚡` tab: timeframe switch still returns candidates/near-miss.
+3. `Position` tab: changing coin updates current/entry context correctly.
+4. `Backtest` tab: at least one symbol+timeframe can produce trades with a sensible threshold.
+5. Cache warnings: if any tab shows cached snapshot warning, do not execute directly without fresh live confirmation.
 ## UK Exchange Data Policy
 
 The exchange fallback list is intentionally restricted to:
@@ -33,12 +55,19 @@ The exchange fallback list is intentionally restricted to:
 
 This is configured in `core/services.py` and is designed to avoid relying on commonly restricted exchange sources.
 
-## Tests
+## CI Quality Gates
+
+GitHub Actions runs on `push` and `pull_request` to `main`:
+
+- `compileall` syntax check
+- `ruff` critical checks (`E9,F63,F7,F82`)
+- `mypy` on core engine contracts
+- full `pytest` suite
+
+## Tests (local)
 
 Run the test suite:
 
 ```bash
-python3 -m unittest tests/test_ui_styles.py tests/test_ui_helpers.py tests/test_tabs_contract.py tests/test_core_engines.py
+python -m pytest -q
 ```
-
-Some tests may be skipped in environments where optional dependencies are not installed.

@@ -24,6 +24,7 @@ def render(ctx: dict) -> None:
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     analyse = get_ctx(ctx, "analyse")
     signal_plain = get_ctx(ctx, "signal_plain")
+    direction_label = get_ctx(ctx, "direction_label")
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
     _build_indicator_grid = get_ctx(ctx, "_build_indicator_grid")
@@ -45,7 +46,7 @@ def render(ctx: dict) -> None:
         f"{_tip('Momentum', 'RSI, MACD, Stochastic RSI, Williams %R, and CCI indicators.')} (30%), "
         f"{_tip('Volume', 'OBV direction, volume spikes, and VWAP positioning.')} (20%), and "
         f"{_tip('Volatility', 'Bollinger Band width, ATR level, and Keltner Channel breakouts.')} (10%) "
-        f"into a single signal (BUY / SELL / WAIT) with a direction-agnostic strength score from 0-100%. "
+        f"into a single direction output (Upside / Downside / Neutral) with a direction-agnostic strength score from 0-100%. "
         f"Designed for spot trading without leverage.</p>"
         f"</div>",
         unsafe_allow_html=True,
@@ -54,8 +55,8 @@ def render(ctx: dict) -> None:
         f"<details style='margin-bottom:0.7rem;'>"
         f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
         f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.45rem;'>"
-        f"<b>1.</b> Start with Signal + Strength + AI Ensemble + Alignment.<br>"
-        f"<b>2.</b> If technical Signal and AI disagree, treat setup as weaker.<br>"
+        f"<b>1.</b> Start with Direction + Strength + AI Ensemble + Alignment.<br>"
+        f"<b>2.</b> If technical Direction and AI disagree, treat setup as weaker.<br>"
         f"<b>3.</b> Use indicator grid and snapshot for context, not standalone entry triggers."
         f"</div></details>",
         unsafe_allow_html=True,
@@ -95,7 +96,8 @@ def render(ctx: dict) -> None:
         current_price = df['close'].iloc[-1]
 
         # Display summary grid
-        signal_clean = signal_plain(signal)
+        signal_dir = signal_plain(signal)
+        signal_clean = direction_label(signal_dir)
         try:
             _ai_prob_s, ai_dir_s, _ai_details_s = ml_ensemble_predict(df_eval)
             ai_agree = float((_ai_details_s or {}).get("agreement", 0.0)) * 100.0
@@ -107,7 +109,7 @@ def render(ctx: dict) -> None:
         conv_lbl_s, conv_c_s = _calc_conviction(sig_dir_s, ai_dir_s, strength_score)
         ai_stability = ai_stability_bucket(ai_agree / 100.0)
 
-        sig_c_s = POSITIVE if "LONG" in signal_clean else (NEGATIVE if "SHORT" in signal_clean else WARNING)
+        sig_c_s = POSITIVE if signal_dir == "LONG" else (NEGATIVE if signal_dir == "SHORT" else WARNING)
         ai_c_s = POSITIVE if ai_dir_s == "LONG" else (NEGATIVE if ai_dir_s == "SHORT" else WARNING)
         _s_bucket = strength_bucket(strength_score)
         conf_c_s = POSITIVE if _s_bucket in {"STRONG", "GOOD"} else (WARNING if _s_bucket == "MIXED" else NEGATIVE)
@@ -116,14 +118,14 @@ def render(ctx: dict) -> None:
             f"<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); "
             f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
             f"<div style='text-align:center; padding:6px;'>"
-            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Signal</div>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Direction</div>"
             f"<div style='color:{sig_c_s}; font-size:0.85rem; font-weight:600;'>{signal_clean}</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Strength</div>"
             f"<div style='color:{conf_c_s}; font-size:0.85rem; font-weight:600;'>{strength_score:.0f}%</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Ensemble</div>"
-            f"<div style='color:{ai_c_s}; font-size:0.85rem; font-weight:600;'>{ai_dir_s}</div></div>"
+            f"<div style='color:{ai_c_s}; font-size:0.85rem; font-weight:600;'>{direction_label(ai_dir_s)}</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Stability</div>"
             f"<div style='color:{ai_stab_c}; font-size:0.85rem; font-weight:600;'>{ai_stability} ({ai_agree:.0f}%)</div></div>"
@@ -135,7 +137,7 @@ def render(ctx: dict) -> None:
         )
         st.markdown(
             f"<div style='color:{TEXT_MUTED}; font-size:0.82rem; margin:0.15rem 0 0.55rem 0;'>"
-            f"<b>Signal</b> = technical direction, <b>Strength</b> = direction-agnostic signal power, "
+            f"<b>Direction</b> = technical direction (Upside/Downside/Neutral), <b>Strength</b> = direction-agnostic signal power, "
             f"<b>AI Stability</b> = model agreement quality, <b>Alignment</b> = technical+AI alignment."
             f"</div>",
             unsafe_allow_html=True,
@@ -187,7 +189,7 @@ def render(ctx: dict) -> None:
         breakout_trigger = plan_resistance + 0.2 * atr14
         invalidation_level = max(0.0, plan_support - 0.8 * atr14)
 
-        if signal_clean == "LONG":
+        if signal_dir == "LONG":
             plan_status = "Bullish Playbook"
             plan_color = POSITIVE
             plan_lines = (
@@ -195,7 +197,7 @@ def render(ctx: dict) -> None:
                 f"2) <b>Breakout add:</b> only if price closes above ${breakout_trigger:,.2f}.<br>"
                 f"3) <b>Risk line:</b> if price closes below ${invalidation_level:,.2f}, setup is invalid."
             )
-        elif signal_clean == "SHORT":
+        elif signal_dir == "SHORT":
             plan_status = "Defensive Playbook"
             plan_color = NEGATIVE
             plan_lines = (

@@ -40,6 +40,7 @@ from core.ml import ml_predict_direction as ml_predict_direction_core
 from core.policy import UK_SAFE_EXCHANGE_FALLBACKS
 from core.risk import calculate_risk_metrics as calculate_risk_metrics_core
 from core.scalping import get_scalping_entry_target as get_scalping_entry_target_core
+from core.telemetry import record_event
 from core.signals import (
     AnalysisResult,
     analyse as analyse_core,
@@ -63,11 +64,14 @@ def _http_get_json(url: str, params: dict | None = None, timeout: int = 10,
         try:
             resp = requests.get(url, params=params, timeout=timeout)
             if resp.status_code == 200:
+                record_event(st, "http_success", status="ok", source=url)
                 return resp.json()
             _debug(f"HTTP {resp.status_code} for {url} (attempt {attempt}/{retries})")
+            record_event(st, "http_failure", status="error", source=url, detail=f"status={resp.status_code}")
         except Exception as exc:
             last_exc = exc
             _debug(f"HTTP error for {url} (attempt {attempt}/{retries}): {exc}")
+            record_event(st, "http_failure", status="error", source=url, detail=str(exc))
         if attempt < retries:
             time.sleep(backoff_sec * attempt)
     if last_exc:

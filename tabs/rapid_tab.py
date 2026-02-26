@@ -33,6 +33,7 @@ def render(ctx: dict) -> None:
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
     signal_plain = get_ctx(ctx, "signal_plain")
+    direction_label = get_ctx(ctx, "direction_label")
     readable_market_cap = get_ctx(ctx, "readable_market_cap")
     _debug = get_ctx(ctx, "_debug")
     cfg = DEFAULT_RAPID_CONFIG
@@ -63,17 +64,13 @@ def render(ctx: dict) -> None:
 
     def _action_badge(v: str) -> str:
         if v == "READY":
-            return "READY"
+            return "ENTER"
         if v == "WAIT":
-            return "WAIT"
+            return "WATCH"
         return "SKIP"
 
     def _dir_badge(v: str) -> str:
-        if v == "LONG":
-            return "LONG"
-        if v == "SHORT":
-            return "SHORT"
-        return "NEUTRAL"
+        return direction_label(v)
 
     def _setup_icon(v: str) -> str:
         if v == "Aligned":
@@ -443,7 +440,7 @@ def render(ctx: dict) -> None:
     with k2:
         st.markdown(
             "<div class='elite-card'>"
-            "<div class='elite-label'>READY Rate (50)</div>"
+            "<div class='elite-label'>ENTER Rate (50)</div>"
             f"<div class='elite-value'>{hist_summary['ready_rate']:.1f}%</div>"
             "</div>",
             unsafe_allow_html=True,
@@ -467,7 +464,7 @@ def render(ctx: dict) -> None:
     st.markdown(
         f"<div style='color:{TEXT_MUTED}; font-size:0.79rem; margin:0.2rem 0 0.55rem 0;'>"
         f"{_tip('Tracked Scans', 'Number of recent Rapid scans stored for quality tracking (up to 50).')} | "
-        f"{_tip('READY Rate (50)', 'Percentage of recent scans where the best candidate was READY.')} | "
+        f"{_tip('ENTER Rate (50)', 'Percentage of recent scans where the best candidate was ENTER.')} | "
         f"{_tip('Avg Best Score (50)', 'Average top-candidate score across recent scans. Higher is better.')} | "
         f"{_tip('Trend-Friendly Share', 'Share of scans where candidate set had supportive ADX trend strength.')}"
         f"</div>",
@@ -509,7 +506,7 @@ def render(ctx: dict) -> None:
         st.markdown(
             f"<details style='margin-top:0.45rem;'><summary style='color:{ACCENT}; cursor:pointer;'>Column Guide</summary>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.83rem; line-height:1.7; margin-top:0.45rem;'>"
-            f"<b>Action</b>: final quick class. <b>Score</b>: setup quality 0-100. <b>Setup</b>/<b>Alignment</b>: structural alignment quality. "
+            f"<b>Action</b>: final quick class (ENTER/WATCH/SKIP). <b>Score</b>: setup quality 0-100. <b>Setup</b>/<b>Alignment</b>: structural alignment quality. "
             f"<b>Entry/SL/TP1</b>: draft trade levels; SL is invalidation.</div></details>",
             unsafe_allow_html=True,
         )
@@ -555,7 +552,7 @@ def render(ctx: dict) -> None:
     st.markdown(
         f"<details style='margin:0.55rem 0;'><summary style='color:{ACCENT}; cursor:pointer;'>How to Act Quickly</summary>"
         f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:0.45rem;'>"
-        f"1. Start with READY setups. 2. Respect SL as invalidation. 3. Prefer Aligned setup and R:R >= 1.5.</div></details>",
+        f"1. Start with ENTER setups. 2. Respect SL as invalidation. 3. WATCH rows are monitor-only until quality improves.</div></details>",
         unsafe_allow_html=True,
     )
     near_miss = [r for r in rows[1:4] if str(r.get("Action")) != "READY"]

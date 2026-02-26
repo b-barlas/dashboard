@@ -1,6 +1,5 @@
 from ui.ctx import get_ctx
-
-from datetime import datetime, timezone
+from ui.snapshot_cache import live_or_snapshot
 
 import numpy as np
 import pandas as pd
@@ -112,34 +111,12 @@ def render(ctx: dict) -> None:
         trending_new = fetch_trending_coins()
         gainers_new, losers_new = fetch_top_gainers_losers(15)
 
-    # Keep last successful payload to prevent empty UI on transient API failures.
-    if trending_new:
-        st.session_state["whale_trending_cache"] = trending_new
-        st.session_state["whale_trending_cache_ts"] = datetime.now(timezone.utc)
-    if gainers_new:
-        st.session_state["whale_gainers_cache"] = gainers_new
-        st.session_state["whale_gainers_cache_ts"] = datetime.now(timezone.utc)
-    if losers_new:
-        st.session_state["whale_losers_cache"] = losers_new
-        st.session_state["whale_losers_cache_ts"] = datetime.now(timezone.utc)
-
-    trending = trending_new or st.session_state.get("whale_trending_cache", [])
-    gainers = gainers_new or st.session_state.get("whale_gainers_cache", [])
-    losers = losers_new or st.session_state.get("whale_losers_cache", [])
-    used_trending_cache = (not trending_new) and bool(trending)
-    used_gainers_cache = (not gainers_new) and bool(gainers)
-    used_losers_cache = (not losers_new) and bool(losers)
-
-    trend_ts = st.session_state.get("whale_trending_cache_ts")
-    gainers_ts = st.session_state.get("whale_gainers_cache_ts")
-    losers_ts = st.session_state.get("whale_losers_cache_ts")
+    trending, used_trending_cache, trend_ts = live_or_snapshot(st, "whale_trending", trending_new)
+    gainers, used_gainers_cache, gainers_ts = live_or_snapshot(st, "whale_gainers", gainers_new)
+    losers, used_losers_cache, losers_ts = live_or_snapshot(st, "whale_losers", losers_new)
 
     def _fmt_ts(ts_obj) -> str:
-        if not ts_obj:
-            return "N/A"
-        if isinstance(ts_obj, datetime):
-            return ts_obj.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        return "N/A"
+        return str(ts_obj) if ts_obj else "N/A"
 
     top_gainers = (gainers or [])[:10]
     top_losers = (losers or [])[:10]
@@ -237,10 +214,17 @@ def render(ctx: dict) -> None:
     with c4:
         z_th = st.slider("Min Z-Score", min_value=1.0, max_value=4.0, value=2.0, step=0.1, key="whale_z_th")
 
+    tf_ratio_base = {"5m": 1.7, "15m": 1.6, "1h": 1.5, "4h": 1.4}.get(scan_tf, 1.5)
+    tf_z_base = {"5m": 2.2, "15m": 2.0, "1h": 1.8, "4h": 1.6}.get(scan_tf, 1.8)
+    ratio_gate = max(float(ratio_th), float(tf_ratio_base))
+    z_gate = max(float(z_th), float(tf_z_base))
+    extreme_ratio_gate = ratio_gate + 0.70
+    extreme_z_gate = z_gate + 0.90
+
     st.markdown(
         f"<p style='color:{TEXT_MUTED}; font-size:0.82rem; margin-top:4px;'>"
-        f"Trigger rule: <b>Ratio ≥ {ratio_th:.1f}</b> OR <b>Z-Score ≥ {z_th:.1f}</b>. "
-        f"Higher thresholds = fewer but cleaner alerts."
+        f"Adaptive trigger ({scan_tf}): <b>Ratio ≥ {ratio_gate:.2f}</b> OR <b>Z-Score ≥ {z_gate:.2f}</b>. "
+        f"<b>EXTREME</b> requires both: Ratio ≥ {extreme_ratio_gate:.2f} and Z-Score ≥ {extreme_z_gate:.2f}."
         f"</p>",
         unsafe_allow_html=True,
     )
@@ -274,7 +258,7 @@ def render(ctx: dict) -> None:
 
                     ratio = last_vol / avg_vol
                     z_score = (last_vol - avg_vol) / std_vol if std_vol > 1e-9 else 0.0
-                    if ratio < ratio_th and z_score < z_th:
+                    if ratio < ratio_gate and z_score < z_gate:
                         continue
 
                     ret_1 = ((df_eval['close'].iloc[-1] / df_eval['close'].iloc[-2]) - 1) * 100
@@ -283,14 +267,31 @@ def render(ctx: dict) -> None:
                     else:
                         ret_24h = np.nan
 
-                    if ratio >= 2.5 or z_score >= 3.0:
+                    is_extreme = ratio >= extreme_ratio_gate and z_score >= extreme_z_gate
+                    is_high = (
+                        (ratio >= ratio_gate and z_score >= z_gate)
+                        or ratio >= (ratio_gate + 0.35)
+                        or z_score >= (z_gate + 0.50)
+                    )
+                    if is_extreme:
                         level = "EXTREME"
-                    elif ratio >= 1.8 or z_score >= 2.0:
+                    elif is_high:
                         level = "HIGH"
                     else:
                         level = "MODERATE"
 
-                    score = (min(ratio, 4.0) / 4.0) * 0.6 + (min(max(z_score, 0.0), 4.0) / 4.0) * 0.4
+                    ratio_norm = (ratio - ratio_gate) / max(extreme_ratio_gate - ratio_gate, 1e-9)
+                    z_norm = (z_score - z_gate) / max(extreme_z_gate - z_gate, 1e-9)
+                    ratio_norm = float(min(max(ratio_norm, 0.0), 1.0))
+                    z_norm = float(min(max(z_norm, 0.0), 1.0))
+                    base_score = 0.55 * ratio_norm + 0.45 * z_norm
+                    if level == "EXTREME":
+                        score = 0.85 + 0.15 * base_score
+                    elif level == "HIGH":
+                        score = 0.60 + 0.25 * base_score
+                    else:
+                        score = 0.35 + 0.20 * base_score
+                    score = float(min(max(score, 0.0), 1.0))
                     surges.append({
                         "Symbol": sym.split('/')[0],
                         "Level": level,
@@ -321,7 +322,7 @@ def render(ctx: dict) -> None:
                     f"<div class='panel-box' style='padding:14px 16px; margin-top:8px;'>"
                     f"<b style='color:{ACCENT};'>How to read this quickly</b>"
                     f"<ul style='color:{TEXT_MUTED}; margin:8px 0 0 18px; line-height:1.7;'>"
-                    f"<li>Prioritize rows with <b>Level = EXTREME</b> and <b>Score >= 0.70</b>.</li>"
+                    f"<li>Prioritize rows with <b>Level = EXTREME</b> and <b>Score >= 0.85</b> (dual-confirmed ratio + z-score).</li>"
                     f"<li>Prefer anomalies where <b>1-Candle %</b> and <b>24h %</b> point the same direction.</li>"
                     f"<li>If Ratio is high but Z-Score is weak, it may be noise from already-elevated baseline volume.</li>"
                     f"<li>Use Spot/Position tabs for confirmation before acting.</li>"
@@ -353,22 +354,22 @@ def render(ctx: dict) -> None:
                 def _status_style(v: str) -> str:
                     s = str(v)
                     if "Extreme" in s:
-                        return f"color:{POSITIVE}; font-weight:700;"
-                    if "Elevated" in s:
                         return f"color:{WARNING}; font-weight:700;"
+                    if "Elevated" in s:
+                        return f"color:{ACCENT}; font-weight:700;"
                     if "Mild" in s:
-                        return f"color:{NEON_BLUE}; font-weight:700;"
+                        return f"color:{TEXT_MUTED}; font-weight:700;"
                     return f"color:{TEXT_MUTED}; font-weight:600;"
 
                 st.markdown(
                     f"<div style='color:{TEXT_MUTED}; font-size:0.83rem; margin:2px 0 8px 0; line-height:1.6;'>"
                     f"<b style='color:{ACCENT};'>Table Legend:</b> "
-                    f"<span style='color:{POSITIVE};'>EXTREME = strongest anomaly</span> "
-                    f"<span style='color:{WARNING}; margin-left:10px;'>HIGH = notable</span> "
-                    f"<span style='color:{NEON_BLUE}; margin-left:10px;'>MODERATE = mild</span> "
-                    f"<span style='color:{POSITIVE}; margin-left:10px;'>Ratio/Z: Extreme</span> "
-                    f"<span style='color:{WARNING}; margin-left:10px;'>Elevated</span> "
-                    f"<span style='color:{NEON_BLUE}; margin-left:10px;'>Mild</span>"
+                    f"<span style='color:{WARNING};'>EXTREME = strongest attention event (dual-confirmed)</span> "
+                    f"<span style='color:{ACCENT}; margin-left:10px;'>HIGH = notable anomaly</span> "
+                    f"<span style='color:{TEXT_MUTED}; margin-left:10px;'>MODERATE = mild anomaly</span> "
+                    f"<span style='color:{WARNING}; margin-left:10px;'>Ratio/Z: Extreme</span> "
+                    f"<span style='color:{ACCENT}; margin-left:10px;'>Elevated</span> "
+                    f"<span style='color:{TEXT_MUTED}; margin-left:10px;'>Mild</span>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
@@ -396,12 +397,12 @@ def render(ctx: dict) -> None:
                     df_view.style
                     .map(
                         lambda v: (
-                            f"background:rgba(0,255,136,0.16); color:{POSITIVE}; font-weight:700; border-radius:8px;"
+                            f"background:rgba(255,209,102,0.16); color:{WARNING}; font-weight:700; border-radius:8px;"
                             if "EXTREME" in str(v)
                             else (
-                                f"background:rgba(255,209,102,0.16); color:{WARNING}; font-weight:700; border-radius:8px;"
+                                f"background:rgba(0,212,255,0.14); color:{ACCENT}; font-weight:700; border-radius:8px;"
                                 if "HIGH" in str(v)
-                                else f"background:rgba(0,212,255,0.10); color:{NEON_BLUE}; font-weight:700; border-radius:8px;"
+                                else f"background:rgba(255,255,255,0.06); color:{TEXT_MUTED}; font-weight:700; border-radius:8px;"
                             )
                         ),
                         subset=["Level (?)"],

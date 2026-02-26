@@ -5,6 +5,7 @@ import html
 
 import pandas as pd
 import plotly.graph_objs as go
+from core.market_decision import action_decision, setup_badge, trade_quality
 from core.signal_contract import strength_from_bias, strength_bucket
 from core.metric_catalog import (
     AI_LONG_THRESHOLD,
@@ -34,6 +35,7 @@ def render(ctx: dict) -> None:
     get_scalping_entry_target = get_ctx(ctx, "get_scalping_entry_target")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
     signal_plain = get_ctx(ctx, "signal_plain")
+    direction_label = get_ctx(ctx, "direction_label")
     readable_market_cap = get_ctx(ctx, "readable_market_cap")
     format_delta = get_ctx(ctx, "format_delta")
     format_trend = get_ctx(ctx, "format_trend")
@@ -200,14 +202,14 @@ def render(ctx: dict) -> None:
     breadth_score = float(max(major_longs, major_shorts) / max(len(major_probs), 1) * 100.0)
 
     mcap_chg = abs(float(delta_mcap or 0.0))
-    if mcap_chg <= 1.0:
-        regime_score = 68.0
-    elif mcap_chg <= 3.0:
-        regime_score = 80.0
-    elif mcap_chg <= 6.0:
-        regime_score = 60.0
+    # Continuous regime scoring to avoid jumpy mode transitions.
+    if mcap_chg <= 1.5:
+        regime_score = 72.0 + (mcap_chg / 1.5) * 10.0
+    elif mcap_chg <= 4.0:
+        regime_score = 82.0 - ((mcap_chg - 1.5) / 2.5) * 24.0
     else:
-        regime_score = 42.0
+        regime_score = 58.0 - (mcap_chg - 4.0) * 4.0
+    regime_score = float(max(38.0, min(90.0, regime_score)))
 
     try:
         spread = float(pd.Series(major_probs).std())
@@ -414,7 +416,7 @@ def render(ctx: dict) -> None:
 
     # Top coin scanner controls
     st.markdown(
-        f"<h2 class='market-section-title' style='color:{ACCENT};'>Coin Signal Scanner</h2>",
+        f"<h2 class='market-section-title' style='color:{ACCENT};'>Coin Action Scanner</h2>",
         unsafe_allow_html=True,
     )
 
@@ -430,21 +432,12 @@ def render(ctx: dict) -> None:
             key="market_timeframe"
         )
     with controls[1]:
-        signal_filter = st.selectbox("Signal", ['LONG', 'SHORT', 'BOTH'], index=2)
+        direction_filter = st.selectbox("Direction", ['Upside', 'Downside', 'Both'], index=2)
     with controls[2]:
         top_n = st.slider("Top N", min_value=3, max_value=50, value=50)
     with controls[3]:
         refresh_scan = st.button("Refresh Scan", use_container_width=True)
     # Strict scalp mode is always enabled (non-strict path removed).
-
-    def _setup_badge(scalp_dir: str, signal_dir: str, ai_dir: str) -> str:
-        if scalp_dir and signal_dir in {"LONG", "SHORT"} and signal_dir == ai_dir == scalp_dir:
-            return "🟢 Aligned"
-        if scalp_dir and signal_dir in {"LONG", "SHORT"} and signal_dir == scalp_dir and ai_dir == "NEUTRAL":
-            return "🟡 Tech-Only"
-        if scalp_dir:
-            return "⚪ Draft"
-        return "🔴 No Setup"
 
     def _style_setup(v: str) -> str:
         s = str(v)
@@ -558,62 +551,6 @@ def render(ctx: dict) -> None:
             return f"→ {clean}"
         return clean
 
-    def _action_decision(
-        signal_dir: str,
-        strength: float,
-        setup_badge: str,
-        conviction_label: str,
-        agreement: float,
-        adx_val: float,
-        rr_ratio: float,
-        has_plan: bool,
-    ) -> str:
-        min_enter_rr = 1.30
-        if signal_dir not in {"LONG", "SHORT"}:
-            return "⛔ SKIP"
-        if not has_plan:
-            return "⏳ WAIT"
-        if rr_ratio < min_enter_rr:
-            return "⏳ WAIT"
-        if "No Setup" in setup_badge or conviction_label == "CONFLICT" or strength < 25:
-            return "⛔ SKIP"
-
-        strict_ok = (
-            strength >= 45
-            and "Aligned" in setup_badge
-            and conviction_label == "HIGH"
-            and agreement >= 0.65
-            and (pd.isna(adx_val) or adx_val >= 18)
-        )
-        if strict_ok:
-            return "✅ ENTER"
-
-        # If strict entry quality is not met, remain in WAIT mode.
-        return "⏳ WAIT"
-
-    def _trade_quality(
-        action: str,
-        setup_badge: str,
-        conviction_label: str,
-        strength: float,
-        agreement: float,
-        rr_ratio: float,
-    ) -> str:
-        if conviction_label == "CONFLICT":
-            return "🔴 C"
-        if "ENTER" in action and "Aligned" in setup_badge and strength >= 60 and agreement >= 0.65 and rr_ratio >= 1.5:
-            return "🟢 A"
-        if (
-            ("ENTER" in action or "WAIT" in action)
-            and "No Setup" not in setup_badge
-            and conviction_label != "CONFLICT"
-            and strength >= 45
-            and agreement >= 0.55
-            and rr_ratio >= 1.3
-        ):
-            return "🟡 B"
-        return "🔴 C"
-
     def _style_action(v: str) -> str:
         s = str(v)
         if "ENTER" in s:
@@ -621,7 +558,7 @@ def render(ctx: dict) -> None:
                 f"color:{POSITIVE}; font-weight:800; "
                 f"background-color:rgba(0,255,136,0.08); border:1px solid rgba(0,255,136,0.35);"
             )
-        if "WAIT" in s:
+        if "WATCH" in s:
             return (
                 f"color:{WARNING}; font-weight:800; "
                 f"background-color:rgba(255,209,102,0.08); border:1px solid rgba(255,209,102,0.35);"
@@ -702,7 +639,7 @@ def render(ctx: dict) -> None:
         if any(
             k in s
             for k in [
-                "ENTER", "LONG", "ALIGNED", "GOOD", "STRONG", "VERY STRONG", "EXTREME",
+                "ENTER", "LONG", "UPSIDE", "ALIGNED", "GOOD", "STRONG", "VERY STRONG", "EXTREME",
                 "ABOVE", "BULLISH", "OVERSOLD", "NEAR BOTTOM",
             ]
         ):
@@ -710,12 +647,12 @@ def render(ctx: dict) -> None:
         if any(
             k in s
             for k in [
-                "SKIP", "SHORT", "CONFLICT", "NO SETUP", "WEAK", "BEARISH",
+                "SKIP", "SHORT", "DOWNSIDE", "CONFLICT", "NO SETUP", "WEAK", "BEARISH",
                 "OVERBOUGHT", "BELOW", "NEAR TOP",
             ]
         ):
             return "neg"
-        if any(k in s for k in ["WAIT", "MIXED", "DRAFT", "TECH-ONLY", "NEUTRAL", "MEDIUM", "STARTING", "MODERATE", "SPIKE"]):
+        if any(k in s for k in ["WATCH", "WAIT", "MIXED", "DRAFT", "TECH-ONLY", "NEUTRAL", "MEDIUM", "STARTING", "MODERATE", "SPIKE"]):
             return "warn"
         return neutral_tone
 
@@ -740,17 +677,10 @@ def render(ctx: dict) -> None:
                 return "neg"
             return "warn"
 
-        if col == "Trade Quality":
-            if " A" in f" {s}" or s == "A":
+        if col == "Direction":
+            if "UPSIDE" in s:
                 return "pos"
-            if " B" in f" {s}" or s == "B":
-                return "warn"
-            return "neg"
-
-        if col == "Signal":
-            if "LONG" in s:
-                return "pos"
-            if "SHORT" in s:
+            if "DOWNSIDE" in s:
                 return "neg"
             return "warn"
 
@@ -770,15 +700,6 @@ def render(ctx: dict) -> None:
                 return "neg"
             return "muted"
 
-        if col == "Setup":
-            if "ALIGNED" in s:
-                return "pos"
-            if "TECH-ONLY" in s:
-                return "warn"
-            if "DRAFT" in s:
-                return "muted"
-            return "neg"
-
         if col == "R:R":
             try:
                 rr = float(
@@ -796,16 +717,16 @@ def render(ctx: dict) -> None:
                 return "muted"
 
         if col == "Scalp Opportunity":
-            if "LONG" in s:
+            if "UPSIDE" in s:
                 return "pos"
-            if "SHORT" in s:
+            if "DOWNSIDE" in s:
                 return "neg"
             return "muted"
 
         if col == "AI Ensemble":
-            if s.startswith("LONG"):
+            if s.startswith("UPSIDE"):
                 return "pos"
-            if s.startswith("SHORT"):
+            if s.startswith("DOWNSIDE"):
                 return "neg"
             return "warn"
 
@@ -875,7 +796,7 @@ def render(ctx: dict) -> None:
             txt = ""
         if col == "Coin":
             return f"<span class='mk-coin'>{html.escape(txt)}</span>"
-        if col in {"Action", "Trade Quality", "Signal", "Strength", "Setup", "R:R", "Scalp Opportunity"}:
+        if col in {"Action", "Direction", "Strength", "R:R", "Scalp Opportunity"}:
             return _chip(txt, _tone_for_col(col, txt))
         if col == "Tech vs AI Alignment":
             return _chip(txt, _tone_for_col(col, txt))
@@ -903,8 +824,7 @@ def render(ctx: dict) -> None:
             "Price ($)": 122,
             "Δ (%)": 92,
             "Action": 112,
-            "Trade Quality": 132,
-            "Signal": 106,
+            "Direction": 106,
             "Strength": 132,
         }
         left_offsets: dict[str, str] = {}
@@ -1042,7 +962,7 @@ def render(ctx: dict) -> None:
             unsafe_allow_html=True,
         )
 
-    scan_sig = (timeframe, signal_filter, int(top_n))
+    scan_sig = (timeframe, direction_filter, int(top_n))
     last_sig = st.session_state.get("market_scan_sig")
     should_scan = refresh_scan or (last_sig != scan_sig) or ("market_scan_results" not in st.session_state)
 
@@ -1051,7 +971,7 @@ def render(ctx: dict) -> None:
 
     # Fetch top coins
     if should_scan:
-        with st.spinner(f"Scanning {top_n} coins ({signal_filter}) [{timeframe}] ..."):
+        with st.spinner(f"Scanning {top_n} coins ({direction_filter}) [{timeframe}] ..."):
             usdt_symbols, market_data = get_top_volume_usdt_symbols(max(top_n, 50))
 
             # skip "wrapped"
@@ -1087,6 +1007,11 @@ def render(ctx: dict) -> None:
                     "No scanner symbols matched current market filters. "
                     f"Source pairs: {len(usdt_symbols)}, market rows: {len(unique_market_data)}, "
                     f"requested top_n: {top_n}."
+                    )
+            elif len(working_symbols) < top_n:
+                st.info(
+                    f"Liquidity universe currently returned {len(working_symbols)} eligible symbols "
+                    f"(requested {top_n}). Scanner remains strict to top-volume matched pairs."
                 )
 
             # Analysis — parallelised data fetching for speed
@@ -1125,16 +1050,16 @@ def render(ctx: dict) -> None:
                 target_price = target_s if scalp_direction else 0.0
 
                 include = (
-                    (signal_filter == 'BOTH') or
-                    (signal_filter == 'LONG' and signal in ['STRONG BUY', 'BUY']) or
-                    (signal_filter == 'SHORT' and signal in ['STRONG SELL', 'SELL'])
+                    (direction_filter == 'Both') or
+                    (direction_filter == 'Upside' and signal in ['STRONG BUY', 'BUY']) or
+                    (direction_filter == 'Downside' and signal in ['STRONG SELL', 'SELL'])
                 )
                 if not include:
                     return None
 
                 signal_direction = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "NEUTRAL")
 
-                ai_display = ai_direction
+                ai_display = direction_label(ai_direction)
                 consensus_votes = int(round(float(agreement) * 3.0))
                 if isinstance(ai_details, dict) and ai_details:
                     consensus_votes = max(1, min(3, consensus_votes))
@@ -1143,25 +1068,25 @@ def render(ctx: dict) -> None:
                 ai_display = f"{ai_display} ({consensus_votes}/3)"
 
                 _emoji_map = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "⚪", "CONFLICT": "🔴"}
-                setup_badge = _setup_badge(scalp_direction or "", signal_direction, ai_direction)
+                setup_badge_val = setup_badge(scalp_direction or "", signal_direction, ai_direction)
                 has_trade_plan = bool(entry_price and target_price and stop_s)
                 strength_val = float(strength_from_bias(float(confidence_score_v)))
                 _conv_lbl, _conv_clr = _calc_conviction(signal_direction, ai_direction, strength_val)
                 conviction = f"{_emoji_map.get(_conv_lbl, '')} {_conv_lbl}" if _conv_lbl else ""
                 rr_val = float(rr_ratio) if rr_ratio else 0.0
-                action = _action_decision(
+                action = action_decision(
                     signal_direction,
                     strength_val,
-                    setup_badge,
+                    setup_badge_val,
                     str(_conv_lbl),
                     float(agreement),
                     float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
                     rr_val,
                     has_trade_plan,
                 )
-                trade_quality = _trade_quality(
+                trade_quality_val = trade_quality(
                     action,
-                    setup_badge,
+                    setup_badge_val,
                     str(_conv_lbl),
                     strength_val,
                     float(agreement),
@@ -1173,13 +1098,13 @@ def render(ctx: dict) -> None:
                     'Price ($)': _fmt_price(price),
                     'Δ (%)': format_delta(price_change) if price_change is not None else '',
                     'Action': action,
-                    'Trade Quality': trade_quality,
-                    'Signal': signal_plain(signal),
+                    'Trade Quality': trade_quality_val,
+                    'Direction': direction_label(signal_plain(signal)),
                     'Strength': _strength_badge(float(confidence_score_v)),
                     'AI Ensemble': ai_display,
                     'Tech vs AI Alignment': conviction,
-                    'Setup': setup_badge,
-                    'Scalp Opportunity': scalp_direction or "",
+                    'Setup': setup_badge_val,
+                    'Scalp Opportunity': direction_label(scalp_direction or ""),
                     'Entry Price': _fmt_price(entry_price) if entry_price else '',
                     'Stop Loss': _fmt_price(stop_s) if stop_s else '',
                     'Target Price': _fmt_price(target_price) if target_price else '',
@@ -1202,7 +1127,7 @@ def render(ctx: dict) -> None:
 
             # Parallel scan using ThreadPoolExecutor (5-10x faster than sequential)
             fresh_results: list[dict] = []
-            with ThreadPoolExecutor(max_workers=6) as executor:
+            with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {executor.submit(_scan_one, sym): sym for sym in working_symbols}
                 for future in as_completed(futures):
                     try:
@@ -1214,7 +1139,7 @@ def render(ctx: dict) -> None:
 
             prev_results = st.session_state.get("market_scan_results", [])
             # Sort by execution priority: Action > Setup > Strength
-            action_rank = {"✅ ENTER": 3, "⏳ WAIT": 2, "⛔ SKIP": 1}
+            action_rank = {"✅ ENTER": 3, "👀 WATCH": 2, "⛔ SKIP": 1}
             setup_rank = {"🟢 Aligned": 4, "🟡 Tech-Only": 3, "⚪ Draft": 2, "🔴 No Setup": 1}
             fresh_results = sorted(
                 fresh_results,
@@ -1279,9 +1204,9 @@ def render(ctx: dict) -> None:
             f"<summary style='color:{ACCENT};'>"
             f"How to read quickly (?)</summary>"
             f"<div class='market-details-body' style='color:{TEXT_MUTED};'>"
-            f"<b>1.</b> Read <b>Action</b> first: ✅ ENTER, ⏳ WAIT, ⛔ SKIP.<br>"
-            f"<b>2.</b> Confirm with <b>Trade Quality</b> + <b>Strength</b> + <b>Setup</b> + <b>R:R</b>.<br>"
-            f"<b>3.</b> Use <b>Entry Price / Stop Loss / Target Price</b> as draft levels and always respect Stop Loss.<br>"
+            f"<b>1.</b> Read <b>Action</b> first: ✅ ENTER, 👀 WATCH, ⛔ SKIP.<br>"
+            f"<b>2.</b> Confirm with <b>Direction</b> + <b>Strength</b> + <b>AI Ensemble</b> + <b>Tech vs AI Alignment</b>.<br>"
+            f"<b>3.</b> Use <b>R:R + Entry Price / Stop Loss / Target Price</b> only for execution planning after Action confirms.<br>"
             f"<b>4.</b> Open <b>+ Show advanced columns</b> only when you need deeper diagnostics."
             f"</div></details>",
             unsafe_allow_html=True,
@@ -1291,10 +1216,12 @@ def render(ctx: dict) -> None:
             f"<summary style='color:{ACCENT};'>Scanner logic (what drives decisions?)</summary>"
             f"<div class='market-details-body' style='color:{TEXT_MUTED};'>"
             f"<b>Step 1:</b> Build universe from top liquid USDT pairs (wrapped tokens removed).<br>"
-            f"<b>Step 2:</b> Run technical analysis + AI ensemble + strict scalp plan (Entry/SL/TP) per coin.<br>"
+            f"<b>Step 2:</b> Run technical analysis + AI ensemble per coin, then generate execution plan fields (Entry/SL/TP).<br>"
             f"<b>Step 3:</b> Build bias from a regime-aware engine (trend/momentum/volume/volatility), then convert to direction-agnostic <b>Strength</b> (0-100).<br>"
-            f"<b>Step 4:</b> Calculate <b>Action</b> with guardrails (direction validity, setup alignment, strength, ADX regime, and minimum R:R).<br>"
-            f"<b>Step 5:</b> Grade <b>Trade Quality</b> as A/B/C from Action + setup + strength + AI agreement + R:R."
+            f"<b>Step 4:</b> Calculate <b>Action</b> with guardrails. "
+            f"ENTER requires: clear direction, Strength ≥ 60, at least 2/3 AI model agreement, no AI-vs-tech conflict, and trend not too weak (ADX guard). "
+            f"R:R and plan levels are execution aids, not Action gates.<br>"
+            f"<b>Step 5:</b> Convert raw outputs into one actionable class: ENTER / WATCH / SKIP."
             f"</div></details>",
             unsafe_allow_html=True,
         )
@@ -1304,10 +1231,12 @@ def render(ctx: dict) -> None:
             f"<summary style='color:{ACCENT};'>"
             f"ℹ️ Column Guide (click to expand)</summary>"
             f"<div class='market-details-body' style='color:{TEXT_MUTED}; padding:0.5rem;'>"
-            "<b>Decision Block (left)</b>: Action, Trade Quality, Signal, Strength. "
+            "<b>Decision Block (left)</b>: Action, Direction, Strength. "
             "Start here for go/no-go decision.<br>"
-            "<b>Confirmation Block</b>: AI Ensemble, Tech vs AI Alignment, Setup, R:R. "
-            "Confirms whether technical and AI context agree.<br>"
+            "<b>Strength meaning</b>: 0-100 direction-agnostic edge force. Read Upside/Downside from Direction; "
+            "use Strength as conviction power of that direction.<br>"
+            "<b>Confirmation Block</b>: AI Ensemble and Tech vs AI Alignment. "
+            "Confirms whether technical and AI context agree for Action.<br>"
             "<b>Plan Block</b>: Entry Price, Stop Loss, Target Price. "
             "Draft execution levels from strict setup engine.<br>"
             "<b>Diagnostics (advanced)</b>: ADX, SuperTrend, Ichimoku, VWAP first; "
@@ -1319,11 +1248,11 @@ def render(ctx: dict) -> None:
         st.markdown(
             f"<div style='display:flex; flex-wrap:wrap; gap:8px; margin:0 0 0.55rem 0;'>"
             f"<span class='market-criteria-chip' style='border:1px solid rgba(0,255,136,0.35); color:{POSITIVE}; background:rgba(0,255,136,0.08);'>"
-            f"A: ENTER + aligned + strength≥60 + agreement≥0.65 + R:R≥1.5</span>"
+            f"ENTER: clear direction + strong edge + AI/technical confirmation + trend not too weak</span>"
             f"<span class='market-criteria-chip' style='border:1px solid rgba(255,209,102,0.35); color:{WARNING}; background:rgba(255,209,102,0.08);'>"
-            f"B: usable setup + strength≥45 + agreement≥0.55 + R:R≥1.3</span>"
+            f"WATCH: direction exists, but confirmation is not complete yet</span>"
             f"<span class='market-criteria-chip' style='border:1px solid rgba(255,51,102,0.35); color:{NEGATIVE}; background:rgba(255,51,102,0.08);'>"
-            f"C: weak/conflict/no-setup or poor R:R</span>"
+            f"SKIP: no clear direction, conflict, or very weak edge</span>"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -1334,7 +1263,7 @@ def render(ctx: dict) -> None:
         # Quick scan health summary (visual-first, logic unchanged)
         action_series = df_results.get("Action", pd.Series(dtype=str)).astype(str)
         enter_count = int(action_series.str.contains("ENTER", na=False).sum())
-        wait_count = int(action_series.str.contains("WAIT", na=False).sum())
+        watch_count = int(action_series.str.contains("WATCH", na=False).sum())
         skip_count = int(action_series.str.contains("SKIP", na=False).sum())
         rr_values = (
             df_results.get("R:R", pd.Series(dtype=str))
@@ -1352,9 +1281,9 @@ def render(ctx: dict) -> None:
         )
 
         best_scalp_coin = "—"
-        best_scalp_sub = "No valid scalp opportunity in this scan."
+        best_scalp_sub = "No ENTER-qualified scalp setup in this scan."
         if "Scalp Opportunity" in df_results.columns:
-            scalp_mask = df_results["Scalp Opportunity"].astype(str).isin(["LONG", "SHORT"])
+            scalp_mask = df_results["Scalp Opportunity"].astype(str).isin(["Upside", "Downside"])
             scoped = df_results[scalp_mask].copy()
             if not scoped.empty:
                 scoped["__rr"] = pd.to_numeric(
@@ -1368,8 +1297,9 @@ def render(ctx: dict) -> None:
                 )
                 scoped["__enter"] = scoped["Action"].astype(str).str.contains("ENTER", na=False)
                 scoped = scoped.dropna(subset=["__rr"])
+                scoped = scoped[scoped["__enter"]]
                 if not scoped.empty:
-                    best_row = scoped.sort_values(["__rr", "__enter"], ascending=[False, False]).iloc[0]
+                    best_row = scoped.sort_values(["__rr"], ascending=[False]).iloc[0]
                     best_scalp_coin = str(best_row.get("Coin", "—"))
                     best_dir = str(best_row.get("Scalp Opportunity", ""))
                     best_rr = float(best_row["__rr"])
@@ -1385,14 +1315,14 @@ def render(ctx: dict) -> None:
                 strength_coin = str(row.get("Coin", "—"))
                 strength_sub = (
                     f"Strength {float(row.get('__strength_val', 0.0)):.0f}% • "
-                    f"Signal {row.get('Signal', '')} • "
+                    f"Direction {row.get('Direction', '')} • "
                     f"AI {row.get('AI Ensemble', '')}"
                 )
 
         q1, q2, q3, q4 = st.columns(4, gap="small")
         with q1:
             status_head = f"{enter_count} Enter Ready" if enter_count > 0 else "No Enter Setup"
-            status_sub = f"ENTER {enter_count} • WAIT {wait_count} • SKIP {skip_count}"
+            status_sub = f"ENTER {enter_count} • WATCH {watch_count} • SKIP {skip_count}"
             st.markdown(
                 "<div class='elite-card'>"
                 "<div class='elite-label'>Action Status</div>"
@@ -1404,9 +1334,9 @@ def render(ctx: dict) -> None:
         with q2:
             st.markdown(
                 "<div class='elite-card'>"
-                "<div class='elite-label'>Aligned Setup Count</div>"
+                "<div class='elite-label'>Aligned Structure Count</div>"
                 f"<div class='elite-value'>{aligned_count}</div>"
-                "<div class='elite-sub'>coins marked as Aligned</div>"
+                "<div class='elite-sub'>coins passing full setup alignment</div>"
                 "</div>",
                 unsafe_allow_html=True,
             )
@@ -1450,12 +1380,10 @@ def render(ctx: dict) -> None:
             "Price ($)",
             "Δ (%)",
             "Action",
-            "Trade Quality",
-            "Signal",
+            "Direction",
             "Strength",
             "AI Ensemble",
             "Tech vs AI Alignment",
-            "Setup",
             "R:R",
             "Entry Price",
             "Stop Loss",

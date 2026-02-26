@@ -68,7 +68,7 @@ It does **not** execute trades. Final decision stays with the user.
             "info",
         ),
         (
-            "2) Core signal engine (how BUY/SELL/WAIT is computed)",
+            "2) Core signal engine (how Direction + Action is computed)",
             """
 The signal engine computes 4 category scores in range **[-1, +1]**:
 - Trend
@@ -119,7 +119,7 @@ Adaptive threshold logic (stricter in harder regimes):
 - Oscillator extremes (RSI/StochRSI/Williams/CCI) are timeframe-adaptive
   to reduce lower-timeframe noise and improve higher-timeframe responsiveness.
 
-If filters fail, output becomes **WAIT**.
+If filters fail, action becomes **WATCH** (monitor, no execution).
             """,
             "risk",
         ),
@@ -148,9 +148,9 @@ Ensemble probability:
 `p_ens = p_gb*0.45 + p_rf*0.35 + p_lr*0.20`
 
 Direction mapping (ensemble):
-- LONG if probability >= 0.58
-- SHORT if probability <= 0.42
-- NEUTRAL in the 0.42-0.58 zone
+- Upside if probability >= 0.58
+- Downside if probability <= 0.42
+- Neutral in the 0.42-0.58 zone
 
 `AI Agree` = model vote agreement inside the ensemble, shown as x/3.
             """,
@@ -183,19 +183,28 @@ Market tab includes:
 - Coin scanner table
 
 Scanner table key columns:
-- Signal
+- Action (ENTER / WATCH / SKIP)
+- Direction (Upside / Downside / Neutral)
 - Strength
 - AI Ensemble
 - Tech vs AI Alignment
-- Setup
 - Indicator snapshots (ADX, Ichimoku, StochRSI, VWAP, Candle Pattern, etc.)
 
+Action policy in production:
+- **ENTER**: direction is clear + strength >= 60 + at least 2/3 AI models agree + technical/AI are not in conflict + ADX guard passes
+- **WATCH**: direction exists but not all quality gates pass
+- **SKIP**: neutral/no direction, conflict, or weak strength (<35)
+
+Important:
+- **Action is a direction-confirmation decision** (go/no-go on market context).
+- **R:R and Entry/SL/TP are execution planning fields**, not Action gates.
+
 Important execution note:
-- Signal/Strength/plan levels are computed on closed candles.
+- Direction/Strength/plan levels are computed on closed candles.
 - Price column can show the latest live tick.
 - This is intentional to avoid repaint risk in decision logic.
 
-Tech vs AI Alignment is based on Signal + AI alignment + strength quality.
+Tech vs AI Alignment is based on Direction + AI alignment + strength quality.
             """,
             "core",
         ),
@@ -214,10 +223,10 @@ Rapid Score combines:
 - Penalty for weak/conflicting alignment
 
 Outputs:
-- Action: READY / WAIT / SKIP
+- Action: ENTER / WATCH / SKIP
 - Direction, Score, Grade, Entry / SL / TP1, R:R
 - "Why now?" bullets for quick context
-- Last-50 quality tracker: READY rate, average best score, trend-friendly share
+- Last-50 quality tracker: ENTER rate, average best score, trend-friendly share
 
 Use Rapid for speed, then verify final execution discipline in Position tab.
             """,
@@ -232,7 +241,7 @@ Use Rapid for speed, then verify final execution discipline in Position tab.
 
 **Position tab**:
 - Open-position context with direction-aware commentary
-- Raw and levered PnL context + current signal regime
+- Raw and levered PnL context + current direction regime
 - Scalping setup, support/resistance distance, risk warnings
 - Estimated liquidation price/distance (simple estimate)
 - Net PnL view (funding impact) and a Technical Invalidation line
@@ -247,12 +256,12 @@ Both use Ensemble AI for directional confirmation.
             """
 Screener scans predefined liquid symbols with filters:
 - Min strength
-- Signal types
+- Direction types
 - Min ADX
 - RSI range
 - Optional volume-spike-only
 
-Each matching row includes technical signal and Ensemble AI direction.
+Each matching row includes technical direction and Ensemble AI direction.
 Use this to shortlist candidates, then validate in Spot/Position/Fibonacci.
             """,
             "core",
@@ -333,7 +342,7 @@ Use lower leverage when:
 - Strength is medium
 - ADX is weak
 - Volatility is high
-- Signal/AI disagree
+- Direction/AI disagree
 
 Best practice:
 - Risk 1-2% account per trade
@@ -377,7 +386,7 @@ If data looks stale:
             """
 Recommended daily flow:
 1. Market tab: check regime + scanner shortlist
-2. Rapid tab: check READY candidates and pre-built plans
+2. Rapid tab: check ENTER candidates and pre-built plans
 3. Spot: validate setup and read the Action Plan
 4. Position: if already in trade, follow Technical Invalidation + decision model first
 5. Fibonacci/Risk: validate structure and downside risk
@@ -385,7 +394,7 @@ Recommended daily flow:
 7. Backtest: validate settings before using new setup live
 
 Quick rule:
-- If Signal/AI conflict and Health says REDUCE or EXIT, reduce risk first.
+- If Direction/AI conflict and Health says REDUCE or EXIT, reduce risk first.
 - If setup is aligned and Health says HOLD, manage with invalidation discipline.
             """,
             "core",
@@ -413,14 +422,14 @@ Use this 60-second checklist:
 
 1. **Market tab**
 - Scanner table loads and shows multiple rows
-- Signal / AI / Setup columns are not empty
+- Action / Direction / AI columns are not empty
 
 2. **Spot tab**
-- Analyse runs and shows Signal + Strength + AI + Tech vs AI Alignment
+- Analyse runs and shows Direction + Strength + AI + Tech vs AI Alignment
 - Spot Action Plan appears
 
 3. **Rapid tab**
-- Rapid table loads with Action / Score / Entry-SL-TP columns
+- Rapid table loads with Action / Direction / Score / Entry-SL-TP columns
 - If no qualified rows, near-miss watchlist appears
 
 4. **Position tab**

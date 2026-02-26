@@ -12,10 +12,10 @@ WARNING = "#FFD166"
 def signal_badge(signal: str) -> str:
     """Return a simplified badge for the given signal."""
     if signal in ("STRONG BUY", "BUY"):
-        return "🟢 LONG"
+        return "🟢 Upside"
     if signal in ("STRONG SELL", "SELL"):
-        return "🔴 SHORT"
-    return "⚪ WAIT"
+        return "🔴 Downside"
+    return "⚪ Neutral"
 
 
 def leverage_badge(lev: int) -> str:
@@ -45,6 +45,15 @@ def signal_plain(signal: str) -> str:
     if signal in ("STRONG SELL", "SELL"):
         return "SHORT"
     return "WAIT"
+
+
+def direction_label(direction: str) -> str:
+    d = str(direction or "").upper()
+    if d == "LONG":
+        return "Upside"
+    if d == "SHORT":
+        return "Downside"
+    return "Neutral"
 
 
 def format_delta(delta):
@@ -108,9 +117,9 @@ def style_delta(val: str, positive: str = POSITIVE, negative: str = NEGATIVE) ->
 
 
 def style_signal(val: str, positive: str = POSITIVE, negative: str = NEGATIVE, warning: str = WARNING) -> str:
-    if "LONG" in val:
+    if "LONG" in val or "UPSIDE" in val:
         return f"color: {positive}; font-weight: 600;"
-    if "SHORT" in val:
+    if "SHORT" in val or "DOWNSIDE" in val:
         return f"color: {negative}; font-weight: 600;"
     return f"color: {warning}; font-weight: 600;"
 
@@ -124,9 +133,9 @@ def style_confidence(val: str, positive: str = POSITIVE, negative: str = NEGATIV
 
 
 def style_scalp_opp(val: str, positive: str = POSITIVE, negative: str = NEGATIVE) -> str:
-    if val == "LONG":
+    if val in {"LONG", "Upside"}:
         return f"color: {positive}; font-weight: 600;"
-    if val == "SHORT":
+    if val in {"SHORT", "Downside"}:
         return f"color: {negative}; font-weight: 600;"
     return ""
 

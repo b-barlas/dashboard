@@ -34,6 +34,7 @@ def render(ctx: dict) -> None:
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     analyse = get_ctx(ctx, "analyse")
     signal_plain = get_ctx(ctx, "signal_plain")
+    direction_label = get_ctx(ctx, "direction_label")
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
     _build_indicator_grid = get_ctx(ctx, "_build_indicator_grid")
@@ -63,7 +64,7 @@ def render(ctx: dict) -> None:
         f"<summary style='color:{ACCENT}; cursor:pointer; font-size:0.9rem;'>How to read quickly</summary>"
         f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.65; margin-top:0.4rem;'>"
         f"1) Confirm <b>PnL + Liquidation Distance</b> first. "
-        f"2) Check <b>Signal / Strength / AI / Alignment</b>. "
+        f"2) Check <b>Direction / Strength / AI / Alignment</b>. "
         f"3) Respect <b>Technical Invalidation</b> as hard risk line. "
         f"4) Follow the <b>Decision Model</b> action (HOLD / REDUCE / EXIT style)."
         f"</div></details>",
@@ -256,7 +257,8 @@ def render(ctx: dict) -> None:
                         unsafe_allow_html=True,
                     )
 
-                signal_clean = signal_plain(signal)
+                signal_dir_display = signal_plain(signal)
+                signal_clean = direction_label(signal_dir_display)
 
                 # -- AI ensemble prediction for this coin/timeframe --
                 try:
@@ -264,25 +266,25 @@ def render(ctx: dict) -> None:
                 except Exception:
                     ai_dir = "NEUTRAL"
 
-                # Alignment: alignment of Signal + AI + Strength
+                # Alignment: alignment of Direction + AI + Strength
                 sig_direction = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "WAIT")
                 conviction_lbl, conviction_c = _calc_conviction(sig_direction, ai_dir, strength_score)
 
-                # Signal / Strength / AI / Alignment summary grid
-                sig_color = POSITIVE if "LONG" in signal_clean else (NEGATIVE if "SHORT" in signal_clean else WARNING)
+                # Direction / Strength / AI / Alignment summary grid
+                sig_color = POSITIVE if signal_dir_display == "LONG" else (NEGATIVE if signal_dir_display == "SHORT" else WARNING)
                 ai_color = POSITIVE if ai_dir == "LONG" else (NEGATIVE if ai_dir == "SHORT" else WARNING)
                 _s_bucket = strength_bucket(strength_score)
                 conf_color = POSITIVE if _s_bucket in {"STRONG", "GOOD"} else (WARNING if _s_bucket == "MIXED" else NEGATIVE)
                 summary_row = (
                     f"<div style='text-align:center; padding:6px;'>"
-                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Signal</div>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Direction</div>"
                     f"<div style='color:{sig_color}; font-size:0.85rem; font-weight:600;'>{signal_clean}</div></div>"
                     f"<div style='text-align:center; padding:6px;'>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Strength</div>"
                     f"<div style='color:{conf_color}; font-size:0.85rem; font-weight:600;'>{strength_score:.0f}%</div></div>"
                     f"<div style='text-align:center; padding:6px;'>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Ensemble</div>"
-                    f"<div style='color:{ai_color}; font-size:0.85rem; font-weight:600;'>{ai_dir}</div></div>"
+                    f"<div style='color:{ai_color}; font-size:0.85rem; font-weight:600;'>{direction_label(ai_dir)}</div></div>"
                     f"<div style='text-align:center; padding:6px;'>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Alignment</div>"
                     f"<div style='color:{conviction_c}; font-size:0.85rem; font-weight:600;'>{conviction_lbl}</div></div>"
@@ -320,7 +322,7 @@ def render(ctx: dict) -> None:
                     st.markdown(
                         f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
                         f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
-                        f"<span style='color:{NEGATIVE}; font-weight:600;'>Signal Conflict</span>"
+                        f"<span style='color:{NEGATIVE}; font-weight:600;'>Direction Conflict</span>"
                         f"<span style='color:{TEXT_MUTED};'> — Your {direction} position conflicts with "
                         f"the current {sig_direction} signal. Review position validity.</span></div>",
                         unsafe_allow_html=True,
@@ -409,7 +411,7 @@ def render(ctx: dict) -> None:
                         "Net PnL ($)": round(float(net_pnl_usd), 2),
                         "Est. Liquidation": (round(float(liq_price), 6) if liq_price is not None else None),
                         "Liq Distance (%)": (round(float(liq_dist_pct), 4) if liq_dist_pct is not None else None),
-                        "Signal": signal_clean,
+                        "Direction": signal_clean,
                         "Strength (%)": round(float(strength_score), 2),
                         "AI Direction": ai_dir,
                         "Alignment": conviction_lbl,
