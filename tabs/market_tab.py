@@ -1332,6 +1332,8 @@ def render(ctx: dict) -> None:
         )
         rr_numeric = pd.to_numeric(rr_values, errors="coerce")
         trend_ai_enter_count = int(action_series.str.contains(r"ENTER \(Trend\+AI\)", na=False, regex=True).sum())
+        trend_only_enter_count = int(action_series.str.contains(r"ENTER \(Trend-Only\)", na=False, regex=True).sum())
+        ai_only_enter_count = int(action_series.str.contains(r"ENTER \(AI-Only\)", na=False, regex=True).sum())
 
         best_scalp_coin = "—"
         best_scalp_sub = "No scalp setup with valid R:R in this scan."
@@ -1364,6 +1366,7 @@ def render(ctx: dict) -> None:
                     best_scalp_sub = f"{best_dir} | R:R {best_rr:.2f} | {best_action}"
 
         strength_coin = "—"
+        strength_val_head = None
         strength_sub = "No strength data available."
         if "__strength_val" in df_results.columns and len(df_results) > 0:
             strength_series = pd.to_numeric(df_results["__strength_val"], errors="coerce").dropna()
@@ -1371,11 +1374,12 @@ def render(ctx: dict) -> None:
                 strength_idx = strength_series.idxmax()
                 row = df_results.loc[strength_idx]
                 strength_coin = str(row.get("Coin", "—"))
+                strength_val_head = float(row.get("__strength_val", 0.0))
                 strength_sub = (
-                    f"Strength {float(row.get('__strength_val', 0.0)):.0f}% • "
                     f"Direction {row.get('Direction', '')} • "
                     f"AI {row.get('AI Ensemble', '')}"
                 )
+        strength_head = strength_coin if strength_val_head is None else f"{strength_coin} ({strength_val_head:.0f}%)"
 
         q1, q2, q3, q4 = st.columns(4, gap="small")
         with q1:
@@ -1390,11 +1394,17 @@ def render(ctx: dict) -> None:
                 unsafe_allow_html=True,
             )
         with q2:
+            enter_mix_head = "No Enter Class" if enter_count == 0 else "Enter Class Mix"
+            enter_mix_sub = (
+                f"Trend+AI {trend_ai_enter_count} • "
+                f"Trend-Only {trend_only_enter_count} • "
+                f"AI-Only {ai_only_enter_count}"
+            )
             st.markdown(
                 "<div class='elite-card'>"
-                "<div class='elite-label'>High-Quality Enter Count</div>"
-                f"<div class='elite-value'>{trend_ai_enter_count}</div>"
-                "<div class='elite-sub'>coins in ENTER (Trend+AI) class</div>"
+                "<div class='elite-label'>Enter Class Distribution</div>"
+                f"<div class='scan-kpi-value'>{enter_mix_head}</div>"
+                f"<div class='scan-kpi-sub'>{enter_mix_sub}</div>"
                 "</div>",
                 unsafe_allow_html=True,
             )
@@ -1411,7 +1421,7 @@ def render(ctx: dict) -> None:
             st.markdown(
                 "<div class='elite-card'>"
                 "<div class='elite-label'>Strength Leader</div>"
-                f"<div class='elite-value'>{strength_coin}</div>"
+                f"<div class='elite-value'>{strength_head}</div>"
                 f"<div class='elite-sub'>{strength_sub}</div>"
                 "</div>",
                 unsafe_allow_html=True,
