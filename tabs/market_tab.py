@@ -1336,7 +1336,7 @@ def render(ctx: dict) -> None:
         ai_only_enter_count = int(action_series.str.contains(r"ENTER \(AI-Only\)", na=False, regex=True).sum())
 
         best_scalp_coin = "—"
-        best_scalp_sub = "No scalp setup with valid R:R in this scan."
+        best_scalp_sub = ""
         if "Scalp Opportunity" in df_results.columns:
             scalp_mask = df_results["Scalp Opportunity"].astype(str).isin(["Upside", "Downside"])
             scoped = df_results[scalp_mask].copy()
@@ -1359,11 +1359,9 @@ def render(ctx: dict) -> None:
                 scoped = scoped[scoped["__rr"] > 0]
                 if not scoped.empty:
                     best_row = scoped.sort_values(["__rr", "__action_rank"], ascending=[False, False]).iloc[0]
-                    best_scalp_coin = str(best_row.get("Coin", "—"))
-                    best_dir = str(best_row.get("Scalp Opportunity", ""))
+                    best_coin = str(best_row.get("Coin", "—"))
                     best_rr = float(best_row["__rr"])
-                    best_action = str(best_row.get("Action", "")).strip()
-                    best_scalp_sub = f"{best_dir} | R:R {best_rr:.2f} | {best_action}"
+                    best_scalp_coin = f"{best_coin} ({best_rr:.2f})"
 
         strength_coin = "—"
         strength_val_head = None
@@ -1413,7 +1411,6 @@ def render(ctx: dict) -> None:
                 "<div class='elite-card'>"
                 "<div class='elite-label'>Best Scalp Opportunity</div>"
                 f"<div class='elite-value'>{best_scalp_coin}</div>"
-                f"<div class='elite-sub'>{best_scalp_sub}</div>"
                 "</div>",
                 unsafe_allow_html=True,
             )
