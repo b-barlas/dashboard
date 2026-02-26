@@ -825,9 +825,11 @@ def render(ctx: dict) -> None:
             "Coin": 120,
             "Price ($)": 122,
             "Δ (%)": 92,
-            "Action": 112,
-            "Direction": 106,
+            "Action": 220,
+            "Direction": 130,
             "Strength": 132,
+            "AI Ensemble": 170,
+            "Tech vs AI Alignment": 190,
         }
         left_offsets: dict[str, str] = {}
         running_left = 0
@@ -924,6 +926,8 @@ def render(ctx: dict) -> None:
               border-right:1px solid rgba(148,163,184,0.07);
               white-space:nowrap;
               vertical-align:middle;
+              overflow:hidden;
+              text-overflow:ellipsis;
             }}
             .mk-table tr:hover td {{
               background-color:rgba(0,212,255,0.06);
@@ -936,11 +940,16 @@ def render(ctx: dict) -> None:
               align-items:center;
               gap:6px;
               padding:2px 8px;
+              max-width:100%;
               border-radius:999px;
               border:1px solid rgba(148,163,184,0.34);
               background:rgba(148,163,184,0.10);
               font-size:0.74rem;
               font-weight:700;
+              overflow:hidden;
+              text-overflow:ellipsis;
+              white-space:nowrap;
+              box-sizing:border-box;
             }}
             .mk-pos {{ color:{POSITIVE}; border-color:rgba(0,255,136,0.42); background:rgba(0,255,136,0.10); }}
             .mk-neg {{ color:{NEGATIVE}; border-color:rgba(255,51,102,0.44); background:rgba(255,51,102,0.10); }}
