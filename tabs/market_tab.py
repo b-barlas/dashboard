@@ -776,7 +776,7 @@ def render(ctx: dict) -> None:
 
         return _tone_for_text(s)
 
-    def _chip(text: object, tone: str | None = None) -> str:
+    def _chip(text: object, tone: str | None = None, title: str | None = None) -> str:
         raw = "" if text is None else str(text).strip()
         if not raw or raw.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE", "-"}:
             return ""
@@ -789,7 +789,20 @@ def render(ctx: dict) -> None:
             "info": "mk-info",
         }
         cls = tone_map.get(tone_key, "mk-muted")
-        return f"<span class='mk-chip {cls}'>{html.escape(raw)}</span>"
+        title_attr = f" title='{html.escape(title)}'" if title else ""
+        return f"<span class='mk-chip {cls}'{title_attr}>{html.escape(raw)}</span>"
+
+    def _compact_action_label(action_text: str) -> str:
+        s = str(action_text or "").strip()
+        if not s:
+            return s
+        if "ENTER (Trend+AI)" in s:
+            return "✅ ENTER T+AI"
+        if "ENTER (Trend-Only)" in s:
+            return "🟡 ENTER Trend"
+        if "ENTER (AI-Only)" in s:
+            return "🟡 ENTER AI"
+        return s
 
     def _render_cell(col: str, row: dict) -> str:
         val = row.get(col, "")
@@ -799,6 +812,8 @@ def render(ctx: dict) -> None:
         if col == "Coin":
             return f"<span class='mk-coin'>{html.escape(txt)}</span>"
         if col in {"Action", "Direction", "Strength", "R:R", "Scalp Opportunity"}:
+            if col == "Action":
+                return _chip(_compact_action_label(txt), _tone_for_col(col, txt), title=txt)
             return _chip(txt, _tone_for_col(col, txt))
         if col == "Tech vs AI Alignment":
             return _chip(txt, _tone_for_col(col, txt))
@@ -825,7 +840,7 @@ def render(ctx: dict) -> None:
             "Coin": 120,
             "Price ($)": 122,
             "Δ (%)": 92,
-            "Action": 220,
+            "Action": 170,
             "Direction": 130,
             "Strength": 132,
             "AI Ensemble": 170,
