@@ -188,7 +188,7 @@ Market tab includes:
 - Coin scanner table
 
 Scanner table key columns:
-- Action (ENTER / WATCH / SKIP)
+- Action (ENTER (Trend+AI) / ENTER (Trend-Only) / ENTER (AI-Only) / WATCH / SKIP)
 - Direction (Upside / Downside / Neutral)
 - Strength
 - AI Ensemble
