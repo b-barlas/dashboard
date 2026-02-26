@@ -54,6 +54,14 @@ def action_decision(
         and conviction_label in {"HIGH", "MEDIUM"}
         and agreement >= min_agreement
     )
+    # Trend-momentum path: keep conviction semantics intact while enabling
+    # controlled ENTER flow in strong trend regimes.
+    enter_trend_momentum = (
+        adx_f >= 25
+        and strength >= 55
+        and agreement >= 0.50
+        and conviction_label != "CONFLICT"
+    )
     # Controlled technical-only path to avoid neutral lock when trend and strength are exceptional.
     enter_tech_only = (
         conviction_label == "TECH-ONLY"
@@ -61,7 +69,7 @@ def action_decision(
         and strength >= 72
     )
 
-    if enter_main or enter_tech_only:
+    if enter_main or enter_trend_momentum or enter_tech_only:
         return "✅ ENTER"
     return "👀 WATCH"
 
