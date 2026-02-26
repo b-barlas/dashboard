@@ -1331,14 +1331,10 @@ def render(ctx: dict) -> None:
             .str.strip()
         )
         rr_numeric = pd.to_numeric(rr_values, errors="coerce")
-        aligned_count = (
-            int(df_results["Setup"].astype(str).str.contains("Aligned", na=False).sum())
-            if "Setup" in df_results.columns
-            else 0
-        )
+        trend_ai_enter_count = int(action_series.str.contains(r"ENTER \(Trend\+AI\)", na=False, regex=True).sum())
 
         best_scalp_coin = "—"
-        best_scalp_sub = "No ENTER-qualified scalp setup in this scan."
+        best_scalp_sub = "No scalp setup with valid R:R in this scan."
         if "Scalp Opportunity" in df_results.columns:
             scalp_mask = df_results["Scalp Opportunity"].astype(str).isin(["Upside", "Downside"])
             scoped = df_results[scalp_mask].copy()
@@ -1352,15 +1348,20 @@ def render(ctx: dict) -> None:
                     .str.strip(),
                     errors="coerce",
                 )
-                scoped["__enter"] = scoped["Action"].astype(str).str.contains("ENTER", na=False)
+                scoped["__action_rank"] = (
+                    scoped["Action"]
+                    .astype(str)
+                    .apply(lambda a: 3 if "ENTER" in a.upper() else (2 if "WATCH" in a.upper() else 1))
+                )
                 scoped = scoped.dropna(subset=["__rr"])
-                scoped = scoped[scoped["__enter"]]
+                scoped = scoped[scoped["__rr"] > 0]
                 if not scoped.empty:
-                    best_row = scoped.sort_values(["__rr"], ascending=[False]).iloc[0]
+                    best_row = scoped.sort_values(["__rr", "__action_rank"], ascending=[False, False]).iloc[0]
                     best_scalp_coin = str(best_row.get("Coin", "—"))
                     best_dir = str(best_row.get("Scalp Opportunity", ""))
                     best_rr = float(best_row["__rr"])
-                    best_scalp_sub = f"{best_dir} | R:R {best_rr:.2f}"
+                    best_action = str(best_row.get("Action", "")).strip()
+                    best_scalp_sub = f"{best_dir} | R:R {best_rr:.2f} | {best_action}"
 
         strength_coin = "—"
         strength_sub = "No strength data available."
@@ -1391,9 +1392,9 @@ def render(ctx: dict) -> None:
         with q2:
             st.markdown(
                 "<div class='elite-card'>"
-                "<div class='elite-label'>Aligned Structure Count</div>"
-                f"<div class='elite-value'>{aligned_count}</div>"
-                "<div class='elite-sub'>coins passing full setup alignment</div>"
+                "<div class='elite-label'>High-Quality Enter Count</div>"
+                f"<div class='elite-value'>{trend_ai_enter_count}</div>"
+                "<div class='elite-sub'>coins in ENTER (Trend+AI) class</div>"
                 "</div>",
                 unsafe_allow_html=True,
             )
