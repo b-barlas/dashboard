@@ -246,7 +246,7 @@ def analyse(df: pd.DataFrame) -> AnalysisResult:
 
 def get_scalping_entry_target(
     df: pd.DataFrame,
-    confidence_score: float,
+    bias_score: float,
     supertrend_trend: str,
     ichimoku_trend: str,
     vwap_label: str,
@@ -255,7 +255,7 @@ def get_scalping_entry_target(
 ):
     return get_scalping_entry_target_core(
         df,
-        confidence_score,
+        bias_score,
         supertrend_trend,
         ichimoku_trend,
         vwap_label,

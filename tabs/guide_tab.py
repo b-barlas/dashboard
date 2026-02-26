@@ -98,6 +98,10 @@ Meaning:
 - Bias near 0: strong bearish alignment
 - Strength near 100: strong edge (either long or short)
 - Strength near 0: mixed/no edge
+
+Naming note:
+- The dashboard uses **Direction + Strength** terminology.
+- Internally, some legacy code fields may still be named `confidence`, but they represent the same **bias score input** that feeds Strength.
             """,
             "core",
         ),

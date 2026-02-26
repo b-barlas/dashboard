@@ -10,7 +10,7 @@ import ta
 
 def get_scalping_entry_target(
     df: pd.DataFrame,
-    confidence_score: float,
+    bias_score: float,
     supertrend_trend: str,
     ichimoku_trend: str,
     vwap_label: str,
@@ -86,47 +86,97 @@ def get_scalping_entry_target(
 
     ema_trend_up = latest["ema5"] > latest["ema13"] > latest["ema21"]
     ema_trend_down = latest["ema5"] < latest["ema13"] < latest["ema21"]
-    macd_confirm = latest["macd"] > latest["macd_signal"] and latest["macd_diff"] > 0
-    rsi_confirm_long = latest["rsi"] > 55
-    rsi_confirm_short = latest["rsi"] < 45
+    macd_confirm_long = latest["macd"] > latest["macd_signal"] and latest["macd_diff"] > 0
+    macd_confirm_short = latest["macd"] < latest["macd_signal"] and latest["macd_diff"] < 0
+
+    # Regime-adaptive RSI gates: stronger trend allows earlier entries.
+    if not pd.isna(adx_val) and adx_val >= 30:
+        rsi_long_min, rsi_short_max = 52.0, 48.0
+    elif not pd.isna(adx_val) and adx_val >= 20:
+        rsi_long_min, rsi_short_max = 54.0, 46.0
+    else:
+        rsi_long_min, rsi_short_max = 56.0, 44.0
+    rsi_confirm_long = latest["rsi"] >= rsi_long_min
+    rsi_confirm_short = latest["rsi"] <= rsi_short_max
+
+    # Build directional votes from independent blocks (bias + trend + momentum + regime).
+    long_regime_confirms = sum(
+        [
+            1 if supertrend_trend == "Bullish" else 0,
+            1 if ichimoku_trend == "Bullish" else 0,
+            1 if vwap_label == "🟢 Above" else 0,
+        ]
+    )
+    short_regime_confirms = sum(
+        [
+            1 if supertrend_trend == "Bearish" else 0,
+            1 if ichimoku_trend == "Bearish" else 0,
+            1 if vwap_label == "🔴 Below" else 0,
+        ]
+    )
+    long_votes = 0
+    short_votes = 0
+    long_votes += 1 if bias_score >= 56 else 0
+    short_votes += 1 if bias_score <= 44 else 0
+    long_votes += 1 if ema_trend_up else 0
+    short_votes += 1 if ema_trend_down else 0
+    long_votes += 1 if macd_confirm_long else 0
+    short_votes += 1 if macd_confirm_short else 0
+    long_votes += 1 if rsi_confirm_long else 0
+    short_votes += 1 if rsi_confirm_short else 0
+    long_votes += 1 if long_regime_confirms >= 2 else 0
+    short_votes += 1 if short_regime_confirms >= 2 else 0
 
     scalp_direction = None
-    if confidence_score >= 65 and ema_trend_up and macd_confirm and rsi_confirm_long:
+    if long_votes >= 4 and long_votes > short_votes:
         scalp_direction = "LONG"
-    elif confidence_score <= 35 and ema_trend_down and not macd_confirm and rsi_confirm_short:
+    elif short_votes >= 4 and short_votes > long_votes:
         scalp_direction = "SHORT"
 
     if strict_mode and scalp_direction is not None:
-        if (pd.isna(adx_val) or adx_val < 20) and not volume_spike:
+        # Trend-strength gate; allow volume override.
+        if (pd.isna(adx_val) or adx_val < 18) and not volume_spike:
             return None, None, None, None, None, "No trend strength / no volume"
 
         if scalp_direction == "LONG":
-            confirms = 0
-            confirms += 1 if supertrend_trend == "Bullish" else 0
-            confirms += 1 if ichimoku_trend == "Bullish" else 0
-            confirms += 1 if vwap_label == "🟢 Above" else 0
-            if confirms < 2:
+            if long_regime_confirms < 2:
                 return None, None, None, None, None, "Regime filters not aligned (need 2/3)"
 
-            if bollinger_bias == "Overbought":
+            if bollinger_bias == "Overbought" and not volume_spike:
                 return None, None, None, None, None, "Overbought"
-            if pd.isna(stochrsi_k_val) or not (0.20 <= stochrsi_k_val <= 0.85 and rsi_confirm_long and macd_confirm):
+            # Adaptive stoch range by trend quality.
+            if not pd.isna(adx_val) and adx_val >= 25:
+                stoch_lo, stoch_hi = 0.18, 0.88
+            else:
+                stoch_lo, stoch_hi = 0.20, 0.82
+            if pd.isna(stochrsi_k_val) or not (stoch_lo <= stochrsi_k_val <= stoch_hi and rsi_confirm_long and macd_confirm_long):
                 return None, None, None, None, None, "Momentum fail"
 
         elif scalp_direction == "SHORT":
-            confirms = 0
-            confirms += 1 if supertrend_trend == "Bearish" else 0
-            confirms += 1 if ichimoku_trend == "Bearish" else 0
-            confirms += 1 if vwap_label == "🔴 Below" else 0
-            if confirms < 2:
+            if short_regime_confirms < 2:
                 return None, None, None, None, None, "Regime filters not aligned (need 2/3)"
 
-            if bollinger_bias == "Oversold":
+            if bollinger_bias == "Oversold" and not volume_spike:
                 return None, None, None, None, None, "Oversold"
-            if pd.isna(stochrsi_k_val) or not (0.15 <= stochrsi_k_val <= 0.80 and rsi_confirm_short and not macd_confirm):
+            if not pd.isna(adx_val) and adx_val >= 25:
+                stoch_lo, stoch_hi = 0.12, 0.82
+            else:
+                stoch_lo, stoch_hi = 0.15, 0.78
+            if pd.isna(stochrsi_k_val) or not (stoch_lo <= stochrsi_k_val <= stoch_hi and rsi_confirm_short and macd_confirm_short):
                 return None, None, None, None, None, "Momentum fail"
 
-        if (atr / close_price) < 0.0015:
+        # Timeframe-adaptive minimum volatility requirement.
+        vol_floor_map = {
+            "1m": 0.0008,
+            "3m": 0.0010,
+            "5m": 0.0012,
+            "15m": 0.0015,
+            "1h": 0.0018,
+            "4h": 0.0022,
+            "1d": 0.0028,
+        }
+        vol_floor = vol_floor_map.get(_inferred_tf or "15m", 0.0015)
+        if (atr / close_price) < vol_floor:
             return None, None, None, None, None, "Low Volatility"
 
     recent = closed_df.tail(sr_lookback_fn(_inferred_tf))
@@ -135,21 +185,36 @@ def get_scalping_entry_target(
 
     entry_s = stop_s = target_s = 0.0
     breakout_note = ""
+    min_rr_strict = 1.20
 
     if scalp_direction == "LONG":
         entry_s = max(float(close_price), float(latest["ema5"])) + 0.20 * float(atr)
-        stop_s = min(float(support), entry_s - 1.00 * float(atr))
-        target_s = max(float(resistance), entry_s + 1.50 * float(atr))
+        # Keep scalp risk in a practical ATR band (avoid extreme wide/tight stops).
+        stop_struct = float(support)
+        stop_floor = entry_s - 1.80 * float(atr)  # widest allowed stop
+        stop_ceil = entry_s - 0.60 * float(atr)   # tightest allowed stop
+        stop_s = max(stop_struct, stop_floor)
+        stop_s = min(stop_s, stop_ceil)
+
+        # Require at least a minimum extension even if structure is close.
+        target_s = max(float(resistance), entry_s + 1.40 * float(atr))
         if target_s > resistance:
             breakout_note = f"⚠️ Target (${target_s:.4f}) is above resistance (${resistance:.4f}). Breakout needed."
     elif scalp_direction == "SHORT":
         entry_s = min(float(close_price), float(latest["ema5"])) - 0.20 * float(atr)
-        stop_s = max(float(resistance), entry_s + 1.00 * float(atr))
-        target_s = min(float(support), entry_s - 1.50 * float(atr))
+        stop_struct = float(resistance)
+        stop_floor = entry_s + 0.60 * float(atr)  # tightest allowed stop
+        stop_ceil = entry_s + 1.80 * float(atr)   # widest allowed stop
+        stop_s = min(stop_struct, stop_ceil)
+        stop_s = max(stop_s, stop_floor)
+
+        target_s = min(float(support), entry_s - 1.40 * float(atr))
         if target_s < support:
             breakout_note = f"⚠️ Target (${target_s:.4f}) is below support (${support:.4f}). Breakout needed."
 
     if stop_s <= 0.0 or target_s <= 0.0 or entry_s <= 0.0:
         return None, None, None, None, None, "Invalid plan levels"
     rr_ratio = abs(target_s - entry_s) / abs(entry_s - stop_s) if entry_s != stop_s else 0.0
+    if strict_mode and rr_ratio < min_rr_strict:
+        return None, None, None, None, None, f"Poor R:R ({rr_ratio:.2f} < {min_rr_strict:.2f})"
     return scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note

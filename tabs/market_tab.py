@@ -1037,13 +1037,13 @@ def render(ctx: dict) -> None:
 
                 a = analyse(df_eval)
                 signal, volume_spike = a.signal, a.volume_spike
-                atr_comment_v, candle_pattern_v, confidence_score_v = a.atr_comment, a.candle_pattern, a.confidence
+                atr_comment_v, candle_pattern_v, bias_score_v = a.atr_comment, a.candle_pattern, a.confidence
                 adx_val_v, supertrend_trend_v, ichimoku_trend_v = a.adx, a.supertrend, a.ichimoku
                 stochrsi_k_val_v, bollinger_bias_v, vwap_label_v = a.stochrsi_k, a.bollinger, a.vwap
                 psar_trend_v = a.psar
 
                 scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note = get_scalping_entry_target(
-                    df_eval, confidence_score_v, supertrend_trend_v, ichimoku_trend_v, vwap_label_v,
+                    df_eval, bias_score_v, supertrend_trend_v, ichimoku_trend_v, vwap_label_v,
                     volume_spike, strict_mode=True,
                 )
                 entry_price = entry_s if scalp_direction else 0.0
@@ -1070,7 +1070,7 @@ def render(ctx: dict) -> None:
                 _emoji_map = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "⚪", "CONFLICT": "🔴"}
                 setup_badge_val = setup_badge(scalp_direction or "", signal_direction, ai_direction)
                 has_trade_plan = bool(entry_price and target_price and stop_s)
-                strength_val = float(strength_from_bias(float(confidence_score_v)))
+                strength_val = float(strength_from_bias(float(bias_score_v)))
                 _conv_lbl, _conv_clr = _calc_conviction(signal_direction, ai_direction, strength_val)
                 conviction = f"{_emoji_map.get(_conv_lbl, '')} {_conv_lbl}" if _conv_lbl else ""
                 rr_val = float(rr_ratio) if rr_ratio else 0.0
@@ -1100,7 +1100,7 @@ def render(ctx: dict) -> None:
                     'Action': action,
                     'Trade Quality': trade_quality_val,
                     'Direction': direction_label(signal_plain(signal)),
-                    'Strength': _strength_badge(float(confidence_score_v)),
+                    'Strength': _strength_badge(float(bias_score_v)),
                     'AI Ensemble': ai_display,
                     'Tech vs AI Alignment': conviction,
                     'Setup': setup_badge_val,
