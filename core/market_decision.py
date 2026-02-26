@@ -48,7 +48,7 @@ def action_decision(
         min_strength = 60.0
         min_agreement = 0.60
 
-    enter_main = (
+    enter_trend_ai = (
         adx_f >= 16
         and strength >= min_strength
         and conviction_label in {"HIGH", "MEDIUM"}
@@ -68,9 +68,21 @@ def action_decision(
         and adx_f >= 24
         and strength >= 72
     )
+    # AI-only path: ensemble agreement is exceptionally strong while technical side
+    # is still early (not yet fully aligned). Keep a minimum trend filter.
+    enter_ai_only = (
+        adx_f >= 16
+        and agreement >= 0.80
+        and strength >= 45
+        and conviction_label in {"LOW", "MEDIUM"}
+    )
 
-    if enter_main or enter_trend_momentum or enter_tech_only:
-        return "✅ ENTER"
+    if enter_trend_ai:
+        return "✅ ENTER (Trend+AI)"
+    if enter_tech_only or enter_trend_momentum:
+        return "🟡 ENTER (Trend-Only)"
+    if enter_ai_only:
+        return "🟡 ENTER (AI-Only)"
     return "👀 WATCH"
 
 

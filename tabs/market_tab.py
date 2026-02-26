@@ -1144,12 +1144,20 @@ def render(ctx: dict) -> None:
 
             prev_results = st.session_state.get("market_scan_results", [])
             # Sort by execution priority: Action > Setup > Strength
-            action_rank = {"✅ ENTER": 3, "👀 WATCH": 2, "⛔ SKIP": 1}
+            def _action_rank(v: str) -> int:
+                s = str(v or "").upper()
+                if "ENTER" in s:
+                    return 3
+                if "WATCH" in s:
+                    return 2
+                if "SKIP" in s:
+                    return 1
+                return 0
             setup_rank = {"🟢 Aligned": 4, "🟡 Tech-Only": 3, "⚪ Draft": 2, "🔴 No Setup": 1}
             fresh_results = sorted(
                 fresh_results,
                 key=lambda x: (
-                    action_rank.get(str(x.get("Action")), 0),
+                    _action_rank(str(x.get("Action"))),
                     setup_rank.get(str(x.get("Setup")), 0),
                     float(x.get("__strength_val", 0.0)),
                 ),
@@ -1209,7 +1217,7 @@ def render(ctx: dict) -> None:
             f"<summary style='color:{ACCENT};'>"
             f"How to read quickly (?)</summary>"
             f"<div class='market-details-body' style='color:{TEXT_MUTED};'>"
-            f"<b>1.</b> Read <b>Action</b> first: ✅ ENTER, 👀 WATCH, ⛔ SKIP.<br>"
+            f"<b>1.</b> Read <b>Action</b> first: ✅ ENTER (Trend+AI), 🟡 ENTER (Trend-Only / AI-Only), 👀 WATCH, ⛔ SKIP.<br>"
             f"<b>2.</b> Confirm with <b>Direction</b> + <b>Strength</b> + <b>AI Ensemble</b> + <b>Tech vs AI Alignment</b>.<br>"
             f"<b>3.</b> Use <b>R:R + Entry Price / Stop Loss / Target Price</b> only for execution planning after Action confirms.<br>"
             f"<b>4.</b> Open <b>+ Show advanced columns</b> only when you need deeper diagnostics."
@@ -1254,7 +1262,9 @@ def render(ctx: dict) -> None:
         st.markdown(
             f"<div style='display:flex; flex-wrap:wrap; gap:8px; margin:0 0 0.55rem 0;'>"
             f"<span class='market-criteria-chip' style='border:1px solid rgba(0,255,136,0.35); color:{POSITIVE}; background:rgba(0,255,136,0.08);'>"
-            f"ENTER: clear direction + strong edge + AI/technical confirmation + trend not too weak</span>"
+            f"ENTER (Trend+AI): strongest class, technical and AI confirmation align</span>"
+            f"<span class='market-criteria-chip' style='border:1px solid rgba(255,209,102,0.35); color:{WARNING}; background:rgba(255,209,102,0.08);'>"
+            f"ENTER (Trend-Only / AI-Only): secondary class, one side leads while risk guards still pass</span>"
             f"<span class='market-criteria-chip' style='border:1px solid rgba(255,209,102,0.35); color:{WARNING}; background:rgba(255,209,102,0.08);'>"
             f"WATCH: direction exists, but confirmation is not complete yet</span>"
             f"<span class='market-criteria-chip' style='border:1px solid rgba(255,51,102,0.35); color:{NEGATIVE}; background:rgba(255,51,102,0.08);'>"
