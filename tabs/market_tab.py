@@ -1368,9 +1368,9 @@ def render(ctx: dict) -> None:
                     best_direction = str(best_row.get("Direction", "")).strip()
                     best_strength = str(best_row.get("Strength", "")).strip()
                     best_ai = str(best_row.get("AI Ensemble", "")).strip()
+                    best_action_compact = _compact_action_label(best_action).replace("✅ ", "").replace("🟡 ", "")
                     best_scalp_sub = (
-                        f"Action {best_action} • Direction {best_direction} • "
-                        f"Strength {best_strength} • AI {best_ai}"
+                        f"{best_action_compact} • {best_direction} • {best_strength} • AI {best_ai}"
                     )
 
         strength_coin = "—"
@@ -1421,7 +1421,8 @@ def render(ctx: dict) -> None:
                 "<div class='elite-card'>"
                 "<div class='elite-label'>Best Scalp Opportunity</div>"
                 f"<div class='elite-value'>{best_scalp_coin}</div>"
-                f"<div class='elite-sub'>{best_scalp_sub}</div>"
+                f"<div class='elite-sub' title='{best_scalp_sub}' "
+                f"style='white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>{best_scalp_sub}</div>"
                 "</div>",
                 unsafe_allow_html=True,
             )
