@@ -31,15 +31,37 @@ def action_decision(
         return "⛔ SKIP"
     if conviction_label == "CONFLICT" or strength < 35:
         return "⛔ SKIP"
+    # Require known trend-strength context for ENTER. Unknown ADX can still be WATCH.
+    if isnan(adx_val):
+        return "👀 WATCH"
 
-    adx_ok = isnan(adx_val) or adx_val >= 16
-    enter_ok = (
-        strength >= 60
+    adx_f = float(adx_val)
+    # In very weak trend, skip only when strength is also weak-mid.
+    if adx_f < 12 and strength < 70:
+        return "⛔ SKIP"
+
+    # Dynamic gate by trend regime: in stronger trends, allow earlier confirmation.
+    if adx_f >= 25:
+        min_strength = 55.0
+        min_agreement = 0.55
+    else:
+        min_strength = 60.0
+        min_agreement = 0.60
+
+    enter_main = (
+        adx_f >= 16
+        and strength >= min_strength
         and conviction_label in {"HIGH", "MEDIUM"}
-        and agreement >= 0.60
-        and adx_ok
+        and agreement >= min_agreement
     )
-    if enter_ok:
+    # Controlled technical-only path to avoid neutral lock when trend and strength are exceptional.
+    enter_tech_only = (
+        conviction_label == "TECH-ONLY"
+        and adx_f >= 24
+        and strength >= 72
+    )
+
+    if enter_main or enter_tech_only:
         return "✅ ENTER"
     return "👀 WATCH"
 

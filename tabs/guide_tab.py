@@ -196,7 +196,8 @@ Scanner table key columns:
 - Indicator snapshots (ADX, Ichimoku, StochRSI, VWAP, Candle Pattern, etc.)
 
 Action policy in production:
-- **ENTER**: direction is clear + strength >= 60 + at least 2/3 AI models agree + technical/AI are not in conflict + ADX guard passes
+- **ENTER**: direction is clear + no tech/AI conflict + ADX guard passes, with dynamic thresholds (strong-trend ADX allows slightly lower strength/agreement)
+- **ENTER (TECH-ONLY path)**: allowed only when AI is neutral but technical side is exceptionally strong and trend quality is high
 - **WATCH**: direction exists but not all quality gates pass
 - **SKIP**: neutral/no direction, conflict, or weak strength (<35)
 

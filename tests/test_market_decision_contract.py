@@ -30,6 +30,14 @@ class MarketDecisionContractTests(unittest.TestCase):
         out = action_decision("SHORT", 62, "🟢 Aligned", "HIGH", 0.7, 26.0, 1.6, True)
         self.assertEqual(out, "✅ ENTER")
 
+    def test_action_enter_tech_only_when_trend_and_strength_are_exceptional(self):
+        out = action_decision("LONG", 74, "🟡 Tech-Only", "TECH-ONLY", 0.0, 27.0, 1.2, False)
+        self.assertEqual(out, "✅ ENTER")
+
+    def test_action_watch_when_adx_unknown(self):
+        out = action_decision("LONG", 74, "🟢 Aligned", "HIGH", 0.8, float("nan"), 1.8, True)
+        self.assertEqual(out, "👀 WATCH")
+
     def test_trade_quality_a_grade(self):
         out = trade_quality("✅ ENTER", "🟢 Aligned", "HIGH", 68, 0.8, 1.7)
         self.assertEqual(out, "🟢 A")

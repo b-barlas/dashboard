@@ -1224,7 +1224,8 @@ def render(ctx: dict) -> None:
             f"<b>Step 2:</b> Run technical analysis + AI ensemble per coin, then generate execution plan fields (Entry/SL/TP).<br>"
             f"<b>Step 3:</b> Build bias from a regime-aware engine (trend/momentum/volume/volatility), then convert to direction-agnostic <b>Strength</b> (0-100).<br>"
             f"<b>Step 4:</b> Calculate <b>Action</b> with guardrails. "
-            f"ENTER requires: clear direction, Strength ≥ 60, at least 2/3 AI model agreement, no AI-vs-tech conflict, and trend not too weak (ADX guard). "
+            f"ENTER uses dynamic regime gates: thresholds relax slightly in strong-trend ADX, remain strict in weak ADX. "
+            f"TECH-ONLY can enter only in exceptional trend+strength conditions. "
             f"R:R and plan levels are execution aids, not Action gates.<br>"
             f"<b>Step 5:</b> Convert raw outputs into one actionable class: ENTER / WATCH / SKIP."
             f"</div></details>",
