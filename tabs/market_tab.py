@@ -696,6 +696,8 @@ def render(ctx: dict) -> None:
                 return "pos"
             if "MEDIUM" in s:
                 return "warn"
+            if "TECH-ONLY" in s:
+                return "warn"
             if "LOW" in s or "CONFLICT" in s:
                 return "neg"
             return "muted"
@@ -1028,6 +1030,7 @@ def render(ctx: dict) -> None:
 
                 prob_up, ai_direction, ai_details = ml_ensemble_predict(df_eval)
                 agreement = float(ai_details.get("agreement", 0.0)) if isinstance(ai_details, dict) else 0.0
+                consensus_agreement = float(ai_details.get("consensus_agreement", 0.0)) if isinstance(ai_details, dict) else 0.0
                 latest = df.iloc[-1]
 
                 base = sym.split('/')[0].upper()
@@ -1060,18 +1063,20 @@ def render(ctx: dict) -> None:
                 signal_direction = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "NEUTRAL")
 
                 ai_display = direction_label(ai_direction)
-                consensus_votes = int(round(float(agreement) * 3.0))
-                if isinstance(ai_details, dict) and ai_details:
-                    consensus_votes = max(1, min(3, consensus_votes))
-                else:
-                    consensus_votes = 0
+                vote_ratio = agreement if ai_direction in {"LONG", "SHORT"} else consensus_agreement
+                consensus_votes = max(0, min(3, int(round(float(vote_ratio) * 3.0))))
                 ai_display = f"{ai_display} ({consensus_votes}/3)"
 
                 _emoji_map = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "⚪", "CONFLICT": "🔴"}
                 setup_badge_val = setup_badge(scalp_direction or "", signal_direction, ai_direction)
                 has_trade_plan = bool(entry_price and target_price and stop_s)
                 strength_val = float(strength_from_bias(float(bias_score_v)))
-                _conv_lbl, _conv_clr = _calc_conviction(signal_direction, ai_direction, strength_val)
+                _conv_lbl, _conv_clr = _calc_conviction(
+                    signal_direction,
+                    ai_direction,
+                    strength_val,
+                    float(agreement),
+                )
                 conviction = f"{_emoji_map.get(_conv_lbl, '')} {_conv_lbl}" if _conv_lbl else ""
                 rr_val = float(rr_ratio) if rr_ratio else 0.0
                 action = action_decision(

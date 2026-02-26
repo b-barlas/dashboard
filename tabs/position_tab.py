@@ -263,12 +263,14 @@ def render(ctx: dict) -> None:
                 # -- AI ensemble prediction for this coin/timeframe --
                 try:
                     _ai_prob, ai_dir, _ai_details = ml_ensemble_predict(df_eval)
+                    ai_agree = float((_ai_details or {}).get("agreement", 0.0))
                 except Exception:
                     ai_dir = "NEUTRAL"
+                    ai_agree = 0.0
 
                 # Alignment: alignment of Direction + AI + Strength
                 sig_direction = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "WAIT")
-                conviction_lbl, conviction_c = _calc_conviction(sig_direction, ai_dir, strength_score)
+                conviction_lbl, conviction_c = _calc_conviction(sig_direction, ai_dir, strength_score, ai_agree)
 
                 # Direction / Strength / AI / Alignment summary grid
                 sig_color = POSITIVE if signal_dir_display == "LONG" else (NEGATIVE if signal_dir_display == "SHORT" else WARNING)

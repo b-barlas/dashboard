@@ -209,7 +209,11 @@ Important execution note:
 - Price column can show the latest live tick.
 - This is intentional to avoid repaint risk in decision logic.
 
-Tech vs AI Alignment is based on Direction + AI alignment + strength quality.
+Tech vs AI Alignment is based on Direction + AI directional agreement + strength quality.
+Common labels:
+- HIGH / MEDIUM: direction and AI agree with enough model support
+- TECH-ONLY: technical side is strong but AI stays neutral
+- CONFLICT: technical and AI directions oppose each other
             """,
             "core",
         ),

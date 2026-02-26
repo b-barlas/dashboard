@@ -70,7 +70,7 @@ def compute_rapid_score(
     conv_penalty = 0.0
     if conviction_label == "CONFLICT":
         conv_penalty = cfg.score_penalty_conflict
-    elif conviction_label == "LOW":
+    elif conviction_label in {"LOW", "TECH-ONLY"}:
         conv_penalty = cfg.score_penalty_low_conviction
 
     # Extra penalty when AI is explicitly opposite and highly certain (3/3-like agreement).
@@ -109,7 +109,7 @@ def decide_action(
         return "SKIP"
     if ai_dir not in {signal_dir, "NEUTRAL"}:
         return "WAIT"
-    if strength >= cfg.action_ready_min_confidence and score >= cfg.action_ready_min_score:
+    if conviction_label in {"HIGH", "MEDIUM"} and strength >= cfg.action_ready_min_confidence and score >= cfg.action_ready_min_score:
         return "READY"
     if score >= cfg.action_wait_min_score:
         return "WAIT"

@@ -171,17 +171,26 @@ def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
             "LONG" if p >= 0.58 else ("SHORT" if p <= 0.42 else "NEUTRAL")
             for p in (gb_prob, rf_prob, lr_prob)
         ]
-        consensus_label = max(set(model_dirs), key=model_dirs.count)
-        consensus_agreement = max(model_dirs.count("LONG"), model_dirs.count("SHORT"), model_dirs.count("NEUTRAL")) / 3.0
-        direction = "LONG" if raw_prob_up >= 0.58 else ("SHORT" if raw_prob_up <= 0.42 else "NEUTRAL")
-        directional_agreement = (
-            model_dirs.count(direction) / 3.0 if direction in {"LONG", "SHORT"} else 0.0
-        )
+        raw_direction = "LONG" if raw_prob_up >= 0.58 else ("SHORT" if raw_prob_up <= 0.42 else "NEUTRAL")
+        vote_counts = {label: model_dirs.count(label) for label in ("LONG", "SHORT", "NEUTRAL")}
+        max_votes = max(vote_counts.values())
+        top_labels = [label for label, cnt in vote_counts.items() if cnt == max_votes]
+        if len(top_labels) == 1:
+            consensus_label = top_labels[0]
+        elif raw_direction in top_labels:
+            consensus_label = raw_direction
+        elif "NEUTRAL" in top_labels:
+            consensus_label = "NEUTRAL"
+        else:
+            consensus_label = "LONG" if raw_prob_up >= 0.5 else "SHORT"
+        consensus_agreement = max_votes / 3.0
         # Reliability-aware shrinkage: damp overconfident probabilities in low-agreement / low-sample regimes.
         sample_factor = max(0.35, min(1.0, (len(df_model) - 50) / 250.0))
         agreement_factor = 0.60 + 0.40 * directional_agreement
         shrink = sample_factor * agreement_factor
         prob_up = 0.5 + (raw_prob_up - 0.5) * shrink
+        direction = "LONG" if prob_up >= 0.58 else ("SHORT" if prob_up <= 0.42 else "NEUTRAL")
+        directional_agreement = model_dirs.count(direction) / 3.0 if direction in {"LONG", "SHORT"} else 0.0
         details = {
             "gradient_boosting": gb_prob,
             "random_forest": rf_prob,
@@ -198,5 +207,4 @@ def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
     except Exception:
         return 0.5, "NEUTRAL", {}
 
-    direction = "LONG" if prob_up >= 0.58 else ("SHORT" if prob_up <= 0.42 else "NEUTRAL")
     return prob_up, direction, details

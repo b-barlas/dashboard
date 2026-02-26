@@ -86,6 +86,8 @@ def render(ctx: dict) -> None:
             return "High"
         if v == "MEDIUM":
             return "Medium"
+        if v == "TECH-ONLY":
+            return "Tech-Only"
         if v == "LOW":
             return "Low"
         if v == "CONFLICT":
@@ -278,8 +280,9 @@ def render(ctx: dict) -> None:
 
                     prob, ai_dir, ai_details = ml_ensemble_predict(df_eval)
                     agreement = float((ai_details or {}).get("agreement", 0.0))
+                    consensus_agreement = float((ai_details or {}).get("consensus_agreement", 0.0))
                     trade_dir = signal_dir if signal_dir in {"LONG", "SHORT"} else (ai_dir if ai_dir in {"LONG", "SHORT"} else "WAIT")
-                    _conv_lbl, _conv_color = _calc_conviction(signal_dir, ai_dir, strength)
+                    _conv_lbl, _conv_color = _calc_conviction(signal_dir, ai_dir, strength, agreement)
 
                     scalp_dir, entry, target, stop, rr_ratio, note = get_scalping_entry_target(
                         df_eval,
@@ -334,7 +337,8 @@ def render(ctx: dict) -> None:
                     why_now = []
                     if setup == "Aligned":
                         why_now.append("Setup is fully aligned")
-                    votes = max(0, min(3, int(round(float(agreement) * 3.0))))
+                    vote_ratio = agreement if ai_dir in {"LONG", "SHORT"} else consensus_agreement
+                    votes = max(0, min(3, int(round(float(vote_ratio) * 3.0))))
                     if agreement >= 0.65:
                         why_now.append(f"AI agreement is strong ({votes}/3)")
                     if pd.notna(adx) and adx >= 25:

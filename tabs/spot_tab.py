@@ -106,7 +106,7 @@ def render(ctx: dict) -> None:
             ai_agree = 0.0
 
         sig_dir_s = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "WAIT")
-        conv_lbl_s, conv_c_s = _calc_conviction(sig_dir_s, ai_dir_s, strength_score)
+        conv_lbl_s, conv_c_s = _calc_conviction(sig_dir_s, ai_dir_s, strength_score, ai_agree / 100.0)
         ai_stability = ai_stability_bucket(ai_agree / 100.0)
 
         sig_c_s = POSITIVE if signal_dir == "LONG" else (NEGATIVE if signal_dir == "SHORT" else WARNING)

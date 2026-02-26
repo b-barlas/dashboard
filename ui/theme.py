@@ -91,16 +91,32 @@ def build_indicator_grid(
     )
 
 
-def calc_conviction(signal_dir: str, ai_dir: str, strength: float) -> tuple[str, str]:
-    """Return conviction label and color based on signal/AI alignment."""
-    if signal_dir in ("LONG", "SHORT") and signal_dir == ai_dir:
-        if strength >= 75:
+def calc_conviction(
+    signal_dir: str,
+    ai_dir: str,
+    strength: float,
+    ai_agreement: float = 0.0,
+) -> tuple[str, str]:
+    """Return alignment quality using Direction + AI agreement + strength."""
+    sdir = str(signal_dir or "").upper()
+    adir = str(ai_dir or "").upper()
+    agree = max(0.0, min(1.0, float(ai_agreement)))
+    s = float(strength)
+
+    if sdir not in {"LONG", "SHORT"}:
+        return "LOW", TEXT_MUTED
+    if adir in {"LONG", "SHORT"} and sdir != adir:
+        return "CONFLICT", NEGATIVE
+    if adir == "NEUTRAL":
+        if s >= 70:
+            return "TECH-ONLY", WARNING
+        return "LOW", TEXT_MUTED
+    if adir in {"LONG", "SHORT"} and sdir == adir:
+        if s >= 72 and agree >= 0.67:
             return "HIGH", POSITIVE
-        if strength >= 60:
+        if s >= 60 and agree >= 0.50:
             return "MEDIUM", WARNING
         return "LOW", TEXT_MUTED
-    if signal_dir in ("LONG", "SHORT") and ai_dir not in ("NEUTRAL", "WAIT", "") and signal_dir != ai_dir:
-        return "CONFLICT", NEGATIVE
     return "LOW", TEXT_MUTED
 
 
