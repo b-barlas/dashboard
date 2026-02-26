@@ -75,10 +75,21 @@ def render(ctx: dict) -> None:
                 st.error("Ensemble prediction failed.")
                 return
             status = str(details.get("status", ""))
+            err_detail = str(details.get("error", "")).strip()
             if status == "single_class_window":
                 st.warning("Model window has one-sided history. Showing neutral fallback output for safety.")
             elif status == "model_exception":
                 st.warning("Model hit unstable inputs. Showing neutral fallback output for this run.")
+                if err_detail:
+                    st.caption(f"Reason: {err_detail}")
+            elif status == "insufficient_features":
+                st.warning("Indicators did not produce enough clean rows for ML. Showing neutral fallback output.")
+                if err_detail:
+                    st.caption(f"Reason: {err_detail}")
+            elif status == "insufficient_candles":
+                st.warning("Not enough candles for reliable ML. Showing neutral fallback output.")
+                if err_detail:
+                    st.caption(f"Reason: {err_detail}")
 
         dir_color = POSITIVE if direction == "LONG" else (NEGATIVE if direction == "SHORT" else WARNING)
         agreement_pct = float(details.get('directional_agreement', details.get('agreement', 0.0))) * 100

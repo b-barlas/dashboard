@@ -99,7 +99,20 @@ def ml_predict_direction(
 def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
     """Ensemble ML prediction combining GB, RF, and LR models."""
     if df is None or len(df) < 60:
-        return 0.5, "NEUTRAL", {}
+        return 0.5, "NEUTRAL", {
+            "ensemble": 0.5,
+            "ensemble_raw": 0.5,
+            "agreement": 0.0,
+            "directional_agreement": 0.0,
+            "consensus_agreement": 0.0,
+            "consensus_label": "NEUTRAL",
+            "model_votes": ["NEUTRAL", "NEUTRAL", "NEUTRAL"],
+            "gradient_boosting": 0.5,
+            "random_forest": 0.5,
+            "logistic_regression": 0.5,
+            "status": "insufficient_candles",
+            "error": "Need at least 60 candles.",
+        }
 
     df = df.copy().reset_index(drop=True)
     df["ema5"] = ta.trend.ema_indicator(df["close"], window=5)
@@ -144,7 +157,20 @@ def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
     df_model = df_model.replace([np.inf, -np.inf], np.nan).dropna()
 
     if len(df_model) < 50:
-        return 0.5, "NEUTRAL", {}
+        return 0.5, "NEUTRAL", {
+            "ensemble": 0.5,
+            "ensemble_raw": 0.5,
+            "agreement": 0.0,
+            "directional_agreement": 0.0,
+            "consensus_agreement": 0.0,
+            "consensus_label": "NEUTRAL",
+            "model_votes": ["NEUTRAL", "NEUTRAL", "NEUTRAL"],
+            "gradient_boosting": 0.5,
+            "random_forest": 0.5,
+            "logistic_regression": 0.5,
+            "status": "insufficient_features",
+            "error": "Not enough clean feature rows after indicator warm-up.",
+        }
 
     X = df_model[feature_cols].astype(float).values
     y = df_model["target"].astype(int).values
@@ -204,9 +230,12 @@ def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
         else:
             consensus_label = "LONG" if raw_prob_up >= 0.5 else "SHORT"
         consensus_agreement = max_votes / 3.0
+        raw_directional_agreement = (
+            model_dirs.count(raw_direction) / 3.0 if raw_direction in {"LONG", "SHORT"} else 0.0
+        )
         # Reliability-aware shrinkage: damp overconfident probabilities in low-agreement / low-sample regimes.
         sample_factor = max(0.35, min(1.0, (len(df_model) - 50) / 250.0))
-        agreement_factor = 0.60 + 0.40 * directional_agreement
+        agreement_factor = 0.60 + 0.40 * raw_directional_agreement
         shrink = sample_factor * agreement_factor
         prob_up = 0.5 + (raw_prob_up - 0.5) * shrink
         direction = "LONG" if prob_up >= 0.58 else ("SHORT" if prob_up <= 0.42 else "NEUTRAL")
@@ -224,7 +253,7 @@ def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
             "consensus_label": consensus_label,
             "model_votes": model_dirs,
         }
-    except Exception:
+    except Exception as e:
         return 0.5, "NEUTRAL", {
             "ensemble": 0.5,
             "ensemble_raw": 0.5,
@@ -237,6 +266,7 @@ def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
             "random_forest": 0.5,
             "logistic_regression": 0.5,
             "status": "model_exception",
+            "error": str(e),
         }
 
     return prob_up, direction, details
