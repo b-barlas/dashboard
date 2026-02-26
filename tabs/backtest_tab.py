@@ -144,7 +144,7 @@ def render(ctx: dict) -> None:
                     elif sig == "SHORT":
                         short_count += 1
                     if sig in {"LONG", "SHORT"}:
-                        actionable_strengths.append(float(strength_from_bias(float(a.confidence))))
+                        actionable_strengths.append(float(strength_from_bias(float(a.bias))))
                 except Exception:
                     continue
 
@@ -178,7 +178,7 @@ def render(ctx: dict) -> None:
                         continue
                     try:
                         a = analyse(df_slice)
-                        bias = float(a.confidence)
+                        bias = float(a.bias)
                         s = float(strength_from_bias(bias))
                         bias_strengths.append(s)
                         if bias >= 60:

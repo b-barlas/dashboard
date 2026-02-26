@@ -271,7 +271,7 @@ def render(ctx: dict) -> None:
 
                     a = analyse(df_eval)
                     signal = a.signal
-                    bias_raw = float(a.confidence)
+                    bias_raw = float(a.bias)
                     strength = float(strength_from_bias(bias_raw))
                     adx = float(a.adx) if pd.notna(a.adx) else float("nan")
                     signal_dir = signal_plain(signal)

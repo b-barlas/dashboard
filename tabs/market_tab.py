@@ -1037,7 +1037,7 @@ def render(ctx: dict) -> None:
 
                 a = analyse(df_eval)
                 signal, volume_spike = a.signal, a.volume_spike
-                atr_comment_v, candle_pattern_v, bias_score_v = a.atr_comment, a.candle_pattern, a.confidence
+                atr_comment_v, candle_pattern_v, bias_score_v = a.atr_comment, a.candle_pattern, a.bias
                 adx_val_v, supertrend_trend_v, ichimoku_trend_v = a.adx, a.supertrend, a.ichimoku
                 stochrsi_k_val_v, bollinger_bias_v, vwap_label_v = a.stochrsi_k, a.bollinger, a.vwap
                 psar_trend_v = a.psar

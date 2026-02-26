@@ -251,7 +251,7 @@ def render(ctx: dict) -> None:
                 ar = analyse(df_eval)
                 scalp_dir, entry_s, target_s, _, _, _ = get_scalping_entry_target(
                     df_eval,
-                    ar.confidence,
+                    ar.bias,
                     ar.supertrend,
                     ar.ichimoku,
                     ar.vwap,

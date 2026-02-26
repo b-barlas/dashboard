@@ -57,7 +57,7 @@ class AnalysisResult:
     volume_spike: bool = False
     atr_comment: str = ""
     candle_pattern: str = ""
-    confidence: float = 0.0
+    bias: float = 0.0
     adx: float = 0.0
     supertrend: str = ""
     ichimoku: str = ""
@@ -69,9 +69,13 @@ class AnalysisResult:
     cci: str = ""
 
     @property
-    def bias(self) -> float:
-        """Alias kept for dashboard terminology compatibility."""
-        return float(self.confidence)
+    def confidence(self) -> float:
+        """Backward-compatible alias; prefer .bias."""
+        return float(self.bias)
+
+    @confidence.setter
+    def confidence(self, value: float) -> None:
+        self.bias = float(value)
 
 
 def detect_volume_spike(df: pd.DataFrame, window: int = 20, multiplier: float = 2.0) -> bool:
@@ -627,7 +631,7 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
         volume_spike=volume_spike,
         atr_comment=atr_comment,
         candle_pattern=candle_pattern,
-        confidence=bias_score,
+        bias=bias_score,
         adx=adx_val,
         supertrend=supertrend_trend,
         ichimoku=ichimoku_trend,

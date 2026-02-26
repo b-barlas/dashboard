@@ -125,7 +125,7 @@ def render(ctx: dict) -> None:
                 rows.append({
                     "Timeframe": tf,
                     "Signal": direction,
-                    "Strength": round(float(strength_from_bias(float(ar.confidence))), 1),
+                    "Strength": round(float(strength_from_bias(float(ar.bias))), 1),
                     "SuperTrend": format_trend(ar.supertrend),
                     "Ichimoku": format_trend(ar.ichimoku),
                     "VWAP": ar.vwap,

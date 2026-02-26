@@ -9,7 +9,7 @@ from core.signal_contract import strength_from_bias
 
 class AnalysisLike(Protocol):
     signal: str
-    confidence: float
+    bias: float
 
 
 def _infer_regime(df_slice: pd.DataFrame, analysis_obj: AnalysisLike) -> tuple[str, float]:
@@ -63,7 +63,7 @@ def run_backtest(
     """Run single-position backtest over a price series.
 
     Entry filter is direction-agnostic:
-    - Compute strength from directional bias (confidence)
+    - Compute strength from directional bias (bias score)
     - Enter LONG/SHORT only when strength >= threshold
     """
     exit_after = max(1, int(exit_after))
@@ -89,7 +89,7 @@ def run_backtest(
         try:
             result = analyzer(df_slice)
             raw_signal = result.signal
-            bias_score = float(result.confidence)
+            bias_score = float(result.bias)
             strength_score = float(strength_from_bias(bias_score))
         except Exception:
             i += 1

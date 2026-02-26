@@ -125,7 +125,7 @@ def render(ctx: dict) -> None:
                     if df_eval is None or len(df_eval) < 55:
                         return False, None
                     a = analyse(df_eval)
-                    bias = float(a.confidence)
+                    bias = float(a.bias)
                     strength = float(strength_from_bias(bias))
                     if strength < min_strength:
                         return True, None

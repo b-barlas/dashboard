@@ -50,8 +50,8 @@ class TradingFlowE2ETests(unittest.TestCase):
         # Spot/position core engines should produce valid outputs on same closed-candle frame.
         a = analyse(df_eval)
         self.assertIn(a.signal, {"STRONG BUY", "BUY", "WAIT", "SELL", "STRONG SELL", "NO DATA"})
-        self.assertGreaterEqual(float(a.confidence), 0.0)
-        self.assertLessEqual(float(a.confidence), 100.0)
+        self.assertGreaterEqual(float(a.bias), 0.0)
+        self.assertLessEqual(float(a.bias), 100.0)
 
         p, ai_dir, details = ml_ensemble_predict(df_eval)
         self.assertIsInstance(p, float)
@@ -60,7 +60,7 @@ class TradingFlowE2ETests(unittest.TestCase):
 
         scalp = get_scalping_entry_target(
             df_eval,
-            float(a.confidence),
+            float(a.bias),
             str(a.supertrend),
             str(a.ichimoku),
             str(a.vwap),
@@ -100,7 +100,7 @@ class TradingFlowE2ETests(unittest.TestCase):
         h_pack = compute_health_decision(
             direction="LONG",
             signal_direction="LONG",
-            strength=float(strength_from_bias(float(a.confidence))),
+            strength=float(strength_from_bias(float(a.bias))),
             conviction_label="MEDIUM",
             liq_distance_pct=float(liq_pack["distance_pct"]) if liq_pack["distance_pct"] is not None else None,
             invalidated=bool(inv_pack["invalidated"]),
