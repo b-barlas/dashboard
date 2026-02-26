@@ -234,7 +234,7 @@ Rapid Score combines:
 - Penalty for weak/conflicting alignment
 
 Outputs:
-- Action: ENTER / WATCH / SKIP
+- Action: ENTER (Trend+AI) / ENTER (Trend-Only) / ENTER (AI-Only) / WATCH / SKIP
 - Direction, Score, Grade, Entry / SL / TP1, R:R
 - "Why now?" bullets for quick context
 - Last-50 quality tracker: ENTER rate, average best score, trend-friendly share

@@ -62,10 +62,17 @@ def render(ctx: dict) -> None:
             return f"${p:,.8f}"
         return f"${p:,.10f}"
 
-    def _action_badge(v: str) -> str:
-        if v == "READY":
-            return "ENTER"
-        if v == "WAIT":
+    def _action_badge(v: str, setup: str = "", align: str = "") -> str:
+        vv = str(v or "").upper()
+        ss = str(setup or "")
+        aa = str(align or "")
+        if vv == "READY":
+            if ss == "Aligned" and aa in {"High", "Medium"}:
+                return "ENTER (Trend+AI)"
+            if ss == "Tech-Only" or aa == "Tech-Only":
+                return "ENTER (Trend-Only)"
+            return "ENTER (AI-Only)"
+        if vv == "WAIT":
             return "WATCH"
         return "SKIP"
 
@@ -103,9 +110,10 @@ def render(ctx: dict) -> None:
         return str(g)
 
     def _chip_class(value: str) -> str:
-        if value in {"READY", "LONG", "Aligned", "High"}:
+        v = str(value or "")
+        if "ENTER" in v.upper() or v in {"READY", "LONG", "Aligned", "High"}:
             return "elite-chip-positive"
-        if value in {"WAIT", "Tech-Only", "Medium"}:
+        if v in {"WAIT", "Tech-Only", "Medium", "WATCH"}:
             return "elite-chip-warning"
         return "elite-chip-negative"
 
@@ -134,7 +142,8 @@ def render(ctx: dict) -> None:
                 why = row.get("Why", []) or []
                 why_line = " | ".join([str(x) for x in why[:2]]) if why else "Await stronger alignment confirmation."
 
-                action_chip = _chip_class(action)
+                action_view = _action_badge(action, setup, align)
+                action_chip = _chip_class(action_view)
                 direction_chip = "elite-chip-positive" if direction == "LONG" else ("elite-chip-negative" if direction == "SHORT" else "elite-chip-warning")
                 setup_chip = _chip_class(setup)
                 align_chip = _chip_class(align.title())
@@ -153,7 +162,7 @@ def render(ctx: dict) -> None:
                         f"<div class='rapid-watch-card'>"
                         f"<div class='rapid-watch-head'>"
                         f"<div class='rapid-watch-symbol'>{coin}</div>"
-                        f"<span class='elite-chip {action_chip}'>{_action_badge(action)}</span>"
+                        f"<span class='elite-chip {action_chip}'>{action_view}</span>"
                         f"</div>"
                         f"<div class='rapid-watch-chip-row'>"
                         f"<span class='elite-chip {direction_chip}'>{_dir_badge(direction)}</span>"
@@ -482,7 +491,10 @@ def render(ctx: dict) -> None:
         df = df[
             ["Coin", "Action", "Direction", "Score", "Grade", "Strength", "Setup", "Alignment", "AI Direction", "AI Agree", "ADX", "Entry", "SL", "TP1", "R:R"]
         ]
-        df["Action"] = df["Action"].map(_action_badge)
+        df["Action"] = df.apply(
+            lambda r: _action_badge(str(r.get("Action", "")), str(r.get("Setup", "")), str(r.get("Alignment", ""))),
+            axis=1,
+        )
         df["Direction"] = df["Direction"].map(_dir_badge)
         df["Grade"] = df["Grade"].map(_grade_icon)
         df["Setup"] = df["Setup"].map(_setup_icon)
@@ -510,15 +522,17 @@ def render(ctx: dict) -> None:
         st.markdown(
             f"<details style='margin-top:0.45rem;'><summary style='color:{ACCENT}; cursor:pointer;'>Column Guide</summary>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.83rem; line-height:1.7; margin-top:0.45rem;'>"
-            f"<b>Action</b>: final quick class (ENTER/WATCH/SKIP). <b>Score</b>: setup quality 0-100. <b>Setup</b>/<b>Alignment</b>: structural alignment quality. "
+            f"<b>Action</b>: final quick class (ENTER (Trend+AI) / ENTER (Trend-Only) / ENTER (AI-Only) / WATCH / SKIP). "
+            f"<b>Score</b>: setup quality 0-100. <b>Setup</b>/<b>Alignment</b>: structural alignment quality. "
             f"<b>Entry/SL/TP1</b>: draft trade levels; SL is invalidation.</div></details>",
             unsafe_allow_html=True,
         )
         return
 
     best = rows[0]
-    action_color = POSITIVE if best["Action"] == "READY" else WARNING
-    action_chip = "elite-chip-positive" if best["Action"] == "READY" else "elite-chip-warning"
+    best_action_view = _action_badge(str(best.get("Action", "")), str(best.get("Setup", "")), str(best.get("Alignment", "")))
+    action_color = POSITIVE if "ENTER" in best_action_view.upper() else WARNING
+    action_chip = "elite-chip-positive" if "ENTER" in best_action_view.upper() else "elite-chip-warning"
     direction_chip = "elite-chip-positive" if best["Direction"] == "LONG" else ("elite-chip-negative" if best["Direction"] == "SHORT" else "elite-chip-warning")
     setup_chip = _chip_class(str(best["Setup"]))
     align_chip = _chip_class(str(best["Alignment"]))
@@ -527,7 +541,7 @@ def render(ctx: dict) -> None:
         f"<div style='display:flex; justify-content:space-between; gap:8px; align-items:center; flex-wrap:wrap;'>"
         f"<div class='elite-hero-title'>Best Candidate: {best['Coin']}</div>"
         f"<div style='display:flex; gap:8px; flex-wrap:wrap;'>"
-        f"<span class='elite-chip {action_chip}'>{_action_badge(best['Action'])}</span>"
+        f"<span class='elite-chip {action_chip}'>{best_action_view}</span>"
         f"<span class='elite-chip {direction_chip}'>{_dir_badge(best['Direction'])}</span>"
         f"<span class='elite-chip {setup_chip}'>{_setup_icon(best['Setup'])}</span>"
         f"<span class='elite-chip {align_chip}'>{_conv_icon(best['Alignment'])}</span>"
