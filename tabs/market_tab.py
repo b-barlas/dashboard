@@ -825,6 +825,8 @@ def render(ctx: dict) -> None:
                     title=txt,
                     extra_class="mk-chip-action",
                 )
+            if col == "Scalp Opportunity" and txt.upper() == "NEUTRAL":
+                return ""
             return _chip(txt, _tone_for_col(col, txt))
         if col == "Tech vs AI Alignment":
             return _chip(txt, _tone_for_col(col, txt))
@@ -1362,6 +1364,14 @@ def render(ctx: dict) -> None:
                     best_coin = str(best_row.get("Coin", "—"))
                     best_rr = float(best_row["__rr"])
                     best_scalp_coin = f"{best_coin} ({best_rr:.2f})"
+                    best_action = str(best_row.get("Action", "")).strip()
+                    best_direction = str(best_row.get("Direction", "")).strip()
+                    best_strength = str(best_row.get("Strength", "")).strip()
+                    best_ai = str(best_row.get("AI Ensemble", "")).strip()
+                    best_scalp_sub = (
+                        f"Action {best_action} • Direction {best_direction} • "
+                        f"Strength {best_strength} • AI {best_ai}"
+                    )
 
         strength_coin = "—"
         strength_val_head = None
@@ -1411,6 +1421,7 @@ def render(ctx: dict) -> None:
                 "<div class='elite-card'>"
                 "<div class='elite-label'>Best Scalp Opportunity</div>"
                 f"<div class='elite-value'>{best_scalp_coin}</div>"
+                f"<div class='elite-sub'>{best_scalp_sub}</div>"
                 "</div>",
                 unsafe_allow_html=True,
             )
