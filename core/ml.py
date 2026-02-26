@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+import numpy as np
+
 import pandas as pd
 import ta
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
@@ -51,7 +53,8 @@ def ml_predict_direction(
     ]
     # Predict t+1 direction from features known at t close.
     df_features = df[feature_cols]
-    df_model = pd.concat([df_features, df["target"]], axis=1).dropna()
+    df_model = pd.concat([df_features, df["target"]], axis=1)
+    df_model = df_model.replace([np.inf, -np.inf], np.nan).dropna()
 
     if len(df_model) < 50:
         return 0.5, "NEUTRAL"
@@ -62,6 +65,8 @@ def ml_predict_direction(
     try:
         split_idx = int(len(X) * 0.8)
         X_train, y_train = X[:split_idx], y[:split_idx]
+        if len(set(y_train.tolist())) < 2:
+            return 0.5, "NEUTRAL"
         X_pred = X[-1:]
 
         scaler = StandardScaler()
@@ -135,7 +140,8 @@ def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
     ]
     # Predict t+1 direction from features known at t close.
     df_features = df[feature_cols]
-    df_model = pd.concat([df_features, df["target"]], axis=1).dropna()
+    df_model = pd.concat([df_features, df["target"]], axis=1)
+    df_model = df_model.replace([np.inf, -np.inf], np.nan).dropna()
 
     if len(df_model) < 50:
         return 0.5, "NEUTRAL", {}
@@ -146,6 +152,20 @@ def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
     try:
         split_idx = int(len(X) * 0.8)
         X_train, y_train = X[:split_idx], y[:split_idx]
+        if len(set(y_train.tolist())) < 2:
+            return 0.5, "NEUTRAL", {
+                "ensemble": 0.5,
+                "ensemble_raw": 0.5,
+                "agreement": 0.0,
+                "directional_agreement": 0.0,
+                "consensus_agreement": 1.0,
+                "consensus_label": "NEUTRAL",
+                "model_votes": ["NEUTRAL", "NEUTRAL", "NEUTRAL"],
+                "gradient_boosting": 0.5,
+                "random_forest": 0.5,
+                "logistic_regression": 0.5,
+                "status": "single_class_window",
+            }
         X_pred = X[-1:]
 
         scaler = StandardScaler()
@@ -205,6 +225,18 @@ def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
             "model_votes": model_dirs,
         }
     except Exception:
-        return 0.5, "NEUTRAL", {}
+        return 0.5, "NEUTRAL", {
+            "ensemble": 0.5,
+            "ensemble_raw": 0.5,
+            "agreement": 0.0,
+            "directional_agreement": 0.0,
+            "consensus_agreement": 0.0,
+            "consensus_label": "NEUTRAL",
+            "model_votes": ["NEUTRAL", "NEUTRAL", "NEUTRAL"],
+            "gradient_boosting": 0.5,
+            "random_forest": 0.5,
+            "logistic_regression": 0.5,
+            "status": "model_exception",
+        }
 
     return prob_up, direction, details

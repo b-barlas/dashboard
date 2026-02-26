@@ -74,6 +74,11 @@ def render(ctx: dict) -> None:
             if not details:
                 st.error("Ensemble prediction failed.")
                 return
+            status = str(details.get("status", ""))
+            if status == "single_class_window":
+                st.warning("Model window has one-sided history. Showing neutral fallback output for safety.")
+            elif status == "model_exception":
+                st.warning("Model hit unstable inputs. Showing neutral fallback output for this run.")
 
         dir_color = POSITIVE if direction == "LONG" else (NEGATIVE if direction == "SHORT" else WARNING)
         agreement_pct = float(details.get('directional_agreement', details.get('agreement', 0.0))) * 100
