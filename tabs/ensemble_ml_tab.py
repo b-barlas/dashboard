@@ -70,7 +70,12 @@ def render(ctx: dict) -> None:
             if df is None or len(df) < 60:
                 st.error("Not enough data.")
                 return
-            prob, direction, details = ml_ensemble_predict(df)
+            # Keep inference consistent with Market/Rapid/Spot by using closed-candle context.
+            df_eval = df.iloc[:-1].copy() if len(df) > 60 else df.copy()
+            if df_eval is None or len(df_eval) < 55:
+                st.error("Not enough closed-candle data.")
+                return
+            prob, direction, details = ml_ensemble_predict(df_eval)
             if not details:
                 st.error("Ensemble prediction failed.")
                 return
@@ -92,11 +97,15 @@ def render(ctx: dict) -> None:
                     st.caption(f"Reason: {err_detail}")
 
         dir_color = POSITIVE if direction == "LONG" else (NEGATIVE if direction == "SHORT" else WARNING)
-        agreement_pct = float(details.get('directional_agreement', details.get('agreement', 0.0))) * 100
+        directional_agreement = float(details.get('directional_agreement', details.get('agreement', 0.0)))
+        consensus_agreement = float(details.get("consensus_agreement", 0.0))
+        agreement_ratio = directional_agreement if direction in {"LONG", "SHORT"} else consensus_agreement
+        agreement_pct = agreement_ratio * 100
         agreement_color = POSITIVE if agreement_pct >= 66 else (WARNING if agreement_pct >= 33 else NEGATIVE)
         agreement_votes = max(0, min(3, int(round(agreement_pct / 100.0 * 3.0))))
         consensus_label = str(details.get("consensus_label", "NEUTRAL"))
-        consensus_agreement = float(details.get("consensus_agreement", 0.0)) * 100.0
+        consensus_agreement_pct = consensus_agreement * 100.0
+        directional_agreement_pct = directional_agreement * 100.0
         certainty = "High" if prob >= 0.7 or prob <= 0.3 else ("Medium" if prob >= 0.58 or prob <= 0.42 else "Low")
 
         st.markdown(
@@ -105,7 +114,7 @@ def render(ctx: dict) -> None:
             f"<div class='ailab-kpi-value' style='color:{dir_color};'>{direction}</div></div>"
             f"<div class='ailab-kpi'><div class='ailab-kpi-label'>Probability</div>"
             f"<div class='ailab-kpi-value'>{prob*100:.1f}%</div></div>"
-            f"<div class='ailab-kpi'><div class='ailab-kpi-label'>Agreement</div>"
+            f"<div class='ailab-kpi'><div class='ailab-kpi-label'>Agreement (Effective)</div>"
             f"<div class='ailab-kpi-value' style='color:{agreement_color};'>{agreement_votes}/3</div></div>"
             f"<div class='ailab-kpi'><div class='ailab-kpi-label'>Signal Certainty</div>"
             f"<div class='ailab-kpi-value'>{certainty}</div></div>"
@@ -121,9 +130,9 @@ def render(ctx: dict) -> None:
             f"<div style='color:{dir_color}; font-size:2.2rem; font-weight:800; margin:7px 0;'>{direction}</div>"
             f"<div style='color:{ACCENT}; font-size:1.05rem;'>Probability: {prob*100:.1f}%</div>"
             f"<div style='color:{agreement_color}; font-size:0.9rem; margin-top:6px;'>"
-            f"Directional Agreement: {agreement_pct:.0f}% ({agreement_votes}/3)</div>"
+            f"Effective Agreement: {agreement_pct:.0f}% ({agreement_votes}/3)</div>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.8rem; margin-top:2px;'>"
-            f"Consensus: {consensus_label} ({consensus_agreement:.0f}%)</div></div>",
+            f"Consensus: {consensus_label} ({consensus_agreement_pct:.0f}%) • Directional-only: {directional_agreement_pct:.0f}%</div></div>",
             unsafe_allow_html=True,
         )
 
