@@ -71,7 +71,7 @@ def render(ctx: dict) -> None:
         f"{_tip('Min ADX', 'Minimum trend strength. ADX above 20 means a trending market. 25+ is a strong trend.')} | "
         f"{_tip('RSI Range', 'Sets the RSI range. 30-70 is neutral, below 30 is oversold, above 70 is overbought.')} | "
         f"{_tip('Volume Spike Only', 'When checked, only coins showing abnormal volume increases are listed.')} | "
-        f"{_tip('AI Agree', 'Model vote agreement inside Ensemble AI, shown as x/3. 2/3+ is usually more stable than 1/3 splits.')} </p>"
+        f"{_tip('AI Agree', 'Directional model agreement inside Ensemble AI (x/3 for final LONG/SHORT direction). NEUTRAL consensus does not count as directional agreement.')} </p>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -234,7 +234,7 @@ def render(ctx: dict) -> None:
                 f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
                 f"<b>1.</b> Start from highest <b>Strength</b> rows.<br>"
                 f"<b>2.</b> Prefer rows where <b>Signal</b> and <b>AI Ensemble</b> agree.<br>"
-                f"<b>3.</b> Prefer <b>AI Agree >= 2/3</b> to avoid noisy model splits.<br>"
+                f"<b>3.</b> Prefer <b>AI Agree >= 2/3</b> for stronger directional confirmation.<br>"
                 f"<b>4.</b> Keep <b>ADX</b> above your floor and avoid extreme RSI edges unless intentional.<br>"
                 f"<b>5.</b> Treat Screener as shortlist only; validate in Spot/Position before acting."
                 f"</div></details>",
@@ -247,7 +247,7 @@ def render(ctx: dict) -> None:
                 f"<b>Signal</b>: technical engine output (BUY/SELL/WAIT).<br>"
                 f"<b>Strength</b>: direction-agnostic signal power from directional bias (0-100).<br>"
                 f"<b>AI Ensemble</b>: 3-model combined direction.<br>"
-                f"<b>AI Agree</b>: model vote agreement inside the ensemble (x/3).<br>"
+                f"<b>AI Agree</b>: directional vote agreement inside the ensemble (x/3).<br>"
                 f"<b>Volume Spike</b>: latest volume anomaly flag.<br>"
                 f"<b>RSI</b>: momentum location in the 0-100 range."
                 f"</div></details>",

@@ -37,8 +37,8 @@ def render(ctx: dict) -> None:
         f"{_tip('Random Forest', 'Averages the output of hundreds of decision trees. Resistant to overfitting. 35% weight.')} (35% weight) | "
         f"{_tip('Logistic Regression', 'The simplest model. Draws a linear boundary. Acts as a stabilizer. 20% weight.')} (20% weight)</p>"
         f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px;'>"
-        f"{_tip('Model Agreement', 'How many of the three models predict the same direction (LONG or SHORT). 100% = all three agree. 33% = only one differs.')} "
-        f"shows how much the models agree with each other.</p>"
+        f"{_tip('Directional Agreement', 'Share of models supporting the final LONG/SHORT direction. For NEUTRAL output this can be 0/3 even if models agree on neutral.')} "
+        f"shows directional confirmation quality.</p>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -76,9 +76,11 @@ def render(ctx: dict) -> None:
                 return
 
         dir_color = POSITIVE if direction == "LONG" else (NEGATIVE if direction == "SHORT" else WARNING)
-        agreement_pct = details.get('agreement', 0) * 100
+        agreement_pct = float(details.get('directional_agreement', details.get('agreement', 0.0))) * 100
         agreement_color = POSITIVE if agreement_pct >= 66 else (WARNING if agreement_pct >= 33 else NEGATIVE)
-        agreement_votes = max(0, min(3, int(round((details.get('agreement', 0) or 0) * 3.0))))
+        agreement_votes = max(0, min(3, int(round(agreement_pct / 100.0 * 3.0))))
+        consensus_label = str(details.get("consensus_label", "NEUTRAL"))
+        consensus_agreement = float(details.get("consensus_agreement", 0.0)) * 100.0
         certainty = "High" if prob >= 0.7 or prob <= 0.3 else ("Medium" if prob >= 0.58 or prob <= 0.42 else "Low")
 
         st.markdown(
@@ -103,7 +105,9 @@ def render(ctx: dict) -> None:
             f"<div style='color:{dir_color}; font-size:2.2rem; font-weight:800; margin:7px 0;'>{direction}</div>"
             f"<div style='color:{ACCENT}; font-size:1.05rem;'>Probability: {prob*100:.1f}%</div>"
             f"<div style='color:{agreement_color}; font-size:0.9rem; margin-top:6px;'>"
-            f"Model Agreement: {agreement_pct:.0f}% ({agreement_votes}/3)</div></div>",
+            f"Directional Agreement: {agreement_pct:.0f}% ({agreement_votes}/3)</div>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.8rem; margin-top:2px;'>"
+            f"Consensus: {consensus_label} ({consensus_agreement:.0f}%)</div></div>",
             unsafe_allow_html=True,
         )
 

@@ -366,7 +366,7 @@ def render(ctx: dict) -> None:
         f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:0.45rem;'>"
         f"<b>Direction</b>: selected model direction for this timeframe (LONG/SHORT/NEUTRAL).<br>"
         f"<b>Selected Model Prob %</b>: selected model probability of upward move.<br>"
-        f"<b>AI Agree</b>: ensemble vote agreement (x/3). Higher is usually more stable.<br>"
+        f"<b>AI Agree</b>: directional ensemble vote agreement (x/3) for final LONG/SHORT direction.<br>"
         f"<b>AI Direction Bias</b>: same market-wide bias logic as Market tab (dominance-weighted Ensemble), shown as direction + percent.<br>"
         f"<b>Plan Entry/Plan Target</b>: primary plan to watch.<br>"
         f"<b>Plan Source</b>: AI-Filtered or Technical Fallback."

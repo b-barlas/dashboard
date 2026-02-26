@@ -49,7 +49,8 @@ def ml_predict_direction(
         "volume_ratio",
         "bb_width",
     ]
-    df_features = df[feature_cols].shift(1)
+    # Predict t+1 direction from features known at t close.
+    df_features = df[feature_cols]
     df_model = pd.concat([df_features, df["target"]], axis=1).dropna()
 
     if len(df_model) < 50:
@@ -132,7 +133,8 @@ def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
         "rsi_slope",
         "vol_trend",
     ]
-    df_features = df[feature_cols].shift(1)
+    # Predict t+1 direction from features known at t close.
+    df_features = df[feature_cols]
     df_model = pd.concat([df_features, df["target"]], axis=1).dropna()
 
     if len(df_model) < 50:
@@ -164,19 +166,34 @@ def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
         rf_prob = float(rf.predict_proba(X_pred_scaled)[0][1])
         lr_prob = float(lr.predict_proba(X_pred_scaled)[0][1])
 
-        prob_up = gb_prob * 0.45 + rf_prob * 0.35 + lr_prob * 0.20
+        raw_prob_up = gb_prob * 0.45 + rf_prob * 0.35 + lr_prob * 0.20
         model_dirs = [
             "LONG" if p >= 0.58 else ("SHORT" if p <= 0.42 else "NEUTRAL")
             for p in (gb_prob, rf_prob, lr_prob)
         ]
-        # Agreement = fraction of models voting for the dominant direction label.
-        agreement = max(model_dirs.count("LONG"), model_dirs.count("SHORT"), model_dirs.count("NEUTRAL")) / 3.0
+        consensus_label = max(set(model_dirs), key=model_dirs.count)
+        consensus_agreement = max(model_dirs.count("LONG"), model_dirs.count("SHORT"), model_dirs.count("NEUTRAL")) / 3.0
+        direction = "LONG" if raw_prob_up >= 0.58 else ("SHORT" if raw_prob_up <= 0.42 else "NEUTRAL")
+        directional_agreement = (
+            model_dirs.count(direction) / 3.0 if direction in {"LONG", "SHORT"} else 0.0
+        )
+        # Reliability-aware shrinkage: damp overconfident probabilities in low-agreement / low-sample regimes.
+        sample_factor = max(0.35, min(1.0, (len(df_model) - 50) / 250.0))
+        agreement_factor = 0.60 + 0.40 * directional_agreement
+        shrink = sample_factor * agreement_factor
+        prob_up = 0.5 + (raw_prob_up - 0.5) * shrink
         details = {
             "gradient_boosting": gb_prob,
             "random_forest": rf_prob,
             "logistic_regression": lr_prob,
+            "ensemble_raw": raw_prob_up,
             "ensemble": prob_up,
-            "agreement": agreement,
+            # Backward-compatible key; now directional (LONG/SHORT only).
+            "agreement": directional_agreement,
+            "directional_agreement": directional_agreement,
+            "consensus_agreement": consensus_agreement,
+            "consensus_label": consensus_label,
+            "model_votes": model_dirs,
         }
     except Exception:
         return 0.5, "NEUTRAL", {}

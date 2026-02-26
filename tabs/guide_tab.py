@@ -156,7 +156,8 @@ Direction mapping (ensemble):
 - Downside if probability <= 0.42
 - Neutral in the 0.42-0.58 zone
 
-`AI Agree` = model vote agreement inside the ensemble, shown as x/3.
+`AI Agree` = directional model vote agreement (x/3) for final LONG/SHORT output.
+Neutral consensus is tracked separately and is not counted as directional agreement.
             """,
             "core",
         ),
