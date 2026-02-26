@@ -1258,26 +1258,23 @@ def render(ctx: dict) -> None:
             f"<summary style='color:{ACCENT};'>"
             f"How to read quickly (?)</summary>"
             f"<div class='market-details-body' style='color:{TEXT_MUTED};'>"
-            f"<b>1.</b> Start from <b>Action</b>: ENTER means candidate is tradable now, WATCH means monitor, SKIP means ignore.<br>"
-            f"<b>2.</b> Check <b>Direction</b> and <b>Strength</b> together: Direction gives side (Upside/Downside), Strength shows edge quality (WEAK/MIXED/GOOD/STRONG).<br>"
-            f"<b>3.</b> Confirm with <b>AI Ensemble</b> and <b>Tech vs AI Alignment</b>: prefer ENTER rows where AI side and technical side do not conflict.<br>"
-            f"<b>4.</b> Only after confirmation, read <b>R:R + Entry Price + Stop Loss + Target Price</b> to plan execution.<br>"
-            f"<b>5.</b> Use <b>+ Show advanced columns</b> only for diagnostics (ADX/Ichimoku/VWAP etc.)."
-            f"</div></details>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f"<details class='market-details' style='margin-bottom:0.6rem;'>"
-            f"<summary style='color:{ACCENT};'>Scanner logic (what drives decisions?)</summary>"
-            f"<div class='market-details-body' style='color:{TEXT_MUTED};'>"
-            f"<b>Step 1:</b> Build universe from top liquid USDT pairs (wrapped tokens removed).<br>"
-            f"<b>Step 2:</b> Run technical analysis + AI ensemble per coin, then generate execution plan fields (Entry/SL/TP).<br>"
-            f"<b>Step 3:</b> Build bias from a regime-aware engine (trend/momentum/volume/volatility), then convert to direction-agnostic <b>Strength</b> (0-100).<br>"
-            f"<b>Step 4:</b> Calculate <b>Action</b> with guardrails. "
-            f"ENTER uses dynamic regime gates: thresholds relax slightly in strong-trend ADX, remain strict in weak ADX. "
-            f"TECH-ONLY can enter only in exceptional trend+strength conditions. "
-            f"R:R and plan levels are execution aids, not Action gates.<br>"
-            f"<b>Step 5:</b> Convert raw outputs into one actionable class: ENTER / WATCH / SKIP."
+            f"<b>1) Read Action first (what to do now)</b><br>"
+            f"• <b>ENTER (Trend+AI)</b>: highest-quality entry candidate. You can evaluate execution immediately.<br>"
+            f"• <b>ENTER (Trend-Only)</b>: trend leads but AI is not fully aligned; use smaller risk and stricter stop discipline.<br>"
+            f"• <b>ENTER (AI-Only)</b>: AI conviction leads while technical structure is early; treat as early setup and require tighter risk control.<br>"
+            f"• <b>WATCH</b>: do not enter yet; keep in watchlist and wait for stronger confirmation.<br>"
+            f"• <b>SKIP</b>: no trade candidate for now.<br><br>"
+            f"<b>2) Validate side quality</b><br>"
+            f"Check <b>Direction</b> (Upside/Downside) + <b>Strength</b> (WEAK/MIXED/GOOD/STRONG). "
+            f"If Direction is clear but Strength is weak, avoid rushing.<br><br>"
+            f"<b>3) Validate confirmation quality</b><br>"
+            f"Use <b>AI Ensemble</b> + <b>Tech vs AI Alignment</b>. "
+            f"Avoid rows where alignment shows <b>CONFLICT</b>.<br><br>"
+            f"<b>4) If you are taking a scalp</b><br>"
+            f"Use <b>Scalp Opportunity</b> first, then check <b>R:R</b>. "
+            f"Prefer better R:R setups, and execute only with <b>Entry Price / Stop Loss / Target Price</b> defined.<br><br>"
+            f"<b>5) Advanced columns are for diagnostics</b><br>"
+            f"Open <b>+ Show advanced columns</b> only when you need deeper indicator detail (ADX/Ichimoku/VWAP etc.)."
             f"</div></details>",
             unsafe_allow_html=True,
         )
