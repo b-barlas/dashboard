@@ -776,7 +776,12 @@ def render(ctx: dict) -> None:
 
         return _tone_for_text(s)
 
-    def _chip(text: object, tone: str | None = None, title: str | None = None) -> str:
+    def _chip(
+        text: object,
+        tone: str | None = None,
+        title: str | None = None,
+        extra_class: str = "",
+    ) -> str:
         raw = "" if text is None else str(text).strip()
         if not raw or raw.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE", "-"}:
             return ""
@@ -790,7 +795,8 @@ def render(ctx: dict) -> None:
         }
         cls = tone_map.get(tone_key, "mk-muted")
         title_attr = f" title='{html.escape(title)}'" if title else ""
-        return f"<span class='mk-chip {cls}'{title_attr}>{html.escape(raw)}</span>"
+        cls_full = f"mk-chip {cls} {extra_class}".strip()
+        return f"<span class='{cls_full}'{title_attr}>{html.escape(raw)}</span>"
 
     def _compact_action_label(action_text: str) -> str:
         s = str(action_text or "").strip()
@@ -813,7 +819,12 @@ def render(ctx: dict) -> None:
             return f"<span class='mk-coin'>{html.escape(txt)}</span>"
         if col in {"Action", "Direction", "Strength", "R:R", "Scalp Opportunity"}:
             if col == "Action":
-                return _chip(_compact_action_label(txt), _tone_for_col(col, txt), title=txt)
+                return _chip(
+                    _compact_action_label(txt),
+                    _tone_for_col(col, txt),
+                    title=txt,
+                    extra_class="mk-chip-action",
+                )
             return _chip(txt, _tone_for_col(col, txt))
         if col == "Tech vs AI Alignment":
             return _chip(txt, _tone_for_col(col, txt))
@@ -840,7 +851,7 @@ def render(ctx: dict) -> None:
             "Coin": 120,
             "Price ($)": 122,
             "Δ (%)": 92,
-            "Action": 170,
+            "Action": 140,
             "Direction": 130,
             "Strength": 132,
             "AI Ensemble": 170,
@@ -965,6 +976,12 @@ def render(ctx: dict) -> None:
               text-overflow:ellipsis;
               white-space:nowrap;
               box-sizing:border-box;
+            }}
+            .mk-chip-action {{
+              font-size:0.70rem;
+              padding:2px 6px;
+              letter-spacing:0.1px;
+              gap:4px;
             }}
             .mk-pos {{ color:{POSITIVE}; border-color:rgba(0,255,136,0.42); background:rgba(0,255,136,0.10); }}
             .mk-neg {{ color:{NEGATIVE}; border-color:rgba(255,51,102,0.44); background:rgba(255,51,102,0.10); }}
