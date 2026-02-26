@@ -23,8 +23,8 @@ def leverage_badge(lev: int) -> str:
     return f"x{lev}"
 
 
-def confidence_score_badge(confidence: float) -> str:
-    score = round(confidence)
+def bias_score_badge(bias_score: float) -> str:
+    score = round(bias_score)
     if score >= 80:
         label = "STRONG BUY"
     elif score >= 60:
@@ -36,6 +36,11 @@ def confidence_score_badge(confidence: float) -> str:
     else:
         label = "STRONG SELL"
     return f"{score} ({label})"
+
+
+def confidence_score_badge(confidence: float) -> str:
+    # Backward-compatible alias; prefer bias_score_badge.
+    return bias_score_badge(confidence)
 
 
 def signal_plain(signal: str) -> str:

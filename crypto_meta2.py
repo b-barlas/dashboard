@@ -30,7 +30,7 @@ from core.services import (
     monte_carlo_simulation,
 )
 from ui.helpers import (
-    confidence_score_badge,
+    bias_score_badge,
     format_adx,
     format_delta,
     format_stochrsi,

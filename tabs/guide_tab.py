@@ -101,7 +101,7 @@ Meaning:
 
 Naming note:
 - The dashboard uses **Direction + Strength** terminology.
-- Internally, some legacy code fields may still be named `confidence`, but they represent the same **bias score input** that feeds Strength.
+- Internal calculation input is **Bias Score (0-100)**, then converted to Strength for decisioning.
             """,
             "core",
         ),

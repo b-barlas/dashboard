@@ -41,7 +41,7 @@ _TAB_DEPS = [
             "get_market_indices", "get_fear_greed", "get_btc_eth_prices", "get_price_change",
             "_tip", "get_major_ohlcv_bundle", "ml_ensemble_predict", "get_top_volume_usdt_symbols",
             "fetch_ohlcv", "analyse", "get_scalping_entry_target", "_calc_conviction",
-            "signal_plain", "direction_label", "confidence_score_badge", "readable_market_cap", "leverage_badge",
+            "signal_plain", "direction_label", "bias_score_badge", "readable_market_cap", "leverage_badge",
             "format_delta", "format_trend", "format_adx", "format_stochrsi",
             "style_signal", "style_confidence", "style_scalp_opp", "style_delta", "_debug",
         ],

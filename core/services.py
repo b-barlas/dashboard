@@ -227,10 +227,10 @@ def explain_candle_pattern(pattern: str) -> str:
     }
     return explanations.get(pattern, "")
 
-def get_signal_from_confidence(confidence: float) -> Tuple[str, str]:
-    score = round(confidence)
+def get_signal_from_bias(bias_score: float) -> Tuple[str, str]:
+    score = round(bias_score)
     if score >= 80:
-        return "STRONG BUY", "🚀 Strong bullish bias. High confidence to go LONG."
+        return "STRONG BUY", "🚀 Strong bullish bias. Directional edge supports LONG."
     elif score >= 60:
         return "BUY", "📈 Bullish leaning. Consider LONG entry."
     elif score >= 40:
@@ -238,7 +238,12 @@ def get_signal_from_confidence(confidence: float) -> Tuple[str, str]:
     elif score >= 20:
         return "SELL", "📉 Bearish leaning. SHORT may be considered."
     else:
-        return "STRONG SELL", "⚠️ Strong bearish bias. SHORT with high confidence."
+        return "STRONG SELL", "⚠️ Strong bearish bias. Directional edge supports SHORT."
+
+
+def get_signal_from_confidence(confidence: float) -> Tuple[str, str]:
+    # Backward-compatible wrapper; prefer get_signal_from_bias.
+    return get_signal_from_bias(confidence)
 
 def analyse(df: pd.DataFrame) -> AnalysisResult:
     return analyse_core(df, debug_fn=_debug)

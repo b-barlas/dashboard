@@ -29,8 +29,8 @@ def ai_stability_bucket(agreement_ratio: float) -> str:
     return "Weak"
 
 
-def confidence_bucket(confidence: float) -> str:
-    c = float(confidence)
+def bias_bucket(bias_score: float) -> str:
+    c = float(bias_score)
     if c >= CONF_STRONG:
         return "Strong"
     if c >= CONF_GOOD:
@@ -38,3 +38,8 @@ def confidence_bucket(confidence: float) -> str:
     if c >= CONF_MEDIUM:
         return "Mixed"
     return "Weak"
+
+
+def confidence_bucket(confidence: float) -> str:
+    # Backward-compatible alias; prefer bias_bucket.
+    return bias_bucket(confidence)

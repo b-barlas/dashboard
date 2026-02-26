@@ -68,6 +68,11 @@ class AnalysisResult:
     williams: str = ""
     cci: str = ""
 
+    @property
+    def bias(self) -> float:
+        """Alias kept for dashboard terminology compatibility."""
+        return float(self.confidence)
+
 
 def detect_volume_spike(df: pd.DataFrame, window: int = 20, multiplier: float = 2.0) -> bool:
     if "volume" not in df.columns or len(df) < window + 1:
@@ -490,11 +495,12 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
         final_score += 0.05 * float(np.sign(trend_score))
 
     final_score = float(np.clip(final_score, -1.0, 1.0))
-    confidence_score = float(np.clip(round((final_score + 1) / 2 * 100, 1), 0, 100))
+    bias_score = float(np.clip(round((final_score + 1) / 2 * 100, 1), 0, 100))
 
     if not pd.isna(adx_val) and adx_val < 20:
         _regime_discount = np.interp(adx_val, [0, 20], [0.70, 1.0])
-        confidence_score = float(np.clip(round(confidence_score * _regime_discount, 1), 0, 100))
+        # Preserve neutral center (50) while damping directional extremity in weak trends.
+        bias_score = float(np.clip(round(50.0 + (bias_score - 50.0) * _regime_discount, 1), 0, 100))
 
     if volatility_score < -0.35:
         buy_threshold, sell_threshold = 72, 28
@@ -505,9 +511,9 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
     else:
         buy_threshold, sell_threshold = 66, 34
 
-    if confidence_score >= buy_threshold:
+    if bias_score >= buy_threshold:
         base_signal = "BUY"
-    elif confidence_score <= sell_threshold:
+    elif bias_score <= sell_threshold:
         base_signal = "SELL"
     else:
         base_signal = "WAIT"
@@ -521,8 +527,8 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
             signal, comment = "WAIT", "⏳ Bullish setup but momentum divergence detected."
         elif volatility_score < -0.5:
             signal, comment = "WAIT", "⚠️ High volatility detected. Wait for calmer conditions."
-        elif confidence_score >= 80:
-            signal, comment = "STRONG BUY", "🚀 Strong bullish bias. High confidence to go LONG."
+        elif bias_score >= 80:
+            signal, comment = "STRONG BUY", "🚀 Strong bullish bias. Directional edge supports LONG."
         else:
             signal, comment = "BUY", "📈 Bullish leaning. Consider LONG entry."
     elif base_signal == "SELL":
@@ -534,8 +540,8 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
             signal, comment = "WAIT", "⏳ Bearish setup but momentum divergence detected."
         elif volatility_score < -0.5:
             signal, comment = "WAIT", "⚠️ High volatility detected. Wait for calmer conditions."
-        elif confidence_score <= 20:
-            signal, comment = "STRONG SELL", "⚠️ Strong bearish bias. SHORT with high confidence."
+        elif bias_score <= 20:
+            signal, comment = "STRONG SELL", "⚠️ Strong bearish bias. Directional edge supports SHORT."
         else:
             signal, comment = "SELL", "📉 Bearish leaning. SHORT may be considered."
     else:
@@ -607,11 +613,11 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
         rs = min(risk_score, 0.40)
         lev_base = int(round(np.interp(rs, [0.25, 0.40], [4, 2])))
 
-    if confidence_score < 50:
+    if bias_score < 50:
         lev_base = min(lev_base, 2)
-    elif confidence_score < 65:
+    elif bias_score < 65:
         lev_base = min(lev_base, 4)
-    elif confidence_score < 75:
+    elif bias_score < 75:
         lev_base = min(lev_base, 6)
 
     return AnalysisResult(
@@ -621,7 +627,7 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
         volume_spike=volume_spike,
         atr_comment=atr_comment,
         candle_pattern=candle_pattern,
-        confidence=confidence_score,
+        confidence=bias_score,
         adx=adx_val,
         supertrend=supertrend_trend,
         ichimoku=ichimoku_trend,
