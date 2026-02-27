@@ -1,8 +1,8 @@
 import pathlib
 import unittest
 
-
-TABS_DIR = pathlib.Path("/Users/burakbarlas/Documents/Claude/Web_ready_2002/tabs")
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+TABS_DIR = ROOT / "tabs"
 
 
 class TabsCtxAccessContractTests(unittest.TestCase):

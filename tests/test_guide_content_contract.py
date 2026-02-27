@@ -1,7 +1,8 @@
 import pathlib
 import unittest
 
-GUIDE_PATH = pathlib.Path("/Users/burakbarlas/Documents/Claude/Web_ready_2002/tabs/guide_tab.py")
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+GUIDE_PATH = ROOT / "tabs" / "guide_tab.py"
 
 
 class GuideContentContractTests(unittest.TestCase):
