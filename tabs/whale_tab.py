@@ -111,9 +111,15 @@ def render(ctx: dict) -> None:
         trending_new = fetch_trending_coins()
         gainers_new, losers_new = fetch_top_gainers_losers(15)
 
-    trending, used_trending_cache, trend_ts = live_or_snapshot(st, "whale_trending", trending_new)
-    gainers, used_gainers_cache, gainers_ts = live_or_snapshot(st, "whale_gainers", gainers_new)
-    losers, used_losers_cache, losers_ts = live_or_snapshot(st, "whale_losers", losers_new)
+    trending, used_trending_cache, trend_ts = live_or_snapshot(
+        st, "whale_trending", trending_new, max_age_sec=900, current_sig=("trending",)
+    )
+    gainers, used_gainers_cache, gainers_ts = live_or_snapshot(
+        st, "whale_gainers", gainers_new, max_age_sec=900, current_sig=("gainers",)
+    )
+    losers, used_losers_cache, losers_ts = live_or_snapshot(
+        st, "whale_losers", losers_new, max_age_sec=900, current_sig=("losers",)
+    )
 
     def _fmt_ts(ts_obj) -> str:
         return str(ts_obj) if ts_obj else "N/A"

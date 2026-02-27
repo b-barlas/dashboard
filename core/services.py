@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from typing import Tuple
 
 import pandas as pd
 import requests
@@ -208,43 +207,6 @@ def detect_candle_pattern(df: pd.DataFrame) -> str:
     return detect_candle_pattern_core(df)
 
 
-def explain_candle_pattern(pattern: str) -> str:
-    explanations = {
-        "Hammer": "bullish bottom wick",
-        "Bullish Engulfing": "strong reversal up",
-        "Morning Star": "3-bar bullish reversal",
-        "Piercing Line": "mid-level reversal",
-        "Inverted Hammer": "potential bottom reversal",
-        "Three White Soldiers": "strong bullish confirmation",
-
-        "Shooting Star": "bearish top wick",
-        "Bearish Engulfing": "strong reversal down",
-        "Evening Star": "3-bar bearish reversal",
-        "Dark Cloud Cover": "mid-level reversal",
-        "Hanging Man": "possible top reversal",
-        "Three Black Crows": "strong bearish confirmation",
-        "Doji": "market indecision"
-    }
-    return explanations.get(pattern, "")
-
-def get_signal_from_bias(bias_score: float) -> Tuple[str, str]:
-    score = round(bias_score)
-    if score >= 80:
-        return "STRONG BUY", "🚀 Strong bullish bias. Directional edge supports LONG."
-    elif score >= 60:
-        return "BUY", "📈 Bullish leaning. Consider LONG entry."
-    elif score >= 40:
-        return "WAIT", "⏳ No clear direction. Market indecision."
-    elif score >= 20:
-        return "SELL", "📉 Bearish leaning. SHORT may be considered."
-    else:
-        return "STRONG SELL", "⚠️ Strong bearish bias. Directional edge supports SHORT."
-
-
-def get_signal_from_confidence(confidence: float) -> Tuple[str, str]:
-    # Backward-compatible wrapper; prefer get_signal_from_bias.
-    return get_signal_from_bias(confidence)
-
 def analyse(df: pd.DataFrame) -> AnalysisResult:
     return analyse_core(df, debug_fn=_debug)
 
@@ -323,7 +285,17 @@ def detect_market_regime(df: pd.DataFrame) -> dict:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def _fetch_trending_coins_cached() -> list[dict]:
+    return fetch_trending_coins_core(_http_get_json)
+
+
 def fetch_trending_coins() -> list[dict]:
+    rows = _fetch_trending_coins_cached()
+    if rows:
+        return rows
+    # Avoid serving cached empty payloads for the full TTL when providers
+    # are temporarily rate-limited.
+    _debug("fetch_trending_coins cache returned empty; retrying uncached fetch.")
     return fetch_trending_coins_core(_http_get_json)
 
 

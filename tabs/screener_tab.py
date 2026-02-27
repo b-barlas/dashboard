@@ -174,6 +174,8 @@ def render(ctx: dict) -> None:
                 st,
                 f"screener_results::{scr_tf}::{min_strength}::{min_adx}::{rsi_range[0]}-{rsi_range[1]}::{volume_spike_only}::{universe_mode}::{universe_size}",
                 results,
+                max_age_sec=900,
+                current_sig=(scr_tf, min_strength, min_adx, rsi_range[0], rsi_range[1], volume_spike_only, universe_mode, universe_size),
             )
             if from_cache:
                 st.warning(f"Live screener data unavailable. Showing cached snapshot from {cache_ts}.")
@@ -182,6 +184,8 @@ def render(ctx: dict) -> None:
                 st,
                 f"screener_results::{scr_tf}::{min_strength}::{min_adx}::{rsi_range[0]}-{rsi_range[1]}::{volume_spike_only}::{universe_mode}::{universe_size}",
                 results,
+                max_age_sec=900,
+                current_sig=(scr_tf, min_strength, min_adx, rsi_range[0], rsi_range[1], volume_spike_only, universe_mode, universe_size),
             )
 
         if results:

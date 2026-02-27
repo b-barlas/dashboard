@@ -206,15 +206,18 @@ Important:
 - **Action is a direction-confirmation decision** (go/no-go on market context).
 - **R:R and Entry/SL/TP are execution planning fields**, not Action gates.
 
-Important execution note:
-- Direction/Strength/plan levels are computed on closed candles.
-- Price column can show the latest live tick.
-- This is intentional to avoid repaint risk in decision logic.
+	Important execution note:
+	- Direction/Strength/plan levels are computed on closed candles.
+	- Price column can show the latest live tick.
+	- This is intentional to avoid repaint risk in decision logic.
+	- Data mode badge:
+	  - **FULL MARKET MODE**: exchange execution data + enrichment fields available
+	  - **EXCHANGE-ONLY MODE**: enrichment provider unavailable; core trading fields still live
 
-Tech vs AI Alignment is based on Direction + AI directional agreement + strength quality.
-Common labels:
-- HIGH / MEDIUM: direction and AI agree with enough model support
-- TECH-ONLY: technical side is strong but AI stays neutral
+	Tech vs AI Alignment is based on Direction + AI directional agreement + strength quality.
+	Common labels:
+	- HIGH / MEDIUM: direction and AI agree with enough model support
+	- TECH-ONLY: technical side is strong but AI stays neutral
 - CONFLICT: technical and AI directions oppose each other
             """,
             "core",
@@ -369,12 +372,25 @@ Primary exchange fallback list is intentionally UK-safe for this setup:
 - Coinbase
 - Bitstamp
 
-If one source fails, app falls back to the next source.
-Some market-wide datasets use CoinGecko.
+Scanner/enrichment provider order (when building market universe):
+1. CoinGecko markets feed (volume-ranked symbols + enrichment)
+2. CoinPaprika tickers fallback (volume-ranked symbols + enrichment)
+3. Exchange-pair fallback (symbols only)
 
-When a live request temporarily fails/rate-limits in analysis tabs,
-the UI may show the **last successful cached snapshot** with a UTC timestamp.
-This is intentional to avoid blank panels during transient outages.
+Execution/indicator data order:
+1. Exchange OHLCV/ticker from the active UK-safe exchange
+2. If exchange fails, app falls back to the next UK-safe exchange
+
+This means trade-critical fields (price, candles, indicators, Action/Direction/Strength)
+remain exchange-driven even when enrichment providers are rate-limited.
+Enrichment fields (for example Market Cap) may show as `—` in exchange-only mode.
+
+Cache policy:
+- Market tab: cached snapshot is used only for the **same timeframe/filter signature**
+  (stale cache from another setting is intentionally blocked).
+- Rapid tab: same signature guard is applied.
+- Other analysis tabs: live-or-snapshot fallback is used with TTL guards.
+  Typical cache TTL is 15 minutes for live analysis tabs and 30 minutes for backtest frames.
             """,
             "info",
         ),
@@ -454,7 +470,9 @@ Use this 60-second checklist:
 - AI Entry / Non-AI Entry appear in debug diagnostics
 
 6. **Fallback check**
-- If any live endpoint fails, cached snapshot warning with UTC timestamp appears
+- If enrichment fails, Market shows **EXCHANGE-ONLY MODE** and core trade columns still render
+- If live endpoint fails, cached snapshot warning with UTC timestamp appears
+- Market/Rapid should not reuse stale snapshot from a different timeframe/filter
             """,
             "info",
         ),

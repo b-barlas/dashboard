@@ -290,12 +290,15 @@ def render(ctx: dict) -> None:
 
     live_valid = [r for r in rows if r.get("Direction") != "NO DATA"]
     snapshot_key = f"ailab_rows::{coin}::{selected_model}::{','.join(sorted(selected_timeframes))}"
+    snapshot_sig = (coin, selected_model, tuple(sorted(selected_timeframes)))
     if len(live_valid) == 0:
-        rows, from_cache, cache_ts = live_or_snapshot(st, snapshot_key, rows)
+        rows, from_cache, cache_ts = live_or_snapshot(
+            st, snapshot_key, rows, max_age_sec=900, current_sig=snapshot_sig
+        )
         if from_cache:
             st.warning(f"Live AI Lab data unavailable. Showing cached snapshot from {cache_ts}.")
     else:
-        live_or_snapshot(st, snapshot_key, rows)
+        live_or_snapshot(st, snapshot_key, rows, max_age_sec=900, current_sig=snapshot_sig)
 
     df_out = pd.DataFrame(rows)
     valid_dirs = [d for d in all_dirs if d in {"LONG", "SHORT", "NEUTRAL"}]

@@ -55,6 +55,48 @@ class MarketDataHelpersTests(unittest.TestCase):
         )
         self.assertEqual(pairs[:2], ["ADA/USD", "SOL/USDT"])
 
+    def test_get_top_volume_usdt_symbols_uses_coinpaprika_when_coingecko_empty(self):
+        def _http_get_json(url, **kwargs):
+            if "coingecko" in url:
+                return []
+            if "coinpaprika" in url:
+                return [
+                    {
+                        "id": "btc-bitcoin",
+                        "symbol": "BTC",
+                        "quotes": {"USD": {"volume_24h": 1_000_000.0, "market_cap": 10}},
+                    },
+                    {
+                        "id": "eth-ethereum",
+                        "symbol": "ETH",
+                        "quotes": {"USD": {"volume_24h": 900_000.0, "market_cap": 9}},
+                    },
+                ]
+            return []
+
+        pairs, raw = market_data.get_top_volume_usdt_symbols(
+            _http_get_json,
+            {"BTC/USDT": {}, "ETH/USD": {}},
+            lambda _msg: None,
+            top_n=10,
+        )
+        self.assertEqual(pairs, ["BTC/USDT", "ETH/USD"])
+        self.assertIsInstance(raw, list)
+        self.assertGreaterEqual(len(raw), 2)
+
+    def test_get_top_volume_usdt_symbols_uses_exchange_fallback_when_both_providers_empty(self):
+        def _http_get_json(url, **kwargs):
+            return []
+
+        pairs, raw = market_data.get_top_volume_usdt_symbols(
+            _http_get_json,
+            {"ADA/USD": {}, "SOL/USDT": {}, "ETH/BTC": {}},
+            lambda _msg: None,
+            top_n=10,
+        )
+        self.assertEqual(pairs[:2], ["ADA/USD", "SOL/USDT"])
+        self.assertEqual(raw, [])
+
 
 if __name__ == "__main__":
     unittest.main()

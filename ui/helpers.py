@@ -12,9 +12,9 @@ WARNING = "#FFD166"
 def signal_badge(signal: str) -> str:
     """Return a simplified badge for the given signal."""
     if signal in ("STRONG BUY", "BUY"):
-        return "🟢 Upside"
+        return "🟢 LONG"
     if signal in ("STRONG SELL", "SELL"):
-        return "🔴 Downside"
+        return "🔴 SHORT"
     return "⚪ Neutral"
 
 

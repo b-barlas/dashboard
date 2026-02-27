@@ -22,10 +22,6 @@ def action_decision(
     conviction_label: str,
     agreement: float,
     adx_val: float,
-    rr_ratio: float,
-    has_plan: bool,
-    *,
-    min_enter_rr: float = 1.30,
 ) -> str:
     if signal_dir not in {"LONG", "SHORT"}:
         return "⛔ SKIP"

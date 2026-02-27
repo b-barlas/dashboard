@@ -10,6 +10,19 @@ from core.signal_contract import strength_from_bias
 class AnalysisLike(Protocol):
     signal: str
     bias: float
+    confidence: float
+
+
+def _read_bias_like(result: AnalysisLike) -> float:
+    """Read bias score with backward compatibility for legacy confidence-only stubs."""
+    try:
+        return float(getattr(result, "bias"))
+    except Exception:
+        pass
+    try:
+        return float(getattr(result, "confidence"))
+    except Exception:
+        return 50.0
 
 
 def _infer_regime(df_slice: pd.DataFrame, analysis_obj: AnalysisLike) -> tuple[str, float]:
@@ -89,7 +102,7 @@ def run_backtest(
         try:
             result = analyzer(df_slice)
             raw_signal = result.signal
-            bias_score = float(result.bias)
+            bias_score = _read_bias_like(result)
             strength_score = float(strength_from_bias(bias_score))
         except Exception:
             i += 1

@@ -46,6 +46,18 @@ def render(ctx: dict) -> None:
     style_delta = get_ctx(ctx, "style_delta")
     _debug = get_ctx(ctx, "_debug")
     """Render the Market Dashboard tab containing top‑level crypto metrics and scanning."""
+    major_fallback_symbols = [
+        "BTC/USDT",
+        "ETH/USDT",
+        "SOL/USDT",
+        "XRP/USDT",
+        "BNB/USDT",
+        "ADA/USDT",
+        "DOGE/USDT",
+        "AVAX/USDT",
+        "LINK/USDT",
+        "TON/USDT",
+    ]
 
     # Fetch global market data
     # Unpack market indices.  The function returns BTC/ETH dominance, market caps,
@@ -1013,6 +1025,7 @@ def render(ctx: dict) -> None:
 
     results: list[dict] = st.session_state.get("market_scan_results", [])
     source_label = st.session_state.get("market_scan_source", "LIVE")
+    data_mode = st.session_state.get("market_data_mode", "FULL MARKET MODE")
 
     # Fetch top coins
     if should_scan:
@@ -1041,11 +1054,28 @@ def render(ctx: dict) -> None:
                 mcap = int(coin.get("market_cap") or 0)
                 if symbol and (symbol not in mcap_map or mcap > mcap_map[symbol]):
                     mcap_map[symbol] = mcap
+            is_exchange_only_mode = len(unique_market_data) == 0
 
             # USDT match
-            valid_bases = {(c.get("symbol") or "").upper() for c in unique_market_data}
-            working_symbols = [s for s in usdt_symbols if s.split("/")[0].upper() in valid_bases]
+            if unique_market_data:
+                valid_bases = {(c.get("symbol") or "").upper() for c in unique_market_data}
+                working_symbols = [s for s in usdt_symbols if s.split("/")[0].upper() in valid_bases]
+            else:
+                # If market rows are empty (e.g. CoinGecko rate-limit), keep scan alive
+                # using exchange pairs directly.
+                working_symbols = list(usdt_symbols)
             working_symbols = working_symbols[:top_n]
+
+            if not working_symbols:
+                # Hard fallback universe for temporary upstream outages.
+                working_symbols = major_fallback_symbols[: min(top_n, len(major_fallback_symbols))]
+                if working_symbols:
+                    st.info(
+                        "Primary market feed is temporarily unavailable. "
+                        "Scanner switched to major fallback universe."
+                    )
+            data_mode = "EXCHANGE-ONLY MODE" if is_exchange_only_mode else "FULL MARKET MODE"
+            st.session_state["market_data_mode"] = data_mode
 
             if not working_symbols:
                 st.warning(
@@ -1077,7 +1107,7 @@ def render(ctx: dict) -> None:
                 latest = df.iloc[-1]
 
                 base = sym.split('/')[0].upper()
-                mcap_val = mcap_map.get(base, 0)
+                mcap_val = mcap_map.get(base)
                 price = float(latest['close'])
                 price_change = get_price_change(sym)
 
@@ -1112,7 +1142,6 @@ def render(ctx: dict) -> None:
 
                 _emoji_map = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "⚪", "CONFLICT": "🔴"}
                 setup_badge_val = setup_badge(scalp_direction or "", signal_direction, ai_direction)
-                has_trade_plan = bool(entry_price and target_price and stop_s)
                 strength_val = float(strength_from_bias(float(bias_score_v)))
                 _conv_lbl, _conv_clr = _calc_conviction(
                     signal_direction,
@@ -1129,8 +1158,6 @@ def render(ctx: dict) -> None:
                     str(_conv_lbl),
                     float(agreement),
                     float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
-                    rr_val,
-                    has_trade_plan,
                 )
                 trade_quality_val = trade_quality(
                     action,
@@ -1157,7 +1184,7 @@ def render(ctx: dict) -> None:
                     'Stop Loss': _fmt_price(stop_s) if stop_s else '',
                     'Target Price': _fmt_price(target_price) if target_price else '',
                     'R:R': _rr_badge(rr_val),
-                    'Market Cap ($)': readable_market_cap(mcap_val),
+                    'Market Cap ($)': readable_market_cap(mcap_val) if mcap_val else "—",
                     'Spike Alert': '▲ Spike' if volume_spike else '',
                     'ADX': round(adx_val_v, 1) if pd.notna(adx_val_v) else float("nan"),
                     'SuperTrend': supertrend_trend_v,
@@ -1212,27 +1239,34 @@ def render(ctx: dict) -> None:
                 st.session_state["market_scan_cache_ts"] = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
                 st.session_state["market_scan_cache_sig"] = scan_sig
                 st.session_state["market_scan_source"] = "LIVE"
+                st.session_state["market_data_mode"] = data_mode
                 source_label = "LIVE"
                 results = fresh_results
             else:
-                # Keep last non-empty snapshot when APIs temporarily fail/rate-limit.
                 st.session_state["market_scan_sig"] = scan_sig
-                results = prev_results
-                if prev_results:
+                cache_sig = st.session_state.get("market_scan_cache_sig")
+                same_sig_cache = bool(cache_sig and tuple(cache_sig) == tuple(scan_sig))
+                if prev_results and same_sig_cache:
+                    # Only fallback to cache for the exact same scan signature.
                     ts = st.session_state.get("market_scan_cache_ts", "unknown time")
+                    results = prev_results
                     source_label = f"CACHED ({ts})"
                     st.session_state["market_scan_source"] = source_label
-                    cache_sig = st.session_state.get("market_scan_cache_sig")
+                    st.session_state["market_data_mode"] = data_mode
+                    st.warning(
+                        f"Live scan returned no rows. Showing last successful snapshot from {ts} "
+                        f"for the same timeframe/filter. Do not execute directly from cache-only view."
+                    )
+                else:
+                    # Do not leak stale cache across timeframe/filter changes.
+                    results = []
+                    source_label = "LIVE"
+                    st.session_state["market_scan_source"] = source_label
+                    st.session_state["market_data_mode"] = data_mode
                     if cache_sig and tuple(cache_sig) != tuple(scan_sig):
                         st.warning(
-                            f"Live scan returned no rows. Showing snapshot from {ts} "
-                            f"(different filter/timeframe: {cache_sig}). "
-                            f"Do not execute directly from this snapshot; refresh until LIVE rows return."
-                        )
-                    else:
-                        st.warning(
-                            f"Live scan returned no rows. Showing last successful snapshot from {ts}. "
-                            f"Do not execute directly from cache-only view."
+                            "Live scan returned no rows for current timeframe/filter. "
+                            "Stale cache from another setting was intentionally not used."
                         )
 
     # Prepare DataFrame for display
@@ -1246,12 +1280,28 @@ def render(ctx: dict) -> None:
             f"{source_chip} • {source_label}</span></div>",
             unsafe_allow_html=True,
         )
+        mode_color = ACCENT if data_mode.startswith("FULL") else WARNING
+        st.markdown(
+            f"<div style='margin:0 0 0.6rem 0;'>"
+            f"<span class='market-inline-chip' style='border:1px solid {mode_color}; color:{mode_color}; "
+            f"background:rgba(255,255,255,0.04);'>{data_mode}</span></div>",
+            unsafe_allow_html=True,
+        )
         if source_label.startswith("CACHED"):
             st.markdown(
                 f"<div class='market-note-box' style='border:1px solid rgba(255,209,102,0.4); border-left:4px solid {WARNING}; "
                 f"background:rgba(255,209,102,0.08); color:{TEXT_MUTED};'>"
                 f"<b style='color:{WARNING};'>Execution Caution:</b> This table is running on cached snapshot data. "
                 f"Confirm with a fresh LIVE scan before placing trades."
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        if data_mode.startswith("EXCHANGE-ONLY"):
+            st.markdown(
+                f"<div class='market-note-box' style='border:1px solid rgba(255,209,102,0.34); border-left:4px solid {WARNING}; "
+                f"background:rgba(255,209,102,0.06); color:{TEXT_MUTED};'>"
+                f"<b style='color:{WARNING};'>Data Mode:</b> Exchange-only feed is active. "
+                f"Trade metrics are live from exchange candles; enrichment fields like market cap may show as —."
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -1280,7 +1330,6 @@ def render(ctx: dict) -> None:
             f"</div></details>",
             unsafe_allow_html=True,
         )
-        show_advanced = st.checkbox("+ Show advanced columns", value=False, key="market_show_adv_cols")
         st.markdown(
             f"<details class='market-details' style='margin-bottom:0.8rem;'>"
             f"<summary style='color:{ACCENT};'>"
@@ -1316,6 +1365,7 @@ def render(ctx: dict) -> None:
             unsafe_allow_html=True,
         )
         st.caption("Signals and plan levels are computed on closed candles; Price ($) shows the latest live tick.")
+        show_advanced = st.checkbox("+ Show advanced columns", value=False, key="market_show_adv_cols")
 
         df_results = pd.DataFrame(results)
 

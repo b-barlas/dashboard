@@ -166,7 +166,13 @@ def render(ctx: dict) -> None:
         for idx, tf in enumerate(selected_timeframes):
             with tf_tabs[idx]:
                 df_live = fetch_ohlcv(coin, tf, limit=200)
-                df, used_cache, cache_ts = live_or_snapshot(st, f"position_df::{coin}::{tf}::200", df_live)
+                df, used_cache, cache_ts = live_or_snapshot(
+                    st,
+                    f"position_df::{coin}::{tf}::200",
+                    df_live,
+                    max_age_sec=900,
+                    current_sig=(coin, tf, 200),
+                )
                 if used_cache:
                     st.warning(f"{tf}: live data unavailable, using cached snapshot from {cache_ts}.")
                 if df is None or len(df) < 55:
@@ -587,7 +593,11 @@ def render(ctx: dict) -> None:
 
         df_candle_live = fetch_ohlcv(coin, largest_tf, limit=100)
         df_candle, used_candle_cache, candle_cache_ts = live_or_snapshot(
-            st, f"position_chart::{coin}::{largest_tf}::100", df_candle_live
+            st,
+            f"position_chart::{coin}::{largest_tf}::100",
+            df_candle_live,
+            max_age_sec=900,
+            current_sig=(coin, largest_tf, 100),
         )
         if used_candle_cache:
             st.warning(f"Candlestick live data unavailable. Showing cached snapshot from {candle_cache_ts}.")

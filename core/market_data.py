@@ -1,4 +1,4 @@
-"""Market-wide and CoinGecko-derived data helpers."""
+"""Market-wide enrichment data helpers (multi-provider)."""
 
 from __future__ import annotations
 
@@ -88,7 +88,27 @@ def get_top_volume_usdt_symbols(
     top_n: int = 100,
     vs_currency: str = "usd",
 ) -> tuple[list[str], list]:
-    try:
+    def _pairs_from_symbols(symbols: list[str]) -> list[str]:
+        valid: list[str] = []
+        seen: set[str] = set()
+        for sym in symbols:
+            symbol = (sym or "").upper()
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            matched = False
+            for base in _base_candidates(symbol):
+                for quote in ("USDT", "USD"):
+                    pair = f"{base}/{quote}"
+                    if pair in markets:
+                        valid.append(pair)
+                        matched = True
+                        break
+                if matched:
+                    break
+        return valid
+
+    def _coingecko_symbols() -> tuple[list[str], list]:
         url = "https://api.coingecko.com/api/v3/coins/markets"
         params = {
             "vs_currency": vs_currency,
@@ -101,27 +121,80 @@ def get_top_volume_usdt_symbols(
         if not isinstance(data, list):
             debug_fn(f"CoinGecko invalid data type: {type(data)}")
             return [], []
+        symbols = [(coin.get("symbol") or "").upper() for coin in data]
+        return symbols, data
 
-        valid = []
-        seen = set()
+    def _coinpaprika_symbols() -> tuple[list[str], list]:
+        # Public fallback provider when CoinGecko is rate-limited.
+        url = "https://api.coinpaprika.com/v1/tickers"
+        data = http_get_json(url, timeout=12, retries=2)
+        if not isinstance(data, list):
+            debug_fn(f"CoinPaprika invalid data type: {type(data)}")
+            return [], []
+        rows = []
         for coin in data:
             symbol = (coin.get("symbol") or "").upper()
-            if not symbol or symbol in seen:
+            if not symbol:
                 continue
-            seen.add(symbol)
+            quotes = coin.get("quotes") if isinstance(coin, dict) else {}
+            usd_q = quotes.get("USD") if isinstance(quotes, dict) else {}
+            vol24 = usd_q.get("volume_24h") if isinstance(usd_q, dict) else None
+            mcap = usd_q.get("market_cap") if isinstance(usd_q, dict) else None
+            try:
+                vol24_f = float(vol24) if vol24 is not None else 0.0
+            except Exception:
+                vol24_f = 0.0
+            rows.append(
+                {
+                    "id": coin.get("id"),
+                    "symbol": symbol.lower(),
+                    "market_cap": mcap if isinstance(mcap, (int, float)) else 0,
+                    "_volume_24h": vol24_f,
+                }
+            )
+        rows = sorted(rows, key=lambda x: float(x.get("_volume_24h", 0.0)), reverse=True)
+        rows = rows[: min(max(top_n * 2, top_n), 300)]
+        symbols = [(r.get("symbol") or "").upper() for r in rows]
+        return symbols, rows
 
-            matched = False
-            for base in _base_candidates(symbol):
-                for quote in ("USDT", "USD"):
-                    pair = f"{base}/{quote}"
-                    if pair in markets:
-                        valid.append(pair)
-                        matched = True
-                        break
-                if matched:
-                    break
+    def _exchange_fallback_pairs() -> list[str]:
+        # Fallback to exchange-available USD/USDT markets when CoinGecko symbols
+        # cannot be mapped (rate-limit / payload drift / symbol mismatch).
+        pairs: list[str] = []
+        for pair in sorted(markets.keys()):
+            if not isinstance(pair, str) or "/" not in pair:
+                continue
+            base, quote = pair.split("/", 1)
+            if not base or quote not in {"USDT", "USD"}:
+                continue
+            pairs.append(pair)
+            if len(pairs) >= top_n:
+                break
+        return pairs
 
-        return valid, data
+    try:
+        cg_symbols, cg_data = _coingecko_symbols()
+        valid = _pairs_from_symbols(cg_symbols)
+        if valid:
+            return valid, cg_data
+
+        cp_symbols, cp_data = _coinpaprika_symbols()
+        valid_cp = _pairs_from_symbols(cp_symbols)
+        if valid_cp:
+            debug_fn("CoinGecko empty/unmapped; using CoinPaprika fallback.")
+            return valid_cp, cp_data
+
+        fallback = _exchange_fallback_pairs()
+        if fallback:
+            debug_fn("Provider mapping empty; using exchange market fallback.")
+            # Prefer whichever provider data is available for enrichment.
+            data_out = cg_data if cg_data else cp_data
+            return fallback, data_out
+        return [], (cg_data if cg_data else cp_data)
     except Exception as exc:
         debug_fn(f"get_top_volume_usdt_symbols error: {exc}")
+        fallback = _exchange_fallback_pairs()
+        if fallback:
+            debug_fn("Using exchange market fallback after error.")
+            return fallback, []
         return [], []

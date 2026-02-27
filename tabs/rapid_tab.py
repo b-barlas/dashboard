@@ -241,6 +241,7 @@ def render(ctx: dict) -> None:
 
     scan_sig = (timeframe, int(universe_size), int(min_score))
     prev_sig = st.session_state.get("rapid_sig")
+    prev_cache_sig = st.session_state.get("rapid_cache_sig")
     should_scan = refresh or ("rapid_rows" not in st.session_state) or (scan_sig != prev_sig)
 
     rows: list[dict] = st.session_state.get("rapid_rows", [])
@@ -424,21 +425,26 @@ def render(ctx: dict) -> None:
                 )
                 st.session_state["rapid_quality_history"] = quality_hist[-int(cfg.history_max_items):]
 
-            # Mark current scan signature as evaluated, even when no qualified rows.
-            st.session_state["rapid_sig"] = scan_sig
             if qualified:
                 st.session_state["rapid_rows"] = qualified
                 st.session_state["rapid_cache_ts"] = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+                st.session_state["rapid_cache_sig"] = scan_sig
+                st.session_state["rapid_sig"] = scan_sig
                 st.session_state["rapid_auto_retry_done"] = False
                 rows = qualified
             else:
                 old_rows = st.session_state.get("rapid_rows", [])
-                old_sig = st.session_state.get("rapid_sig")
-                same_context = tuple(old_sig) == tuple(scan_sig) if old_sig else False
+                same_context = tuple(prev_cache_sig) == tuple(scan_sig) if prev_cache_sig else False
                 rows = old_rows if same_context else []
+                st.session_state["rapid_sig"] = scan_sig
                 if rows:
                     ts = st.session_state.get("rapid_cache_ts", "unknown time")
                     st.warning(f"Rapid live scan returned no candidates. Showing previous snapshot from {ts}.")
+                elif prev_cache_sig and tuple(prev_cache_sig) != tuple(scan_sig):
+                    st.warning(
+                        "Rapid live scan returned no candidates for current timeframe/settings. "
+                        "Stale snapshot from another setting was intentionally not used."
+                    )
 
     hist_summary = summarize_quality_history(st.session_state.get("rapid_quality_history", []))
     k1, k2, k3, k4 = st.columns(4, gap="small")

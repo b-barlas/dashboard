@@ -73,7 +73,13 @@ def render(ctx: dict) -> None:
             st.error(_val_err)
             return
         df_live = fetch_ohlcv(coin, timeframe)
-        df, used_cache, cache_ts = live_or_snapshot(st, f"spot_df::{coin}::{timeframe}", df_live)
+        df, used_cache, cache_ts = live_or_snapshot(
+            st,
+            f"spot_df::{coin}::{timeframe}",
+            df_live,
+            max_age_sec=900,
+            current_sig=(coin, timeframe),
+        )
         if used_cache:
             st.warning(f"Live data unavailable. Showing cached snapshot from {cache_ts}.")
         if df is None or len(df) < 60:

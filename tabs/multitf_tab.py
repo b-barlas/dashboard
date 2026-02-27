@@ -135,11 +135,23 @@ def render(ctx: dict) -> None:
 
             valid_live = [r for r in rows if r["Signal"] != "NO DATA"]
             if len(valid_live) == 0:
-                rows, from_cache, cache_ts = live_or_snapshot(st, f"mtf_rows::{coin}", rows)
+                rows, from_cache, cache_ts = live_or_snapshot(
+                    st,
+                    f"mtf_rows::{coin}",
+                    rows,
+                    max_age_sec=900,
+                    current_sig=(coin,),
+                )
                 if from_cache:
                     st.warning(f"Live multi-timeframe data unavailable. Showing cached snapshot from {cache_ts}.")
             else:
-                live_or_snapshot(st, f"mtf_rows::{coin}", rows)
+                live_or_snapshot(
+                    st,
+                    f"mtf_rows::{coin}",
+                    rows,
+                    max_age_sec=900,
+                    current_sig=(coin,),
+                )
 
             # Confluence calculations
             valid = [r for r in rows if r["Signal"] != "NO DATA"]

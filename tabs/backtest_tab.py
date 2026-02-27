@@ -101,7 +101,13 @@ def render(ctx: dict) -> None:
 
     st.info("Fetching data and running comprehensive analysis...")
     df_live = fetch_ohlcv(coin, timeframe, limit)
-    df, used_cache, cache_ts = live_or_snapshot(st, f"backtest_df::{coin}::{timeframe}::{limit}", df_live)
+    df, used_cache, cache_ts = live_or_snapshot(
+        st,
+        f"backtest_df::{coin}::{timeframe}::{limit}",
+        df_live,
+        max_age_sec=1800,
+        current_sig=(coin, timeframe, limit),
+    )
     if used_cache:
         st.warning(f"Live data unavailable. Using cached snapshot from {cache_ts}.")
     if df is None or df.empty:

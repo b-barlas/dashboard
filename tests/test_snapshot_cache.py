@@ -37,6 +37,24 @@ class SnapshotCacheTests(unittest.TestCase):
         self.assertTrue(from_cache2)
         self.assertFalse(out2.empty)
 
+    def test_signature_mismatch_blocks_cache(self) -> None:
+        st = _St()
+        live_or_snapshot(st, "k", [1], current_sig=("BTC", "1h"))
+        out, from_cache, ts = live_or_snapshot(st, "k", [], current_sig=("BTC", "4h"))
+        self.assertFalse(from_cache)
+        self.assertEqual(out, [])
+        self.assertIsNone(ts)
+
+    def test_ttl_blocks_stale_cache(self) -> None:
+        st = _St()
+        live_or_snapshot(st, "k", [1], current_sig=("BTC",))
+        # Force old cache age.
+        st.session_state["k_ts_epoch"] = 0.0
+        out, from_cache, ts = live_or_snapshot(st, "k", [], max_age_sec=60, current_sig=("BTC",))
+        self.assertFalse(from_cache)
+        self.assertEqual(out, [])
+        self.assertIsNone(ts)
+
 
 if __name__ == "__main__":
     unittest.main()
