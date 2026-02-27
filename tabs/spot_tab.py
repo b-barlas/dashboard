@@ -9,6 +9,7 @@ from ui.snapshot_cache import live_or_snapshot
 
 
 def render(ctx: dict) -> None:
+    """Render the Spot Trading tab."""
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
     TEXT_MUTED = get_ctx(ctx, "TEXT_MUTED")
@@ -32,7 +33,6 @@ def render(ctx: dict) -> None:
     _wma = get_ctx(ctx, "_wma")
     _sr_lookback = get_ctx(ctx, "_sr_lookback")
     _debug = get_ctx(ctx, "_debug")
-    """Render the Spot Trading tab which allows instant analysis of a selected coin."""
     st.markdown(
         f"<h2 style='color:{ACCENT};margin-bottom:0.5rem;'>Spot Trading</h2>",
         unsafe_allow_html=True,
@@ -55,7 +55,7 @@ def render(ctx: dict) -> None:
         f"<details style='margin-bottom:0.7rem;'>"
         f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
         f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.45rem;'>"
-        f"<b>1.</b> Start with Direction + Strength + AI Ensemble + Alignment.<br>"
+        f"<b>1.</b> Start with Direction + Strength + AI Ensemble + Tech vs AI Alignment.<br>"
         f"<b>2.</b> If technical Direction and AI disagree, treat setup as weaker.<br>"
         f"<b>3.</b> Use indicator grid and snapshot for context, not standalone entry triggers."
         f"</div></details>",
@@ -86,7 +86,8 @@ def render(ctx: dict) -> None:
             st.error(f"Could not fetch data for **{coin}** on {timeframe}. The coin may not be listed on supported exchanges. Try a major pair (BTC, ETH) or check the symbol.")
             return
         # Keep analysis on closed candles for consistency with signal engine.
-        df_eval = df.iloc[:-1].copy() if len(df) > 60 else df.copy()
+        # Always analyse on closed candles; live tick may still be shown separately.
+        df_eval = df.iloc[:-1].copy()
         if df_eval is None or len(df_eval) < 55:
             st.error("Not enough closed-candle data for a stable analysis.")
             return
@@ -106,12 +107,17 @@ def render(ctx: dict) -> None:
         signal_clean = direction_label(signal_dir)
         try:
             _ai_prob_s, ai_dir_s, _ai_details_s = ml_ensemble_predict(df_eval)
-            ai_agree = float((_ai_details_s or {}).get("agreement", 0.0)) * 100.0
+            directional_agree = float((_ai_details_s or {}).get("agreement", 0.0))
+            consensus_agree = float((_ai_details_s or {}).get("consensus_agreement", 0.0))
+            vote_ratio = directional_agree if ai_dir_s in {"LONG", "SHORT"} else consensus_agree
+            ai_votes = max(0, min(3, int(round(vote_ratio * 3.0))))
+            ai_agree = vote_ratio * 100.0
         except Exception:
             ai_dir_s = "NEUTRAL"
+            ai_votes = 0
             ai_agree = 0.0
 
-        sig_dir_s = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "WAIT")
+        sig_dir_s = signal_dir if signal_dir in {"LONG", "SHORT"} else "WAIT"
         conv_lbl_s, conv_c_s = _calc_conviction(sig_dir_s, ai_dir_s, strength_score, ai_agree / 100.0)
         ai_stability = ai_stability_bucket(ai_agree / 100.0)
 
@@ -131,12 +137,12 @@ def render(ctx: dict) -> None:
             f"<div style='color:{conf_c_s}; font-size:0.85rem; font-weight:600;'>{strength_score:.0f}%</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Ensemble</div>"
-            f"<div style='color:{ai_c_s}; font-size:0.85rem; font-weight:600;'>{direction_label(ai_dir_s)}</div></div>"
+            f"<div style='color:{ai_c_s}; font-size:0.85rem; font-weight:600;'>{direction_label(ai_dir_s)} ({ai_votes}/3)</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Stability</div>"
             f"<div style='color:{ai_stab_c}; font-size:0.85rem; font-weight:600;'>{ai_stability} ({ai_agree:.0f}%)</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
-            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Alignment</div>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Tech vs AI Alignment</div>"
             f"<div style='color:{conv_c_s}; font-size:0.85rem; font-weight:600;'>{conv_lbl_s}</div></div>"
             f"</div>",
             unsafe_allow_html=True,
@@ -144,7 +150,7 @@ def render(ctx: dict) -> None:
         st.markdown(
             f"<div style='color:{TEXT_MUTED}; font-size:0.82rem; margin:0.15rem 0 0.55rem 0;'>"
             f"<b>Direction</b> = technical direction (Upside/Downside/Neutral), <b>Strength</b> = direction-agnostic signal power, "
-            f"<b>AI Stability</b> = model agreement quality, <b>Alignment</b> = technical+AI alignment."
+            f"<b>AI Stability</b> = model agreement quality, <b>Tech vs AI Alignment</b> = technical+AI alignment."
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -366,17 +372,21 @@ def render(ctx: dict) -> None:
             st.plotly_chart(volume_fig, width="stretch")
 
             # Technical snapshot
-            df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
-            df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
-            df['rsi14'] = ta.momentum.rsi(df['close'], window=14)
-            latest = df.iloc[-1]
+            snap_df = df_eval.copy()
+            snap_df['ema9'] = ta.trend.ema_indicator(snap_df['close'], window=9)
+            snap_df['ema21'] = ta.trend.ema_indicator(snap_df['close'], window=21)
+            snap_df['rsi14'] = ta.momentum.rsi(snap_df['close'], window=14)
+            snap_macd = ta.trend.MACD(snap_df['close'])
+            snap_df['macd'] = snap_macd.macd()
+            snap_df['obv'] = ta.volume.on_balance_volume(snap_df['close'], snap_df['volume'])
+            latest = snap_df.iloc[-1]
             ema9 = latest['ema9']
             ema21 = latest['ema21']
-            macd_val = df['macd'].iloc[-1]
+            macd_val = snap_df['macd'].iloc[-1]
             rsi_val = latest['rsi14']
-            _obv_back_pos = min(5, len(df) - 1)
-            obv_change = ((df['obv'].iloc[-1] - df['obv'].iloc[-_obv_back_pos]) / abs(df['obv'].iloc[-_obv_back_pos]) * 100) if (_obv_back_pos > 0 and df['obv'].iloc[-_obv_back_pos] != 0) else 0
-            recent = df.tail(_sr_lookback(timeframe))
+            _obv_back_pos = min(5, len(snap_df) - 1)
+            obv_change = ((snap_df['obv'].iloc[-1] - snap_df['obv'].iloc[-_obv_back_pos]) / abs(snap_df['obv'].iloc[-_obv_back_pos]) * 100) if (_obv_back_pos > 0 and snap_df['obv'].iloc[-_obv_back_pos] != 0) else 0
+            recent = snap_df.tail(_sr_lookback(timeframe))
             support = recent['low'].min()
             resistance = recent['high'].max()
             current_price = latest['close']

@@ -47,8 +47,7 @@ def render(ctx: dict) -> None:
             """
 If you want a clean, fast workflow, use this sequence first:
 1. **Market**: scan broad universe and shortlist
-2. **Rapid**: pick best candidate with ready action plan
-3. **Position**: execute with invalidation discipline and health checks
+2. **Position**: execute with invalidation discipline and health checks
 
 Treat the other tabs as **advanced validation tools** (optional when needed), not mandatory every trade.
             """,
@@ -224,31 +223,7 @@ Important:
             "core",
         ),
         (
-            "8) Rapid tab (fast decision feed)",
-            """
-**Rapid** is a speed-focused tab for short-horizon opportunities.
-It scans a liquid universe and ranks candidates with a single **Rapid Score (0-100)**.
-
-Rapid Score combines:
-- Strength (30%)
-- Structure quality (20%)
-- AI quality: direction fit + agreement (20%)
-- Trend quality via ADX (15%)
-- Execution quality via R:R (15%)
-- Penalty for weak/conflicting alignment
-
-Outputs:
-- Action: ENTER (Trend+AI) / ENTER (Trend-Only) / ENTER (AI-Only) / WATCH / SKIP
-- Direction, Score, Grade, Entry / SL / TP1, R:R
-- "Why now?" bullets for quick context
-- Last-50 quality tracker: ENTER rate, average best score, trend-friendly share
-
-Use Rapid for speed, then verify final execution discipline in Position tab.
-            """,
-            "core",
-        ),
-        (
-            "9) Spot and Position tabs",
+            "8) Spot and Position tabs",
             """
 **Spot tab**:
 - Single-coin deep analysis for non-leveraged decisions
@@ -267,7 +242,7 @@ Both use Ensemble AI for directional confirmation.
             "core",
         ),
         (
-            "10) Screener tab",
+            "9) Screener tab",
             """
 Screener scans predefined liquid symbols with filters:
 - Min strength
@@ -282,7 +257,7 @@ Use this to shortlist candidates, then validate in Spot/Position/Fibonacci.
             "core",
         ),
         (
-            "11) Fibonacci, Monte Carlo, Risk Analytics",
+            "10) Fibonacci, Monte Carlo, Risk Analytics",
             """
 **Fibonacci tab**:
 - Retracement/extension levels
@@ -303,7 +278,7 @@ Use this to shortlist candidates, then validate in Spot/Position/Fibonacci.
             "core",
         ),
         (
-            "12) Backtest tab",
+            "11) Backtest tab",
             """
 Backtest replays strategy logic on historical candles:
 - Entry by signal+strength rules
@@ -321,7 +296,7 @@ A high win rate with bad drawdown is not necessarily good.
             "risk",
         ),
         (
-            "13) Tools tab (risk/reward + liquidation)",
+            "12) Tools tab (risk/reward + liquidation)",
             """
 Tools help pre-trade planning:
 - Risk/Reward calculator
@@ -338,7 +313,7 @@ Always define risk before entry:
             "risk",
         ),
         (
-            "14) Correlation, Sessions, Heatmap, Whale",
+            "13) Correlation, Sessions, Heatmap, Whale",
             """
 - **Correlation**: co-movement matrix for diversification
 - **Sessions**: behavior by Asia/Europe/US market windows
@@ -350,7 +325,7 @@ These tabs help with **context**, not standalone entries.
             "info",
         ),
         (
-            "15) Leverage guidance",
+            "14) Leverage guidance",
             """
 Leverage suggestions are ceilings, not targets.
 Use lower leverage when:
@@ -366,7 +341,7 @@ Best practice:
             "risk",
         ),
         (
-            "16) Data sources and UK-safe policy",
+            "15) Data sources and UK-safe policy",
             """
 Primary exchange fallback list is intentionally UK-safe for this setup:
 - Kraken
@@ -389,14 +364,13 @@ Enrichment fields (for example Market Cap) may show as `—` in exchange-only mo
 Cache policy:
 - Market tab: cached snapshot is used only for the **same timeframe/filter signature**
   (stale cache from another setting is intentionally blocked).
-- Rapid tab: same signature guard is applied.
 - Other analysis tabs: live-or-snapshot fallback is used with TTL guards.
   Typical cache TTL is 15 minutes for live analysis tabs and 30 minutes for backtest frames.
             """,
             "info",
         ),
         (
-            "17) How to run with Streamlit",
+            "16) How to run with Streamlit",
             """
 Run locally:
 1. Install dependencies from `requirements.txt`
@@ -410,16 +384,15 @@ If data looks stale:
             "info",
         ),
         (
-            "18) Practical workflow (recommended)",
+            "17) Practical workflow (recommended)",
             """
 Recommended daily flow:
 1. Market tab: check regime + scanner shortlist
-2. Rapid tab: check ENTER candidates and pre-built plans
-3. Spot: validate setup and read the Action Plan
-4. Position: if already in trade, follow Technical Invalidation + decision model first
-5. Fibonacci/Risk: validate structure and downside risk
-6. Tools: confirm R:R and liquidation distance
-7. Backtest: validate settings before using new setup live
+2. Spot: validate setup and read the Action Plan
+3. Position: if already in trade, follow Technical Invalidation + decision model first
+4. Fibonacci/Risk: validate structure and downside risk
+5. Tools: confirm R:R and liquidation distance
+6. Backtest: validate settings before using new setup live
 
 Quick rule:
 - If Direction/AI conflict and Health says REDUCE or EXIT, reduce risk first.
@@ -428,7 +401,7 @@ Quick rule:
             "core",
         ),
         (
-            "19) Limitations and responsibility",
+            "18) Limitations and responsibility",
             """
 No model can predict news shocks, listing events, outages, or sudden regime breaks.
 Treat all outputs as probabilistic guidance.
@@ -444,7 +417,7 @@ This dashboard is **not financial advice**.
             "warn",
         ),
         (
-            "20) Quick Smoke Checklist (before daily use)",
+            "19) Quick Smoke Checklist (before daily use)",
             """
 Use this 60-second checklist:
 
@@ -456,24 +429,20 @@ Use this 60-second checklist:
 - Analyse runs and shows Direction + Strength + AI + Tech vs AI Alignment
 - Spot Action Plan appears
 
-3. **Rapid tab**
-- Rapid table loads with Action / Direction / Score / Entry-SL-TP columns
-- If no qualified rows, near-miss watchlist appears
-
-4. **Position tab**
+3. **Position tab**
 - Raw/Levered PnL and Net PnL render correctly
 - Technical Invalidation line is visible
 - Excel report downloads without resetting analysis view
 
-5. **AI Lab**
+4. **AI Lab**
 - Predict fills timeframe matrix
 - Plan Entry / Plan Target / Plan Source columns populate logically
 - AI Entry / Non-AI Entry appear in debug diagnostics
 
-6. **Fallback check**
+5. **Fallback check**
 - If enrichment fails, Market shows **EXCHANGE-ONLY MODE** and core trade columns still render
 - If live endpoint fails, cached snapshot warning with UTC timestamp appears
-- Market/Rapid should not reuse stale snapshot from a different timeframe/filter
+- Market should not reuse stale snapshot from a different timeframe/filter
             """,
             "info",
         ),

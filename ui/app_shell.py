@@ -26,8 +26,7 @@ def render_app(deps: dict) -> None:
             "border:1px solid rgba(0,212,255,0.25); border-radius:8px; padding:8px; margin-bottom:8px;'>"
             "<b style='color:#00D4FF;'>Core Workflow</b><br>"
             "1) Market: scan universe<br>"
-            "2) Rapid: pick best setup<br>"
-            "3) Position: execute/manage"
+            "2) Position: execute/manage"
             "</div>",
             unsafe_allow_html=True,
         )

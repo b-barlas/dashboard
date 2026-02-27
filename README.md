@@ -41,7 +41,7 @@ This runs:
 After deploy/reboot, validate:
 
 1. `Market` tab: scan loads with non-empty rows.
-2. `Rapid ⚡` tab: timeframe switch still returns candidates/near-miss.
+2. `Market` tab: timeframe switch still returns candidates and action-ready rows.
 3. `Position` tab: changing coin updates current/entry context correctly.
 4. `Backtest` tab: at least one symbol+timeframe can produce trades with a sensible threshold.
 5. Cache warnings: if any tab shows cached snapshot warning, do not execute directly without fresh live confirmation.

@@ -70,7 +70,7 @@ def render(ctx: dict) -> None:
             if df is None or len(df) < 60:
                 st.error("Not enough data.")
                 return
-            # Keep inference consistent with Market/Rapid/Spot by using closed-candle context.
+            # Keep inference consistent with Market/Spot/Position by using closed-candle context.
             df_eval = df.iloc[:-1].copy() if len(df) > 60 else df.copy()
             if df_eval is None or len(df_eval) < 55:
                 st.error("Not enough closed-candle data.")

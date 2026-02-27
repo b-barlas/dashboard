@@ -83,7 +83,7 @@ def render(ctx: dict) -> None:
             if plan_entry > 0:
                 st.session_state["position_entry_input"] = plan_entry
             st.session_state["position_prefill_note"] = (
-                f"Loaded from {prefill.get('source', 'Rapid')}: "
+                f"Loaded from {prefill.get('source', 'Scanner')}: "
                 f"{plan_coin} {plan_dir} | Entry {plan_entry:.6f} | "
                 f"SL {prefill.get('sl', 'N/A')} | TP1 {prefill.get('tp1', 'N/A')}"
             )
@@ -113,7 +113,7 @@ def render(ctx: dict) -> None:
         except Exception:
             continue
 
-    # Auto-refresh entry field when coin changes (unless value was prefilled from Rapid plan).
+    # Auto-refresh entry field when coin changes (unless value was prefilled from scanner plan).
     prev_coin = str(st.session_state.get("position_last_coin", "")).strip().upper()
     if coin and coin != prev_coin and default_entry_price > 0:
         st.session_state["position_entry_input"] = float(default_entry_price)
