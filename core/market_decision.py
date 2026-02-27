@@ -5,20 +5,20 @@ from __future__ import annotations
 from math import isnan
 
 
-def setup_badge(scalp_dir: str, signal_dir: str, ai_dir: str) -> str:
+def structure_state(scalp_dir: str, signal_dir: str, ai_dir: str) -> str:
     if scalp_dir and signal_dir in {"LONG", "SHORT"} and signal_dir == ai_dir == scalp_dir:
-        return "🟢 Aligned"
+        return "FULL"
     if scalp_dir and signal_dir in {"LONG", "SHORT"} and signal_dir == scalp_dir and ai_dir == "NEUTRAL":
-        return "🟡 Tech-Only"
+        return "TREND"
     if scalp_dir:
-        return "⚪ Draft"
-    return "🔴 No Setup"
+        return "EARLY"
+    return "NONE"
 
 
 def action_decision(
     signal_dir: str,
     strength: float,
-    setup_badge_val: str,
+    structure_state_val: str,
     conviction_label: str,
     agreement: float,
     adx_val: float,
@@ -60,7 +60,7 @@ def action_decision(
     )
     # Controlled technical-only path to avoid neutral lock when trend and strength are exceptional.
     enter_tech_only = (
-        conviction_label == "TECH-ONLY"
+        conviction_label == "TREND"
         and adx_f >= 24
         and strength >= 72
     )
@@ -70,7 +70,7 @@ def action_decision(
         adx_f >= 16
         and agreement >= 0.80
         and strength >= 45
-        and conviction_label in {"LOW", "MEDIUM"}
+        and conviction_label in {"WEAK", "MEDIUM"}
     )
 
     if enter_trend_ai:
@@ -84,7 +84,7 @@ def action_decision(
 
 def trade_quality(
     action: str,
-    setup_badge_val: str,
+    structure_state_val: str,
     conviction_label: str,
     strength: float,
     agreement: float,
@@ -92,11 +92,11 @@ def trade_quality(
 ) -> str:
     if conviction_label == "CONFLICT":
         return "🔴 C"
-    if "ENTER" in action and "Aligned" in setup_badge_val and strength >= 60 and agreement >= 0.65 and rr_ratio >= 1.5:
+    if "ENTER" in action and structure_state_val == "FULL" and strength >= 60 and agreement >= 0.65 and rr_ratio >= 1.5:
         return "🟢 A"
     if (
         ("ENTER" in action or "WATCH" in action)
-        and "No Setup" not in setup_badge_val
+        and structure_state_val != "NONE"
         and conviction_label != "CONFLICT"
         and strength >= 45
         and agreement >= 0.55

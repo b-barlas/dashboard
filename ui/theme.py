@@ -104,20 +104,20 @@ def calc_conviction(
     s = float(strength)
 
     if sdir not in {"LONG", "SHORT"}:
-        return "LOW", TEXT_MUTED
+        return "WEAK", TEXT_MUTED
     if adir in {"LONG", "SHORT"} and sdir != adir:
         return "CONFLICT", NEGATIVE
     if adir == "NEUTRAL":
         if s >= 70:
-            return "TECH-ONLY", WARNING
-        return "LOW", TEXT_MUTED
+            return "TREND", WARNING
+        return "WEAK", TEXT_MUTED
     if adir in {"LONG", "SHORT"} and sdir == adir:
         if s >= 72 and agree >= 0.67:
             return "HIGH", POSITIVE
         if s >= 60 and agree >= 0.50:
             return "MEDIUM", WARNING
-        return "LOW", TEXT_MUTED
-    return "LOW", TEXT_MUTED
+        return "WEAK", TEXT_MUTED
+    return "WEAK", TEXT_MUTED
 
 
 def _is_nan(value: float) -> bool:

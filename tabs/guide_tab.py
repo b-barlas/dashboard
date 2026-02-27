@@ -217,8 +217,9 @@ Important:
 	Tech vs AI Alignment is based on Direction + AI directional agreement + strength quality.
 	Common labels:
 	- HIGH / MEDIUM: direction and AI agree with enough model support
-	- TECH-ONLY: technical side is strong but AI stays neutral
-- CONFLICT: technical and AI directions oppose each other
+	- TREND: technical side is strong but AI stays neutral
+	- WEAK: weak confirmation quality
+	- CONFLICT: technical and AI directions oppose each other
             """,
             "core",
         ),
@@ -230,7 +231,7 @@ It scans a liquid universe and ranks candidates with a single **Rapid Score (0-1
 
 Rapid Score combines:
 - Strength (30%)
-- Setup quality (20%)
+- Structure quality (20%)
 - AI quality: direction fit + agreement (20%)
 - Trend quality via ADX (15%)
 - Execution quality via R:R (15%)

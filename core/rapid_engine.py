@@ -8,14 +8,14 @@ import pandas as pd
 from core.rapid_config import DEFAULT_RAPID_CONFIG, RapidConfig
 
 
-def setup_badge(scalp_dir: str, signal_dir: str, ai_dir: str) -> str:
+def structure_state(scalp_dir: str, signal_dir: str, ai_dir: str) -> str:
     if scalp_dir and signal_dir in {"LONG", "SHORT"} and signal_dir == ai_dir == scalp_dir:
-        return "Aligned"
+        return "FULL"
     if scalp_dir and signal_dir in {"LONG", "SHORT"} and signal_dir == scalp_dir and ai_dir == "NEUTRAL":
-        return "Tech-Only"
+        return "TREND"
     if scalp_dir:
-        return "Draft"
-    return "No Setup"
+        return "EARLY"
+    return "NONE"
 
 
 def grade_from_score(score: float) -> str:
@@ -32,7 +32,7 @@ def compute_rapid_score(
     *,
     signal_dir: str,
     strength: float,
-    setup: str,
+    structure: str,
     conviction_label: str,
     ai_dir: str,
     agreement: float,
@@ -47,7 +47,7 @@ def compute_rapid_score(
         return 5.0
 
     strength_score = max(0.0, min(100.0, float(strength)))
-    setup_score = {"Aligned": 100.0, "Tech-Only": 72.0, "Draft": 45.0}.get(setup, 0.0)
+    setup_score = {"FULL": 100.0, "TREND": 72.0, "EARLY": 45.0}.get(structure, 0.0)
 
     ai_align = 100.0 if ai_dir == signal_dir else (60.0 if ai_dir == "NEUTRAL" else 15.0)
     ai_score = 0.55 * ai_align + 0.45 * max(0.0, min(100.0, agreement * 100.0))
@@ -70,7 +70,7 @@ def compute_rapid_score(
     conv_penalty = 0.0
     if conviction_label == "CONFLICT":
         conv_penalty = cfg.score_penalty_conflict
-    elif conviction_label in {"LOW", "TECH-ONLY"}:
+    elif conviction_label in {"WEAK", "TREND"}:
         conv_penalty = cfg.score_penalty_low_conviction
 
     # Extra penalty when AI is explicitly opposite and highly certain (3/3-like agreement).
@@ -92,7 +92,7 @@ def decide_action(
     *,
     signal_dir: str,
     strength: float,
-    setup: str,
+    structure: str,
     conviction_label: str,
     ai_dir: str,
     score: float,
@@ -105,7 +105,7 @@ def decide_action(
         return "WAIT"
     if float(strength) < 25.0:
         return "SKIP"
-    if setup == "No Setup" or conviction_label == "CONFLICT":
+    if structure == "NONE" or conviction_label == "CONFLICT":
         return "SKIP"
     if ai_dir not in {signal_dir, "NEUTRAL"}:
         return "WAIT"

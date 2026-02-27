@@ -5,7 +5,7 @@ import html
 
 import pandas as pd
 import plotly.graph_objs as go
-from core.market_decision import action_decision, setup_badge, trade_quality
+from core.market_decision import action_decision, structure_state, trade_quality
 from core.signal_contract import strength_from_bias, strength_bucket
 from core.metric_catalog import (
     AI_LONG_THRESHOLD,
@@ -453,11 +453,11 @@ def render(ctx: dict) -> None:
 
     def _style_setup(v: str) -> str:
         s = str(v)
-        if "Aligned" in s:
+        if "FULL" in s:
             return f"color:{POSITIVE}; font-weight:700;"
-        if "Tech-Only" in s:
+        if "TREND" in s:
             return f"color:{WARNING}; font-weight:700;"
-        if "No Setup" in s:
+        if "NONE" in s:
             return f"color:{NEGATIVE}; font-weight:700;"
         return f"color:{TEXT_MUTED}; font-weight:600;"
 
@@ -659,12 +659,12 @@ def render(ctx: dict) -> None:
         if any(
             k in s
             for k in [
-                "SKIP", "SHORT", "DOWNSIDE", "CONFLICT", "NO SETUP", "WEAK", "BEARISH",
+                "SKIP", "SHORT", "DOWNSIDE", "CONFLICT", "WEAK", "BEARISH",
                 "OVERBOUGHT", "BELOW", "NEAR TOP",
             ]
         ):
             return "neg"
-        if any(k in s for k in ["WATCH", "WAIT", "MIXED", "DRAFT", "TECH-ONLY", "NEUTRAL", "MEDIUM", "STARTING", "MODERATE", "SPIKE"]):
+        if any(k in s for k in ["WATCH", "WAIT", "MIXED", "EARLY", "TREND", "NEUTRAL", "MEDIUM", "STARTING", "MODERATE", "SPIKE"]):
             return "warn"
         return neutral_tone
 
@@ -708,9 +708,9 @@ def render(ctx: dict) -> None:
                 return "pos"
             if "MEDIUM" in s:
                 return "warn"
-            if "TECH-ONLY" in s:
+            if "TREND" in s:
                 return "warn"
-            if "LOW" in s or "CONFLICT" in s:
+            if "WEAK" in s or "CONFLICT" in s:
                 return "neg"
             return "muted"
 
@@ -773,7 +773,7 @@ def render(ctx: dict) -> None:
             return "warn"
 
         if col in {"Bollinger", "Stochastic RSI", "Williams %R", "CCI"}:
-            if "OVERSOLD" in s or "NEAR BOTTOM" in s or "LOW" in s:
+            if "OVERSOLD" in s or "NEAR BOTTOM" in s:
                 return "pos"
             if "OVERBOUGHT" in s or "NEAR TOP" in s or "HIGH" in s:
                 return "neg"
@@ -1140,8 +1140,8 @@ def render(ctx: dict) -> None:
                 consensus_votes = max(0, min(3, int(round(float(vote_ratio) * 3.0))))
                 ai_display = f"{ai_display} ({consensus_votes}/3)"
 
-                _emoji_map = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "⚪", "CONFLICT": "🔴"}
-                setup_badge_val = setup_badge(scalp_direction or "", signal_direction, ai_direction)
+                _emoji_map = {"HIGH": "🟢", "MEDIUM": "🟡", "TREND": "🟡", "WEAK": "⚪", "CONFLICT": "🔴"}
+                structure_val = structure_state(scalp_direction or "", signal_direction, ai_direction)
                 strength_val = float(strength_from_bias(float(bias_score_v)))
                 _conv_lbl, _conv_clr = _calc_conviction(
                     signal_direction,
@@ -1154,14 +1154,14 @@ def render(ctx: dict) -> None:
                 action = action_decision(
                     signal_direction,
                     strength_val,
-                    setup_badge_val,
+                    structure_val,
                     str(_conv_lbl),
                     float(agreement),
                     float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
                 )
                 trade_quality_val = trade_quality(
                     action,
-                    setup_badge_val,
+                    structure_val,
                     str(_conv_lbl),
                     strength_val,
                     float(agreement),
@@ -1178,7 +1178,7 @@ def render(ctx: dict) -> None:
                     'Strength': _strength_badge(float(bias_score_v)),
                     'AI Ensemble': ai_display,
                     'Tech vs AI Alignment': conviction,
-                    'Setup': setup_badge_val,
+                    '__structure_state': structure_val,
                     'Scalp Opportunity': direction_label(scalp_direction or ""),
                     'Entry Price': _fmt_price(entry_price) if entry_price else '',
                     'Stop Loss': _fmt_price(stop_s) if stop_s else '',
@@ -1213,7 +1213,7 @@ def render(ctx: dict) -> None:
                         _debug(f"Scanner error for {futures[future]}: {e}")
 
             prev_results = st.session_state.get("market_scan_results", [])
-            # Sort by execution priority: Action > Setup > Strength
+            # Sort by execution priority: Action > Structure > Strength
             def _action_rank(v: str) -> int:
                 s = str(v or "").upper()
                 if "ENTER" in s:
@@ -1223,12 +1223,12 @@ def render(ctx: dict) -> None:
                 if "SKIP" in s:
                     return 1
                 return 0
-            setup_rank = {"🟢 Aligned": 4, "🟡 Tech-Only": 3, "⚪ Draft": 2, "🔴 No Setup": 1}
+            setup_rank = {"FULL": 4, "TREND": 3, "EARLY": 2, "NONE": 1}
             fresh_results = sorted(
                 fresh_results,
                 key=lambda x: (
                     _action_rank(str(x.get("Action"))),
-                    setup_rank.get(str(x.get("Setup")), 0),
+                    setup_rank.get(str(x.get("__structure_state")), 0),
                     float(x.get("__strength_val", 0.0)),
                 ),
                 reverse=True,
@@ -1342,7 +1342,7 @@ def render(ctx: dict) -> None:
             "<b>Direction</b>: expected side (Upside / Downside / Neutral).<br>"
             "<b>Strength</b>: 0-100 edge power from technical engine (direction-agnostic).<br>"
             "<b>AI Ensemble</b>: AI side + model vote support (x/3).<br>"
-            "<b>Tech vs AI Alignment</b>: agreement quality between technical side and AI side (HIGH/MEDIUM/LOW/CONFLICT).<br>"
+            "<b>Tech vs AI Alignment</b>: agreement quality between technical side and AI side (HIGH/MEDIUM/TREND/WEAK/CONFLICT).<br>"
             "<b>R:R</b>: risk/reward estimate from planned stop-target geometry.<br>"
             "<b>Entry Price</b>: proposed entry level from setup engine.<br>"
             "<b>Stop Loss</b>: invalidation level for risk control.<br>"
@@ -1441,7 +1441,7 @@ def render(ctx: dict) -> None:
 
         q1, q2, q3, q4 = st.columns(4, gap="small")
         with q1:
-            status_head = f"{enter_count} Enter Ready" if enter_count > 0 else "No Enter Setup"
+            status_head = f"{enter_count} Enter Ready" if enter_count > 0 else "No Enter Candidate"
             status_sub = f"ENTER {enter_count} • WATCH {watch_count} • SKIP {skip_count}"
             st.markdown(
                 "<div class='elite-card'>"

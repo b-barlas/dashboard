@@ -6,23 +6,23 @@ from core.rapid_engine import (
     compute_rapid_score,
     decide_action,
     grade_from_score,
-    setup_badge,
+    structure_state,
     summarize_quality_history,
 )
 
 
 class RapidEngineTests(unittest.TestCase):
-    def test_setup_badge(self) -> None:
-        self.assertEqual(setup_badge("LONG", "LONG", "LONG"), "Aligned")
-        self.assertEqual(setup_badge("LONG", "LONG", "NEUTRAL"), "Tech-Only")
-        self.assertEqual(setup_badge("LONG", "SHORT", "LONG"), "Draft")
-        self.assertEqual(setup_badge("", "LONG", "LONG"), "No Setup")
+    def test_structure_state(self) -> None:
+        self.assertEqual(structure_state("LONG", "LONG", "LONG"), "FULL")
+        self.assertEqual(structure_state("LONG", "LONG", "NEUTRAL"), "TREND")
+        self.assertEqual(structure_state("LONG", "SHORT", "LONG"), "EARLY")
+        self.assertEqual(structure_state("", "LONG", "LONG"), "NONE")
 
-    def test_score_prefers_aligned_quality(self) -> None:
+    def test_score_prefers_high_structure_quality(self) -> None:
         hi = compute_rapid_score(
             signal_dir="LONG",
             strength=78,
-            setup="Aligned",
+            structure="FULL",
             conviction_label="HIGH",
             ai_dir="LONG",
             agreement=0.80,
@@ -33,8 +33,8 @@ class RapidEngineTests(unittest.TestCase):
         lo = compute_rapid_score(
             signal_dir="LONG",
             strength=55,
-            setup="Draft",
-            conviction_label="LOW",
+            structure="EARLY",
+            conviction_label="WEAK",
             ai_dir="SHORT",
             agreement=0.30,
             adx=14.0,
@@ -48,7 +48,7 @@ class RapidEngineTests(unittest.TestCase):
             decide_action(
                 signal_dir="LONG",
                 strength=72,
-                setup="Aligned",
+                structure="FULL",
                 conviction_label="HIGH",
                 ai_dir="LONG",
                 score=82,
@@ -60,7 +60,7 @@ class RapidEngineTests(unittest.TestCase):
             decide_action(
                 signal_dir="LONG",
                 strength=58,
-                setup="Tech-Only",
+                structure="TREND",
                 conviction_label="MEDIUM",
                 ai_dir="NEUTRAL",
                 score=68,
@@ -72,7 +72,7 @@ class RapidEngineTests(unittest.TestCase):
             decide_action(
                 signal_dir="LONG",
                 strength=75,
-                setup="No Setup",
+                structure="NONE",
                 conviction_label="CONFLICT",
                 ai_dir="SHORT",
                 score=80,

@@ -101,7 +101,7 @@ def compute_health_decision(
     if conviction_label == "CONFLICT":
         health_score -= 25
         notes.append("AI conflict")
-    elif conviction_label == "LOW":
+    elif conviction_label == "WEAK":
         health_score -= 15
         notes.append("low conviction")
     elif conviction_label == "MEDIUM":

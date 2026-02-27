@@ -149,7 +149,7 @@ def render(ctx: dict) -> None:
             df_ret = pd.concat(returns_dict.values(), axis=1, join="inner").dropna()
             if len(df_ret) < 20:
                 st.error(
-                    "Aligned data is too short to produce a stable matrix. Try fewer custom coins or a higher timeframe."
+                    "Matched data is too short to produce a stable matrix. Try fewer custom coins or a higher timeframe."
                 )
                 return
 
@@ -214,7 +214,7 @@ def render(ctx: dict) -> None:
             st.markdown(
                 f"<div class='corr-kpi-grid'>"
                 f"<div class='corr-kpi'><div class='corr-kpi-label'>Method</div><div class='corr-kpi-value'>{corr_method.title()}</div></div>"
-                f"<div class='corr-kpi'><div class='corr-kpi-label'>Aligned Samples</div><div class='corr-kpi-value'>{len(df_ret)}</div></div>"
+                f"<div class='corr-kpi'><div class='corr-kpi-label'>Matched Samples</div><div class='corr-kpi-value'>{len(df_ret)}</div></div>"
                 f"<div class='corr-kpi'><div class='corr-kpi-label'>Pair Count</div><div class='corr-kpi-value'>{pair_count}</div></div>"
                 f"<div class='corr-kpi'><div class='corr-kpi-label'>Avg |Corr|</div><div class='corr-kpi-value'>{avg_abs_corr:.2f}</div></div>"
                 f"</div>",

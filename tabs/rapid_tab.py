@@ -10,7 +10,7 @@ from core.rapid_engine import (
     compute_rapid_score,
     decide_action,
     grade_from_score,
-    setup_badge,
+    structure_state,
     summarize_quality_history,
 )
 from ui.ctx import get_ctx
@@ -67,9 +67,9 @@ def render(ctx: dict) -> None:
         ss = str(setup or "")
         aa = str(align or "")
         if vv == "READY":
-            if ss == "Aligned" and aa in {"High", "Medium"}:
+            if ss == "FULL" and aa in {"HIGH", "MEDIUM"}:
                 return "ENTER (Trend+AI)"
-            if ss == "Tech-Only" or aa == "Tech-Only":
+            if ss == "TREND" or aa == "TREND":
                 return "ENTER (Trend-Only)"
             return "ENTER (AI-Only)"
         if vv == "WAIT":
@@ -79,27 +79,6 @@ def render(ctx: dict) -> None:
     def _dir_badge(v: str) -> str:
         return direction_label(v)
 
-    def _setup_icon(v: str) -> str:
-        if v == "Aligned":
-            return "Aligned"
-        if v == "Tech-Only":
-            return "Tech-Only"
-        if v == "Draft":
-            return "Draft"
-        return "No Setup"
-
-    def _conv_icon(v: str) -> str:
-        if v == "HIGH":
-            return "High"
-        if v == "MEDIUM":
-            return "Medium"
-        if v == "TECH-ONLY":
-            return "Tech-Only"
-        if v == "LOW":
-            return "Low"
-        if v == "CONFLICT":
-            return "Conflict"
-        return v
 
     def _adx_icon(v) -> str:
         if v is None or pd.isna(v):
@@ -111,9 +90,9 @@ def render(ctx: dict) -> None:
 
     def _chip_class(value: str) -> str:
         v = str(value or "")
-        if "ENTER" in v.upper() or v in {"READY", "LONG", "Aligned", "High"}:
+        if "ENTER" in v.upper() or v in {"READY", "LONG", "FULL", "HIGH"}:
             return "elite-chip-positive"
-        if v in {"WAIT", "Tech-Only", "Medium", "WATCH"}:
+        if v in {"WAIT", "TREND", "MEDIUM", "WATCH"}:
             return "elite-chip-warning"
         return "elite-chip-negative"
 
@@ -127,8 +106,8 @@ def render(ctx: dict) -> None:
             for j, row in enumerate(chunk):
                 action = str(row.get("Action", "SKIP"))
                 direction = str(row.get("Direction", "NEUTRAL"))
-                setup = str(row.get("Setup", "No Setup"))
-                align = str(row.get("Alignment", "Low"))
+                setup = str(row.get("Setup", "NONE"))
+                align = str(row.get("Alignment", "WEAK"))
                 score = float(row.get("Score", 0.0))
                 strength = float(row.get("Strength", 0.0))
                 ai_agree = str(row.get("AI Agree", "0/3"))
@@ -140,13 +119,11 @@ def render(ctx: dict) -> None:
                 rr = str(row.get("R:R", "N/A"))
                 coin = str(row.get("Coin", "N/A"))
                 why = row.get("Why", []) or []
-                why_line = " | ".join([str(x) for x in why[:2]]) if why else "Await stronger alignment confirmation."
+                why_line = " | ".join([str(x) for x in why[:2]]) if why else "Await stronger confirmation."
 
                 action_view = _action_badge(action, setup, align)
                 action_chip = _chip_class(action_view)
                 direction_chip = "elite-chip-positive" if direction == "LONG" else ("elite-chip-negative" if direction == "SHORT" else "elite-chip-warning")
-                setup_chip = _chip_class(setup)
-                align_chip = _chip_class(align.title())
                 score_color = POSITIVE if score >= 75 else (WARNING if score >= 62 else NEGATIVE)
                 score_fill = max(0, min(100, int(round(score))))
                 try:
@@ -166,8 +143,7 @@ def render(ctx: dict) -> None:
                         f"</div>"
                         f"<div class='rapid-watch-chip-row'>"
                         f"<span class='elite-chip {direction_chip}'>{_dir_badge(direction)}</span>"
-                        f"<span class='elite-chip {setup_chip}'>{setup}</span>"
-                        f"<span class='elite-chip {align_chip}'>{align}</span>"
+                        f"<span class='elite-chip elite-chip-warning'>Strength {strength:.0f}%</span>"
                         f"</div>"
                         f"<div style='display:flex; justify-content:space-between; color:{TEXT_MUTED}; font-size:0.78rem;'>"
                         f"<span>Score {score:.0f}</span><span>Strength {strength:.0f}%</span>"
@@ -203,14 +179,14 @@ def render(ctx: dict) -> None:
         f"<details style='margin:0.35rem 0 0.7rem 0;'>"
         f"<summary style='color:{ACCENT}; cursor:pointer;'>How Rapid Score Works</summary>"
         f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:0.45rem;'>"
-        f"<b>Score (0-100)</b> is a weighted setup-quality score:<br>"
+        f"<b>Score (0-100)</b> is a weighted execution-readiness score:<br>"
         f"• Strength: <b>30%</b><br>"
-        f"• Setup quality (Aligned/Tech-Only/Draft): <b>20%</b><br>"
+        f"• Structure quality (internal): <b>20%</b><br>"
         f"• AI quality (direction fit + agreement): <b>20%</b><br>"
         f"• Trend quality (ADX): <b>15%</b><br>"
         f"• Execution quality (R:R): <b>15%</b><br>"
-        f"• Alignment conflict/low gets penalty.<br>"
-        f"Higher score means cleaner and more actionable setup quality."
+        f"• Direction conflict and weak confirmation get penalties.<br>"
+        f"Higher score means cleaner and more actionable execution quality."
         f"</div></details>",
         unsafe_allow_html=True,
     )
@@ -303,7 +279,7 @@ def render(ctx: dict) -> None:
                         a.volume_spike,
                         strict_mode=True,
                     )
-                    setup = setup_badge(scalp_dir or "", signal_dir, ai_dir)
+                    structure = structure_state(scalp_dir or "", signal_dir, ai_dir)
                     has_plan = bool(entry and target and stop and rr_ratio)
                     rr = float(rr_ratio or 0.0)
 
@@ -311,7 +287,7 @@ def render(ctx: dict) -> None:
                         score = compute_rapid_score(
                             signal_dir=trade_dir,
                             strength=strength,
-                            setup=setup,
+                            structure=structure,
                             conviction_label=str(_conv_lbl),
                             ai_dir=ai_dir,
                             agreement=agreement,
@@ -323,7 +299,7 @@ def render(ctx: dict) -> None:
                         action = decide_action(
                             signal_dir=trade_dir,
                             strength=strength,
-                            setup=setup,
+                            structure=structure,
                             conviction_label=str(_conv_lbl),
                             ai_dir=ai_dir,
                             score=score,
@@ -332,7 +308,7 @@ def render(ctx: dict) -> None:
                         )
                     else:
                         # Relaxed scoring path: keep near-miss candidates visible instead of blank screen.
-                        setup_boost = 18.0 if setup == "Aligned" else (10.0 if setup in {"Tech-Only", "Draft"} else 0.0)
+                        setup_boost = 18.0 if structure == "FULL" else (10.0 if structure in {"TREND", "EARLY"} else 0.0)
                         trend_boost = 10.0 if (pd.notna(adx) and float(adx) >= cfg.trend_adx_weak) else 0.0
                         neutral_score = (
                             0.55 * float(strength)
@@ -345,8 +321,8 @@ def render(ctx: dict) -> None:
                     base = sym.split("/")[0].upper()
                     last_price = float(df["close"].iloc[-1])
                     why_now = []
-                    if setup == "Aligned":
-                        why_now.append("Setup is fully aligned")
+                    if structure == "FULL":
+                        why_now.append("Trend and AI confirmations align")
                     vote_ratio = agreement if ai_dir in {"LONG", "SHORT"} else consensus_agreement
                     votes = max(0, min(3, int(round(float(vote_ratio) * 3.0))))
                     if agreement >= 0.65:
@@ -356,7 +332,7 @@ def render(ctx: dict) -> None:
                     if rr >= 1.5:
                         why_now.append(f"Risk/reward is acceptable ({rr:.2f})")
                     if not why_now:
-                        why_now.append("Partial alignment only; requires tighter confirmation")
+                        why_now.append("Confirmation is partial; wait for stronger evidence")
 
                     return {
                         "Symbol": sym,
@@ -367,7 +343,7 @@ def render(ctx: dict) -> None:
                         "Score": round(score, 1),
                         "Grade": grade_from_score(score),
                         "Strength": round(strength, 1),
-                        "Setup": setup,
+                        "Setup": structure,
                         "Alignment": str(_conv_lbl),
                         "AI Direction": ai_dir,
                         "AI Agree": f"{votes}/3",
@@ -495,7 +471,7 @@ def render(ctx: dict) -> None:
         if df.empty:
             return df
         df = df[
-            ["Coin", "Action", "Direction", "Score", "Grade", "Strength", "Setup", "Alignment", "AI Direction", "AI Agree", "ADX", "Entry", "SL", "TP1", "R:R"]
+            ["Coin", "Action", "Direction", "Score", "Grade", "Strength", "AI Direction", "AI Agree", "ADX", "Entry", "SL", "TP1", "R:R"]
         ]
         df["Action"] = df.apply(
             lambda r: _action_badge(str(r.get("Action", "")), str(r.get("Setup", "")), str(r.get("Alignment", ""))),
@@ -503,8 +479,6 @@ def render(ctx: dict) -> None:
         )
         df["Direction"] = df["Direction"].map(_dir_badge)
         df["Grade"] = df["Grade"].map(_grade_icon)
-        df["Setup"] = df["Setup"].map(_setup_icon)
-        df["Alignment"] = df["Alignment"].map(_conv_icon)
         df["AI Direction"] = df["AI Direction"].map(_dir_badge)
         df["ADX"] = df["ADX"].map(_adx_icon)
         return df
@@ -514,7 +488,7 @@ def render(ctx: dict) -> None:
         st.markdown(
             f"<div class='elite-hero' style='border-color:rgba(255,209,102,0.35);'>"
             f"<div class='elite-hero-title' style='color:{WARNING};'>Watch Mode</div>"
-            f"<div class='elite-sub'>No qualified rapid setup right now. Monitor near-miss candidates and wait for stronger alignment.</div>"
+            f"<div class='elite-sub'>No qualified rapid candidate right now. Monitor near-miss list and wait for stronger confirmation.</div>"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -529,7 +503,7 @@ def render(ctx: dict) -> None:
             f"<details style='margin-top:0.45rem;'><summary style='color:{ACCENT}; cursor:pointer;'>Column Guide</summary>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.83rem; line-height:1.7; margin-top:0.45rem;'>"
             f"<b>Action</b>: final quick class (ENTER (Trend+AI) / ENTER (Trend-Only) / ENTER (AI-Only) / WATCH / SKIP). "
-            f"<b>Score</b>: setup quality 0-100. <b>Setup</b>/<b>Alignment</b>: structural alignment quality. "
+            f"<b>Score</b>: execution-readiness score (0-100). "
             f"<b>Entry/SL/TP1</b>: draft trade levels; SL is invalidation.</div></details>",
             unsafe_allow_html=True,
         )
@@ -540,8 +514,6 @@ def render(ctx: dict) -> None:
     action_color = POSITIVE if "ENTER" in best_action_view.upper() else WARNING
     action_chip = "elite-chip-positive" if "ENTER" in best_action_view.upper() else "elite-chip-warning"
     direction_chip = "elite-chip-positive" if best["Direction"] == "LONG" else ("elite-chip-negative" if best["Direction"] == "SHORT" else "elite-chip-warning")
-    setup_chip = _chip_class(str(best["Setup"]))
-    align_chip = _chip_class(str(best["Alignment"]))
     st.markdown(
         f"<div class='elite-hero' style='margin-top:0.55rem; border-color:rgba(0,212,255,0.24);'>"
         f"<div style='display:flex; justify-content:space-between; gap:8px; align-items:center; flex-wrap:wrap;'>"
@@ -549,8 +521,6 @@ def render(ctx: dict) -> None:
         f"<div style='display:flex; gap:8px; flex-wrap:wrap;'>"
         f"<span class='elite-chip {action_chip}'>{best_action_view}</span>"
         f"<span class='elite-chip {direction_chip}'>{_dir_badge(best['Direction'])}</span>"
-        f"<span class='elite-chip {setup_chip}'>{_setup_icon(best['Setup'])}</span>"
-        f"<span class='elite-chip {align_chip}'>{_conv_icon(best['Alignment'])}</span>"
         f"</div></div>"
         f"<div class='elite-grid'>"
         f"<div class='elite-mini'><div class='elite-label'>Score</div><div style='color:{action_color}; font-weight:700;'>{best['Score']:.1f} ({_grade_icon(best['Grade'])})</div></div>"

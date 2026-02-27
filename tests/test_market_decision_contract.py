@@ -1,61 +1,61 @@
 import unittest
 
-from core.market_decision import action_decision, setup_badge, trade_quality
+from core.market_decision import action_decision, structure_state, trade_quality
 
 
 class MarketDecisionContractTests(unittest.TestCase):
-    def test_setup_badge_aligned(self):
-        self.assertEqual(setup_badge("LONG", "LONG", "LONG"), "🟢 Aligned")
+    def test_structure_state_full(self):
+        self.assertEqual(structure_state("LONG", "LONG", "LONG"), "FULL")
 
-    def test_setup_badge_tech_only(self):
-        self.assertEqual(setup_badge("SHORT", "SHORT", "NEUTRAL"), "🟡 Tech-Only")
+    def test_structure_state_trend(self):
+        self.assertEqual(structure_state("SHORT", "SHORT", "NEUTRAL"), "TREND")
 
     def test_action_requires_valid_direction(self):
-        out = action_decision("NEUTRAL", 70, "🟢 Aligned", "HIGH", 0.8, 30.0)
+        out = action_decision("NEUTRAL", 70, "FULL", "HIGH", 0.8, 30.0)
         self.assertEqual(out, "⛔ SKIP")
 
     def test_action_enter_from_core_quality_inputs(self):
-        out = action_decision("LONG", 70, "🟢 Aligned", "HIGH", 0.8, 30.0)
+        out = action_decision("LONG", 70, "FULL", "HIGH", 0.8, 30.0)
         self.assertEqual(out, "✅ ENTER (Trend+AI)")
 
     def test_action_skip_on_conflict(self):
-        out = action_decision("LONG", 70, "🟢 Aligned", "CONFLICT", 0.8, 30.0)
+        out = action_decision("LONG", 70, "FULL", "CONFLICT", 0.8, 30.0)
         self.assertEqual(out, "⛔ SKIP")
 
     def test_action_skip_on_weak_strength(self):
-        out = action_decision("SHORT", 34, "🟡 Tech-Only", "MEDIUM", 0.75, 29.0)
+        out = action_decision("SHORT", 34, "TREND", "MEDIUM", 0.75, 29.0)
         self.assertEqual(out, "⛔ SKIP")
 
     def test_action_enter_on_strict_gate(self):
-        out = action_decision("SHORT", 62, "🟢 Aligned", "HIGH", 0.7, 26.0)
+        out = action_decision("SHORT", 62, "FULL", "HIGH", 0.7, 26.0)
         self.assertEqual(out, "✅ ENTER (Trend+AI)")
 
     def test_action_enter_on_trend_momentum_path(self):
-        out = action_decision("LONG", 56, "⚪ Draft", "LOW", 0.52, 28.0)
+        out = action_decision("LONG", 56, "EARLY", "WEAK", 0.52, 28.0)
         self.assertEqual(out, "🟡 ENTER (Trend-Only)")
 
     def test_action_enter_tech_only_when_trend_and_strength_are_exceptional(self):
-        out = action_decision("LONG", 74, "🟡 Tech-Only", "TECH-ONLY", 0.0, 27.0)
+        out = action_decision("LONG", 74, "TREND", "TREND", 0.0, 27.0)
         self.assertEqual(out, "🟡 ENTER (Trend-Only)")
 
     def test_action_enter_ai_only_when_agreement_is_exceptional(self):
-        out = action_decision("LONG", 46, "⚪ Draft", "LOW", 0.85, 20.0)
+        out = action_decision("LONG", 46, "EARLY", "WEAK", 0.85, 20.0)
         self.assertEqual(out, "🟡 ENTER (AI-Only)")
 
     def test_action_watch_when_adx_unknown(self):
-        out = action_decision("LONG", 74, "🟢 Aligned", "HIGH", 0.8, float("nan"))
+        out = action_decision("LONG", 74, "FULL", "HIGH", 0.8, float("nan"))
         self.assertEqual(out, "👀 WATCH")
 
     def test_trade_quality_a_grade(self):
-        out = trade_quality("✅ ENTER", "🟢 Aligned", "HIGH", 68, 0.8, 1.7)
+        out = trade_quality("✅ ENTER", "FULL", "HIGH", 68, 0.8, 1.7)
         self.assertEqual(out, "🟢 A")
 
     def test_trade_quality_b_grade(self):
-        out = trade_quality("👀 WATCH", "🟡 Tech-Only", "MEDIUM", 50, 0.6, 1.35)
+        out = trade_quality("👀 WATCH", "TREND", "MEDIUM", 50, 0.6, 1.35)
         self.assertEqual(out, "🟡 B")
 
     def test_trade_quality_c_grade(self):
-        out = trade_quality("👀 WATCH", "🔴 No Setup", "LOW", 42, 0.4, 1.1)
+        out = trade_quality("👀 WATCH", "NONE", "WEAK", 42, 0.4, 1.1)
         self.assertEqual(out, "🔴 C")
 
 
