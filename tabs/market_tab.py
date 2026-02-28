@@ -389,7 +389,7 @@ def render(ctx: dict) -> None:
             ))
             fig_btc.update_layout(
                 height=186,
-                margin=dict(l=6, r=6, t=52, b=10),
+                margin=dict(l=12, r=12, t=52, b=10),
                 plot_bgcolor="#000000",
                 paper_bgcolor="#000000",
             )
@@ -439,7 +439,7 @@ def render(ctx: dict) -> None:
             ))
             fig_eth.update_layout(
                 height=186,
-                margin=dict(l=6, r=6, t=52, b=10),
+                margin=dict(l=12, r=12, t=52, b=10),
                 plot_bgcolor="#000000",
                 paper_bgcolor="#000000",
             )
@@ -504,7 +504,7 @@ def render(ctx: dict) -> None:
         ))
         fig_behaviour.update_layout(
             height=186,
-            margin=dict(l=6, r=6, t=36, b=10),
+            margin=dict(l=12, r=12, t=52, b=10),
             plot_bgcolor="#000000",
             paper_bgcolor="#000000",
         )
@@ -560,7 +560,7 @@ def render(ctx: dict) -> None:
         ))
         fig_quality.update_layout(
             height=186,
-            margin=dict(l=6, r=6, t=36, b=10),
+            margin=dict(l=12, r=12, t=52, b=10),
             plot_bgcolor="#000000",
             paper_bgcolor="#000000",
         )
