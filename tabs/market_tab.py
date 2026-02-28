@@ -371,10 +371,17 @@ def render(ctx: dict) -> None:
     gauge_number_y = 0.16
     # BTC dominance gauge
     with g1:
+        st.markdown(
+            "<div style='text-align:center; margin-bottom:2px;'>"
+            "<span style='color:#E5E7EB; font-size:13px;'>BTC Dominance (%)</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
         if btc_dom_display is not None:
             fig_btc = go.Figure(go.Indicator(
                 mode="gauge",
                 value=btc_dom_display,
+                domain={"x": [0.06, 0.94], "y": [0, 1]},
                 gauge={
                     'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
                     'bar': {'color': ACCENT},
@@ -385,7 +392,7 @@ def render(ctx: dict) -> None:
                         {'range': [AI_LONG_THRESHOLD * 100, 100], 'color': POSITIVE},
                     ],
                 },
-                title={'text': 'BTC Dominance (%)', 'font': {'size': 13, 'color': '#E5E7EB'}},
+                title={'text': '', 'font': {'size': 13, 'color': '#E5E7EB'}},
             ))
             fig_btc.update_layout(
                 height=186,
@@ -421,10 +428,17 @@ def render(ctx: dict) -> None:
 
     # ETH dominance gauge
     with g2:
+        st.markdown(
+            "<div style='text-align:center; margin-bottom:2px;'>"
+            "<span style='color:#E5E7EB; font-size:13px;'>ETH Dominance (%)</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
         if eth_dom_display is not None:
             fig_eth = go.Figure(go.Indicator(
                 mode="gauge",
                 value=eth_dom_display,
+                domain={"x": [0.06, 0.94], "y": [0, 1]},
                 gauge={
                     'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
                     'bar': {'color': ACCENT},
@@ -435,7 +449,7 @@ def render(ctx: dict) -> None:
                         {'range': [25, 100], 'color': POSITIVE},
                     ],
                 },
-                title={'text': 'ETH Dominance (%)', 'font': {'size': 13, 'color': '#E5E7EB'}},
+                title={'text': '', 'font': {'size': 13, 'color': '#E5E7EB'}},
             ))
             fig_eth.update_layout(
                 height=186,
@@ -490,6 +504,7 @@ def render(ctx: dict) -> None:
         fig_behaviour = go.Figure(go.Indicator(
             mode="gauge",
             value=int(round(behaviour_prob * 100)),
+            domain={"x": [0.06, 0.94], "y": [0, 1]},
             gauge={
                 'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
                 'bar': {'color': ACCENT},
@@ -546,6 +561,7 @@ def render(ctx: dict) -> None:
         fig_quality = go.Figure(go.Indicator(
             mode="gauge",
             value=int(round(composite_score)),
+            domain={"x": [0.06, 0.94], "y": [0, 1]},
             gauge={
                 'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
                 'bar': {'color': ACCENT},
