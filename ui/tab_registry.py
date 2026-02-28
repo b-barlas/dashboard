@@ -39,10 +39,10 @@ _TAB_DEPS = [
             "ACCENT", "TEXT_MUTED", "CARD_BG", "POSITIVE", "NEGATIVE", "WARNING",
             "get_market_indices", "get_fear_greed", "get_btc_eth_prices", "get_price_change",
             "_tip", "get_major_ohlcv_bundle", "ml_ensemble_predict", "get_top_volume_usdt_symbols",
-            "fetch_ohlcv", "analyse", "get_scalping_entry_target", "_calc_conviction",
+            "fetch_ohlcv", "analyse", "get_scalping_entry_target", "scalp_quality_gate", "_calc_conviction",
             "signal_plain", "direction_label", "bias_score_badge", "readable_market_cap", "leverage_badge",
             "format_delta", "format_trend", "format_adx", "format_stochrsi",
-            "style_signal", "style_confidence", "style_scalp_opp", "style_delta", "_debug",
+            "style_signal", "style_scalp_opp", "style_delta", "sanitize_trading_terms", "_debug",
         ],
     ),
     (
@@ -60,7 +60,8 @@ _TAB_DEPS = [
             "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "CARD_BG", "PRIMARY_BG",
             "_tip", "_normalize_coin_input", "_validate_coin_symbol", "_symbol_variants", "EXCHANGE",
             "fetch_ohlcv", "analyse", "signal_plain", "direction_label", "ml_ensemble_predict", "_calc_conviction",
-            "_build_indicator_grid", "_sr_lookback", "_wma", "_debug", "get_scalping_entry_target",
+            "_build_indicator_grid", "_sr_lookback", "_wma", "_debug", "get_scalping_entry_target", "scalp_quality_gate",
+            "sanitize_trading_terms",
         ],
     ),
     (
@@ -68,7 +69,8 @@ _TAB_DEPS = [
         [
             "ACCENT", "TEXT_MUTED", "TEXT_LIGHT", "POSITIVE", "NEGATIVE", "WARNING", "CARD_BG", "_tip",
             "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "ml_ensemble_predict",
-            "get_scalping_entry_target", "analyse", "_build_indicator_grid", "_wma", "_debug",
+            "get_scalping_entry_target", "scalp_quality_gate", "_calc_conviction", "analyse",
+            "_build_indicator_grid", "_wma", "_debug",
             "get_major_ohlcv_bundle", "get_market_indices", "_sr_lookback",
         ],
     ),

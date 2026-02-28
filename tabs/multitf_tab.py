@@ -74,6 +74,16 @@ def render(ctx: dict) -> None:
             return "SHORT"
         return "WAIT"
 
+    def _plain_trend_label(value: str) -> str:
+        t = str(value or "").strip().lower()
+        if t == "bullish":
+            return "Bullish"
+        if t == "bearish":
+            return "Bearish"
+        if t == "neutral":
+            return "Neutral"
+        return ""
+
     def _status(v: float, good: float, watch: float, lower_better: bool = False) -> tuple[str, str]:
         if lower_better:
             if v <= good:
@@ -127,7 +137,7 @@ def render(ctx: dict) -> None:
                     "Signal": direction,
                     "Strength": round(float(strength_from_bias(float(ar.bias))), 1),
                     "SuperTrend": format_trend(ar.supertrend),
-                    "Ichimoku": format_trend(ar.ichimoku),
+                    "Ichimoku": _plain_trend_label(ar.ichimoku),
                     "VWAP": ar.vwap,
                     "ADX": round(ar.adx, 1),
                     "Weight": tf_weights.get(tf, 1.0),

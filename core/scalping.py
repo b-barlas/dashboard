@@ -8,6 +8,72 @@ import pandas as pd
 import ta
 
 
+def scalp_quality_gate(
+    *,
+    scalp_direction: str | None,
+    signal_direction: str | None,
+    rr_ratio: float | None,
+    adx_val: float | None,
+    strength: float | None,
+    conviction_label: str | None,
+    entry: float | None,
+    stop: float | None,
+    target: float | None,
+    min_rr: float = 1.50,
+    min_adx: float = 20.0,
+    min_strength: float = 55.0,
+) -> tuple[bool, str]:
+    """Single source-of-truth gate for execution-ready scalp opportunities.
+
+    Returns:
+      (True, "PASS") when all guards pass, otherwise (False, REASON_CODE).
+    """
+    dir_norm = str(scalp_direction or "").upper().strip()
+    sig_norm = str(signal_direction or "").upper().strip()
+    conv = str(conviction_label or "").upper().strip()
+
+    if dir_norm not in {"LONG", "SHORT"}:
+        return False, "NO_SCALP_DIRECTION"
+    if sig_norm not in {"LONG", "SHORT"}:
+        return False, "SIGNAL_DIRECTION_NEUTRAL"
+    if dir_norm != sig_norm:
+        return False, "DIRECTION_MISMATCH"
+    if conv == "CONFLICT":
+        return False, "CONFLICT"
+
+    try:
+        rr = float(rr_ratio) if rr_ratio is not None else float("nan")
+    except Exception:
+        rr = float("nan")
+    if pd.isna(rr) or rr < float(min_rr):
+        return False, "RR_TOO_LOW"
+
+    try:
+        adx_f = float(adx_val) if adx_val is not None else float("nan")
+    except Exception:
+        adx_f = float("nan")
+    if pd.isna(adx_f) or adx_f < float(min_adx):
+        return False, "ADX_TOO_LOW"
+
+    try:
+        strength_f = float(strength) if strength is not None else float("nan")
+    except Exception:
+        strength_f = float("nan")
+    if pd.isna(strength_f) or strength_f < float(min_strength):
+        return False, "STRENGTH_TOO_LOW"
+
+    try:
+        e = float(entry) if entry is not None else 0.0
+        s = float(stop) if stop is not None else 0.0
+        t = float(target) if target is not None else 0.0
+    except Exception:
+        return False, "INVALID_LEVELS"
+    if e <= 0.0 or s <= 0.0 or t <= 0.0:
+        return False, "INVALID_LEVELS"
+
+    return True, "PASS"
+
+
 def get_scalping_entry_target(
     df: pd.DataFrame,
     bias_score: float,
@@ -134,9 +200,9 @@ def get_scalping_entry_target(
         scalp_direction = "SHORT"
 
     if strict_mode and scalp_direction is not None:
-        # Trend-strength gate; allow volume override.
-        if (pd.isna(adx_val) or adx_val < 18) and not volume_spike:
-            return None, None, None, None, None, "No trend strength / no volume"
+        # Trend-strength gate.
+        if pd.isna(adx_val) or adx_val < 20:
+            return None, None, None, None, None, "No trend strength (ADX < 20)"
 
         if scalp_direction == "LONG":
             if long_regime_confirms < 2:
@@ -165,27 +231,13 @@ def get_scalping_entry_target(
             if pd.isna(stochrsi_k_val) or not (stoch_lo <= stochrsi_k_val <= stoch_hi and rsi_confirm_short and macd_confirm_short):
                 return None, None, None, None, None, "Momentum fail"
 
-        # Timeframe-adaptive minimum volatility requirement.
-        vol_floor_map = {
-            "1m": 0.0008,
-            "3m": 0.0010,
-            "5m": 0.0012,
-            "15m": 0.0015,
-            "1h": 0.0018,
-            "4h": 0.0022,
-            "1d": 0.0028,
-        }
-        vol_floor = vol_floor_map.get(_inferred_tf or "15m", 0.0015)
-        if (atr / close_price) < vol_floor:
-            return None, None, None, None, None, "Low Volatility"
-
     recent = closed_df.tail(sr_lookback_fn(_inferred_tf))
     support = recent["low"].min()
     resistance = recent["high"].max()
 
     entry_s = stop_s = target_s = 0.0
     breakout_note = ""
-    min_rr_strict = 1.20
+    min_rr_strict = 1.50
 
     if scalp_direction == "LONG":
         entry_s = max(float(close_price), float(latest["ema5"])) + 0.20 * float(atr)

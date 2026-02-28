@@ -5,13 +5,44 @@ from __future__ import annotations
 from math import isnan
 
 
-def structure_state(scalp_dir: str, signal_dir: str, ai_dir: str) -> str:
-    if scalp_dir and signal_dir in {"LONG", "SHORT"} and signal_dir == ai_dir == scalp_dir:
-        return "FULL"
-    if scalp_dir and signal_dir in {"LONG", "SHORT"} and signal_dir == scalp_dir and ai_dir == "NEUTRAL":
-        return "TREND"
-    if scalp_dir:
+def structure_state(
+    signal_dir: str,
+    ai_dir: str,
+    strength: float,
+    agreement: float,
+) -> str:
+    """Classify market structure quality without depending on scalp planning.
+
+    This state is intentionally direction/confirmation-centric:
+    - FULL: strong direction + AI alignment
+    - TREND: tradable trend context, but not strongest alignment
+    - EARLY: early structure, requires tighter risk controls
+    - NONE: no actionable structure
+    """
+    if signal_dir not in {"LONG", "SHORT"}:
+        return "NONE"
+
+    s = float(strength)
+    a = float(agreement)
+    ad = str(ai_dir or "").upper()
+
+    if ad in {"LONG", "SHORT"} and ad != signal_dir:
+        return "NONE"
+
+    if ad == signal_dir:
+        if s >= 60 and a >= 0.67:
+            return "FULL"
+        if s >= 55:
+            return "TREND"
         return "EARLY"
+
+    if ad == "NEUTRAL":
+        if s >= 70:
+            return "TREND"
+        if s >= 55:
+            return "EARLY"
+        return "NONE"
+
     return "NONE"
 
 
@@ -23,84 +54,114 @@ def action_decision(
     agreement: float,
     adx_val: float,
 ) -> str:
+    action, _reason = _action_decision_core(
+        signal_dir,
+        strength,
+        structure_state_val,
+        conviction_label,
+        agreement,
+        adx_val,
+    )
+    return action
+
+
+def action_reason(
+    signal_dir: str,
+    strength: float,
+    structure_state_val: str,
+    conviction_label: str,
+    agreement: float,
+    adx_val: float,
+) -> str:
+    _action, reason = _action_decision_core(
+        signal_dir,
+        strength,
+        structure_state_val,
+        conviction_label,
+        agreement,
+        adx_val,
+    )
+    return reason
+
+
+def action_decision_with_reason(
+    signal_dir: str,
+    strength: float,
+    structure_state_val: str,
+    conviction_label: str,
+    agreement: float,
+    adx_val: float,
+) -> tuple[str, str]:
+    """Return action class and compact reason code in one call."""
+    return _action_decision_core(
+        signal_dir,
+        strength,
+        structure_state_val,
+        conviction_label,
+        agreement,
+        adx_val,
+    )
+
+
+def _action_decision_core(
+    signal_dir: str,
+    strength: float,
+    structure_state_val: str,
+    conviction_label: str,
+    agreement: float,
+    adx_val: float,
+) -> tuple[str, str]:
     if signal_dir not in {"LONG", "SHORT"}:
-        return "⛔ SKIP"
+        return "⛔ SKIP", "NO_DIRECTION"
     if conviction_label == "CONFLICT" or strength < 35:
-        return "⛔ SKIP"
+        if conviction_label == "CONFLICT":
+            return "⛔ SKIP", "TECH_AI_CONFLICT"
+        return "⛔ SKIP", "LOW_STRENGTH"
+    if structure_state_val == "NONE":
+        return "⛔ SKIP", "NO_STRUCTURE"
     # Require known trend-strength context for ENTER. Unknown ADX can still be WATCH.
     if isnan(adx_val):
-        return "👀 WATCH"
+        return "👀 WATCH", "ADX_UNKNOWN"
 
     adx_f = float(adx_val)
     # In very weak trend, skip only when strength is also weak-mid.
     if adx_f < 12 and strength < 70:
-        return "⛔ SKIP"
+        return "⛔ SKIP", "ADX_TOO_LOW"
 
-    # Dynamic gate by trend regime: in stronger trends, allow earlier confirmation.
-    if adx_f >= 25:
-        min_strength = 55.0
-        min_agreement = 0.55
-    else:
-        min_strength = 60.0
-        min_agreement = 0.60
-
+    # ENTER classes require non-weak trend context (ADX >= 20) so Action
+    # semantics stay consistent with the ADX label model.
+    # Primary class: both trend and AI confirmations are aligned.
     enter_trend_ai = (
-        adx_f >= 16
-        and strength >= min_strength
+        structure_state_val == "FULL"
+        and adx_f >= 20
+        and strength >= 60
+        and agreement >= 0.67
         and conviction_label in {"HIGH", "MEDIUM"}
-        and agreement >= min_agreement
     )
-    # Trend-momentum path: keep conviction semantics intact while enabling
-    # controlled ENTER flow in strong trend regimes.
-    enter_trend_momentum = (
-        adx_f >= 25
-        and strength >= 55
-        and agreement >= 0.50
+
+    # Leader + veto model:
+    # - Trend-Led: trend drives the decision; AI only acts as guardrail/veto.
+    # - AI-Led: AI drives the decision; trend only acts as guardrail/veto.
+    enter_trend_led = (
+        structure_state_val in {"FULL", "TREND", "EARLY"}
+        and adx_f >= 20
+        and strength >= 56
+        and agreement < 0.78
         and conviction_label != "CONFLICT"
     )
-    # Controlled technical-only path to avoid neutral lock when trend and strength are exceptional.
-    enter_tech_only = (
-        conviction_label == "TREND"
-        and adx_f >= 24
-        and strength >= 72
-    )
-    # AI-only path: ensemble agreement is exceptionally strong while technical side
-    # is still early (not yet fully aligned). Keep a minimum trend filter.
-    enter_ai_only = (
-        adx_f >= 16
-        and agreement >= 0.80
+    enter_ai_led = (
+        structure_state_val in {"EARLY", "TREND"}
+        and adx_f >= 20
         and strength >= 45
-        and conviction_label in {"WEAK", "MEDIUM"}
+        and agreement >= 0.78
+        and conviction_label != "CONFLICT"
+        and not (adx_f < 14 and strength < 55)
     )
 
     if enter_trend_ai:
-        return "✅ ENTER (Trend+AI)"
-    if enter_tech_only or enter_trend_momentum:
-        return "🟡 ENTER (Trend-Only)"
-    if enter_ai_only:
-        return "🟡 ENTER (AI-Only)"
-    return "👀 WATCH"
-
-
-def trade_quality(
-    action: str,
-    structure_state_val: str,
-    conviction_label: str,
-    strength: float,
-    agreement: float,
-    rr_ratio: float,
-) -> str:
-    if conviction_label == "CONFLICT":
-        return "🔴 C"
-    if "ENTER" in action and structure_state_val == "FULL" and strength >= 60 and agreement >= 0.65 and rr_ratio >= 1.5:
-        return "🟢 A"
-    if (
-        ("ENTER" in action or "WATCH" in action)
-        and structure_state_val != "NONE"
-        and conviction_label != "CONFLICT"
-        and strength >= 45
-        and agreement >= 0.55
-        and rr_ratio >= 1.3
-    ):
-        return "🟡 B"
-    return "🔴 C"
+        return "✅ ENTER (Trend+AI)", "ENTER_TREND_AI"
+    if enter_trend_led:
+        return "🟡 ENTER (Trend-Led)", "ENTER_TREND_LED"
+    if enter_ai_led:
+        return "🟡 ENTER (AI-Led)", "ENTER_AI_LED"
+    return "👀 WATCH", "NEEDS_CONFIRMATION"

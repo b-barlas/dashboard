@@ -1,9 +1,9 @@
 from ui.ctx import get_ctx
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objs as go
 import ta
-from core.metric_catalog import ai_stability_bucket
 from core.signal_contract import strength_from_bias, strength_bucket
 from ui.snapshot_cache import live_or_snapshot
 
@@ -33,6 +33,21 @@ def render(ctx: dict) -> None:
     _wma = get_ctx(ctx, "_wma")
     _sr_lookback = get_ctx(ctx, "_sr_lookback")
     _debug = get_ctx(ctx, "_debug")
+
+    def _fmt_price(v: float) -> str:
+        try:
+            p = float(v)
+        except Exception:
+            return ""
+        if p >= 1000:
+            return f"${p:,.2f}"
+        if p >= 1:
+            return f"${p:,.4f}"
+        if p >= 0.01:
+            return f"${p:,.6f}"
+        if p >= 0.0001:
+            return f"${p:,.8f}"
+        return f"${p:,.10f}"
     st.markdown(
         f"<h2 style='color:{ACCENT};margin-bottom:0.5rem;'>Spot Trading</h2>",
         unsafe_allow_html=True,
@@ -93,7 +108,7 @@ def render(ctx: dict) -> None:
             return
 
         a = analyse(df_eval)
-        signal, comment, volume_spike = a.signal, a.comment, a.volume_spike
+        signal, _comment, volume_spike = a.signal, a.comment, a.volume_spike
         atr_comment, candle_pattern, bias_score = a.atr_comment, a.candle_pattern, a.bias
         strength_score = float(strength_from_bias(float(bias_score)))
         adx_val, supertrend_trend, ichimoku_trend = a.adx, a.supertrend, a.ichimoku
@@ -118,14 +133,13 @@ def render(ctx: dict) -> None:
             ai_agree = 0.0
 
         sig_dir_s = signal_dir if signal_dir in {"LONG", "SHORT"} else "WAIT"
-        conv_lbl_s, conv_c_s = _calc_conviction(sig_dir_s, ai_dir_s, strength_score, ai_agree / 100.0)
-        ai_stability = ai_stability_bucket(ai_agree / 100.0)
+        conv_lbl_s, _conv_c_s = _calc_conviction(sig_dir_s, ai_dir_s, strength_score, ai_agree / 100.0)
 
         sig_c_s = POSITIVE if signal_dir == "LONG" else (NEGATIVE if signal_dir == "SHORT" else WARNING)
         ai_c_s = POSITIVE if ai_dir_s == "LONG" else (NEGATIVE if ai_dir_s == "SHORT" else WARNING)
         _s_bucket = strength_bucket(strength_score)
         conf_c_s = POSITIVE if _s_bucket in {"STRONG", "GOOD"} else (WARNING if _s_bucket == "MIXED" else NEGATIVE)
-        ai_stab_c = POSITIVE if ai_stability == "Strong" else (WARNING if ai_stability == "Medium" else TEXT_MUTED)
+        conv_c_s = POSITIVE if conv_lbl_s == "HIGH" else (WARNING if conv_lbl_s in {"MEDIUM", "TREND"} else NEGATIVE)
         st.markdown(
             f"<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); "
             f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
@@ -139,9 +153,6 @@ def render(ctx: dict) -> None:
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Ensemble</div>"
             f"<div style='color:{ai_c_s}; font-size:0.85rem; font-weight:600;'>{direction_label(ai_dir_s)} ({ai_votes}/3)</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
-            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Stability</div>"
-            f"<div style='color:{ai_stab_c}; font-size:0.85rem; font-weight:600;'>{ai_stability} ({ai_agree:.0f}%)</div></div>"
-            f"<div style='text-align:center; padding:6px;'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Tech vs AI Alignment</div>"
             f"<div style='color:{conv_c_s}; font-size:0.85rem; font-weight:600;'>{conv_lbl_s}</div></div>"
             f"</div>",
@@ -150,44 +161,72 @@ def render(ctx: dict) -> None:
         st.markdown(
             f"<div style='color:{TEXT_MUTED}; font-size:0.82rem; margin:0.15rem 0 0.55rem 0;'>"
             f"<b>Direction</b> = technical direction (Upside/Downside/Neutral), <b>Strength</b> = direction-agnostic signal power, "
-            f"<b>AI Stability</b> = model agreement quality, <b>Tech vs AI Alignment</b> = technical+AI alignment."
+            f"<b>AI Ensemble (x/3)</b> = model vote agreement, <b>Tech vs AI Alignment</b> = technical+AI alignment."
             f"</div>",
             unsafe_allow_html=True,
         )
 
-        st.markdown(f"<p style='color:{TEXT_MUTED}; font-size:0.88rem;'>{comment}</p>", unsafe_allow_html=True)
-
-        # Market regime warning (ADX < 20 = ranging market)
-        if not np.isnan(adx_val) and adx_val < 20:
-            st.markdown(
-                f"<div style='background:#2D1B00; border-left:4px solid {WARNING}; "
-                f"padding:8px 12px; border-radius:4px; margin:6px 0;'>"
-                f"<span style='color:{WARNING}; font-weight:600;'>Market Ranging (ADX {adx_val:.0f})</span>"
-                f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'> — Trend signals are less reliable. "
-                f"Strength discounted. Consider smaller positions or waiting for a clear trend.</span></div>",
-                unsafe_allow_html=True,
+        ichi_meta_parts = []
+        if a.ichimoku_tk_cross:
+            ichi_meta_parts.append(
+                f"TK Cross: {a.ichimoku_tk_cross.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
             )
+        if a.ichimoku_future_bias:
+            ichi_meta_parts.append(
+                f"Future Cloud: {a.ichimoku_future_bias.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
+            )
+        if a.ichimoku_cloud_strength:
+            ichi_meta_parts.append(
+                f"Cloud Strength: {a.ichimoku_cloud_strength.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
+            )
+        ichimoku_hover = " | ".join(ichi_meta_parts)
+
+        spike_label = ""
+        spike_hover = ""
+        if volume_spike:
+            try:
+                prev_vol_avg = float(df_eval["volume"].iloc[-21:-1].mean()) if len(df_eval) >= 21 else float("nan")
+                last_vol = float(df_eval["volume"].iloc[-1]) if len(df_eval) >= 1 else float("nan")
+                vol_ratio = (last_vol / prev_vol_avg) if pd.notna(prev_vol_avg) and prev_vol_avg > 0 and pd.notna(last_vol) else float("nan")
+            except Exception:
+                vol_ratio = float("nan")
+            try:
+                o = float(df_eval["open"].iloc[-1])
+                c = float(df_eval["close"].iloc[-1])
+                candle_pct = ((c / o) - 1.0) * 100.0 if pd.notna(o) and pd.notna(c) and o > 0 else float("nan")
+                if pd.notna(o) and pd.notna(c) and c > o:
+                    spike_label = "▲ Up Spike"
+                elif pd.notna(o) and pd.notna(c) and c < o:
+                    spike_label = "▼ Down Spike"
+                else:
+                    spike_label = "→ Spike"
+            except Exception:
+                candle_pct = float("nan")
+                spike_label = "→ Spike"
+            parts = []
+            if pd.notna(vol_ratio):
+                parts.append(f"Vol Ratio: {vol_ratio:.2f}x")
+            if pd.notna(candle_pct):
+                parts.append(f"Candle: {candle_pct:+.2f}%")
+            vwap_ctx = str(vwap_label or "").replace("🟢 ", "").replace("🔴 ", "").replace("→ ", "").strip()
+            if vwap_ctx:
+                parts.append(f"VWAP: {vwap_ctx}")
+            spike_hover = " | ".join(parts)
 
         # Indicator grid (professional card layout)
         _grid_html = _build_indicator_grid(
             supertrend_trend, ichimoku_trend, vwap_label, adx_val, bollinger_bias,
             stochrsi_k_val, psar_trend, williams_label, cci_label,
             volume_spike, atr_comment, candle_pattern,
+            spike_label=spike_label, spike_hover=spike_hover,
+            timeframe=timeframe,
+            ichimoku_hover=ichimoku_hover,
         )
         if _grid_html:
             st.markdown(_grid_html, unsafe_allow_html=True,
             )
 
-        # Price box (compact, premium)
-        st.markdown(
-            f"<div class='elite-card' style='margin:0.25rem 0 0.55rem 0;'>"
-            f"<div class='elite-label'>Current Price</div>"
-            f"<div class='elite-value'>${current_price:,.2f}</div>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-
-        # Action plan (beginner-friendly, spot-only, conditional playbook)
+        # Execution levels (spot-only)
         try:
             atr14 = float(ta.volatility.average_true_range(df_eval["high"], df_eval["low"], df_eval["close"], window=14).iloc[-1])
         except Exception:
@@ -200,35 +239,53 @@ def render(ctx: dict) -> None:
         pullback_high = plan_support + 0.4 * atr14
         breakout_trigger = plan_resistance + 0.2 * atr14
         invalidation_level = max(0.0, plan_support - 0.8 * atr14)
+        take_profit_low = plan_resistance
+        take_profit_high = max(plan_resistance, plan_resistance + 0.6 * atr14)
+
+        st.markdown(
+            f"<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:0.6rem; margin:0.25rem 0 0.55rem 0;'>"
+            f"<div class='elite-card'><div class='elite-label'>Current Price</div><div class='elite-value'>{_fmt_price(current_price)}</div></div>"
+            f"<div class='elite-card'><div class='elite-label'>Primary Accumulation Zone</div><div class='elite-value' style='font-size:1.6rem;'>{_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}</div></div>"
+            f"<div class='elite-card'><div class='elite-label'>Breakout Entry</div><div class='elite-value'>{_fmt_price(breakout_trigger)}</div></div>"
+            f"<div class='elite-card'><div class='elite-label'>Exit If Broken</div><div class='elite-value'>{_fmt_price(invalidation_level)}</div></div>"
+            f"<div class='elite-card'><div class='elite-label'>Take Profit Zone</div><div class='elite-value' style='font-size:1.6rem;'>{_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}</div></div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
         if signal_dir == "LONG":
-            plan_status = "Bullish Playbook"
+            plan_status = "Bullish"
             plan_color = POSITIVE
             plan_lines = (
-                f"1) <b>Buy zone:</b> ${pullback_low:,.2f} - ${pullback_high:,.2f} (pullback near support).<br>"
-                f"2) <b>Breakout add:</b> only if price closes above ${breakout_trigger:,.2f}.<br>"
-                f"3) <b>Risk line:</b> if price closes below ${invalidation_level:,.2f}, setup is invalid."
+                f"1) <b>If price dips into Primary Accumulation Zone</b> ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}): start scaling in.<br>"
+                f"2) <b>If price closes above Breakout Entry</b> ({_fmt_price(breakout_trigger)}): add to position / confirm continuation.<br>"
+                f"3) <b>Take Profit Zone</b> ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}): take partial profit at lower edge, trail the rest.<br>"
+                f"4) <b>Exit If Broken</b> ({_fmt_price(invalidation_level)}): close the spot plan if candle closes below."
             )
         elif signal_dir == "SHORT":
-            plan_status = "Defensive Playbook"
+            plan_status = "Defensive"
             plan_color = NEGATIVE
             plan_lines = (
-                f"1) <b>No fresh spot buy</b> while bearish pressure continues.<br>"
-                f"2) <b>Re-entry watch:</b> wait reclaim above ${plan_resistance:,.2f} or clear base near support.<br>"
-                f"3) <b>Risk line:</b> protect capital if price loses ${invalidation_level:,.2f} with momentum."
+                f"1) <b>Spot mode is defensive:</b> avoid fresh entries while downside pressure persists.<br>"
+                f"2) <b>Re-entry condition:</b> wait for a close back above Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
+                f"3) <b>If already holding:</b> reduce risk into rallies, and respect Exit If Broken ({_fmt_price(invalidation_level)}).<br>"
+                f"4) <b>Take Profit Zone</b> ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}): use only after reclaim confirmation."
             )
         else:
-            plan_status = "Wait Playbook"
+            plan_status = "Wait"
             plan_color = WARNING
             plan_lines = (
-                f"1) <b>No-trade zone:</b> mixed signals, avoid forcing entries.<br>"
-                f"2) <b>Bull trigger:</b> acceptance above ${breakout_trigger:,.2f}.<br>"
-                f"3) <b>Pullback watch:</b> reaction around ${pullback_low:,.2f} - ${pullback_high:,.2f}."
+                f"1) <b>No-force zone:</b> wait until price reaches a decision level.<br>"
+                f"2) <b>If price falls into Primary Accumulation Zone</b> ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}): look for hold/reaction before entry.<br>"
+                f"3) <b>If price closes above Breakout Entry</b> ({_fmt_price(breakout_trigger)}): momentum entry becomes valid.<br>"
+                f"4) <b>Take Profit Zone</b> ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}): plan exits in advance.<br>"
+                f"5) <b>Exit If Broken</b> ({_fmt_price(invalidation_level)}): cancel setup if level is lost on close."
             )
 
         st.markdown(
             f"<div class='panel-box' style='border-left:4px solid {plan_color};'>"
-            f"<b style='color:{plan_color}; font-size:1rem;'>Spot Action Plan ({plan_status})</b>"
+            f"<b style='color:{plan_color}; font-size:1rem;'>Spot Execution Plan</b>"
+            f"<div style='color:{plan_color}; font-size:0.82rem; margin-top:4px;'><b>Mode:</b> {plan_status}</div>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; line-height:1.7; margin-top:6px;'>"
             f"{plan_lines}"
             f"<br><span style='color:{TEXT_MUTED}; font-size:0.78rem;'>Guide only, not financial advice. "
@@ -396,7 +453,7 @@ def render(ctx: dict) -> None:
             <div class='panel-box'>
               <b style='color:{ACCENT}; font-size:1.05rem;'>📊 Technical Snapshot</b><br>
               <ul style='color:{TEXT_MUTED}; font-size:0.9rem; line-height:1.5; list-style-position:inside; margin-top:6px;'>
-                <li>EMA Trend (9 vs 21): <b>{ema9:.2f}</b> vs <b>{ema21:.2f}</b> {('🟢' if ema9 > ema21 else '🔴')} — When EMA9 is above EMA21 the short-term trend is bullish; otherwise bearish.</li>
+                <li>EMA Trend (9 vs 21): <b>{ema9:.2f}</b> vs <b>{ema21:.2f}</b> {('🟢' if ema9 > ema21 else '🔴')} — When EMA9 is above EMA21 the near-term trend is bullish; otherwise bearish.</li>
                 <li>MACD: <b>{macd_val:.2f}</b> {('🟢' if macd_val > 0 else '🔴')} — Positive MACD indicates upward momentum; negative values suggest downward pressure.</li>
                 <li>RSI (14): <b>{rsi_val:.2f}</b> {('🟢' if rsi_val > 55 else ('🟠' if 45 <= rsi_val <= 55 else '🔴'))} — Above 70 may signal overbought, below 30 oversold. Values above 50 favour bulls.</li>
                 <li>OBV change (last 5 candles): <b>{obv_change:+.2f}%</b> {('🟢' if obv_change > 0 else '🔴')} — Rising OBV supports the price move; falling OBV warns against continuation.</li>

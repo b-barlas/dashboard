@@ -351,10 +351,6 @@ def render(ctx: dict) -> None:
         styled_df["Strength"] = styled_df["Strength"].apply(lambda x: f"{x:.1f}%")
     if "Bias" in styled_df.columns:
         styled_df["Bias"] = styled_df["Bias"].apply(lambda x: f"{x:.1f}%")
-    if "Confidence" in styled_df.columns:
-        # Backward compatibility for historical/custom outputs; normalize label to dashboard terminology.
-        styled_df["Bias Score"] = styled_df["Confidence"].apply(lambda x: f"{x:.1f}%")
-        styled_df = styled_df.drop(columns=["Confidence"])
     if "Regime Score" in styled_df.columns:
         styled_df["Regime Score"] = styled_df["Regime Score"].apply(lambda x: f"{x:.1f}")
     if "Equity" in styled_df.columns:

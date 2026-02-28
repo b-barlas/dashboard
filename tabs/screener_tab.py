@@ -144,6 +144,27 @@ def render(ctx: dict) -> None:
                         _ai_prob, ai_dir, ai_details = 0.5, "NEUTRAL", {}
                     ai_agree = float(ai_details.get("agreement", 0.0)) if isinstance(ai_details, dict) else 0.0
                     ai_votes = max(0, min(3, int(round(ai_agree * 3.0))))
+                    spike_label = ""
+                    if a.volume_spike:
+                        try:
+                            o = float(df_eval["open"].iloc[-1])
+                            c = float(df_eval["close"].iloc[-1])
+                            prev_vol_avg = float(df_eval["volume"].iloc[-21:-1].mean()) if len(df_eval) >= 21 else float("nan")
+                            last_vol = float(df_eval["volume"].iloc[-1]) if len(df_eval) >= 1 else float("nan")
+                            vol_ratio = (
+                                last_vol / prev_vol_avg
+                                if pd.notna(prev_vol_avg) and prev_vol_avg > 0 and pd.notna(last_vol)
+                                else float("nan")
+                            )
+                            if pd.notna(o) and pd.notna(c) and c > o:
+                                base_lbl = "▲ Up Spike"
+                            elif pd.notna(o) and pd.notna(c) and c < o:
+                                base_lbl = "▼ Down Spike"
+                            else:
+                                base_lbl = "→ Spike"
+                            spike_label = f"{base_lbl} ({vol_ratio:.2f}x)" if pd.notna(vol_ratio) else base_lbl
+                        except Exception:
+                            spike_label = "→ Spike"
                     row = {
                         "Symbol": sym.split("/")[0],
                         "Price": float(df_eval["close"].iloc[-1]),
@@ -153,7 +174,7 @@ def render(ctx: dict) -> None:
                         "AI Agree": f"{ai_votes}/3",
                         "RSI": round(float(rsi_val), 1),
                         "ADX": round(float(a.adx), 1) if not np.isnan(a.adx) else 0.0,
-                        "Volume Spike": "Yes" if a.volume_spike else "No",
+                        "Volume Spike": spike_label,
                     }
                     return True, row
                 except Exception:
@@ -198,7 +219,11 @@ def render(ctx: dict) -> None:
             )
             aligned_share = float(aligned_mask.mean() * 100.0) if len(df_results) else 0.0
             avg_strength = float(df_results["Strength"].mean()) if len(df_results) else 0.0
-            spike_share = float((df_results["Volume Spike"] == "Yes").mean() * 100.0) if len(df_results) else 0.0
+            spike_share = (
+                float(df_results["Volume Spike"].astype(str).str.contains("Spike", na=False).mean() * 100.0)
+                if len(df_results)
+                else 0.0
+            )
             if aligned_share >= 65 and avg_strength >= 65:
                 prof = "Cleaner shortlist"
                 prof_text = "Signal and AI are broadly aligned. Prioritize top-strength rows first."
@@ -252,7 +277,7 @@ def render(ctx: dict) -> None:
                 f"<b>Strength</b>: direction-agnostic signal power from directional bias (0-100).<br>"
                 f"<b>AI Ensemble</b>: 3-model combined direction.<br>"
                 f"<b>AI Agree</b>: directional vote agreement inside the ensemble (x/3).<br>"
-                f"<b>Volume Spike</b>: latest volume anomaly flag.<br>"
+                f"<b>Volume Spike</b>: latest volume anomaly label (Up/Down/Neutral spike, with ratio).<br>"
                 f"<b>RSI</b>: momentum location in the 0-100 range."
                 f"</div></details>",
                 unsafe_allow_html=True,
@@ -296,12 +321,23 @@ def render(ctx: dict) -> None:
                     return f"color:{WARNING}; font-weight:700;"
                 return f"color:{NEGATIVE}; font-weight:700;"
 
+            def _spike_style(v: str) -> str:
+                s = str(v or "").upper()
+                if "UP SPIKE" in s:
+                    return f"color:{POSITIVE}; font-weight:700;"
+                if "DOWN SPIKE" in s:
+                    return f"color:{NEGATIVE}; font-weight:700;"
+                if "SPIKE" in s:
+                    return f"color:{WARNING}; font-weight:700;"
+                return f"color:{TEXT_MUTED};"
+
             styled = (
                 df_show.style
                 .map(_sig_style, subset=["Signal"])
                 .map(_ai_style, subset=["AI Ensemble"])
                 .map(_conf_style, subset=["Strength"])
                 .map(_agree_style, subset=["AI Agree"])
+                .map(_spike_style, subset=["Volume Spike"])
             )
             st.dataframe(styled, width="stretch")
         else:

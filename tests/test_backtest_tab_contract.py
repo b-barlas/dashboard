@@ -87,7 +87,7 @@ class BacktestTabContractTests(unittest.TestCase):
             out = pd.DataFrame(
                 {
                     "Date": [data["timestamp"].iloc[60]],
-                    "Confidence": [70.0],
+                    "Bias": [70.0],
                     "Signal": ["LONG"],
                     "Entry": [float(data["close"].iloc[60])],
                     "Exit": [float(data["close"].iloc[65])],

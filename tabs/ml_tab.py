@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
 from core.metric_catalog import AI_LONG_THRESHOLD, AI_SHORT_THRESHOLD, direction_from_prob
+from core.signal_contract import strength_from_bias
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -22,6 +23,8 @@ def render(ctx: dict) -> None:
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     get_scalping_entry_target = get_ctx(ctx, "get_scalping_entry_target")
+    scalp_quality_gate = get_ctx(ctx, "scalp_quality_gate")
+    _calc_conviction = get_ctx(ctx, "_calc_conviction")
     analyse = get_ctx(ctx, "analyse")
     _build_indicator_grid = get_ctx(ctx, "_build_indicator_grid")
     get_major_ohlcv_bundle = get_ctx(ctx, "get_major_ohlcv_bundle")
@@ -249,7 +252,7 @@ def render(ctx: dict) -> None:
             ta_target_txt = "N/A"
             try:
                 ar = analyse(df_eval)
-                scalp_dir, entry_s, target_s, _, _, _ = get_scalping_entry_target(
+                scalp_dir, entry_s, target_s, stop_s, rr_ratio, _ = get_scalping_entry_target(
                     df_eval,
                     ar.bias,
                     ar.supertrend,
@@ -258,10 +261,31 @@ def render(ctx: dict) -> None:
                     ar.volume_spike,
                     strict_mode=True,
                 )
-                if scalp_dir in {"LONG", "SHORT"} and entry_s and target_s:
+                signal_dir = (
+                    "LONG" if ar.signal in {"STRONG BUY", "BUY"}
+                    else ("SHORT" if ar.signal in {"STRONG SELL", "SELL"} else "NEUTRAL")
+                )
+                conviction_lbl, _ = _calc_conviction(
+                    signal_dir,
+                    direction,
+                    strength_from_bias(float(ar.bias)),
+                    agreement_ratio,
+                )
+                scalp_ok, _scalp_reason = scalp_quality_gate(
+                    scalp_direction=scalp_dir,
+                    signal_direction=signal_dir,
+                    rr_ratio=rr_ratio,
+                    adx_val=ar.adx,
+                    strength=strength_from_bias(float(ar.bias)),
+                    conviction_label=conviction_lbl,
+                    entry=entry_s,
+                    stop=stop_s,
+                    target=target_s,
+                )
+                if scalp_ok and scalp_dir in {"LONG", "SHORT"} and entry_s and target_s:
                     ta_entry_txt = f"${entry_s:,.4f}"
                     ta_target_txt = f"${target_s:,.4f}"
-                if scalp_dir == direction and direction in {"LONG", "SHORT"} and entry_s and target_s:
+                if scalp_ok and scalp_dir == direction and direction in {"LONG", "SHORT"} and entry_s and target_s:
                     ai_entry_txt = f"${entry_s:,.4f}"
                     ai_target_txt = f"${target_s:,.4f}"
             except Exception as exc:
@@ -458,6 +482,57 @@ def render(ctx: dict) -> None:
                     st.caption(f"{tf}: no sufficient closed-candle data.")
                     continue
                 ar = analyse(df_eval)
+                ichi_meta_parts = []
+                if ar.ichimoku_tk_cross:
+                    ichi_meta_parts.append(
+                        f"TK Cross: {ar.ichimoku_tk_cross.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
+                    )
+                if ar.ichimoku_future_bias:
+                    ichi_meta_parts.append(
+                        f"Future Cloud: {ar.ichimoku_future_bias.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
+                    )
+                if ar.ichimoku_cloud_strength:
+                    ichi_meta_parts.append(
+                        f"Cloud Strength: {ar.ichimoku_cloud_strength.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
+                    )
+                ichimoku_hover = " | ".join(ichi_meta_parts)
+
+                spike_label = ""
+                spike_hover = ""
+                if ar.volume_spike:
+                    try:
+                        prev_vol_avg = float(df_eval["volume"].iloc[-21:-1].mean()) if len(df_eval) >= 21 else float("nan")
+                        last_vol = float(df_eval["volume"].iloc[-1]) if len(df_eval) >= 1 else float("nan")
+                        vol_ratio = (
+                            last_vol / prev_vol_avg
+                            if pd.notna(prev_vol_avg) and prev_vol_avg > 0 and pd.notna(last_vol)
+                            else float("nan")
+                        )
+                    except Exception:
+                        vol_ratio = float("nan")
+                    try:
+                        o = float(df_eval["open"].iloc[-1])
+                        c = float(df_eval["close"].iloc[-1])
+                        candle_pct = ((c / o) - 1.0) * 100.0 if pd.notna(o) and pd.notna(c) and o > 0 else float("nan")
+                        if pd.notna(o) and pd.notna(c) and c > o:
+                            spike_label = "▲ Up Spike"
+                        elif pd.notna(o) and pd.notna(c) and c < o:
+                            spike_label = "▼ Down Spike"
+                        else:
+                            spike_label = "→ Spike"
+                    except Exception:
+                        candle_pct = float("nan")
+                        spike_label = "→ Spike"
+                    parts = []
+                    if pd.notna(vol_ratio):
+                        parts.append(f"Vol Ratio: {vol_ratio:.2f}x")
+                    if pd.notna(candle_pct):
+                        parts.append(f"Candle: {candle_pct:+.2f}%")
+                    vwap_ctx = str(ar.vwap or "").replace("🟢 ", "").replace("🔴 ", "").replace("→ ", "").strip()
+                    if vwap_ctx:
+                        parts.append(f"VWAP: {vwap_ctx}")
+                    spike_hover = " | ".join(parts)
+
                 grid_html = _build_indicator_grid(
                     ar.supertrend,
                     ar.ichimoku,
@@ -471,6 +546,10 @@ def render(ctx: dict) -> None:
                     ar.volume_spike,
                     ar.atr_comment,
                     ar.candle_pattern,
+                    spike_label=spike_label,
+                    spike_hover=spike_hover,
+                    timeframe=tf,
+                    ichimoku_hover=ichimoku_hover,
                 )
                 st.markdown(f"<b style='color:{ACCENT};'>Indicators ({tf})</b>", unsafe_allow_html=True)
                 st.markdown(grid_html, unsafe_allow_html=True)

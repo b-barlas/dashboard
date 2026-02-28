@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import html
 import math
 
-from ui.helpers import format_adx, format_trend
+from ui.helpers import format_adx, format_stochrsi, format_trend
 
 PRIMARY_BG = "#000000"
 CARD_BG = "#000000"
@@ -26,11 +27,35 @@ def tip(label: str, tooltip: str) -> str:
 
 def ind_color(val: str) -> str:
     """Return color for an indicator value."""
-    if any(k in val for k in ["Bullish", "Above", "Oversold", "Low"]):
+    v = str(val or "")
+    u = v.upper()
+    if "VERY STRONG" in u or "EXTREME" in u:
         return POSITIVE
-    if any(k in val for k in ["Bearish", "Below", "Overbought", "High"]):
+    if "WEAK" in u:
+        return NEGATIVE
+    if "STARTING" in u:
+        return WARNING
+    if "STRONG" in u:
+        return POSITIVE
+    if "UP SPIKE" in u:
+        return POSITIVE
+    if "DOWN SPIKE" in u:
+        return NEGATIVE
+    if "SPIKE" in u:
+        return WARNING
+    if any(k in v for k in ["Bullish", "Above", "Oversold", "Low", "Near Bottom"]):
+        return POSITIVE
+    if any(k in v for k in ["Bearish", "Below", "Overbought", "High", "Near Top"]):
         return NEGATIVE
     return WARNING
+
+
+def _clean_indicator_label(val: str) -> str:
+    """Strip icon glyphs/prefix markers so grid stays text-first."""
+    v = str(val or "").strip()
+    for token in ["🟢", "🔴", "🟡", "⚪", "🔥", "▲▲", "▲", "▼", "→", "–"]:
+        v = v.replace(token, "")
+    return " ".join(v.split()).strip()
 
 
 def build_indicator_grid(
@@ -44,46 +69,62 @@ def build_indicator_grid(
     williams_label: str,
     cci_label: str,
     volume_spike: bool,
-    atr_comment: str,
-    candle_pattern: str,
+    atr_comment: str = "",
+    candle_pattern: str = "",
+    spike_label: str = "",
+    spike_hover: str = "",
+    timeframe: str | None = None,
+    ichimoku_hover: str | None = None,
 ) -> str:
     """Build indicator grid HTML used across Spot/Position/AI tabs."""
-    indicators = []
+    indicators: list[tuple[str, str, str, str]] = []
     if supertrend_trend:
-        indicators.append(("SuperTrend", format_trend(supertrend_trend), ind_color(supertrend_trend)))
+        supertrend_txt = _clean_indicator_label(format_trend(supertrend_trend))
+        indicators.append(("SuperTrend", supertrend_txt, ind_color(supertrend_txt), ""))
     if ichimoku_trend:
-        indicators.append(("Ichimoku", format_trend(ichimoku_trend), ind_color(ichimoku_trend)))
+        ichimoku_txt = _clean_indicator_label(format_trend(ichimoku_trend))
+        indicators.append(("Ichimoku", ichimoku_txt, ind_color(ichimoku_txt), str(ichimoku_hover or "")))
     if vwap_label:
-        indicators.append(("VWAP", vwap_label, ind_color(vwap_label)))
+        vwap_txt = _clean_indicator_label(vwap_label)
+        indicators.append(("VWAP", vwap_txt, ind_color(vwap_txt), ""))
     if not _is_nan(adx_val):
-        indicators.append(("ADX", format_adx(adx_val), WARNING))
+        adx_txt = _clean_indicator_label(format_adx(adx_val))
+        indicators.append(("ADX", adx_txt, ind_color(adx_txt), ""))
     if bollinger_bias:
-        indicators.append(("Bollinger", bollinger_bias, ind_color(bollinger_bias)))
+        boll_txt = _clean_indicator_label(bollinger_bias)
+        indicators.append(("Bollinger", boll_txt, ind_color(boll_txt), ""))
     if not _is_nan(stochrsi_k_val):
-        srsi_c = POSITIVE if stochrsi_k_val < 0.2 else (NEGATIVE if stochrsi_k_val > 0.8 else WARNING)
-        indicators.append(("StochRSI", f"{stochrsi_k_val:.2f}", srsi_c))
+        srsi_txt = _clean_indicator_label(format_stochrsi(stochrsi_k_val, timeframe=timeframe))
+        indicators.append(("StochRSI", srsi_txt, ind_color(srsi_txt), ""))
     if "Bullish" in psar_trend or "Bearish" in psar_trend:
-        indicators.append(("PSAR", psar_trend, ind_color(psar_trend)))
+        psar_txt = _clean_indicator_label(psar_trend)
+        indicators.append(("PSAR", psar_txt, ind_color(psar_txt), ""))
     if williams_label:
-        indicators.append(("Williams %R", williams_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), ind_color(williams_label)))
+        will_txt = _clean_indicator_label(williams_label)
+        indicators.append(("Williams %R", will_txt, ind_color(will_txt), ""))
     if cci_label:
-        indicators.append(("CCI", cci_label.replace("🟢 ", "").replace("🔴 ", "").replace("🟡 ", ""), ind_color(cci_label)))
+        cci_txt = _clean_indicator_label(cci_label)
+        indicators.append(("CCI", cci_txt, ind_color(cci_txt), ""))
     if volume_spike:
-        indicators.append(("Volume", "Spike ▲", POSITIVE))
+        spike_txt = _clean_indicator_label(spike_label) if str(spike_label or "").strip() else "Spike"
+        indicators.append(("Volume", spike_txt, ind_color(spike_txt), str(spike_hover or "")))
     atr_clean = atr_comment.replace("▲", "").replace("▼", "").replace("–", "").strip()
     if atr_clean:
-        indicators.append(("Volatility", atr_clean, ind_color(atr_clean)))
+        indicators.append(("Volatility", atr_clean, ind_color(atr_clean), ""))
     if candle_pattern:
-        indicators.append(("Pattern", candle_pattern.split(" (")[0], WARNING))
+        pattern_txt = _clean_indicator_label(candle_pattern.split(" (")[0])
+        indicators.append(("Pattern", pattern_txt, ind_color(pattern_txt), ""))
     if not indicators:
         return ""
-    grid_items = "".join(
-        f"<div style='text-align:center; padding:6px;'>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>{name}</div>"
-        f"<div style='color:{color}; font-size:0.85rem; font-weight:600;'>{val}</div>"
-        f"</div>"
-        for name, val, color in indicators
-    )
+    grid_items = ""
+    for name, val, color, tooltip in indicators:
+        tt_attr = f" title='{html.escape(tooltip, quote=True)}'" if tooltip else ""
+        grid_items += (
+            f"<div style='text-align:center; padding:6px;'>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>{name}</div>"
+            f"<div style='color:{color}; font-size:0.85rem; font-weight:600;'{tt_attr}>{val}</div>"
+            f"</div>"
+        )
     return (
         f"<div style='display:grid; grid-template-columns:repeat(auto-fill, minmax(90px, 1fr)); "
         f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"

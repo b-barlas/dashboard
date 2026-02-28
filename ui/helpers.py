@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 POSITIVE = "#00FF88"
 NEGATIVE = "#FF3366"
@@ -12,9 +13,9 @@ WARNING = "#FFD166"
 def signal_badge(signal: str) -> str:
     """Return a simplified badge for the given signal."""
     if signal in ("STRONG BUY", "BUY"):
-        return "🟢 LONG"
+        return "🟢 Upside"
     if signal in ("STRONG SELL", "SELL"):
-        return "🔴 SHORT"
+        return "🔴 Downside"
     return "⚪ Neutral"
 
 
@@ -26,25 +27,20 @@ def leverage_badge(lev: int) -> str:
 def bias_score_badge(bias_score: float) -> str:
     score = round(bias_score)
     if score >= 80:
-        label = "STRONG BUY"
+        label = "Strong Bullish"
     elif score >= 60:
-        label = "BUY"
+        label = "Bullish"
     elif score >= 40:
-        label = "WAIT"
+        label = "Neutral"
     elif score >= 20:
-        label = "SELL"
+        label = "Bearish"
     else:
-        label = "STRONG SELL"
+        label = "Strong Bearish"
     return f"{score} ({label})"
 
 
-def confidence_score_badge(confidence: float) -> str:
-    # Backward-compatible alias; prefer bias_score_badge.
-    return bias_score_badge(confidence)
-
-
 def signal_plain(signal: str) -> str:
-    """Map detailed signals to a plain LONG/SHORT/WAIT label."""
+    """Map detailed signals to an internal LONG/SHORT/WAIT label."""
     if signal in ("STRONG BUY", "BUY"):
         return "LONG"
     if signal in ("STRONG SELL", "SELL"):
@@ -74,11 +70,14 @@ def format_delta(delta):
 
 
 def format_trend(trend: str) -> str:
-    if trend == "Bullish":
+    t = str(trend or "").strip().lower()
+    if t == "bullish":
         return "▲ Bullish"
-    if trend == "Bearish":
+    if t == "bearish":
         return "▼ Bearish"
-    return "–"
+    if t == "neutral":
+        return "→ Neutral"
+    return ""
 
 
 def format_adx(adx: float) -> str:
@@ -99,16 +98,27 @@ def format_adx(adx: float) -> str:
     return f"🔥 {adx_f:.1f} (Extreme)"
 
 
-def format_stochrsi(value):
+def _stochrsi_soft_thresholds(timeframe: str | None = None) -> tuple[float, float]:
+    """Return timeframe-adaptive soft thresholds as (low, high)."""
+    tf = str(timeframe or "").strip().lower()
+    if tf in {"1m", "3m", "5m"}:
+        return 0.15, 0.85
+    if tf in {"4h", "1d"}:
+        return 0.22, 0.78
+    return 0.20, 0.80
+
+
+def format_stochrsi(value, timeframe: str | None = None):
     try:
         v = float(value)
     except Exception:
         return "N/A"
     if math.isnan(v):
         return "N/A"
-    if v < 0.2:
+    low_thr, high_thr = _stochrsi_soft_thresholds(timeframe)
+    if v <= low_thr:
         return "🟢 Low"
-    if v > 0.8:
+    if v >= high_thr:
         return "🔴 High"
     return "→ Neutral"
 
@@ -122,27 +132,37 @@ def style_delta(val: str, positive: str = POSITIVE, negative: str = NEGATIVE) ->
 
 
 def style_signal(val: str, positive: str = POSITIVE, negative: str = NEGATIVE, warning: str = WARNING) -> str:
-    if "LONG" in val or "UPSIDE" in val:
+    if "LONG" in val or "UPSIDE" in val or "BULLISH" in val:
         return f"color: {positive}; font-weight: 600;"
-    if "SHORT" in val or "DOWNSIDE" in val:
+    if "SHORT" in val or "DOWNSIDE" in val or "BEARISH" in val:
         return f"color: {negative}; font-weight: 600;"
     return f"color: {warning}; font-weight: 600;"
 
 
-def style_confidence(val: str, positive: str = POSITIVE, negative: str = NEGATIVE, warning: str = WARNING) -> str:
-    if "STRONG BUY" in val or "BUY" in val:
-        return f"color: {positive}; font-weight: 600;"
-    if "WAIT" in val:
-        return f"color: {warning}; font-weight: 600;"
-    return f"color: {negative}; font-weight: 600;"
-
-
 def style_scalp_opp(val: str, positive: str = POSITIVE, negative: str = NEGATIVE) -> str:
-    if val in {"LONG", "Upside"}:
+    if val in {"LONG", "Upside", "Bullish"}:
         return f"color: {positive}; font-weight: 600;"
-    if val in {"SHORT", "Downside"}:
+    if val in {"SHORT", "Downside", "Bearish"}:
         return f"color: {negative}; font-weight: 600;"
     return ""
+
+
+def sanitize_trading_terms(text: object) -> str:
+    """Normalize legacy long/short and buy/sell wording for user-facing UI text."""
+    s = "" if text is None else str(text)
+    if not s:
+        return ""
+    replacements = [
+        (r"\bSTRONG BUY\b", "Strong Bullish"),
+        (r"\bSTRONG SELL\b", "Strong Bearish"),
+        (r"\bBUY\b", "Bullish"),
+        (r"\bSELL\b", "Bearish"),
+        (r"\bLONG\b", "Upside"),
+        (r"\bSHORT\b", "Downside"),
+    ]
+    for pattern, repl in replacements:
+        s = re.sub(pattern, repl, s, flags=re.IGNORECASE)
+    return s
 
 
 def readable_market_cap(value):

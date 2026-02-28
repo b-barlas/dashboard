@@ -19,7 +19,7 @@ except Exception:
 @dataclass
 class DummyAnalysis:
     signal: str
-    confidence: float
+    bias: float
 
 
 @unittest.skipUnless(DEPS_OK, "Missing dependencies for core engine tests")
@@ -62,7 +62,7 @@ class CoreEngineTests(unittest.TestCase):
         df = self._sample_df()
 
         def analyzer(_slice: pd.DataFrame) -> DummyAnalysis:
-            return DummyAnalysis(signal="BUY", confidence=95.0)
+            return DummyAnalysis(signal="BUY", bias=95.0)
 
         out, _summary = run_backtest(df, analyzer=analyzer, threshold=70, exit_after=5)
         self.assertGreater(len(out), 0)
@@ -72,7 +72,7 @@ class CoreEngineTests(unittest.TestCase):
         df = self._sample_df()
 
         def analyzer(_slice: pd.DataFrame) -> DummyAnalysis:
-            return DummyAnalysis(signal="SELL", confidence=10.0)
+            return DummyAnalysis(signal="SELL", bias=10.0)
 
         out, _summary = run_backtest(df, analyzer=analyzer, threshold=70, exit_after=5)
         self.assertGreater(len(out), 0)
@@ -82,7 +82,7 @@ class CoreEngineTests(unittest.TestCase):
         df = self._sample_df()
 
         def analyzer(_slice: pd.DataFrame) -> DummyAnalysis:
-            return DummyAnalysis(signal="SELL", confidence=40.0)
+            return DummyAnalysis(signal="SELL", bias=40.0)
 
         out, _summary = run_backtest(df, analyzer=analyzer, threshold=70, exit_after=5)
         self.assertEqual(len(out), 0)
@@ -91,7 +91,7 @@ class CoreEngineTests(unittest.TestCase):
         df = self._sample_df()
 
         def analyzer(_slice: pd.DataFrame) -> DummyAnalysis:
-            return DummyAnalysis(signal="BUY", confidence=95.0)
+            return DummyAnalysis(signal="BUY", bias=95.0)
 
         out, _summary = run_backtest(df, analyzer=analyzer, threshold=70, exit_after=5)
         self.assertGreater(len(out), 1)
@@ -105,7 +105,7 @@ class CoreEngineTests(unittest.TestCase):
         df = self._sample_df()
         result = analyse_core(df)
         self.assertTrue(hasattr(result, "signal"))
-        self.assertTrue(hasattr(result, "confidence"))
+        self.assertTrue(hasattr(result, "bias"))
         self.assertTrue(hasattr(result, "leverage"))
 
     def test_signals_engine_does_not_crash_when_adx_fails(self) -> None:

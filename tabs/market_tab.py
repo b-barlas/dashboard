@@ -2,10 +2,11 @@ from ui.ctx import get_ctx
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import html
+import re
 
 import pandas as pd
 import plotly.graph_objs as go
-from core.market_decision import action_decision, structure_state, trade_quality
+from core.market_decision import action_decision_with_reason, structure_state
 from core.signal_contract import strength_from_bias, strength_bucket
 from core.metric_catalog import (
     AI_LONG_THRESHOLD,
@@ -33,6 +34,7 @@ def render(ctx: dict) -> None:
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     analyse = get_ctx(ctx, "analyse")
     get_scalping_entry_target = get_ctx(ctx, "get_scalping_entry_target")
+    scalp_quality_gate = get_ctx(ctx, "scalp_quality_gate")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
     signal_plain = get_ctx(ctx, "signal_plain")
     direction_label = get_ctx(ctx, "direction_label")
@@ -41,9 +43,7 @@ def render(ctx: dict) -> None:
     format_trend = get_ctx(ctx, "format_trend")
     format_adx = get_ctx(ctx, "format_adx")
     format_stochrsi = get_ctx(ctx, "format_stochrsi")
-    style_signal = get_ctx(ctx, "style_signal")
-    style_scalp_opp = get_ctx(ctx, "style_scalp_opp")
-    style_delta = get_ctx(ctx, "style_delta")
+    sanitize_trading_terms = get_ctx(ctx, "sanitize_trading_terms")
     _debug = get_ctx(ctx, "_debug")
     """Render the Market Dashboard tab containing top‑level crypto metrics and scanning."""
     major_fallback_symbols = [
@@ -84,7 +84,7 @@ def render(ctx: dict) -> None:
         f"<b class='market-intro-title' style='color:{ACCENT};'>What does this tab show?</b>"
         f"<p class='market-intro-body' style='color:{TEXT_MUTED};'>"
         f"Your market overview dashboard. Shows live BTC/ETH prices, total market cap, "
-        f"{_tip('Fear & Greed Index', 'A 0-100 score measuring market sentiment. 0 = Extreme Fear (buy opportunity), 100 = Extreme Greed (sell signal). Based on volatility, volume, social media, and surveys.')} "
+        f"{_tip('Fear & Greed Index', 'A 0-100 score measuring market sentiment. 0 = Extreme Fear (potential accumulation zone), 100 = Extreme Greed (potential distribution zone). Based on volatility, volume, social media, and surveys.')} "
         f"and {_tip('BTC Dominance', 'Percentage of total crypto market cap that belongs to Bitcoin. Rising dominance = money flowing into BTC (risk-off). Falling = altcoin season.')}. "
         f"Top coins are dynamically selected by 24h volume from CoinGecko and scored with real-time technical signals.</p>"
         f"</div>",
@@ -143,7 +143,7 @@ def render(ctx: dict) -> None:
             f"<div class='metric-card'>"
             f"  <div class='metric-label'>Fear &amp; Greed "
             f"<span title='Crypto Fear &amp; Greed Index (0-100). "
-            f"0-25 = Extreme Fear (potential buy zone), 75-100 = Extreme Greed (potential sell zone).' "
+            f"0-25 = Extreme Fear (potential accumulation zone), 75-100 = Extreme Greed (potential distribution zone).' "
             f"style='cursor:help; font-size:0.7rem;'>ℹ️</span></div>"
             f"  <div class='metric-value'>{fg_value}</div>"
             f"  <div style='color:{sentiment_color};font-size:0.9rem;'>{fg_label}</div>"
@@ -451,74 +451,6 @@ def render(ctx: dict) -> None:
         refresh_scan = st.button("Refresh Scan", use_container_width=True)
     # Strict scalp mode is always enabled (non-strict path removed).
 
-    def _style_setup(v: str) -> str:
-        s = str(v)
-        if "FULL" in s:
-            return f"color:{POSITIVE}; font-weight:700;"
-        if "TREND" in s:
-            return f"color:{WARNING}; font-weight:700;"
-        if "NONE" in s:
-            return f"color:{NEGATIVE}; font-weight:700;"
-        return f"color:{TEXT_MUTED}; font-weight:600;"
-
-    def _style_trend_state(v: str) -> str:
-        s = str(v)
-        if s in {"", "N/A", "Unavailable", "nan"}:
-            return f"color:{TEXT_MUTED};"
-        if s.startswith("▲"):
-            return f"color:{POSITIVE}; font-weight:700;"
-        if s.startswith("▼"):
-            return f"color:{NEGATIVE}; font-weight:700;"
-        if s.startswith("→"):
-            return f"color:{WARNING}; font-weight:700;"
-        # ADX-specific states first (string comes from format_adx helper).
-        if "Very Strong" in s or "Extreme" in s or "(Strong)" in s:
-            return f"color:{POSITIVE}; font-weight:700;"
-        if "Weak" in s or "Starting" in s:
-            return f"color:{WARNING}; font-weight:700;"
-        if "Bullish" in s or "Above" in s or "Oversold" in s or "Near Bottom" in s or "Low" in s:
-            return f"color:{POSITIVE}; font-weight:700;"
-        if "Bearish" in s or "Below" in s or "Overbought" in s or "Near Top" in s or "High" in s:
-            return f"color:{NEGATIVE}; font-weight:700;"
-        if "Neutral" in s or "Moderate" in s or "Near VWAP" in s or "Starting" in s:
-            return f"color:{WARNING}; font-weight:700;"
-        return f"color:{TEXT_MUTED};"
-
-    def _style_secondary(v: str) -> str:
-        s = str(v)
-        if not s or s in {"N/A", "Unavailable", "nan"}:
-            return f"color:{TEXT_MUTED}; opacity:0.7;"
-        return f"color:{TEXT_MUTED}; opacity:0.9;"
-
-    def _style_trend_state_soft(v: str) -> str:
-        s = str(v)
-        if s in {"", "N/A", "Unavailable", "nan"}:
-            return f"color:{TEXT_MUTED}; opacity:0.75;"
-        if s.startswith("▲"):
-            return f"color:{POSITIVE}; font-weight:600; opacity:0.82;"
-        if s.startswith("▼"):
-            return f"color:{NEGATIVE}; font-weight:600; opacity:0.82;"
-        if s.startswith("→"):
-            return f"color:{WARNING}; font-weight:600; opacity:0.82;"
-        if "Bullish" in s or "Above" in s or "Oversold" in s or "Near Bottom" in s or "Low" in s:
-            return f"color:{POSITIVE}; font-weight:600; opacity:0.8;"
-        if "Bearish" in s or "Below" in s or "Overbought" in s or "Near Top" in s or "High" in s:
-            return f"color:{NEGATIVE}; font-weight:600; opacity:0.8;"
-        if "Neutral" in s or "Moderate" in s or "Near VWAP" in s or "Starting" in s:
-            return f"color:{WARNING}; font-weight:600; opacity:0.8;"
-        return f"color:{TEXT_MUTED}; opacity:0.9;"
-
-    def _row_action_highlight(row: pd.Series) -> list[str]:
-        action = str(row.get("Action", ""))
-        neutral = ""
-        if "ENTER" in action:
-            tone = "background-color: rgba(0,255,136,0.055);"
-        elif "SKIP" in action:
-            tone = "background-color: rgba(255,51,102,0.05);"
-        else:
-            tone = "background-color: rgba(255,209,102,0.04);"
-        return [tone if col != "Action" else f"{tone} font-weight:800;" for col in row.index]
-
     def _fmt_price(v: float) -> str:
         try:
             p = float(v)
@@ -563,71 +495,38 @@ def render(ctx: dict) -> None:
             return f"→ {clean}"
         return clean
 
-    def _style_action(v: str) -> str:
-        s = str(v)
-        if "ENTER" in s:
-            return (
-                f"color:{POSITIVE}; font-weight:800; "
-                f"background-color:rgba(0,255,136,0.08); border:1px solid rgba(0,255,136,0.35);"
-            )
-        if "WATCH" in s:
-            return (
-                f"color:{WARNING}; font-weight:800; "
-                f"background-color:rgba(255,209,102,0.08); border:1px solid rgba(255,209,102,0.35);"
-            )
-        return (
-            f"color:{NEGATIVE}; font-weight:800; "
-            f"background-color:rgba(255,51,102,0.08); border:1px solid rgba(255,51,102,0.35);"
-        )
-
-    def _style_trade_quality(v: str) -> str:
-        s = str(v)
-        if "A" in s:
-            return (
-                f"color:{POSITIVE}; font-weight:800; "
-                f"background-color:rgba(0,255,136,0.08); border:1px solid rgba(0,255,136,0.35);"
-            )
-        if "B" in s:
-            return (
-                f"color:{WARNING}; font-weight:800; "
-                f"background-color:rgba(255,209,102,0.08); border:1px solid rgba(255,209,102,0.35);"
-            )
-        return (
-            f"color:{NEGATIVE}; font-weight:800; "
-            f"background-color:rgba(255,51,102,0.08); border:1px solid rgba(255,51,102,0.35);"
-        )
+    def _compact_adx_label(v: object) -> str:
+        raw = str(v or "").strip()
+        if not raw or raw.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE"}:
+            return ""
+        # format_adx output examples:
+        # "▼ 17.9 (Weak)", "→ 23.4 (Starting)", "▲ 34.8 (Strong)",
+        # "▲▲ 58.1 (Very Strong)", "🔥 79.3 (Extreme)"
+        m = re.search(r"\(([^)]+)\)", raw)
+        if not m:
+            return raw
+        bucket = m.group(1).strip()
+        if raw.startswith("▲▲"):
+            return f"▲▲ {bucket}"
+        if raw.startswith("▲"):
+            return f"▲ {bucket}"
+        if raw.startswith("▼"):
+            return f"▼ {bucket}"
+        if raw.startswith("→"):
+            return f"→ {bucket}"
+        if raw.startswith("🔥"):
+            return f"🔥 {bucket}"
+        return bucket
 
     def _rr_badge(rr_val: float) -> str:
         if rr_val <= 0:
             return ""
-        if rr_val >= 2.0:
-            return f"🟢 {rr_val:.2f}"
-        if rr_val >= 1.3:
-            return f"🟡 {rr_val:.2f}"
-        return f"🔴 {rr_val:.2f}"
-
-    def _style_rr(v: str) -> str:
-        s = str(v)
-        if s.startswith("🟢"):
-            return f"color:{POSITIVE}; font-weight:700;"
-        if s.startswith("🟡"):
-            return f"color:{WARNING}; font-weight:700;"
-        if s.startswith("🔴"):
-            return f"color:{NEGATIVE}; font-weight:700;"
-        return ""
+        return f"{rr_val:.2f}"
 
     def _strength_badge(bias: float) -> str:
         strength = float(strength_from_bias(bias))
         label = strength_bucket(strength)
         return f"{strength:.0f}% ({label})"
-
-    def _style_strength(v: str) -> str:
-        s = str(v)
-        if "(STRONG)" in s or "(GOOD)" in s:
-            return f"color:{POSITIVE}; font-weight:700;"
-        if "(MIXED)" in s:
-            return f"color:{WARNING}; font-weight:700;"
-        return f"color:{NEGATIVE}; font-weight:700;"
 
     def _tone_for_text(text: str, *, neutral_tone: str = "muted") -> str:
         s = str(text).strip().upper()
@@ -704,14 +603,16 @@ def render(ctx: dict) -> None:
             return "neg"
 
         if col == "Tech vs AI Alignment":
+            if "CONFLICT" in s:
+                return "neg"
             if "HIGH" in s:
                 return "pos"
             if "MEDIUM" in s:
                 return "warn"
             if "TREND" in s:
                 return "warn"
-            if "WEAK" in s or "CONFLICT" in s:
-                return "neg"
+            if "WEAK" in s:
+                return "warn"
             return "muted"
 
         if col == "R:R":
@@ -722,9 +623,9 @@ def render(ctx: dict) -> None:
                     .replace("🔴", "")
                     .strip()
                 )
-                if rr >= 1.5:
+                if rr >= 2.0:
                     return "pos"
-                if rr >= 1.2:
+                if rr >= 1.5:
                     return "warn"
                 return "neg"
             except Exception:
@@ -754,12 +655,12 @@ def render(ctx: dict) -> None:
             return "muted"
 
         if col == "Spike Alert":
-            return "pos" if "SPIKE" in s else "muted"
+            return "warn" if "SPIKE" in s else "muted"
 
         if col == "ADX":
-            if "VERY STRONG" in s or "STRONG" in s:
+            if "EXTREME" in s or "VERY STRONG" in s or "STRONG" in s:
                 return "pos"
-            if "STARTING" in s or "MODERATE" in s:
+            if "STARTING" in s:
                 return "warn"
             if "WEAK" in s:
                 return "neg"
@@ -773,17 +674,26 @@ def render(ctx: dict) -> None:
             return "warn"
 
         if col in {"Bollinger", "Stochastic RSI", "Williams %R", "CCI"}:
-            if "OVERSOLD" in s or "NEAR BOTTOM" in s:
+            if "OVERSOLD" in s or "NEAR BOTTOM" in s or "LOW" in s:
                 return "pos"
             if "OVERBOUGHT" in s or "NEAR TOP" in s or "HIGH" in s:
                 return "neg"
             return "warn"
 
         if col == "Candle Pattern":
+            if s.startswith("▲"):
+                return "pos"
+            if s.startswith("▼"):
+                return "neg"
+            if s.startswith("→") or s.startswith("-"):
+                return "warn"
+            # Fallback safety for legacy rows without arrow prefixes.
             if "BULLISH" in s:
                 return "pos"
             if "BEARISH" in s:
                 return "neg"
+            if "NEUTRAL" in s or "INDECISION" in s:
+                return "warn"
             return "warn"
 
         return _tone_for_text(s)
@@ -816,11 +726,26 @@ def render(ctx: dict) -> None:
             return s
         if "ENTER (Trend+AI)" in s:
             return "✅ ENTER T+AI"
-        if "ENTER (Trend-Only)" in s:
+        if "ENTER (Trend-Led)" in s:
             return "🟡 ENTER Trend"
-        if "ENTER (AI-Only)" in s:
+        if "ENTER (AI-Led)" in s:
             return "🟡 ENTER AI"
         return s
+
+    def _action_reason_text(code: str) -> str:
+        mapping = {
+            "NO_DIRECTION": "No clear direction (neutral signal).",
+            "TECH_AI_CONFLICT": "Technical and AI directions are in conflict.",
+            "LOW_STRENGTH": "Strength is below minimum threshold.",
+            "NO_STRUCTURE": "Structure quality is not actionable.",
+            "ADX_UNKNOWN": "Trend strength (ADX) is unavailable; waiting.",
+            "ADX_TOO_LOW": "Trend strength is too low for execution.",
+            "ENTER_TREND_AI": "Trend and AI confirmations align with quality gates.",
+            "ENTER_TREND_LED": "Trend leads and passes quality gates; AI is used as veto only.",
+            "ENTER_AI_LED": "AI leads with strong agreement; trend is used as veto only.",
+            "NEEDS_CONFIRMATION": "Direction exists, but confirmation is incomplete.",
+        }
+        return mapping.get(str(code or "").upper(), "")
 
     def _render_cell(col: str, row: dict) -> str:
         val = row.get(col, "")
@@ -831,20 +756,68 @@ def render(ctx: dict) -> None:
             return f"<span class='mk-coin'>{html.escape(txt)}</span>"
         if col in {"Action", "Direction", "Strength", "R:R", "Scalp Opportunity"}:
             if col == "Action":
+                reason_code = str(row.get("__action_reason", "")).strip()
+                reason_text = _action_reason_text(reason_code)
+                title_txt = txt if not reason_text else f"{txt} | Reason: {reason_text}"
                 return _chip(
                     _compact_action_label(txt),
                     _tone_for_col(col, txt),
-                    title=txt,
+                    title=title_txt,
                     extra_class="mk-chip-action",
                 )
+            if col == "Direction":
+                direction_note = str(row.get("__direction_note", "")).strip()
+                return _chip(txt, _tone_for_col(col, txt), title=direction_note or None)
             if col == "Scalp Opportunity" and txt.upper() == "NEUTRAL":
                 return ""
+            if col == "Strength":
+                strength_note = str(row.get("__strength_note", "")).strip()
+                return _chip(txt, _tone_for_col(col, txt), title=strength_note or None)
+            if col == "R:R":
+                rr_note = str(row.get("__rr_note", "")).strip()
+                rr_text = txt
+                if rr_note:
+                    rr_text = f"{txt}*"
+                return _chip(rr_text, _tone_for_col(col, txt), title=rr_note or None)
             return _chip(txt, _tone_for_col(col, txt))
         if col == "Tech vs AI Alignment":
-            return _chip(txt, _tone_for_col(col, txt))
+            align_note = str(row.get("__alignment_note", "")).strip()
+            return _chip(txt, _tone_for_col(col, txt), title=align_note or None)
         if col == "AI Ensemble":
             t = _tone_for_col(col, txt)
-            return _chip(txt, t)
+            ai_note = str(row.get("__ai_note", "")).strip()
+            return _chip(txt, t, title=ai_note or None)
+        if col == "Spike Alert":
+            if not txt:
+                return ""
+            spike_dir = str(row.get("__spike_dir", "")).upper()
+            if spike_dir == "UP":
+                spike_tone = "pos"
+                spike_label = "▲ Up Spike"
+            elif spike_dir == "DOWN":
+                spike_tone = "neg"
+                spike_label = "▼ Down Spike"
+            else:
+                spike_tone = "warn"
+                spike_label = "→ Spike"
+            detail_parts: list[str] = []
+            spike_vol_ratio = row.get("__spike_vol_ratio")
+            spike_candle_pct = row.get("__spike_candle_pct")
+            spike_vwap_ctx = str(row.get("__spike_vwap_ctx", "")).strip()
+            try:
+                if pd.notna(spike_vol_ratio):
+                    detail_parts.append(f"Vol Ratio: {float(spike_vol_ratio):.2f}x")
+            except Exception:
+                pass
+            try:
+                if pd.notna(spike_candle_pct):
+                    detail_parts.append(f"Candle: {float(spike_candle_pct):+,.2f}%")
+            except Exception:
+                pass
+            if spike_vwap_ctx:
+                detail_parts.append(f"VWAP: {spike_vwap_ctx}")
+            detail_title = " | ".join(detail_parts) if detail_parts else "Volume anomaly detected"
+            return _chip(spike_label, spike_tone, title=detail_title)
         if col == "Δ (%)":
             if not txt:
                 return ""
@@ -853,9 +826,43 @@ def render(ctx: dict) -> None:
             if txt.startswith("▼"):
                 return f"<span class='mk-delta mk-neg-t'>{html.escape(txt)}</span>"
             return f"<span class='mk-delta mk-muted-t'>{html.escape(txt)}</span>"
-        if col in {"Entry Price", "Stop Loss", "Target Price"}:
+        if col == "Entry Price":
+            if not txt:
+                return ""
+            entry_note = str(row.get("__entry_note", "")).strip()
+            if entry_note:
+                return (
+                    f"<span class='mk-plain' title='{html.escape(entry_note, quote=True)}'>"
+                    f"{html.escape(txt)}</span>"
+                )
+            return f"<span class='mk-plain'>{html.escape(txt)}</span>"
+        if col == "Stop Loss":
             return f"<span class='mk-plain'>{html.escape(txt)}</span>" if txt else ""
-        if col in {"ADX", "SuperTrend", "Ichimoku", "VWAP", "Bollinger", "Stochastic RSI", "Volatility", "PSAR", "Williams %R", "CCI", "Candle Pattern", "Spike Alert"}:
+        if col == "Target Price":
+            if not txt:
+                return ""
+            target_note = str(row.get("__target_note", "")).strip()
+            if target_note:
+                return (
+                    f"<span class='mk-plain' title='{html.escape(target_note, quote=True)}'>"
+                    f"{html.escape(txt)}</span>"
+                )
+            return f"<span class='mk-plain'>{html.escape(txt)}</span>"
+        if col == "Ichimoku":
+            ichi_title = str(row.get("__ichimoku_detail", "")).strip()
+            return _chip(txt, _tone_for_col(col, txt), title=ichi_title or None) if txt else ""
+        if col == "ADX":
+            adx_raw = row.get("__adx_raw")
+            adx_title = None
+            try:
+                if pd.notna(adx_raw):
+                    adx_f = float(adx_raw)
+                    gate_txt = "PASS (>=20)" if adx_f >= 20.0 else "LOW (<20)"
+                    adx_title = f"ADX {adx_f:.1f} | Scalp trend gate: {gate_txt}"
+            except Exception:
+                adx_title = None
+            return _chip(txt, _tone_for_col(col, txt), title=adx_title) if txt else ""
+        if col in {"ADX", "SuperTrend", "Ichimoku", "VWAP", "Bollinger", "Stochastic RSI", "Volatility", "PSAR", "Williams %R", "CCI", "Candle Pattern"}:
             return _chip(txt, _tone_for_col(col, txt)) if txt else ""
         return f"<span class='mk-plain'>{html.escape(txt)}</span>"
 
@@ -1051,7 +1058,14 @@ def render(ctx: dict) -> None:
             mcap_map = {}
             for coin in unique_market_data:
                 symbol = (coin.get("symbol") or "").upper()
-                mcap = int(coin.get("market_cap") or 0)
+                raw_mcap = coin.get("market_cap")
+                try:
+                    if isinstance(raw_mcap, str):
+                        raw_mcap = raw_mcap.replace(",", "").strip()
+                    mcap_f = float(raw_mcap) if raw_mcap is not None and pd.notna(raw_mcap) else 0.0
+                    mcap = int(mcap_f) if pd.notna(mcap_f) and mcap_f > 0 else 0
+                except Exception:
+                    mcap = 0
                 if symbol and (symbol not in mcap_map or mcap > mcap_map[symbol]):
                     mcap_map[symbol] = mcap
             is_exchange_only_mode = len(unique_market_data) == 0
@@ -1101,15 +1115,33 @@ def render(ctx: dict) -> None:
                 if df_eval is None or len(df_eval) <= 55:
                     return None
 
-                prob_up, ai_direction, ai_details = ml_ensemble_predict(df_eval)
+                _ai_prob, ai_direction, ai_details = ml_ensemble_predict(df_eval)
                 agreement = float(ai_details.get("agreement", 0.0)) if isinstance(ai_details, dict) else 0.0
+                directional_agreement = float(ai_details.get("directional_agreement", agreement)) if isinstance(ai_details, dict) else agreement
                 consensus_agreement = float(ai_details.get("consensus_agreement", 0.0)) if isinstance(ai_details, dict) else 0.0
+                model_votes = list(ai_details.get("model_votes", [])) if isinstance(ai_details, dict) else []
                 latest = df.iloc[-1]
+                latest_closed = df_eval.iloc[-1]
 
                 base = sym.split('/')[0].upper()
                 mcap_val = mcap_map.get(base)
                 price = float(latest['close'])
-                price_change = get_price_change(sym)
+                # Delta source of truth: selected-timeframe closed candles.
+                # This keeps table delta aligned with Direction/Strength calculations.
+                price_change = None
+                try:
+                    prev_close = float(df_eval["close"].iloc[-2])
+                    last_closed = float(df_eval["close"].iloc[-1])
+                    if pd.notna(prev_close) and prev_close > 0 and pd.notna(last_closed):
+                        price_change = ((last_closed / prev_close) - 1.0) * 100.0
+                except Exception:
+                    price_change = None
+                # Safety fallback (rare): if candle delta is unavailable, use ticker percentage.
+                if price_change is None:
+                    try:
+                        price_change = get_price_change(sym)
+                    except Exception:
+                        price_change = None
 
                 a = analyse(df_eval)
                 signal, volume_spike = a.signal, a.volume_spike
@@ -1117,6 +1149,33 @@ def render(ctx: dict) -> None:
                 adx_val_v, supertrend_trend_v, ichimoku_trend_v = a.adx, a.supertrend, a.ichimoku
                 stochrsi_k_val_v, bollinger_bias_v, vwap_label_v = a.stochrsi_k, a.bollinger, a.vwap
                 psar_trend_v = a.psar
+
+                spike_dir = ""
+                spike_vol_ratio = float("nan")
+                spike_candle_pct = float("nan")
+                spike_vwap_ctx = str(vwap_label_v or "").replace("🟢 ", "").replace("🔴 ", "").replace("→ ", "").strip()
+                if volume_spike:
+                    try:
+                        prev_vol_avg = float(df_eval["volume"].iloc[-21:-1].mean()) if len(df_eval) >= 21 else float("nan")
+                        last_vol = float(df_eval["volume"].iloc[-1]) if len(df_eval) >= 1 else float("nan")
+                        if pd.notna(prev_vol_avg) and prev_vol_avg > 0 and pd.notna(last_vol):
+                            spike_vol_ratio = last_vol / prev_vol_avg
+                    except Exception:
+                        spike_vol_ratio = float("nan")
+                    try:
+                        o = float(latest_closed["open"])
+                        c = float(latest_closed["close"])
+                        if pd.notna(o) and pd.notna(c) and o > 0:
+                            spike_candle_pct = ((c / o) - 1.0) * 100.0
+                        if pd.notna(o) and pd.notna(c):
+                            if c > o:
+                                spike_dir = "UP"
+                            elif c < o:
+                                spike_dir = "DOWN"
+                            else:
+                                spike_dir = "NEUTRAL"
+                    except Exception:
+                        spike_dir = "NEUTRAL"
 
                 scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note = get_scalping_entry_target(
                     df_eval, bias_score_v, supertrend_trend_v, ichimoku_trend_v, vwap_label_v,
@@ -1134,64 +1193,168 @@ def render(ctx: dict) -> None:
                     return None
 
                 signal_direction = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "NEUTRAL")
+                signal_text = sanitize_trading_terms(signal)
+                comment_text = sanitize_trading_terms(str(getattr(a, 'comment', '') or '').strip())
+                direction_note = (
+                    f"Source signal: {signal_text} | Bias: {float(bias_score_v):.1f} | "
+                    f"Signal comment: {comment_text}"
+                ).strip()
 
                 ai_display = direction_label(ai_direction)
-                vote_ratio = agreement if ai_direction in {"LONG", "SHORT"} else consensus_agreement
+                vote_ratio = directional_agreement if ai_direction in {"LONG", "SHORT"} else consensus_agreement
                 consensus_votes = max(0, min(3, int(round(float(vote_ratio) * 3.0))))
                 ai_display = f"{ai_display} ({consensus_votes}/3)"
+                ai_note = (
+                    f"AI direction: {direction_label(ai_direction)} | "
+                    f"Displayed votes: {consensus_votes}/3 | "
+                    f"Directional agreement: {float(directional_agreement) * 100:.0f}% | "
+                    f"Consensus agreement: {float(consensus_agreement) * 100:.0f}%"
+                )
+                if model_votes:
+                    vote_labels = [direction_label(str(v)) for v in model_votes]
+                    ai_note += f" | Model votes: {', '.join(vote_labels)}"
 
                 _emoji_map = {"HIGH": "🟢", "MEDIUM": "🟡", "TREND": "🟡", "WEAK": "⚪", "CONFLICT": "🔴"}
-                structure_val = structure_state(scalp_direction or "", signal_direction, ai_direction)
                 strength_val = float(strength_from_bias(float(bias_score_v)))
-                _conv_lbl, _conv_clr = _calc_conviction(
+                strength_note = (
+                    f"Bias: {float(bias_score_v):.1f} | Strength: {strength_val:.1f} "
+                    f"(formula: |bias-50|^0.70 scaled to 0-100) | "
+                    f"Bands: Weak<40, Mixed 40-59, Good 60-74, Strong>=75"
+                )
+                structure_val = structure_state(
                     signal_direction,
                     ai_direction,
                     strength_val,
-                    float(agreement),
+                    float(directional_agreement),
+                )
+                _conv_lbl, _ = _calc_conviction(
+                    signal_direction,
+                    ai_direction,
+                    strength_val,
+                    float(directional_agreement),
                 )
                 conviction = f"{_emoji_map.get(_conv_lbl, '')} {_conv_lbl}" if _conv_lbl else ""
+                structure_desc = {
+                    "FULL": "Trend+AI confirmed",
+                    "TREND": "Trend-led structure",
+                    "EARLY": "Early structure",
+                    "NONE": "No structure",
+                }.get(str(structure_val), str(structure_val))
+                align_note = (
+                    f"Tech: {direction_label(signal_direction)} | "
+                    f"AI: {direction_label(ai_direction)} ({consensus_votes}/3) | "
+                    f"Directional agreement: {float(directional_agreement) * 100:.0f}% | "
+                    f"Consensus agreement: {float(consensus_agreement) * 100:.0f}% | "
+                    f"Structure: {structure_desc}"
+                )
+                if str(_conv_lbl) == "CONFLICT":
+                    align_note += " | Conflict: technical and AI directions are opposite."
+                elif str(_conv_lbl) == "WEAK":
+                    align_note += " | Weak: no hard conflict, but confirmation quality is low."
                 rr_val = float(rr_ratio) if rr_ratio else 0.0
-                action = action_decision(
+                action, action_reason_code = action_decision_with_reason(
                     signal_direction,
                     strength_val,
                     structure_val,
                     str(_conv_lbl),
-                    float(agreement),
+                    float(directional_agreement),
                     float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
                 )
-                trade_quality_val = trade_quality(
-                    action,
-                    structure_val,
-                    str(_conv_lbl),
-                    strength_val,
-                    float(agreement),
-                    rr_val,
+                scalp_gate_pass, scalp_gate_reason = scalp_quality_gate(
+                    scalp_direction=scalp_direction,
+                    signal_direction=signal_direction,
+                    rr_ratio=rr_val,
+                    adx_val=float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
+                    strength=strength_val,
+                    conviction_label=str(_conv_lbl),
+                    entry=entry_s,
+                    stop=stop_s,
+                    target=target_s,
                 )
+                scalp_opportunity_label = direction_label(scalp_direction or "") if scalp_gate_pass else ""
+
+                if not scalp_gate_pass:
+                    entry_price = 0.0
+                    stop_s = 0.0
+                    target_price = 0.0
+                    rr_val = 0.0
+                entry_note = ""
+                if scalp_gate_pass and scalp_direction in {"LONG", "SHORT"} and entry_s:
+                    try:
+                        close_ref = float(latest_closed["close"])
+                        ema5_ref = float(df_eval["close"].ewm(span=5, adjust=False).mean().iloc[-1])
+                        if scalp_direction == "LONG":
+                            base_ref = max(close_ref, ema5_ref)
+                            atr_used = (float(entry_s) - base_ref) / 0.20
+                            rule_txt = "max(Close, EMA5) + 0.20×ATR"
+                        else:
+                            base_ref = min(close_ref, ema5_ref)
+                            atr_used = (base_ref - float(entry_s)) / 0.20
+                            rule_txt = "min(Close, EMA5) - 0.20×ATR"
+                        entry_note = (
+                            f"{direction_label(scalp_direction)} entry model: {rule_txt} | "
+                            f"Close {_fmt_price(close_ref)} | EMA5 {_fmt_price(ema5_ref)} | "
+                            f"ATR {_fmt_price(atr_used)}"
+                        )
+                    except Exception:
+                        entry_note = ""
+                target_note = str(breakout_note or "").strip() if scalp_gate_pass else ""
+                rr_note = ""
+                if scalp_gate_pass and target_note:
+                    rr_note = f"Conditional R:R: {target_note}"
+
+                ichimoku_cell = format_trend(ichimoku_trend_v)
+                ichi_detail_parts: list[str] = []
+                if a.ichimoku_tk_cross:
+                    ichi_detail_parts.append(f"TK Cross: {a.ichimoku_tk_cross.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}")
+                if a.ichimoku_future_bias:
+                    ichi_detail_parts.append(
+                        f"Future Cloud: {a.ichimoku_future_bias.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
+                    )
+                if a.ichimoku_cloud_strength:
+                    ichi_detail_parts.append(
+                        f"Cloud Strength: {a.ichimoku_cloud_strength.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
+                    )
+                ichimoku_detail = " | ".join(ichi_detail_parts)
 
                 return {
                     'Coin': base,
                     'Price ($)': _fmt_price(price),
                     'Δ (%)': format_delta(price_change) if price_change is not None else '',
                     'Action': action,
-                    'Trade Quality': trade_quality_val,
+                    '__action_reason': action_reason_code,
                     'Direction': direction_label(signal_plain(signal)),
+                    '__direction_note': direction_note,
                     'Strength': _strength_badge(float(bias_score_v)),
+                    '__strength_note': strength_note,
                     'AI Ensemble': ai_display,
+                    '__ai_note': ai_note,
                     'Tech vs AI Alignment': conviction,
+                    '__alignment_note': align_note,
                     '__structure_state': structure_val,
-                    'Scalp Opportunity': direction_label(scalp_direction or ""),
+                    'Scalp Opportunity': scalp_opportunity_label,
                     'Entry Price': _fmt_price(entry_price) if entry_price else '',
+                    '__entry_note': entry_note,
                     'Stop Loss': _fmt_price(stop_s) if stop_s else '',
                     'Target Price': _fmt_price(target_price) if target_price else '',
+                    '__target_note': target_note,
+                    '__rr_note': rr_note,
                     'R:R': _rr_badge(rr_val),
                     'Market Cap ($)': readable_market_cap(mcap_val) if mcap_val else "—",
-                    'Spike Alert': '▲ Spike' if volume_spike else '',
+                    'Spike Alert': '→ Spike' if volume_spike else '',
+                    '__spike_dir': spike_dir,
+                    '__spike_vol_ratio': spike_vol_ratio,
+                    '__spike_candle_pct': spike_candle_pct,
+                    '__spike_vwap_ctx': spike_vwap_ctx,
+                    '__scalp_gate_reason': scalp_gate_reason,
                     'ADX': round(adx_val_v, 1) if pd.notna(adx_val_v) else float("nan"),
+                    '__adx_raw': round(adx_val_v, 2) if pd.notna(adx_val_v) else float("nan"),
                     'SuperTrend': supertrend_trend_v,
                     'Volatility': atr_comment_v,
                     'Stochastic RSI': round(stochrsi_k_val_v, 2) if pd.notna(stochrsi_k_val_v) else float("nan"),
                     'Candle Pattern': candle_pattern_v,
-                    'Ichimoku': ichimoku_trend_v,
+                    'Ichimoku': ichimoku_cell,
+                    '__ichimoku_detail': ichimoku_detail,
                     'Bollinger': bollinger_bias_v,
                     'VWAP': vwap_label_v,
                     'PSAR': psar_trend_v if psar_trend_v != "Unavailable" else '',
@@ -1312,19 +1475,25 @@ def render(ctx: dict) -> None:
             f"<div class='market-details-body' style='color:{TEXT_MUTED};'>"
             f"<b>1) Read Action first (what to do now)</b><br>"
             f"• <b>ENTER (Trend+AI)</b>: highest-quality entry candidate. You can evaluate execution immediately.<br>"
-            f"• <b>ENTER (Trend-Only)</b>: trend leads but AI is not fully aligned; use smaller risk and stricter stop discipline.<br>"
-            f"• <b>ENTER (AI-Only)</b>: AI conviction leads while technical structure is early; treat as early setup and require tighter risk control.<br>"
+            f"• <b>ENTER (Trend-Led)</b>: trend leads and AI is used as veto/guardrail only.<br>"
+            f"• <b>ENTER (AI-Led)</b>: AI leads and trend is used as veto/guardrail only.<br>"
             f"• <b>WATCH</b>: do not enter yet; keep in watchlist and wait for stronger confirmation.<br>"
             f"• <b>SKIP</b>: no trade candidate for now.<br><br>"
+            f"Tip: hover the <b>Action</b> badge to see the reason behind WATCH/SKIP/ENTER classification.<br><br>"
+            f"Action is computed from <b>Direction + Strength + AI Ensemble + Tech vs AI Alignment</b>, "
+            f"not from scalp plan levels.<br><br>"
             f"<b>2) Validate side quality</b><br>"
             f"Check <b>Direction</b> (Upside/Downside) + <b>Strength</b> (WEAK/MIXED/GOOD/STRONG). "
             f"If Direction is clear but Strength is weak, avoid rushing.<br><br>"
             f"<b>3) Validate confirmation quality</b><br>"
             f"Use <b>AI Ensemble</b> + <b>Tech vs AI Alignment</b>. "
-            f"Avoid rows where alignment shows <b>CONFLICT</b>.<br><br>"
+            f"Avoid rows where alignment shows <b>CONFLICT</b>. "
+            f"<b>WEAK</b> means low confirmation quality (not hard conflict) and needs tighter risk.<br><br>"
             f"<b>4) If you are taking a scalp</b><br>"
-            f"Use <b>Scalp Opportunity</b> first, then check <b>R:R</b>. "
-            f"Prefer better R:R setups, and execute only with <b>Entry Price / Stop Loss / Target Price</b> defined.<br><br>"
+            f"<b>Scalp Opportunity</b> is shown only when all scalp quality gates pass: "
+            f"Direction is clear and scalp side <b>matches Direction</b>, <b>R:R ≥ 1.5</b>, <b>ADX ≥ 20</b>, <b>Strength ≥ 55</b>, "
+            f"<b>Tech vs AI Alignment</b> is not CONFLICT, and <b>Entry/Stop/Target</b> levels are valid. "
+            f"If the column is empty, do not force a scalp trade.<br><br>"
             f"<b>5) Advanced columns are for diagnostics</b><br>"
             f"Open <b>+ Show advanced columns</b> only when you need deeper indicator detail (ADX/Ichimoku/VWAP etc.)."
             f"</div></details>",
@@ -1337,26 +1506,33 @@ def render(ctx: dict) -> None:
             f"<div class='market-details-body' style='color:{TEXT_MUTED}; padding:0.5rem;'>"
             "<b>Coin</b>: asset ticker.<br>"
             "<b>Price ($)</b>: latest tradable price snapshot.<br>"
-            "<b>Δ (%)</b>: recent price change for momentum context.<br>"
-            "<b>Action</b>: final decision class (ENTER / WATCH / SKIP).<br>"
-            "<b>Direction</b>: expected side (Upside / Downside / Neutral).<br>"
-            "<b>Strength</b>: 0-100 edge power from technical engine (direction-agnostic).<br>"
-            "<b>AI Ensemble</b>: AI side + model vote support (x/3).<br>"
-            "<b>Tech vs AI Alignment</b>: agreement quality between technical side and AI side (HIGH/MEDIUM/TREND/WEAK/CONFLICT).<br>"
+            "<b>Δ (%)</b>: change from previous closed candle to latest closed candle on selected timeframe (fallback: ticker % if candle delta unavailable).<br>"
+            "<b>Action</b>: final decision class (ENTER / WATCH / SKIP). Hover badge for reason text.<br>"
+            "<b>Direction</b>: expected side (Upside / Downside / Neutral). Hover cell for source signal and reason.<br>"
+            "<b>Strength</b>: 0-100 edge power from technical engine (direction-agnostic). Hover cell to see bias->strength conversion and bucket bands.<br>"
+            "<b>AI Ensemble</b>: AI side + model vote support (x/3). For Upside/Downside this is directional vote support; for Neutral this is consensus support. Hover cell for detailed agreements.<br>"
+            "<b>Tech vs AI Alignment</b>: agreement quality between technical side and AI side (HIGH/MEDIUM/TREND/WEAK/CONFLICT). "
+            "CONFLICT = opposite sides; WEAK = low-quality confirmation without hard conflict. Hover cell for details.<br>"
             "<b>R:R</b>: risk/reward estimate from planned stop-target geometry.<br>"
-            "<b>Entry Price</b>: proposed entry level from setup engine.<br>"
+            "<b>Entry Price</b>: proposed entry level from setup engine (hover value to see formula/context note).<br>"
             "<b>Stop Loss</b>: invalidation level for risk control.<br>"
-            "<b>Target Price</b>: first planned take-profit level.<br>"
-            "<b>Scalp Opportunity</b>: short-horizon directional setup (if available).<br>"
+            "<b>Target Price</b>: first planned take-profit level (hover value to see breakout requirement note, if any).<br>"
+            "<b>R:R marker (*)</b>: this R:R is conditional; target requires breakout. Hover R:R for detail.<br>"
+            "<b>Scalp Opportunity</b>: appears only when scalp quality gates pass (Direction match + R:R ≥ 1.5 + ADX ≥ 20 + Strength ≥ 55 + no CONFLICT + valid Entry/Stop/Target).<br>"
             "<b>Market Cap ($)</b>: size/liquidity context of the coin.<br>"
-            "<b>Advanced columns</b>: ADX, SuperTrend, Ichimoku, VWAP, Bollinger, StochRSI, PSAR, Williams %R, CCI, Candle Pattern for deeper diagnostics."
+            "<b>ADX</b>: trend-strength bucket used as execution quality filter (not direction).<br>"
+            "<b>Advanced columns</b>: ADX, SuperTrend, Ichimoku, VWAP, Bollinger, StochRSI, PSAR, Williams %R, CCI, Candle Pattern for deeper diagnostics.<br>"
+            "<b>ADX display</b>: bucket label is shown in-cell; hover ADX to see exact value + scalp gate status.<br>"
+            "<b>Spike Alert</b>: volume anomaly marker. Up/Down is based on spike candle close vs open (independent from Action). Hover for Vol Ratio / candle move / VWAP context.<br>"
+            "<b>Ichimoku</b>: shows cloud trend (Bullish/Bearish/Neutral). Hover badge to see TK cross, future cloud bias, and cloud strength details.<br>"
+            "<b>Candle Pattern direction</b>: ▲ bullish, ▼ bearish, → neutral."
             "</div></details>",
             unsafe_allow_html=True,
         )
         st.markdown(
             f"<div style='display:flex; flex-wrap:wrap; gap:8px; margin:0 0 0.55rem 0;'>"
             f"<span class='market-criteria-chip' style='border:1px solid rgba(0,255,136,0.35); color:{POSITIVE}; background:rgba(0,255,136,0.08);'>"
-            f"ENTER (Trend+AI / Trend-Only / AI-Only): execution-ready class under active risk guards</span>"
+            f"ENTER (Trend+AI / Trend-Led / AI-Led): execution-ready class under active risk guards</span>"
             f"<span class='market-criteria-chip' style='border:1px solid rgba(255,209,102,0.35); color:{WARNING}; background:rgba(255,209,102,0.08);'>"
             f"WATCH: direction exists, but confirmation is not complete yet</span>"
             f"<span class='market-criteria-chip' style='border:1px solid rgba(255,51,102,0.35); color:{NEGATIVE}; background:rgba(255,51,102,0.08);'>"
@@ -1364,7 +1540,7 @@ def render(ctx: dict) -> None:
             f"</div>",
             unsafe_allow_html=True,
         )
-        st.caption("Signals and plan levels are computed on closed candles; Price ($) shows the latest live tick.")
+        st.caption("Signals and plan levels are computed on closed candles; Price ($) shows the latest candle close.")
         show_advanced = st.checkbox("+ Show advanced columns", value=False, key="market_show_adv_cols")
 
         df_results = pd.DataFrame(results)
@@ -1374,18 +1550,9 @@ def render(ctx: dict) -> None:
         enter_count = int(action_series.str.contains("ENTER", na=False).sum())
         watch_count = int(action_series.str.contains("WATCH", na=False).sum())
         skip_count = int(action_series.str.contains("SKIP", na=False).sum())
-        rr_values = (
-            df_results.get("R:R", pd.Series(dtype=str))
-            .astype(str)
-            .str.replace("🟢", "", regex=False)
-            .str.replace("🟡", "", regex=False)
-            .str.replace("🔴", "", regex=False)
-            .str.strip()
-        )
-        rr_numeric = pd.to_numeric(rr_values, errors="coerce")
         trend_ai_enter_count = int(action_series.str.contains(r"ENTER \(Trend\+AI\)", na=False, regex=True).sum())
-        trend_only_enter_count = int(action_series.str.contains(r"ENTER \(Trend-Only\)", na=False, regex=True).sum())
-        ai_only_enter_count = int(action_series.str.contains(r"ENTER \(AI-Only\)", na=False, regex=True).sum())
+        trend_led_enter_count = int(action_series.str.contains(r"ENTER \(Trend-Led\)", na=False, regex=True).sum())
+        ai_led_enter_count = int(action_series.str.contains(r"ENTER \(AI-Led\)", na=False, regex=True).sum())
 
         best_scalp_coin = "—"
         best_scalp_sub = ""
@@ -1455,8 +1622,8 @@ def render(ctx: dict) -> None:
             enter_mix_head = "No Enter Class" if enter_count == 0 else "Enter Class Mix"
             enter_mix_sub = (
                 f"Trend+AI {trend_ai_enter_count} • "
-                f"Trend-Only {trend_only_enter_count} • "
-                f"AI-Only {ai_only_enter_count}"
+                f"Trend-Led {trend_led_enter_count} • "
+                f"AI-Led {ai_led_enter_count}"
             )
             st.markdown(
                 "<div class='elite-card'>"
@@ -1489,13 +1656,37 @@ def render(ctx: dict) -> None:
 
         # indicator visual formatting
         df_results["SuperTrend"] = df_results["SuperTrend"].apply(format_trend)
-        df_results["ADX"] = df_results["ADX"].apply(format_adx)
-        df_results["Ichimoku"] = (
-            df_results["Ichimoku"]
-            .apply(format_trend)
-            .replace("–", "")
+        df_results["ADX"] = df_results["ADX"].apply(format_adx).apply(_compact_adx_label)
+        def _format_ichimoku_cell(v: object) -> str:
+            raw = str(v or "").strip()
+            if not raw or raw.upper() in {"UNAVAILABLE", "N/A", "NA", "NAN"}:
+                return ""
+            cleaned = (
+                raw.replace("🟢 ", "")
+                .replace("🔴 ", "")
+                .replace("🟡 ", "")
+                .replace("▲▲ ", "")
+                .replace("▲ ", "")
+                .replace("▼ ", "")
+                .replace("→ ", "")
+                .replace("– ", "")
+                .strip()
+            )
+            up = cleaned.upper()
+            if "BULLISH" in up:
+                return "Bullish"
+            if "BEARISH" in up:
+                return "Bearish"
+            if "NEUTRAL" in up:
+                return "Neutral"
+            return cleaned
+
+        df_results["Ichimoku"] = df_results["Ichimoku"].apply(_format_ichimoku_cell)
+        df_results["Stochastic RSI"] = (
+            df_results["Stochastic RSI"]
+            .apply(lambda v: format_stochrsi(v, timeframe=timeframe))
+            .apply(_normalize_indicator_label)
         )
-        df_results["Stochastic RSI"] = df_results["Stochastic RSI"].apply(format_stochrsi).apply(_normalize_indicator_label)
         df_results["VWAP"] = df_results["VWAP"].apply(_normalize_indicator_label)
         df_results["Bollinger"] = df_results["Bollinger"].apply(_normalize_indicator_label)
         df_results["PSAR"] = df_results["PSAR"].apply(_normalize_indicator_label)
@@ -1534,11 +1725,54 @@ def render(ctx: dict) -> None:
         ]
         all_cols = primary_cols + [c for c in advanced_extra_cols if c not in primary_cols]
         display_cols = all_cols if show_advanced else primary_cols
-        df_display = df_results[display_cols].copy()
+        hidden_meta_cols = [
+            c for c in [
+                "__action_reason",
+                "__entry_note",
+                "__ichimoku_detail",
+                "__spike_dir",
+                "__spike_vol_ratio",
+                "__spike_candle_pct",
+                "__spike_vwap_ctx",
+                "__target_note",
+                "__rr_note",
+                "__adx_raw",
+                "__direction_note",
+                "__strength_note",
+                "__ai_note",
+                "__alignment_note",
+            ] if c in df_results.columns and c not in display_cols
+        ]
+        df_display = df_results[display_cols + hidden_meta_cols].copy()
 
         _render_pro_table(df_display, display_cols)
 
-        csv_market = df_results.drop(columns=["__strength_val"]).to_csv(index=False).encode("utf-8")
+        csv_market = (
+            df_results
+            .drop(
+                columns=[
+                    "__strength_val",
+                    "__structure_state",
+                    "__action_reason",
+                    "__entry_note",
+                    "__ichimoku_detail",
+                    "__spike_dir",
+                    "__spike_vol_ratio",
+                    "__spike_candle_pct",
+                    "__spike_vwap_ctx",
+                    "__target_note",
+                    "__rr_note",
+                    "__adx_raw",
+                    "__direction_note",
+                    "__strength_note",
+                    "__ai_note",
+                    "__alignment_note",
+                ],
+                errors="ignore",
+            )
+            .to_csv(index=False)
+            .encode("utf-8")
+        )
         st.download_button(
             label="Download Scan Results (CSV)",
             data=csv_market,

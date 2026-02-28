@@ -10,17 +10,12 @@ from core.signal_contract import strength_from_bias
 class AnalysisLike(Protocol):
     signal: str
     bias: float
-    confidence: float
 
 
 def _read_bias_like(result: AnalysisLike) -> float:
-    """Read bias score with backward compatibility for legacy confidence-only stubs."""
+    """Read bias score from analysis result."""
     try:
         return float(getattr(result, "bias"))
-    except Exception:
-        pass
-    try:
-        return float(getattr(result, "confidence"))
     except Exception:
         return 50.0
 

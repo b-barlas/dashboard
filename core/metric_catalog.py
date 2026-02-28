@@ -6,9 +6,9 @@ AI_SHORT_THRESHOLD = 0.42
 AI_AGREE_STRONG = 0.75
 AI_AGREE_MEDIUM = 0.60
 
-CONF_STRONG = 80.0
-CONF_GOOD = 65.0
-CONF_MEDIUM = 50.0
+BIAS_STRONG = 80.0
+BIAS_GOOD = 65.0
+BIAS_MIXED = 50.0
 
 
 def direction_from_prob(prob: float) -> str:
@@ -31,15 +31,10 @@ def ai_stability_bucket(agreement_ratio: float) -> str:
 
 def bias_bucket(bias_score: float) -> str:
     c = float(bias_score)
-    if c >= CONF_STRONG:
+    if c >= BIAS_STRONG:
         return "Strong"
-    if c >= CONF_GOOD:
+    if c >= BIAS_GOOD:
         return "Good"
-    if c >= CONF_MEDIUM:
+    if c >= BIAS_MIXED:
         return "Mixed"
     return "Weak"
-
-
-def confidence_bucket(confidence: float) -> str:
-    # Backward-compatible alias; prefer bias_bucket.
-    return bias_bucket(confidence)

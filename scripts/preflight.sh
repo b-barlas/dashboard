@@ -8,9 +8,11 @@ echo "[1/4] Python version"
 python --version
 python - << 'PY'
 import sys
-if sys.version_info >= (3, 13):
-    raise SystemExit("Python 3.13 is not supported for this project yet. Use Python 3.12.x.")
-print("Python runtime check: OK (<3.13)")
+if sys.version_info < (3, 12):
+    raise SystemExit("Python 3.12+ is required.")
+if sys.version_info >= (3, 14):
+    raise SystemExit("Python 3.14+ is not validated yet. Use Python 3.12.x or 3.13.x.")
+print("Python runtime check: OK (supported range: 3.12.x - 3.13.x)")
 PY
 
 echo "[2/4] Compile check"

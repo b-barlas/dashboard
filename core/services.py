@@ -38,7 +38,10 @@ from core.ml import ml_ensemble_predict as ml_ensemble_predict_core
 from core.ml import ml_predict_direction as ml_predict_direction_core
 from core.policy import UK_SAFE_EXCHANGE_FALLBACKS
 from core.risk import calculate_risk_metrics as calculate_risk_metrics_core
-from core.scalping import get_scalping_entry_target as get_scalping_entry_target_core
+from core.scalping import (
+    get_scalping_entry_target as get_scalping_entry_target_core,
+    scalp_quality_gate as scalp_quality_gate_core,
+)
 from core.telemetry import record_event
 from core.signals import (
     AnalysisResult,
@@ -229,6 +232,37 @@ def get_scalping_entry_target(
         volume_spike,
         strict_mode=strict_mode,
         sr_lookback_fn=_sr_lookback,
+    )
+
+
+def scalp_quality_gate(
+    *,
+    scalp_direction: str | None,
+    signal_direction: str | None,
+    rr_ratio: float | None,
+    adx_val: float | None,
+    strength: float | None,
+    conviction_label: str | None,
+    entry: float | None,
+    stop: float | None,
+    target: float | None,
+    min_rr: float = 1.50,
+    min_adx: float = 20.0,
+    min_strength: float = 55.0,
+) -> tuple[bool, str]:
+    return scalp_quality_gate_core(
+        scalp_direction=scalp_direction,
+        signal_direction=signal_direction,
+        rr_ratio=rr_ratio,
+        adx_val=adx_val,
+        strength=strength,
+        conviction_label=conviction_label,
+        entry=entry,
+        stop=stop,
+        target=target,
+        min_rr=min_rr,
+        min_adx=min_adx,
+        min_strength=min_strength,
     )
 
 # === Machine Learning Prediction ===

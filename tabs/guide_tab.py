@@ -95,7 +95,7 @@ Strength bands (dashboard standard):
 Meaning:
 - Bias near 100: strong bullish alignment
 - Bias near 0: strong bearish alignment
-- Strength near 100: strong edge (either long or short)
+- Strength near 100: strong edge (either upside or downside)
 - Strength near 0: mixed/no edge
 
 Naming note:
@@ -155,7 +155,7 @@ Direction mapping (ensemble):
 - Downside if probability <= 0.42
 - Neutral in the 0.42-0.58 zone
 
-`AI Agree` = directional model vote agreement (x/3) for final LONG/SHORT output.
+`AI Agree` = directional model vote agreement (x/3) for final Upside/Downside output.
 Neutral consensus is tracked separately and is not counted as directional agreement.
             """,
             "core",
@@ -187,22 +187,39 @@ Market tab includes:
 - Coin scanner table
 
 Scanner table key columns:
-- Action (ENTER (Trend+AI) / ENTER (Trend-Only) / ENTER (AI-Only) / WATCH / SKIP)
+- Action (ENTER (Trend+AI) / ENTER (Trend-Led) / ENTER (AI-Led) / WATCH / SKIP)
 - Direction (Upside / Downside / Neutral)
 - Strength
 - AI Ensemble
 - Tech vs AI Alignment
 - Indicator snapshots (ADX, Ichimoku, StochRSI, VWAP, Candle Pattern, etc.)
 
+Candle Pattern direction standard:
+- ▲ = bullish pattern (green)
+- ▼ = bearish pattern (red)
+- → = neutral/indecision pattern (yellow)
+
 Action policy in production:
 - **ENTER (Trend+AI)**: strongest class; technical direction + AI direction are aligned with quality gates passed
-- **ENTER (Trend-Only)**: trend/technical side leads and risk guards pass, while AI side is not fully aligned yet
-- **ENTER (AI-Only)**: AI agreement is exceptionally strong and risk guards pass, while technical side is early
+- **ENTER (Trend-Led)**: trend/technical side leads and risk guards pass; AI is used as veto/guardrail only
+- **ENTER (AI-Led)**: AI agreement leads and risk guards pass; trend is used as veto/guardrail only
 - **WATCH**: direction exists but not all quality gates pass
 - **SKIP**: neutral/no direction, conflict, or weak strength (<35)
+- In table view, hover the **Action** badge to see compact reason text for that classification.
+
+Scalp Opportunity policy in production:
+- `Scalp Opportunity` is shown only when **all** scalp gates pass:
+  - Direction is clear (Upside/Downside) and scalp side matches Direction
+  - R:R >= 1.5
+  - ADX >= 20
+  - Strength >= 55
+  - Tech vs AI Alignment is not CONFLICT
+  - Entry/Stop/Target levels are valid
+- If `Scalp Opportunity` is empty, there is no execution-ready scalp setup and Entry/Stop/Target/R:R stay blank.
 
 Important:
 - **Action is a direction-confirmation decision** (go/no-go on market context).
+- **Action does not depend on scalp plan levels**; it is computed from Direction + Strength + AI Ensemble + Tech vs AI Alignment.
 - **R:R and Entry/SL/TP are execution planning fields**, not Action gates.
 
 	Important execution note:

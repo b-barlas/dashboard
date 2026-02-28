@@ -61,6 +61,9 @@ class AnalysisResult:
     adx: float = 0.0
     supertrend: str = ""
     ichimoku: str = ""
+    ichimoku_tk_cross: str = ""
+    ichimoku_future_bias: str = ""
+    ichimoku_cloud_strength: str = ""
     stochrsi_k: float = 0.0
     bollinger: str = ""
     vwap: str = ""
@@ -68,14 +71,75 @@ class AnalysisResult:
     williams: str = ""
     cci: str = ""
 
-    @property
-    def confidence(self) -> float:
-        """Backward-compatible alias; prefer .bias."""
-        return float(self.bias)
 
-    @confidence.setter
-    def confidence(self, value: float) -> None:
-        self.bias = float(value)
+def classify_bollinger_bias(close_price: float, bb_lower: float, bb_upper: float) -> str:
+    """Classify close location against Bollinger bands.
+
+    Labels are direction-aware and robust to NaN/malformed inputs:
+    - 🔴 Overbought: materially above upper band
+    - 🟢 Oversold: materially below lower band
+    - → Near Top / → Near Bottom: inside-band edge zones
+    - → Neutral: mid-band area
+    """
+    try:
+        cp = float(close_price)
+        lo = float(bb_lower)
+        up = float(bb_upper)
+    except Exception:
+        return ""
+    if not (np.isfinite(cp) and np.isfinite(lo) and np.isfinite(up)):
+        return ""
+    width = up - lo
+    if not np.isfinite(width) or width <= 0:
+        return ""
+
+    # Small buffer avoids over-classifying marginal upper/lower pierces.
+    outer_buffer = width * 0.01
+    if cp > up + outer_buffer:
+        return "🔴 Overbought"
+    if cp < lo - outer_buffer:
+        return "🟢 Oversold"
+
+    # Band-percentile zoning (inside-band context).
+    band_pos = (cp - lo) / width
+    if band_pos >= 0.85:
+        return "→ Near Top"
+    if band_pos <= 0.15:
+        return "→ Near Bottom"
+    return "→ Neutral"
+
+
+def classify_vwap_bias(close_price: float, vwap_price: float, atr_value: float | None = None) -> str:
+    """Classify close location relative to VWAP with a deadband.
+
+    Deadband prevents noisy Above/Below flips when price is hugging VWAP.
+    """
+    try:
+        cp = float(close_price)
+        vp = float(vwap_price)
+    except Exception:
+        return ""
+    if not (np.isfinite(cp) and np.isfinite(vp)):
+        return ""
+
+    atr = float("nan")
+    try:
+        if atr_value is not None:
+            atr = float(atr_value)
+    except Exception:
+        atr = float("nan")
+
+    base_tol = max(abs(vp) * 0.0008, 1e-10)  # ~8 bps baseline deadband
+    if np.isfinite(atr) and atr > 0:
+        tol = max(base_tol, atr * 0.08)
+    else:
+        tol = base_tol
+
+    if cp > vp + tol:
+        return "🟢 Above"
+    if cp < vp - tol:
+        return "🔴 Below"
+    return "→ Near VWAP"
 
 
 def detect_volume_spike(df: pd.DataFrame, window: int = 20, multiplier: float = 2.0) -> bool:
@@ -94,44 +158,71 @@ def detect_candle_pattern(df: pd.DataFrame) -> str:
     last = df.iloc[-1]
     prev = df.iloc[-2]
     prev2 = df.iloc[-3]
-
     body_last = abs(last["close"] - last["open"])
     body_prev = abs(prev["close"] - prev["open"])
     body_prev2 = abs(prev2["close"] - prev2["open"])
+    range_last = max(float(last["high"] - last["low"]), 1e-9)
+    range_prev = max(float(prev["high"] - prev["low"]), 1e-9)
+    range_prev2 = max(float(prev2["high"] - prev2["low"]), 1e-9)
+    avg_range_2 = max((range_last + range_prev) / 2.0, 1e-9)
+    body_ratio_last = body_last / range_last
+    body_ratio_prev = body_prev / range_prev
+
+    bull_last = bool(last["close"] > last["open"])
+    bear_last = bool(last["close"] < last["open"])
+    bull_prev = bool(prev["close"] > prev["open"])
+    bear_prev = bool(prev["close"] < prev["open"])
+
+    # Context from pre-last candles to avoid classifying single-candle shapes without trend regime.
+    pre = df["close"].iloc[-5:-1]
+    pre_drift = float(pre.iloc[-1] - pre.iloc[0]) if len(pre) >= 2 else 0.0
+    pre_up_moves = int(pre.diff().dropna().gt(0).sum())
+    pre_down_moves = int(pre.diff().dropna().lt(0).sum())
+    trend_up_ctx = pre_drift > 0 and pre_up_moves >= pre_down_moves + 1
+    trend_down_ctx = pre_drift < 0 and pre_down_moves >= pre_up_moves + 1
 
     if (
-        prev["close"] < prev["open"]
-        and last["close"] > last["open"]
+        bear_prev
+        and bull_last
         and last["close"] > prev["open"]
         and last["open"] < prev["close"]
     ):
         return "▲ Bullish Engulfing (strong reversal up)"
 
     if (
-        prev["close"] > prev["open"]
-        and last["close"] < last["open"]
+        bull_prev
+        and bear_last
         and last["open"] > prev["close"]
         and last["close"] < prev["open"]
     ):
         return "▼ Bearish Engulfing (strong reversal down)"
 
-    lower_shadow = min(last["open"], last["close"]) - last["low"]
-    upper_shadow = last["high"] - max(last["open"], last["close"])
-    if body_last < lower_shadow and upper_shadow < lower_shadow * 0.5:
-        return "▲ Hammer (bullish bottom wick)"
-    if upper_shadow > 2 * body_last and lower_shadow < body_last:
-        return "▲ Inverted Hammer (potential bottom reversal)"
-    if lower_shadow > 2 * body_last and upper_shadow < body_last:
-        return "▼ Hanging Man (possible top reversal)"
-    if upper_shadow > 2 * body_last and lower_shadow < body_last and last["close"] < last["open"]:
-        return "▼ Shooting Star (bearish top wick)"
-    if body_last / (last["high"] - last["low"] + 1e-9) < 0.1:
-        return "- Doji (market indecision)"
+    # Stricter 3-candle continuation confirmations (avoid over-triggering on small/random candles).
+    if (
+        all(df.iloc[-i]["close"] > df.iloc[-i]["open"] for i in range(1, 4))
+        and last["close"] > prev["close"] > prev2["close"]
+        and body_last / range_last >= 0.50
+        and body_prev / range_prev >= 0.50
+        and body_prev2 / range_prev2 >= 0.50
+        and min(prev["open"], prev["close"]) <= last["open"] <= max(prev["open"], prev["close"])
+        and min(prev2["open"], prev2["close"]) <= prev["open"] <= max(prev2["open"], prev2["close"])
+    ):
+        return "▲ Three White Soldiers (strong bullish confirmation)"
+    if (
+        all(df.iloc[-i]["close"] < df.iloc[-i]["open"] for i in range(1, 4))
+        and last["close"] < prev["close"] < prev2["close"]
+        and body_last / range_last >= 0.50
+        and body_prev / range_prev >= 0.50
+        and body_prev2 / range_prev2 >= 0.50
+        and min(prev["open"], prev["close"]) <= last["open"] <= max(prev["open"], prev["close"])
+        and min(prev2["open"], prev2["close"]) <= prev["open"] <= max(prev2["open"], prev2["close"])
+    ):
+        return "▼ Three Black Crows (strong bearish confirmation)"
 
     if (
         prev2["close"] < prev2["open"]
         and body_prev < min(body_prev2, body_last)
-        and last["close"] > last["open"]
+        and bull_last
         and last["close"] > ((prev2["open"] + prev2["close"]) / 2)
     ):
         return "▲ Morning Star (3-bar bullish reversal)"
@@ -139,31 +230,100 @@ def detect_candle_pattern(df: pd.DataFrame) -> str:
     if (
         prev2["close"] > prev2["open"]
         and body_prev < min(body_prev2, body_last)
-        and last["close"] < last["open"]
+        and bear_last
         and last["close"] < ((prev2["open"] + prev2["close"]) / 2)
     ):
         return "▼ Evening Star (3-bar bearish reversal)"
 
     if (
-        prev["close"] < prev["open"]
+        bear_prev
         and last["open"] < prev["close"]
         and last["close"] > ((prev["open"] + prev["close"]) / 2)
         and last["close"] < prev["open"]
     ):
-        return "▲ Piercing Line (mid-level reversal)"
+        return "▲ Piercing Line (bullish mid-level reversal)"
 
     if (
-        prev["close"] > prev["open"]
+        bull_prev
         and last["open"] > prev["close"]
         and last["close"] < ((prev["open"] + prev["close"]) / 2)
         and last["close"] > prev["open"]
     ):
-        return "▼ Dark Cloud Cover (mid-level reversal)"
+        return "▼ Dark Cloud Cover (bearish mid-level reversal)"
 
-    if all(df.iloc[-i]["close"] > df.iloc[-i]["open"] for i in range(1, 4)):
-        return "▲ Three White Soldiers (strong bullish confirmation)"
-    if all(df.iloc[-i]["close"] < df.iloc[-i]["open"] for i in range(1, 4)):
-        return "▼ Three Black Crows (strong bearish confirmation)"
+    tweezer_tol = avg_range_2 * 0.15
+    if (
+        trend_down_ctx
+        and bear_prev
+        and bull_last
+        and abs(float(prev["low"]) - float(last["low"])) <= tweezer_tol
+    ):
+        return "▲ Tweezer Bottom (bullish support reaction)"
+    if (
+        trend_up_ctx
+        and bull_prev
+        and bear_last
+        and abs(float(prev["high"]) - float(last["high"])) <= tweezer_tol
+    ):
+        return "▼ Tweezer Top (bearish resistance reaction)"
+
+    lower_shadow = min(last["open"], last["close"]) - last["low"]
+    upper_shadow = last["high"] - max(last["open"], last["close"])
+    long_lower_wick = lower_shadow >= max(2.0 * body_last, range_last * 0.45) and upper_shadow <= max(
+        body_last * 0.6, range_last * 0.15
+    )
+    long_upper_wick = upper_shadow >= max(2.0 * body_last, range_last * 0.45) and lower_shadow <= max(
+        body_last * 0.6, range_last * 0.15
+    )
+
+    if long_lower_wick and body_ratio_last <= 0.45:
+        if trend_down_ctx:
+            return "▲ Hammer (bullish bottom wick)"
+        if trend_up_ctx:
+            return "▼ Hanging Man (bearish top reversal)"
+        return "→ Long Lower Wick (context mixed)"
+
+    if long_upper_wick and body_ratio_last <= 0.45:
+        if trend_up_ctx:
+            return "▼ Shooting Star (bearish top wick)"
+        if trend_down_ctx:
+            return "▲ Inverted Hammer (bullish reversal candidate)"
+        return "→ Long Upper Wick (context mixed)"
+
+    inside_prev_body = (
+        min(prev["open"], prev["close"]) <= last["open"] <= max(prev["open"], prev["close"])
+        and min(prev["open"], prev["close"]) <= last["close"] <= max(prev["open"], prev["close"])
+    )
+    if (
+        trend_down_ctx
+        and bear_prev
+        and bull_last
+        and inside_prev_body
+        and body_prev > body_last * 1.2
+        and body_ratio_last >= 0.18
+        and body_ratio_prev >= 0.35
+    ):
+        return "▲ Bullish Harami (bullish reversal candidate)"
+    if (
+        trend_up_ctx
+        and bull_prev
+        and bear_last
+        and inside_prev_body
+        and body_prev > body_last * 1.2
+        and body_ratio_last >= 0.18
+        and body_ratio_prev >= 0.35
+    ):
+        return "▼ Bearish Harami (bearish reversal candidate)"
+
+    if body_last / range_last >= 0.90 and bull_last:
+        return "▲ Bullish Marubozu (bullish continuation)"
+    if body_last / range_last >= 0.90 and bear_last:
+        return "▼ Bearish Marubozu (bearish continuation)"
+
+    if body_last / (last["high"] - last["low"] + 1e-9) < 0.1:
+        return "→ Doji (neutral indecision)"
+    if body_last / range_last <= 0.30 and lower_shadow > body_last and upper_shadow > body_last:
+        return "→ Spinning Top (neutral indecision)"
     return ""
 
 
@@ -254,23 +414,26 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
     latest = df.iloc[latest_idx]
     closed_df = df
 
-    vwap_val = latest.get("vwap", np.nan)
-    if pd.isna(vwap_val):
-        vwap_label = "Unavailable"
-    elif latest["close"] > vwap_val:
-        vwap_label = "🟢 Above"
-    elif latest["close"] < vwap_val:
-        vwap_label = "🔴 Below"
-    else:
-        vwap_label = "→ Near VWAP"
+    def _safe_num(v: object) -> float:
+        try:
+            if pd.isna(v):
+                return float("nan")
+            return float(v)
+        except Exception:
+            return float("nan")
 
     volume_spike = detect_volume_spike(closed_df)
     candle_pattern = detect_candle_pattern(closed_df)
 
-    atr_latest = latest["atr"]
-    if atr_latest > latest["close"] * 0.05:
+    close_latest = _safe_num(latest["close"])
+    atr_latest = _safe_num(latest["atr"])
+    vwap_val = _safe_num(latest.get("vwap", np.nan))
+    vwap_label = classify_vwap_bias(close_latest, vwap_val, atr_latest)
+    if not np.isfinite(atr_latest) or not np.isfinite(close_latest) or close_latest <= 0:
+        atr_comment = ""
+    elif atr_latest > close_latest * 0.05:
         atr_comment = "▲ High"
-    elif atr_latest < latest["close"] * 0.02:
+    elif atr_latest < close_latest * 0.02:
         atr_comment = "▼ Low"
     else:
         atr_comment = "– Moderate"
@@ -299,15 +462,15 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
     df["bb_lower"] = df["bb_mid"] - 2 * df["bb_std"]
 
     latest = df.iloc[latest_idx]
-    cci_val = latest["cci"]
-    stochrsi_k_val = latest.get("stochrsi_k", np.nan)
-    williams_val = latest["williams_r"]
-    psar_val = latest.get("psar", np.nan)
-    bb_upper = latest["bb_upper"]
-    bb_lower = latest["bb_lower"]
-    bb_range = bb_upper - bb_lower
-    bb_buffer = bb_range * 0.01
-    close_price = latest["close"]
+
+    cci_val = _safe_num(latest["cci"])
+    stochrsi_k_val = _safe_num(latest.get("stochrsi_k", np.nan))
+    williams_val = _safe_num(latest["williams_r"])
+    psar_val = _safe_num(latest.get("psar", np.nan))
+    bb_upper = _safe_num(latest["bb_upper"])
+    bb_lower = _safe_num(latest["bb_lower"])
+    bb_range = bb_upper - bb_lower if np.isfinite(bb_upper) and np.isfinite(bb_lower) else float("nan")
+    close_price = close_latest
 
     trend_signals = []
     if latest["ema5"] > latest["ema21"] > latest["ema50"]:
@@ -322,29 +485,89 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
         trend_signals.append(0.0)
 
     supertrend_trend = "Unavailable"
-    st_val = latest.get("supertrend", np.nan)
-    if pd.notna(st_val):
-        if latest["close"] > st_val:
+    st_val = _safe_num(latest.get("supertrend", np.nan))
+    if np.isfinite(st_val) and np.isfinite(close_latest):
+        # Small deadband avoids unstable Bullish/Bearish flips near exact band touch.
+        st_tol = max(abs(close_latest) * 1e-8, 1e-10)
+        st_diff = close_latest - st_val
+        if st_diff > st_tol:
             trend_signals.append(0.5)
             supertrend_trend = "Bullish"
-        elif latest["close"] < st_val:
+        elif st_diff < -st_tol:
             trend_signals.append(-0.5)
             supertrend_trend = "Bearish"
+        else:
+            supertrend_trend = "Neutral"
 
+    ichimoku_tk_cross = ""
+    ichimoku_future_bias = ""
+    ichimoku_cloud_strength = ""
     try:
-        sa = latest.get("senkou_a", np.nan)
-        sb = latest.get("senkou_b", np.nan)
-        if pd.isna(sa) or pd.isna(sb):
+        # Keep two views:
+        # - current cloud: shifted spans at current bar (price-vs-cloud trend)
+        # - future cloud: raw spans at current bar (forward bias t+26)
+        sa_raw = _safe_num(latest.get("senkou_a", np.nan))
+        sb_raw = _safe_num(latest.get("senkou_b", np.nan))
+        sa_curr = _safe_num(df["senkou_a"].shift(26).iloc[latest_idx]) if "senkou_a" in df.columns else float("nan")
+        sb_curr = _safe_num(df["senkou_b"].shift(26).iloc[latest_idx]) if "senkou_b" in df.columns else float("nan")
+        tenkan = _safe_num(latest.get("tenkan", np.nan))
+        kijun = _safe_num(latest.get("kijun", np.nan))
+
+        # If shifted current cloud is not available, fall back to raw spans so
+        # short-history frames do not collapse to unavailable.
+        sa_trend = sa_curr if np.isfinite(sa_curr) else sa_raw
+        sb_trend = sb_curr if np.isfinite(sb_curr) else sb_raw
+
+        if not (np.isfinite(sa_trend) and np.isfinite(sb_trend)):
             ichimoku_trend = "Unavailable"
         else:
-            if latest["close"] > max(sa, sb):
+            cloud_top = max(sa_trend, sb_trend)
+            cloud_bottom = min(sa_trend, sb_trend)
+            if latest["close"] > cloud_top:
                 trend_signals.append(0.5)
                 ichimoku_trend = "Bullish"
-            elif latest["close"] < min(sa, sb):
+            elif latest["close"] < cloud_bottom:
                 trend_signals.append(-0.5)
                 ichimoku_trend = "Bearish"
             else:
                 ichimoku_trend = "Neutral"
+
+            if np.isfinite(tenkan) and np.isfinite(kijun):
+                if tenkan > kijun:
+                    ichimoku_tk_cross = "▲ Bullish"
+                    trend_signals.append(0.25)
+                elif tenkan < kijun:
+                    ichimoku_tk_cross = "▼ Bearish"
+                    trend_signals.append(-0.25)
+                else:
+                    ichimoku_tk_cross = "→ Neutral"
+
+            if np.isfinite(sa_raw) and np.isfinite(sb_raw) and sa_raw > sb_raw:
+                ichimoku_future_bias = "▲ Bullish"
+                trend_signals.append(0.20)
+            elif np.isfinite(sa_raw) and np.isfinite(sb_raw) and sa_raw < sb_raw:
+                ichimoku_future_bias = "▼ Bearish"
+                trend_signals.append(-0.20)
+            elif np.isfinite(sa_raw) and np.isfinite(sb_raw):
+                ichimoku_future_bias = "→ Neutral"
+
+            cloud_span = abs(sa_raw - sb_raw) if np.isfinite(sa_raw) and np.isfinite(sb_raw) else float("nan")
+            if np.isfinite(cloud_span) and np.isfinite(atr_latest) and atr_latest > 0:
+                span_ratio = cloud_span / atr_latest
+                if span_ratio >= 1.4:
+                    ichimoku_cloud_strength = "▲ Thick"
+                elif span_ratio >= 0.6:
+                    ichimoku_cloud_strength = "→ Medium"
+                else:
+                    ichimoku_cloud_strength = "▼ Thin"
+            elif np.isfinite(cloud_span) and np.isfinite(close_latest) and close_latest > 0:
+                span_pct = cloud_span / close_latest
+                if span_pct >= 0.015:
+                    ichimoku_cloud_strength = "▲ Thick"
+                elif span_pct >= 0.007:
+                    ichimoku_cloud_strength = "→ Medium"
+                else:
+                    ichimoku_cloud_strength = "▼ Thin"
     except Exception:
         ichimoku_trend = "Unavailable"
 
@@ -416,14 +639,15 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
             elif macd_slope < 0:
                 momentum_signals.append(-0.2)
 
-    if stochrsi_k_val >= stoch_ob_ext:
-        momentum_signals.append(-0.5)
-    elif stochrsi_k_val <= stoch_os_ext:
-        momentum_signals.append(0.5)
-    elif stochrsi_k_val >= stoch_ob_soft:
-        momentum_signals.append(-0.3)
-    elif stochrsi_k_val <= stoch_os_soft:
-        momentum_signals.append(0.3)
+    if np.isfinite(stochrsi_k_val):
+        if stochrsi_k_val >= stoch_ob_ext:
+            momentum_signals.append(-0.5)
+        elif stochrsi_k_val <= stoch_os_ext:
+            momentum_signals.append(0.5)
+        elif stochrsi_k_val >= stoch_ob_soft:
+            momentum_signals.append(-0.3)
+        elif stochrsi_k_val <= stoch_os_soft:
+            momentum_signals.append(0.3)
 
     if williams_val < williams_os:
         momentum_signals.append(0.5)
@@ -455,24 +679,34 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
     elif vol_ratio <= 0.7:
         volume_signals.append(-0.2 if latest["close"] >= latest["open"] else 0.2)
 
-    if latest["close"] > latest["vwap"]:
+    if vwap_label == "🟢 Above":
         volume_signals.append(0.5)
-    elif latest["close"] < latest["vwap"]:
+    elif vwap_label == "🔴 Below":
         volume_signals.append(-0.5)
 
     volume_score = np.clip(np.mean(volume_signals) if volume_signals else 0.0, -1, 1)
 
     volatility_signals = []
-    atr_ratio = atr_latest / latest["close"]
-    if atr_ratio < 0.015:
-        volatility_signals.append(0.5)
-    elif atr_ratio > 0.05:
-        volatility_signals.append(-0.5)
-    bb_width_pct = bb_range / latest["close"]
-    if bb_width_pct < 0.05:
-        volatility_signals.append(0.5)
-    elif bb_width_pct > 0.15:
-        volatility_signals.append(-0.5)
+    atr_ratio = (
+        atr_latest / close_latest
+        if np.isfinite(atr_latest) and np.isfinite(close_latest) and close_latest > 0
+        else float("nan")
+    )
+    if np.isfinite(atr_ratio):
+        if atr_ratio < 0.015:
+            volatility_signals.append(0.5)
+        elif atr_ratio > 0.05:
+            volatility_signals.append(-0.5)
+    bb_width_pct = (
+        bb_range / close_latest
+        if np.isfinite(bb_range) and np.isfinite(close_latest) and close_latest > 0
+        else float("nan")
+    )
+    if np.isfinite(bb_width_pct):
+        if bb_width_pct < 0.05:
+            volatility_signals.append(0.5)
+        elif bb_width_pct > 0.15:
+            volatility_signals.append(-0.5)
     volatility_score = np.clip(np.mean(volatility_signals) if volatility_signals else 0.0, -1, 1)
 
     # Regime-aware category weights improve robustness across trend vs range environments.
@@ -559,7 +793,7 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
         else:
             comment = "⏳ Mixed signals. No clear direction."
 
-    if np.isnan(williams_val):
+    if pd.isna(williams_val):
         williams_label = ""
     elif williams_val < williams_os:
         williams_label = "🟢 Oversold"
@@ -568,24 +802,24 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
     else:
         williams_label = "🟡 Neutral"
 
-    cci_label = "🟡 Neutral"
-    if cci_val > cci_ob:
+    if pd.isna(cci_val):
+        cci_label = ""
+    elif cci_val > cci_ob:
         cci_label = "🔴 Overbought"
     elif cci_val < cci_os:
         cci_label = "🟢 Oversold"
+    else:
+        cci_label = "🟡 Neutral"
 
-    bollinger_bias = "→ Neutral"
-    if close_price > bb_upper + bb_buffer:
-        bollinger_bias = "🔴 Overbought"
-    elif close_price > bb_upper:
-        bollinger_bias = "→ Near Top"
-    elif close_price < bb_lower - bb_buffer:
-        bollinger_bias = "🟢 Oversold"
-    elif close_price < bb_lower:
-        bollinger_bias = "→ Near Bottom"
+    bollinger_bias = classify_bollinger_bias(close_price, bb_lower, bb_upper)
 
-    bollinger_width = df["bb_upper"].iloc[latest_idx] - df["bb_lower"].iloc[latest_idx]
-    volatility_factor = min(bollinger_width / max(latest["close"], 1e-9), 0.1)
+    bollinger_width = (
+        _safe_num(df["bb_upper"].iloc[latest_idx]) - _safe_num(df["bb_lower"].iloc[latest_idx])
+    )
+    if np.isfinite(bollinger_width) and np.isfinite(close_latest) and close_latest > 0:
+        volatility_factor = min(bollinger_width / close_latest, 0.1)
+    else:
+        volatility_factor = 0.0
     rsi_factor = 0.1 if latest["rsi"] > rsi_ob or latest["rsi"] < rsi_os else 0
     _obv_back_lev = min(5, len(closed_df) - 1)
     obv_factor = (
@@ -600,13 +834,16 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
     recent = closed_df.tail(sr_lookback(_inferred_tf))
     support = recent["low"].min()
     resistance = recent["high"].max()
-    current_price = latest["close"]
-    sr_factor = (
-        0.1
-        if abs(current_price - support) / current_price < 0.02
-        or abs(current_price - resistance) / current_price < 0.02
-        else 0
-    )
+    current_price = close_latest
+    if np.isfinite(current_price) and current_price > 0:
+        sr_factor = (
+            0.1
+            if abs(current_price - support) / current_price < 0.02
+            or abs(current_price - resistance) / current_price < 0.02
+            else 0
+        )
+    else:
+        sr_factor = 0
     risk_score = volatility_factor + rsi_factor + obv_factor + sr_factor
 
     if risk_score <= 0.15:
@@ -635,6 +872,9 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
         adx=adx_val,
         supertrend=supertrend_trend,
         ichimoku=ichimoku_trend,
+        ichimoku_tk_cross=ichimoku_tk_cross,
+        ichimoku_future_bias=ichimoku_future_bias,
+        ichimoku_cloud_strength=ichimoku_cloud_strength,
         stochrsi_k=stochrsi_k_val,
         bollinger=bollinger_bias,
         vwap=vwap_label,

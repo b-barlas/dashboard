@@ -572,7 +572,7 @@ div[data-testid="stVerticalBlock"] > div {{
 }}
 .fib-level:hover {{ transform: translateX(4px); }}
 
-/* Monte Carlo confidence band */
+/* Monte Carlo probability band */
 .mc-stat {{
     text-align: center;
     padding: 12px;

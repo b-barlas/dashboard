@@ -35,6 +35,7 @@ def render(ctx: dict) -> None:
     analyse = get_ctx(ctx, "analyse")
     signal_plain = get_ctx(ctx, "signal_plain")
     direction_label = get_ctx(ctx, "direction_label")
+    sanitize_trading_terms = get_ctx(ctx, "sanitize_trading_terms")
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
     _build_indicator_grid = get_ctx(ctx, "_build_indicator_grid")
@@ -42,6 +43,7 @@ def render(ctx: dict) -> None:
     _wma = get_ctx(ctx, "_wma")
     _debug = get_ctx(ctx, "_debug")
     get_scalping_entry_target = get_ctx(ctx, "get_scalping_entry_target")
+    scalp_quality_gate = get_ctx(ctx, "scalp_quality_gate")
     """Render the Position Analyser tab for evaluating open positions."""
     st.markdown(
         f"<h2 style='color:{ACCENT};margin-bottom:0.5rem;'>Position Analyser</h2>",
@@ -79,12 +81,12 @@ def render(ctx: dict) -> None:
             if plan_coin:
                 st.session_state["position_coin_input"] = plan_coin
             if plan_dir in {"LONG", "SHORT"}:
-                st.session_state["position_direction_input"] = plan_dir
+                st.session_state["position_direction_input"] = direction_label(plan_dir)
             if plan_entry > 0:
                 st.session_state["position_entry_input"] = plan_entry
             st.session_state["position_prefill_note"] = (
                 f"Loaded from {prefill.get('source', 'Scanner')}: "
-                f"{plan_coin} {plan_dir} | Entry {plan_entry:.6f} | "
+                f"{plan_coin} {direction_label(plan_dir)} | Entry {plan_entry:.6f} | "
                 f"SL {prefill.get('sl', 'N/A')} | TP1 {prefill.get('tp1', 'N/A')}"
             )
         except Exception:
@@ -129,7 +131,16 @@ def render(ctx: dict) -> None:
         key="position_entry_input",
     )
     leverage = st.number_input("Leverage (x)", min_value=1, max_value=125, value=5, step=1)
-    direction = st.selectbox("Position Direction", ["LONG", "SHORT"], key="position_direction_input")
+    _raw_dir = str(st.session_state.get("position_direction_input", "Upside")).strip()
+    if _raw_dir.upper() == "LONG":
+        _raw_dir = "Upside"
+    elif _raw_dir.upper() == "SHORT":
+        _raw_dir = "Downside"
+    if _raw_dir not in {"Upside", "Downside"}:
+        _raw_dir = "Upside"
+    st.session_state["position_direction_input"] = _raw_dir
+    direction_ui = st.selectbox("Position Direction", ["Upside", "Downside"], key="position_direction_input")
+    direction = "LONG" if direction_ui == "Upside" else "SHORT"
     p1, p2 = st.columns(2)
     with p1:
         margin_used = st.number_input("Margin Used ($)", min_value=0.0, value=1000.0, step=100.0)
@@ -222,10 +233,11 @@ def render(ctx: dict) -> None:
                 col = POSITIVE if pnl_percent > 0 else (WARNING if abs(pnl_percent) < 1 else NEGATIVE)
                 icon = '🟢' if pnl_percent > 0 else ('🟠' if abs(pnl_percent) < 1 else '🔴')
 
+                pos_side_label = direction_label(direction)
                 st.markdown(
                     f"<div class='panel-box' style='border-left:4px solid {col}; padding:16px 18px;'>"
                     f"  <div style='display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;'>"
-                    f"    <span style='color:{col}; font-weight:800;'>{icon} {direction} Position ({tf})</span>"
+                    f"    <span style='color:{col}; font-weight:800;'>{icon} {pos_side_label} Position ({tf})</span>"
                     f"    <span style='color:{col}; font-weight:800;'>Levered {pnl_percent:+.2f}%</span>"
                     f"  </div>"
                     f"  <div style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px;'>"
@@ -304,7 +316,10 @@ def render(ctx: dict) -> None:
                     unsafe_allow_html=True,
                 )
 
-                st.markdown(f"<p style='color:{TEXT_MUTED}; font-size:0.88rem;'>{comment}</p>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<p style='color:{TEXT_MUTED}; font-size:0.88rem;'>{sanitize_trading_terms(comment)}</p>",
+                    unsafe_allow_html=True,
+                )
 
                 # Market regime warning (ADX < 20)
                 if not np.isnan(adx_val) and adx_val < 20:
@@ -331,8 +346,8 @@ def render(ctx: dict) -> None:
                         f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
                         f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
                         f"<span style='color:{NEGATIVE}; font-weight:600;'>Direction Conflict</span>"
-                        f"<span style='color:{TEXT_MUTED};'> — Your {direction} position conflicts with "
-                        f"the current {sig_direction} signal. Review position validity.</span></div>",
+                        f"<span style='color:{TEXT_MUTED};'> — Your {direction_label(direction)} position conflicts with "
+                        f"the current {direction_label(sig_direction)} signal. Review position validity.</span></div>",
                         unsafe_allow_html=True,
                     )
 
@@ -405,7 +420,7 @@ def render(ctx: dict) -> None:
                         "Timestamp (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
                         "Coin": coin,
                         "Timeframe": tf,
-                        "Direction": direction,
+                        "Position Side": direction_label(direction),
                         "Entry Price": round(float(entry_price), 6),
                         "Current Price": round(float(current_price), 6),
                         "Leverage (x)": int(leverage),
@@ -419,9 +434,9 @@ def render(ctx: dict) -> None:
                         "Net PnL ($)": round(float(net_pnl_usd), 2),
                         "Est. Liquidation": (round(float(liq_price), 6) if liq_price is not None else None),
                         "Liq Distance (%)": (round(float(liq_dist_pct), 4) if liq_dist_pct is not None else None),
-                        "Direction": signal_clean,
+                        "Signal Direction": signal_clean,
                         "Strength (%)": round(float(strength_score), 2),
-                        "AI Direction": ai_dir,
+                        "AI Direction": direction_label(ai_dir),
                         "Alignment": conviction_lbl,
                         "Technical Invalidation": round(float(invalidation), 6),
                         "Invalidation State": inv_state,
@@ -462,14 +477,14 @@ def render(ctx: dict) -> None:
                         )
                     elif current_price > entry_price:
                         suggestion = (
-                            f"⚠️ Price is above the short entry level.<br>"
+                            f"⚠️ Price is above the downside entry level.<br>"
                             f"Watch resistance at <b>${resistance_sr:,.4f}</b>. If it holds, the trade may still be valid.<br>"
                             f"<i>Remain cautious—trend may be reversing.</i>"
                         )
                     elif current_price > support_sr:
                         suggestion = (
                             f"📉 Price is below entry, approaching support at <b>${support_sr:,.4f}</b>.<br>"
-                            f"<i>Consider holding. Breakdown of support could validate the short setup further.</i>"
+                            f"<i>Consider holding. Breakdown of support could validate the downside setup further.</i>"
                         )
                     else:
                         suggestion = (
@@ -538,16 +553,27 @@ def render(ctx: dict) -> None:
                         volume_spike,
                         strict_mode=True
                     )
+                    scalp_ok, scalp_reason = scalp_quality_gate(
+                        scalp_direction=scalp_direction,
+                        signal_direction=sig_direction,
+                        rr_ratio=rr_ratio,
+                        adx_val=adx_val,
+                        strength=strength_score,
+                        conviction_label=conviction_lbl,
+                        entry=entry_s,
+                        stop=stop_s,
+                        target=target_s,
+                    )
                 
                     # === Display Scalping Result ===
-                    if scalp_direction:
+                    if scalp_ok and scalp_direction:
                         color = POSITIVE if scalp_direction == "LONG" else NEGATIVE
                         icon = "🟢" if scalp_direction == "LONG" else "🔴"
                         st.markdown(
                             f"""
                             <div class='panel-box' style='border-left:4px solid {color};'>
                               <div style='display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;'>
-                                <span style='color:{color}; font-weight:800;'>{icon} Scalping {scalp_direction}</span>
+                                <span style='color:{color}; font-weight:800;'>{icon} Scalping {direction_label(scalp_direction)}</span>
                                 <span style='color:{color}; font-weight:700;'>R:R {rr_ratio:.2f}</span>
                               </div>
                               <div style='color:{TEXT_MUTED}; font-size:0.88rem; margin-top:6px; line-height:1.65;'>
@@ -562,7 +588,17 @@ def render(ctx: dict) -> None:
                             unsafe_allow_html=True
                         )
                     else:
-                        msg = breakout_note or "No valid scalping setup with current filters."
+                        reason_map = {
+                            "NO_SCALP_DIRECTION": "No directional scalp setup on current structure.",
+                            "SIGNAL_DIRECTION_NEUTRAL": "Signal direction is neutral; scalp setup is blocked.",
+                            "DIRECTION_MISMATCH": "Scalp side does not match direction; setup filtered.",
+                            "CONFLICT": "Technical vs AI alignment is in conflict.",
+                            "RR_TOO_LOW": "R:R below required threshold (1.5).",
+                            "ADX_TOO_LOW": "ADX below required trend threshold (20).",
+                            "STRENGTH_TOO_LOW": "Strength below required threshold (55).",
+                            "INVALID_LEVELS": "Invalid Entry/Stop/Target levels.",
+                        }
+                        msg = breakout_note or reason_map.get(scalp_reason, "No valid scalping setup with current filters.")
                         if msg in {"Invalid plan levels", "Invalid ATR/price"}:
                             msg = "No valid plan on current candle structure."
                         st.markdown(
@@ -573,11 +609,65 @@ def render(ctx: dict) -> None:
                             unsafe_allow_html=True,
                         )
                     with st.expander("Advanced Context"):
+                        ichi_meta_parts = []
+                        if a.ichimoku_tk_cross:
+                            ichi_meta_parts.append(
+                                f"TK Cross: {a.ichimoku_tk_cross.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
+                            )
+                        if a.ichimoku_future_bias:
+                            ichi_meta_parts.append(
+                                f"Future Cloud: {a.ichimoku_future_bias.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
+                            )
+                        if a.ichimoku_cloud_strength:
+                            ichi_meta_parts.append(
+                                f"Cloud Strength: {a.ichimoku_cloud_strength.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
+                            )
+                        ichimoku_hover = " | ".join(ichi_meta_parts)
+
+                        spike_label = ""
+                        spike_hover = ""
+                        if volume_spike:
+                            try:
+                                prev_vol_avg = float(df_eval["volume"].iloc[-21:-1].mean()) if len(df_eval) >= 21 else float("nan")
+                                last_vol = float(df_eval["volume"].iloc[-1]) if len(df_eval) >= 1 else float("nan")
+                                vol_ratio = (
+                                    last_vol / prev_vol_avg
+                                    if pd.notna(prev_vol_avg) and prev_vol_avg > 0 and pd.notna(last_vol)
+                                    else float("nan")
+                                )
+                            except Exception:
+                                vol_ratio = float("nan")
+                            try:
+                                o = float(df_eval["open"].iloc[-1])
+                                c = float(df_eval["close"].iloc[-1])
+                                candle_pct = ((c / o) - 1.0) * 100.0 if pd.notna(o) and pd.notna(c) and o > 0 else float("nan")
+                                if pd.notna(o) and pd.notna(c) and c > o:
+                                    spike_label = "▲ Up Spike"
+                                elif pd.notna(o) and pd.notna(c) and c < o:
+                                    spike_label = "▼ Down Spike"
+                                else:
+                                    spike_label = "→ Spike"
+                            except Exception:
+                                candle_pct = float("nan")
+                                spike_label = "→ Spike"
+                            parts = []
+                            if pd.notna(vol_ratio):
+                                parts.append(f"Vol Ratio: {vol_ratio:.2f}x")
+                            if pd.notna(candle_pct):
+                                parts.append(f"Candle: {candle_pct:+.2f}%")
+                            vwap_ctx = str(vwap_label or "").replace("🟢 ", "").replace("🔴 ", "").replace("→ ", "").strip()
+                            if vwap_ctx:
+                                parts.append(f"VWAP: {vwap_ctx}")
+                            spike_hover = " | ".join(parts)
+
                         # -- Indicator grid (professional card layout) --
                         _grid_html = _build_indicator_grid(
                             supertrend_trend, ichimoku_trend, vwap_label, adx_val, bollinger_bias,
                             stochrsi_k_val, psar_trend, williams_label, cci_label,
                             volume_spike, atr_comment, candle_pattern,
+                            spike_label=spike_label, spike_hover=spike_hover,
+                            timeframe=tf,
+                            ichimoku_hover=ichimoku_hover,
                         )
                         if _grid_html:
                             st.markdown(_grid_html, unsafe_allow_html=True)
