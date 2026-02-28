@@ -449,7 +449,30 @@ def render(ctx: dict) -> None:
         top_n = st.slider("Top N", min_value=3, max_value=50, value=50)
     with controls[3]:
         refresh_scan = st.button("Refresh Scan", use_container_width=True)
+    filter_controls = st.columns([1.3, 2.7], gap="small")
+    with filter_controls[0]:
+        exclude_stables = st.checkbox(
+            "Exclude stablecoins",
+            value=True,
+            key="market_exclude_stables",
+            help="Hide stable/synthetic USD-pegged coins from scanner universe.",
+        )
+    with filter_controls[1]:
+        st.caption(
+            "Scanner universe filter: stablecoin exclusion is ON by default to reduce noise."
+            if exclude_stables
+            else "Scanner universe filter: stablecoin exclusion is OFF (all symbols included)."
+        )
     # Strict scalp mode is always enabled (non-strict path removed).
+
+    STABLE_BASES = {
+        "USDT", "USDC", "BUSD", "DAI", "TUSD", "USDE", "FDUSD", "PYUSD",
+        "RLUSD", "USDP", "GUSD", "EURS", "EURC",
+    }
+
+    def _is_stable_base(base: str) -> bool:
+        b = str(base or "").upper().strip()
+        return bool(b and b in STABLE_BASES)
 
     def _fmt_price(v: float) -> str:
         try:
@@ -753,7 +776,9 @@ def render(ctx: dict) -> None:
         if txt.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE", "-"}:
             txt = ""
         if col == "Coin":
-            return f"<span class='mk-coin'>{html.escape(txt)}</span>"
+            pair = str(row.get("__pair", "")).strip()
+            title_attr = f" title='{html.escape(pair)}'" if pair else ""
+            return f"<span class='mk-coin'{title_attr}>{html.escape(txt)}</span>"
         if col in {"Action", "Direction", "Strength", "R:R", "Scalp Opportunity"}:
             if col == "Action":
                 reason_code = str(row.get("__action_reason", "")).strip()
@@ -1026,7 +1051,7 @@ def render(ctx: dict) -> None:
             unsafe_allow_html=True,
         )
 
-    scan_sig = (timeframe, direction_filter, int(top_n))
+    scan_sig = (timeframe, direction_filter, int(top_n), bool(exclude_stables))
     last_sig = st.session_state.get("market_scan_sig")
     should_scan = refresh_scan or (last_sig != scan_sig) or ("market_scan_results" not in st.session_state)
 
@@ -1078,6 +1103,8 @@ def render(ctx: dict) -> None:
                 # If market rows are empty (e.g. CoinGecko rate-limit), keep scan alive
                 # using exchange pairs directly.
                 working_symbols = list(usdt_symbols)
+            if exclude_stables:
+                working_symbols = [s for s in working_symbols if not _is_stable_base(s.split("/")[0].upper())]
             working_symbols = working_symbols[:top_n]
 
             if not working_symbols:
@@ -1319,6 +1346,7 @@ def render(ctx: dict) -> None:
 
                 return {
                     'Coin': base,
+                    '__pair': sym,
                     'Price ($)': _fmt_price(price),
                     'Δ (%)': format_delta(price_change) if price_change is not None else '',
                     'Action': action,
@@ -1341,6 +1369,7 @@ def render(ctx: dict) -> None:
                     '__rr_note': rr_note,
                     'R:R': _rr_badge(rr_val),
                     'Market Cap ($)': readable_market_cap(mcap_val) if mcap_val else "—",
+                    '__mcap_val': int(mcap_val) if mcap_val else 0,
                     'Spike Alert': '→ Spike' if volume_spike else '',
                     '__spike_dir': spike_dir,
                     '__spike_vol_ratio': spike_vol_ratio,
@@ -1390,11 +1419,12 @@ def render(ctx: dict) -> None:
             fresh_results = sorted(
                 fresh_results,
                 key=lambda x: (
-                    _action_rank(str(x.get("Action"))),
-                    setup_rank.get(str(x.get("__structure_state")), 0),
-                    float(x.get("__strength_val", 0.0)),
+                    -_action_rank(str(x.get("Action"))),
+                    -setup_rank.get(str(x.get("__structure_state")), 0),
+                    -float(x.get("__strength_val", 0.0)),
+                    -float(x.get("__mcap_val", 0)),
+                    str(x.get("Coin", "")),
                 ),
-                reverse=True,
             )[:top_n]
             if fresh_results:
                 st.session_state["market_scan_results"] = fresh_results
@@ -1504,7 +1534,7 @@ def render(ctx: dict) -> None:
             f"<summary style='color:{ACCENT};'>"
             f"ℹ️ Column Guide (click to expand)</summary>"
             f"<div class='market-details-body' style='color:{TEXT_MUTED}; padding:0.5rem;'>"
-            "<b>Coin</b>: asset ticker.<br>"
+            "<b>Coin</b>: asset ticker (hover to see exchange pair symbol).<br>"
             "<b>Price ($)</b>: latest tradable price snapshot.<br>"
             "<b>Δ (%)</b>: change from previous closed candle to latest closed candle on selected timeframe (fallback: ticker % if candle delta unavailable).<br>"
             "<b>Action</b>: final decision class (ENTER / WATCH / SKIP). Hover badge for reason text.<br>"
