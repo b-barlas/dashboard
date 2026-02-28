@@ -33,7 +33,7 @@ jobs:
         run: ruff check . --select E9,F63,F7,F82
 
       - name: Mypy (core engine contracts)
-        run: mypy --config-file mypy.ini core/signal_contract.py core/rapid_engine.py core/scalping.py
+        run: mypy --config-file mypy.ini core/signal_contract.py core/scalping.py core/market_decision.py
 
       - name: Run tests
         run: python -m pytest -q
