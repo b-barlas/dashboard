@@ -1535,7 +1535,7 @@ def render(ctx: dict) -> None:
             f"ℹ️ Column Guide (click to expand)</summary>"
             f"<div class='market-details-body' style='color:{TEXT_MUTED}; padding:0.5rem;'>"
             "<b>Coin</b>: asset ticker (hover to see exchange pair symbol).<br>"
-            "<b>Price ($)</b>: latest tradable price snapshot.<br>"
+            "<b>Price ($)</b>: latest candle close from the active feed.<br>"
             "<b>Δ (%)</b>: change from previous closed candle to latest closed candle on selected timeframe (fallback: ticker % if candle delta unavailable).<br>"
             "<b>Action</b>: final decision class (ENTER / WATCH / SKIP). Hover badge for reason text.<br>"
             "<b>Direction</b>: expected side (Upside / Downside / Neutral). Hover cell for source signal and reason.<br>"
@@ -1771,6 +1771,7 @@ def render(ctx: dict) -> None:
                 "__strength_note",
                 "__ai_note",
                 "__alignment_note",
+                "__pair",
             ] if c in df_results.columns and c not in display_cols
         ]
         df_display = df_results[display_cols + hidden_meta_cols].copy()
@@ -1797,6 +1798,9 @@ def render(ctx: dict) -> None:
                     "__strength_note",
                     "__ai_note",
                     "__alignment_note",
+                    "__pair",
+                    "__mcap_val",
+                    "__scalp_gate_reason",
                 ],
                 errors="ignore",
             )
