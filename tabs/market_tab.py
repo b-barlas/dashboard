@@ -777,8 +777,14 @@ def render(ctx: dict) -> None:
             txt = ""
         if col == "Coin":
             pair = str(row.get("__pair", "")).strip()
-            title_attr = f" title='{html.escape(pair)}'" if pair else ""
-            return f"<span class='mk-coin'{title_attr}>{html.escape(txt)}</span>"
+            if pair:
+                return (
+                    f"<span class='mk-coin-wrap'>"
+                    f"<span class='mk-coin'>{html.escape(txt)}</span>"
+                    f"<span class='mk-coin-tooltip'>{html.escape(pair)}</span>"
+                    f"</span>"
+                )
+            return f"<span class='mk-coin'>{html.escape(txt)}</span>"
         if col in {"Action", "Direction", "Strength", "R:R", "Scalp Opportunity"}:
             if col == "Action":
                 reason_code = str(row.get("__action_reason", "")).strip()
@@ -1035,6 +1041,35 @@ def render(ctx: dict) -> None:
             .mk-info {{ color:{ACCENT}; border-color:rgba(0,212,255,0.46); background:rgba(0,212,255,0.10); }}
             .mk-muted {{ color:{TEXT_MUTED}; border-color:rgba(140,161,182,0.35); background:rgba(140,161,182,0.08); }}
             .mk-coin {{ font-weight:800; letter-spacing:0.2px; color:#F8FAFC; }}
+            .mk-coin-wrap {{
+              position:relative;
+              display:inline-flex;
+              align-items:center;
+            }}
+            .mk-coin-tooltip {{
+              position:absolute;
+              left:0;
+              top:calc(100% + 6px);
+              z-index:20;
+              opacity:0;
+              visibility:hidden;
+              transition:opacity 0.14s ease, visibility 0.14s ease;
+              pointer-events:none;
+              white-space:nowrap;
+              border:1px solid rgba(0,212,255,0.40);
+              background:rgba(6,12,24,0.96);
+              color:#D6E8FF;
+              font-size:0.70rem;
+              font-weight:700;
+              line-height:1.2;
+              border-radius:8px;
+              padding:4px 8px;
+              box-shadow:0 8px 20px rgba(0,0,0,0.35);
+            }}
+            .mk-coin-wrap:hover .mk-coin-tooltip {{
+              opacity:1;
+              visibility:visible;
+            }}
             .mk-plain {{ color:#E5E7EB; }}
             .mk-delta {{ font-weight:700; }}
             .mk-pos-t {{ color:{POSITIVE}; }}
