@@ -33,9 +33,10 @@ class MarketCoinColumnContractTests(unittest.TestCase):
         self.assertIn('str(x.get("Coin", ""))', self.text)
 
     def test_csv_export_drops_internal_coin_metadata(self):
-        self.assertRegex(self.text, r"(?s)columns=\[.*?\"__pair\"")
-        self.assertRegex(self.text, r"(?s)columns=\[.*?\"__mcap_val\"")
-        self.assertRegex(self.text, r"(?s)columns=\[.*?\"__scalp_gate_reason\"")
+        self.assertIn(
+            'csv_df = csv_df[[c for c in csv_df.columns if not str(c).startswith("__")]]',
+            self.text,
+        )
 
 
 if __name__ == "__main__":

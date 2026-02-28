@@ -21,6 +21,7 @@ from core.services import (
     get_fear_greed,
     get_major_ohlcv_bundle,
     get_market_indices,
+    get_market_top_snapshot,
     get_price_change,
     get_scalping_entry_target,
     scalp_quality_gate,

@@ -121,7 +121,7 @@ def _action_decision_core(
         return "⛔ SKIP", "NO_STRUCTURE"
     # Require known trend-strength context for ENTER. Unknown ADX can still be WATCH.
     if isnan(adx_val):
-        return "👀 WATCH", "ADX_UNKNOWN"
+        return "WATCH", "ADX_UNKNOWN"
 
     adx_f = float(adx_val)
     # In very weak trend, skip only when strength is also weak-mid.
@@ -164,4 +164,4 @@ def _action_decision_core(
         return "🟡 ENTER (Trend-Led)", "ENTER_TREND_LED"
     if enter_ai_led:
         return "🟡 ENTER (AI-Led)", "ENTER_AI_LED"
-    return "👀 WATCH", "NEEDS_CONFIRMATION"
+    return "WATCH", "NEEDS_CONFIRMATION"

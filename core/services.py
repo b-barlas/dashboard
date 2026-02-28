@@ -58,6 +58,23 @@ def _debug(msg: str) -> None:
         st.sidebar.write(msg)
 
 
+def _safe_float(v) -> float | None:
+    try:
+        f = float(v)
+        return f if pd.notna(f) else None
+    except Exception:
+        return None
+
+
+def _is_finite(v) -> bool:
+    return _safe_float(v) is not None
+
+
+def _is_positive(v) -> bool:
+    f = _safe_float(v)
+    return f is not None and f > 0
+
+
 def _http_get_json(url: str, params: dict | None = None, timeout: int = 10,
                    retries: int = 3, backoff_sec: float = 0.7):
     """GET JSON with small retry/backoff for transient API failures."""
@@ -104,19 +121,20 @@ def get_market_indices():
 
     Returns BTC and ETH dominance percentages, total and alt market cap values,
     the 24h percentage change in total market cap, and dominance values for
-    several leading altcoins (BNB, SOL, ADA, XRP).  All dominance values are
-    returned as integers representing percentage points (e.g. 42 for 42%).
+    several leading altcoins (BNB, SOL, ADA, XRP). Dominance values are
+    returned as percentage points with 1 decimal precision.
     
-    If the API call fails, zeros are returned for all fields.
+    If the API call fails, zero-like defaults are returned to keep the app alive.
+    Callers should treat all-zero dominance payloads as unavailable data.
     """
     try:
         return get_market_indices_core()
     except Exception as e:
         # Log the error and return zeros for all values to avoid breaking the
-        # dashboard.  Using ints ensures consistent return types across the
+        # dashboard.  Using numeric defaults ensures consistent return types across the
         # success and failure paths.
         print(f"get_market_indices error: {e}")
-        return 0, 0, 0, 0, 0.0, 0, 0, 0, 0
+        return 0.0, 0.0, 0, 0, 0.0, 0.0, 0.0, 0.0, 0.0
 
 
 # Fetch fear and greed index from alternative.me
@@ -126,6 +144,186 @@ def get_fear_greed():
     except Exception as e:
         _debug(f"get_fear_greed error: {e}")
         return None, "Unavailable"
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def _fetch_btc_eth_from_coingecko_with_change() -> dict[str, float | None]:
+    data = _http_get_json(
+        "https://api.coingecko.com/api/v3/simple/price",
+        params={
+            "ids": "bitcoin,ethereum",
+            "vs_currencies": "usd",
+            "include_24hr_change": "true",
+        },
+        timeout=10,
+        retries=3,
+    ) or {}
+    btc = data.get("bitcoin", {}) if isinstance(data, dict) else {}
+    eth = data.get("ethereum", {}) if isinstance(data, dict) else {}
+    return {
+        "btc_price": _safe_float(btc.get("usd")),
+        "btc_change": _safe_float(btc.get("usd_24h_change")),
+        "eth_price": _safe_float(eth.get("usd")),
+        "eth_change": _safe_float(eth.get("usd_24h_change")),
+    }
+
+
+def _fetch_pair_price_change_from_exchange(symbol: str) -> tuple[float | None, float | None]:
+    for variant in symbol_variants_core(symbol):
+        try:
+            ticker = EXCHANGE.fetch_ticker(variant)
+            price = _safe_float(ticker.get("last"))
+            if price is None:
+                price = _safe_float(ticker.get("close"))
+            change = _safe_float(ticker.get("percentage"))
+            if price is not None:
+                return price, change
+        except Exception:
+            continue
+    return None, None
+
+
+def _fg_label_from_value(value: float | None) -> str:
+    if value is None:
+        return "Unavailable"
+    v = int(max(0, min(100, round(value))))
+    if v <= 24:
+        return "Extreme Fear"
+    if v <= 44:
+        return "Fear"
+    if v <= 55:
+        return "Neutral"
+    if v <= 74:
+        return "Greed"
+    return "Extreme Greed"
+
+
+def _valid_top_metric_field(field: str, value) -> bool:
+    if field in {
+        "btc_price", "eth_price", "total_mcap", "alt_mcap",
+        "btc_dom", "eth_dom", "bnb_dom", "sol_dom", "ada_dom", "xrp_dom",
+    }:
+        return _is_positive(value)
+    if field in {"btc_change", "eth_change", "mcap_24h_pct"}:
+        return _is_finite(value)
+    if field == "fg_value":
+        f = _safe_float(value)
+        return f is not None and 0 <= f <= 100
+    if field == "fg_label":
+        return isinstance(value, str) and value.strip() != ""
+    return value is not None
+
+
+def get_market_top_snapshot() -> dict[str, float | int | str | None]:
+    """Unified top-of-market snapshot with provider fallback and last-good cache.
+
+    Rules:
+    - BTC/ETH price and 24h change come from the same provider in a given fetch.
+      Provider order: Exchange ticker -> CoinGecko simple price.
+    - Market indices are fetched from CoinGecko global.
+    - Fear & Greed is fetched from alternative.me.
+    - Any missing field falls back to the last valid snapshot in session state.
+    """
+    key = "market_top_snapshot_v1"
+    previous = st.session_state.get(key, {})
+    live: dict[str, float | int | str | None] = {}
+
+    # 1) BTC/ETH price+change: same-provider consistency
+    ex_btc_price, ex_btc_change = _fetch_pair_price_change_from_exchange("BTC/USDT")
+    ex_eth_price, ex_eth_change = _fetch_pair_price_change_from_exchange("ETH/USDT")
+    exchange_complete = all(
+        _valid_top_metric_field(name, value)
+        for name, value in {
+            "btc_price": ex_btc_price,
+            "btc_change": ex_btc_change,
+            "eth_price": ex_eth_price,
+            "eth_change": ex_eth_change,
+        }.items()
+    )
+    if exchange_complete:
+        live.update(
+            {
+                "btc_price": ex_btc_price,
+                "btc_change": ex_btc_change,
+                "eth_price": ex_eth_price,
+                "eth_change": ex_eth_change,
+            }
+        )
+    else:
+        cg = _fetch_btc_eth_from_coingecko_with_change()
+        cg_complete = all(
+            _valid_top_metric_field(name, value)
+            for name, value in cg.items()
+        )
+        if cg_complete:
+            live.update(cg)
+
+    # 2) Market indices
+    try:
+        (
+            btc_dom,
+            eth_dom,
+            total_mcap,
+            alt_mcap,
+            mcap_24h_pct,
+            bnb_dom,
+            sol_dom,
+            ada_dom,
+            xrp_dom,
+        ) = get_market_indices_core()
+        live.update(
+            {
+                "btc_dom": _safe_float(btc_dom),
+                "eth_dom": _safe_float(eth_dom),
+                "total_mcap": _safe_float(total_mcap),
+                "alt_mcap": _safe_float(alt_mcap),
+                "mcap_24h_pct": _safe_float(mcap_24h_pct),
+                "bnb_dom": _safe_float(bnb_dom),
+                "sol_dom": _safe_float(sol_dom),
+                "ada_dom": _safe_float(ada_dom),
+                "xrp_dom": _safe_float(xrp_dom),
+            }
+        )
+    except Exception as e:
+        _debug(f"get_market_top_snapshot indices fallback: {e}")
+
+    # 3) Fear & Greed
+    try:
+        fg_value, fg_label = get_fear_greed_core()
+        fg_value_f = _safe_float(fg_value)
+        live["fg_value"] = fg_value_f
+        live["fg_label"] = fg_label if _valid_top_metric_field("fg_label", fg_label) else _fg_label_from_value(fg_value_f)
+    except Exception as e:
+        _debug(f"get_market_top_snapshot fear_greed fallback: {e}")
+
+    # 4) Merge with last-good snapshot field-by-field
+    fields = [
+        "btc_price", "btc_change", "eth_price", "eth_change",
+        "btc_dom", "eth_dom", "total_mcap", "alt_mcap", "mcap_24h_pct",
+        "bnb_dom", "sol_dom", "ada_dom", "xrp_dom", "fg_value", "fg_label",
+    ]
+    merged: dict[str, float | int | str | None] = {}
+    updated_snapshot = dict(previous) if isinstance(previous, dict) else {}
+    for field in fields:
+        live_value = live.get(field)
+        if _valid_top_metric_field(field, live_value):
+            merged[field] = live_value
+            updated_snapshot[field] = live_value
+        else:
+            prev_value = previous.get(field) if isinstance(previous, dict) else None
+            if _valid_top_metric_field(field, prev_value):
+                merged[field] = prev_value
+            else:
+                merged[field] = None
+
+    if not _valid_top_metric_field("fg_label", merged.get("fg_label")):
+        merged["fg_label"] = _fg_label_from_value(_safe_float(merged.get("fg_value")))
+
+    # Persist only when we have at least one valid live field.
+    if any(_valid_top_metric_field(f, live.get(f)) for f in fields):
+        st.session_state[key] = updated_snapshot
+
+    return merged
 
 def get_social_sentiment(symbol: str) -> tuple[int, str]:
     """Return a naive sentiment score (0–100) and label based on 24h price change.

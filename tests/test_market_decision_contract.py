@@ -60,11 +60,11 @@ class MarketDecisionContractTests(unittest.TestCase):
 
     def test_action_watch_when_adx_unknown(self):
         out = action_decision("LONG", 74, "FULL", "HIGH", 0.8, float("nan"))
-        self.assertEqual(out, "👀 WATCH")
+        self.assertEqual(out, "WATCH")
 
     def test_action_watch_when_adx_is_weak_even_if_quality_is_high(self):
         out = action_decision("LONG", 74, "FULL", "HIGH", 0.8, 19.9)
-        self.assertEqual(out, "👀 WATCH")
+        self.assertEqual(out, "WATCH")
 
     def test_action_reason_conflict(self):
         out = action_reason("LONG", 70, "FULL", "CONFLICT", 0.8, 30.0)

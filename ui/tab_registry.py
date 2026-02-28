@@ -37,7 +37,7 @@ _TAB_DEPS = [
         render_market_tab_ui,
         [
             "ACCENT", "TEXT_MUTED", "CARD_BG", "POSITIVE", "NEGATIVE", "WARNING",
-            "get_market_indices", "get_fear_greed", "get_btc_eth_prices", "get_price_change",
+            "get_market_top_snapshot", "get_price_change",
             "_tip", "get_major_ohlcv_bundle", "ml_ensemble_predict", "get_top_volume_usdt_symbols",
             "fetch_ohlcv", "analyse", "get_scalping_entry_target", "scalp_quality_gate", "_calc_conviction",
             "signal_plain", "direction_label", "bias_score_badge", "readable_market_cap", "leverage_badge",

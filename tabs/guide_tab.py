@@ -38,327 +38,289 @@ def render(ctx: dict) -> None:
 
     st.markdown("## Analysis Guide")
     st.caption(
-        "Full user manual: what each tab does, how calculations are made, and how to interpret outputs without guesswork."
+        "Full user manual in dashboard tab order: what each tab does, how core calculations work, and how to read outputs clearly."
     )
 
     sections = [
         (
-            "0) Quick Start (Core 3-Step Workflow)",
+            "0) Core Engine (used across tabs)",
             """
-If you want a clean, fast workflow, use this sequence first:
-1. **Market**: scan broad universe and shortlist
-2. **Position**: execute with invalidation discipline and health checks
+This dashboard is a decision-support system (it does **not** place trades).
 
-Treat the other tabs as **advanced validation tools** (optional when needed), not mandatory every trade.
-            """,
-            "info",
-        ),
-        (
-            "1) What this dashboard is",
-            """
-This app is a **decision-support dashboard** for crypto markets. It combines:
-- Technical analysis (trend, momentum, volume, volatility)
-- Machine learning signals (production default: Ensemble)
-- Risk and backtest tooling
-- Multi-tab workflow for scanning, validation, and execution planning
-
-It does **not** execute trades. Final decision stays with the user.
-            """,
-            "info",
-        ),
-        (
-            "2) Core signal engine (how Direction + Action is computed)",
-            """
-The signal engine computes 4 category scores in range **[-1, +1]**:
+Technical engine computes 4 category blocks in range **[-1, +1]**:
 - Trend
 - Momentum
 - Volume
 - Volatility
 
-Regime-aware weighted score:
-- Strong trend (high ADX): trend weight increases
-- Weak trend / range: momentum and volatility weights increase
-- Normal regime: balanced baseline weights
+Those are combined into a final score, then converted:
+- `bias = (final_score + 1) / 2 * 100`  (0-100)
+- `strength = (abs(bias - 50) / 50) ^ 0.70 * 100`  (0-100, direction-agnostic)
 
-Directional bias conversion:
-`bias = (final_score + 1) / 2 * 100`
-
-Strength conversion (direction-agnostic):
-`strength = (abs(bias - 50) / 50) ^ 0.70 * 100`
-
-Strength bands (dashboard standard):
+Strength buckets used in UI:
 - 0-39: Weak
 - 40-59: Mixed
 - 60-74: Good
 - 75-100: Strong
 
-Meaning:
-- Bias near 100: strong bullish alignment
-- Bias near 0: strong bearish alignment
-- Strength near 100: strong edge (either upside or downside)
-- Strength near 0: mixed/no edge
+Direction comes from technical signal mapping:
+- Upside / Downside / Neutral
 
-Naming note:
-- The dashboard uses **Direction + Strength** terminology.
-- Internal calculation input is **Bias Score (0-100)**, then converted to Strength for decisioning.
+Ensemble AI (3 models) is used as confirmation:
+- Gradient Boosting 45%
+- Random Forest 35%
+- Logistic Regression 20%
+- Direction thresholds: Upside if prob >= 0.58, Downside if prob <= 0.42, else Neutral
             """,
             "core",
         ),
         (
-            "3) Quality gates and adaptive thresholds",
+            "1) Market tab (Coin Action Scanner)",
             """
-High strength alone is not enough. Signals pass extra filters:
-- Trend confirmation (avoid counter-trend forcing)
-- Momentum sanity checks
-- Volume confirmation
-- Volatility/risk gating
-- Trend-momentum conflict penalty
-- Trend-volume alignment bonus
+This is the primary scan tab. Start here.
 
-Adaptive threshold logic (stricter in harder regimes):
-- Normal market: less strict
-- High volatility: stricter
-- Weak trend (low ADX): strictest
-- Oscillator extremes (RSI/StochRSI/Williams/CCI) are timeframe-adaptive
-  to reduce lower-timeframe noise and improve higher-timeframe responsiveness.
-
-If filters fail, action becomes **WATCH** (monitor, no execution).
-            """,
-            "risk",
-        ),
-        (
-            "4) Indicator families used in analysis",
-            """
-Main indicators used across tabs:
-- **Trend**: EMA stack, SuperTrend, Ichimoku, PSAR, ADX strength
-- **Momentum**: RSI, MACD, StochRSI, Williams %R, CCI
-- **Volume**: OBV, volume spike checks, VWAP context
-- **Volatility**: ATR and Bollinger width
-
-These are combined into category scores, then into final bias/strength.
-            """,
-            "core",
-        ),
-        (
-            "5) AI architecture (important)",
-            """
-Production AI signal in main tabs uses **Ensemble ML**:
-- Gradient Boosting (weight 45%)
-- Random Forest (weight 35%)
-- Logistic Regression (weight 20%)
-
-Ensemble probability:
-`p_ens = p_gb*0.45 + p_rf*0.35 + p_lr*0.20`
-
-Direction mapping (ensemble):
-- Upside if probability >= 0.58
-- Downside if probability <= 0.42
-- Neutral in the 0.42-0.58 zone
-
-`AI Agree` = directional model vote agreement (x/3) for final Upside/Downside output.
-Neutral consensus is tracked separately and is not counted as directional agreement.
-            """,
-            "core",
-        ),
-        (
-            "6) AI Lab tab (model diagnostics)",
-            """
-The **AI Lab** tab is for model comparison and diagnostics.
-You can select:
-- Ensemble
-- Gradient Boosting
-- Random Forest
-- Logistic Regression
-
-Use case:
-- Compare model behavior across timeframes
-- Inspect stability before trusting edge
-- Keep production trading decisions aligned with Ensemble in main tabs
-            """,
-            "info",
-        ),
-        (
-            "7) Market tab (scanner + macro view)",
-            """
-Market tab includes:
-- Live BTC/ETH, market cap, Fear & Greed
-- Dominance gauges (BTC/ETH)
-- AI direction bias (dominance-weighted)
-- Coin scanner table
-
-Scanner table key columns:
-- Action (ENTER (Trend+AI) / ENTER (Trend-Led) / ENTER (AI-Led) / WATCH / SKIP)
-- Direction (Upside / Downside / Neutral)
+Main table columns:
+- Coin, Price ($), Delta (%)
+- Action
+- Direction
 - Strength
 - AI Ensemble
 - Tech vs AI Alignment
-- Indicator snapshots (ADX, Ichimoku, StochRSI, VWAP, Candle Pattern, etc.)
+- R:R, Entry/Stop/Target, Scalp Opportunity
+- Optional advanced indicator columns
 
-Candle Pattern direction standard:
-- ▲ = bullish pattern (green)
-- ▼ = bearish pattern (red)
-- → = neutral/indecision pattern (yellow)
+Action classes (final decision class):
+- ENTER (Trend+AI): strongest class (trend and AI align)
+- ENTER (Trend-Led): trend leads; AI works as guardrail
+- ENTER (AI-Led): AI leads; trend works as guardrail
+- WATCH: setup exists but confirmation incomplete
+- SKIP: no direction, conflict, or weak edge
 
-Action policy in production:
-- **ENTER (Trend+AI)**: strongest class; technical direction + AI direction are aligned with quality gates passed
-- **ENTER (Trend-Led)**: trend/technical side leads and risk guards pass; AI is used as veto/guardrail only
-- **ENTER (AI-Led)**: AI agreement leads and risk guards pass; trend is used as veto/guardrail only
-- **WATCH**: direction exists but not all quality gates pass
-- **SKIP**: neutral/no direction, conflict, or weak strength (<35)
-- In table view, hover the **Action** badge to see compact reason text for that classification.
+Scalp Opportunity is separate from Action.
+It appears only if all execution gates pass:
+- Direction match
+- R:R >= 1.5
+- ADX >= 20
+- Strength >= 55
+- No tech/AI conflict
+- Valid entry/stop/target
 
-Scalp Opportunity policy in production:
-- `Scalp Opportunity` is shown only when **all** scalp gates pass:
-  - Direction is clear (Upside/Downside) and scalp side matches Direction
-  - R:R >= 1.5
-  - ADX >= 20
-  - Strength >= 55
-  - Tech vs AI Alignment is not CONFLICT
-  - Entry/Stop/Target levels are valid
-- If `Scalp Opportunity` is empty, there is no execution-ready scalp setup and Entry/Stop/Target/R:R stay blank.
+Important consistency rule:
+- Direction/Strength and plan levels are computed from **closed candles**
+- Price column also reflects closed-candle close in scanner context
 
-Important:
-- **Action is a direction-confirmation decision** (go/no-go on market context).
-- **Action does not depend on scalp plan levels**; it is computed from Direction + Strength + AI Ensemble + Tech vs AI Alignment.
-- **R:R and Entry/SL/TP are execution planning fields**, not Action gates.
-
-	Important execution note:
-	- Direction/Strength/plan levels are computed on closed candles.
-	- Price column can show the latest live tick.
-	- This is intentional to avoid repaint risk in decision logic.
-	- Data mode badge:
-	  - **FULL MARKET MODE**: exchange execution data + enrichment fields available
-	  - **EXCHANGE-ONLY MODE**: enrichment provider unavailable; core trading fields still live
-
-	Tech vs AI Alignment is based on Direction + AI directional agreement + strength quality.
-	Common labels:
-	- HIGH / MEDIUM: direction and AI agree with enough model support
-	- TREND: technical side is strong but AI stays neutral
-	- WEAK: weak confirmation quality
-	- CONFLICT: technical and AI directions oppose each other
+Mode badges:
+- FULL MARKET MODE: exchange + enrichment providers active
+- EXCHANGE-ONLY MODE: enrichment unavailable, core trade fields still active
             """,
             "core",
         ),
         (
-            "8) Spot and Position tabs",
+            "2) Spot tab",
             """
-**Spot tab**:
-- Single-coin deep analysis for non-leveraged decisions
-- Full indicator grid, chart overlays, sentiment proxy, technical snapshot
-
-**Position tab**:
-- Open-position context with direction-aware commentary
-- Raw and levered PnL context + current direction regime
-- Scalping setup, support/resistance distance, risk warnings
-- Estimated liquidation price/distance (simple estimate)
-- Net PnL view (funding impact) and a Technical Invalidation line
-- Compact decision model guidance for HOLD / REDUCE / EXIT style actions
-
-Both use Ensemble AI for directional confirmation.
+Single-coin analysis for spot execution planning.
+What to read:
+- Direction + Strength + AI Ensemble + Tech vs AI Alignment (signal quality)
+- Indicator strip (SuperTrend, Ichimoku, VWAP, ADX, Bollinger, StochRSI, PSAR, Williams %R, CCI, Volatility)
+- Current Price / Breakout Entry / Exit If Broken cards
+- Spot Execution Plan text (scenario-based execution steps)
             """,
             "core",
         ),
         (
-            "9) Screener tab",
+            "3) Position tab",
             """
-Screener scans predefined liquid symbols with filters:
-- Min strength
-- Direction types
-- Min ADX
-- RSI range
-- Optional volume-spike-only
-
-Each matching row includes technical direction and Ensemble AI direction.
-Use this to shortlist candidates, then validate in Spot/Position/Fibonacci.
+Live position management tab.
+Main outputs:
+- Raw PnL, levered PnL, funding effect, net PnL
+- Estimated liquidation distance (simple model)
+- Direction / Strength / AI Ensemble / Alignment summary
+- Technical Invalidation Line (hard risk line)
+- Position health decision block (HOLD / REDUCE / EXIT style guidance)
+- Optional scalp setup block with gate reasons when unavailable
             """,
             "core",
         ),
         (
-            "10) Fibonacci, Monte Carlo, Risk Analytics",
+            "4) AI Lab tab",
             """
-**Fibonacci tab**:
-- Retracement/extension levels
-- Divergence detection
-- Volume profile (POC/value area)
-- Market regime classification
+Model diagnostics across multiple timeframes for one coin.
+Shows:
+- Selected model direction/probability
+- Ensemble agreement (x/3)
+- AI Direction Bias (same market-wide bias logic as Market tab)
+- Plan Entry/Target + plan source (AI-filtered vs technical fallback)
 
-**Monte Carlo tab**:
-- Simulated future paths from historical return distribution
-- Probability bands, expected return, VaR-like downside view
-
-**Risk Analytics tab**:
-- Sharpe, Sortino, Calmar
-- Max Drawdown
-- VaR and CVaR
-- Distribution shape (skew/kurtosis)
+Use AI Lab for diagnostics and model behavior checks, not as a standalone execution trigger.
             """,
             "core",
         ),
         (
-            "11) Backtest tab",
+            "5) Ensemble AI tab",
             """
-Backtest replays strategy logic on historical candles:
-- Entry by signal+strength rules
-- Exit after configured hold window
-- Commission/slippage assumptions
+Pure ensemble prediction view for one coin/timeframe.
+Shows:
+- Ensemble direction and probability
+- Effective agreement (directional or consensus-aware)
+- Individual model outputs
+- Confidence gauge
 
-Read together, not in isolation:
-- Win rate
-- Profit factor
-- Max drawdown
-- Sharpe (risk-adjusted)
-
-A high win rate with bad drawdown is not necessarily good.
+If training window is unstable/insufficient, the tab intentionally returns a neutral fallback output.
             """,
-            "risk",
+            "core",
         ),
         (
-            "12) Tools tab (risk/reward + liquidation)",
+            "6) Heatmap tab",
             """
-Tools help pre-trade planning:
-- Risk/Reward calculator
-- Position sizing context
-- Leverage impact table
-- Liquidation distance estimation
-
-Always define risk before entry:
-1. Stop-loss
-2. Risk amount
-3. Position size
-4. Leverage only if needed
-            """,
-            "risk",
-        ),
-        (
-            "13) Correlation, Sessions, Heatmap, Whale",
-            """
-- **Correlation**: co-movement matrix for diversification
-- **Sessions**: behavior by Asia/Europe/US market windows
-- **Heatmap**: market-wide breadth by cap and 24h move
-- **Whale**: trending, gainers/losers, volume-pressure context
-
-These tabs help with **context**, not standalone entries.
+Top-coin market breadth view.
+Shows:
+- Cap-weighted heatmap
+- Breadth (advancers share), A/D ratio, average change
+- Quick read of market leadership concentration
             """,
             "info",
         ),
         (
-            "14) Leverage guidance",
+            "7) Monte Carlo tab",
             """
-Leverage suggestions are ceilings, not targets.
-Use lower leverage when:
-- Strength is medium
-- ADX is weak
-- Volatility is high
-- Direction/AI disagree
-
-Best practice:
-- Risk 1-2% account per trade
-- Avoid over-sizing from high-strength overtrust
+Scenario simulation from historical return behavior.
+Use it for:
+- Distribution-aware expectation
+- Downside path stress context
+- Probability-band interpretation (not certainty)
             """,
             "risk",
         ),
         (
-            "15) Data sources and UK-safe policy",
+            "8) Fibonacci tab",
+            """
+Structure and zone-mapping tab.
+Main outputs:
+- Retracement/extension levels
+- Divergence checks
+- Volume-profile context (including POC area)
+- Regime hints and action hints
+            """,
+            "core",
+        ),
+        (
+            "9) Risk Analytics tab",
+            """
+Portfolio-style risk metrics from recent return series.
+Includes:
+- Sharpe / Sortino / Calmar
+- Max drawdown
+- VaR / CVaR
+- Skew / Kurtosis
+
+Use this tab to understand risk shape, not to create entry signals alone.
+            """,
+            "risk",
+        ),
+        (
+            "10) Whale Tracker tab",
+            """
+Attention/liquidity proxy tab (not on-chain wallet tracking).
+Combines:
+- Trending coins feed
+- Top gainers / losers snapshots
+- Volume anomaly scanner with ratio + z-score logic
+
+Use it to find attention shifts, then validate entries in Market/Spot/Position.
+            """,
+            "info",
+        ),
+        (
+            "11) Screener tab",
+            """
+Rule-based shortlist tab over liquid symbols.
+Typical filters:
+- Minimum strength
+- Direction type
+- ADX floor
+- RSI window
+- Optional spike-only mode
+
+Use Screener as pre-filter, then confirm execution context in Market/Spot/Position.
+            """,
+            "core",
+        ),
+        (
+            "12) Multi-TF tab",
+            """
+Cross-timeframe alignment view for a single coin.
+Shows:
+- Direction status by timeframe
+- Strength status by timeframe
+- ADX status by timeframe
+
+Purpose: avoid taking a low-timeframe setup fully against higher-timeframe structure.
+            """,
+            "core",
+        ),
+        (
+            "13) Correlation tab",
+            """
+Co-movement matrix for selected symbols.
+Use it to:
+- avoid accidental concentration
+- separate highly correlated positions
+- build better diversification logic
+            """,
+            "info",
+        ),
+        (
+            "14) Sessions tab",
+            """
+Session behavior split (Asia / Europe / US windows).
+Shows:
+- session-level return and volatility context
+- volume profile by session
+- quick quality cues
+            """,
+            "info",
+        ),
+        (
+            "15) Tools tab",
+            """
+Beginner-friendly pre-trade calculator.
+Inputs:
+- Entry, Stop Loss, Take Profit
+- Margin used, leverage, funding rate
+
+Outputs:
+- Notional, position size, R:R
+- TP/SL PnL projections
+- simplified liquidation estimate and leverage comparison
+            """,
+            "risk",
+        ),
+        (
+            "16) Backtest tab",
+            """
+Historical replay for strategy validation.
+Core reading order:
+1) trade count and sample quality
+2) win rate + profit factor
+3) drawdown and risk-adjusted metrics
+
+A high win rate alone is not enough if drawdown/risk quality is poor.
+            """,
+            "risk",
+        ),
+        (
+            "17) Analysis Guide tab (this page)",
+            """
+This guide mirrors the live dashboard behavior.
+Use it as:
+- quick reference for each tab
+- plain-language explanation for key columns and calculations
+- consistency check before production use
+            """,
+            "info",
+        ),
+        (
+            "18) Data sources, fallback policy, and UK-safe exchanges",
             """
 Primary exchange fallback list is intentionally UK-safe for this setup:
 - Kraken
@@ -387,7 +349,7 @@ Cache policy:
             "info",
         ),
         (
-            "16) How to run with Streamlit",
+            "19) How to run with Streamlit",
             """
 Run locally:
 1. Install dependencies from `requirements.txt`
@@ -401,11 +363,11 @@ If data looks stale:
             "info",
         ),
         (
-            "17) Practical workflow (recommended)",
+            "20) Practical workflow (recommended)",
             """
 Recommended daily flow:
 1. Market tab: check regime + scanner shortlist
-2. Spot: validate setup and read the Action Plan
+2. Spot: validate setup and read the Spot Execution Plan
 3. Position: if already in trade, follow Technical Invalidation + decision model first
 4. Fibonacci/Risk: validate structure and downside risk
 5. Tools: confirm R:R and liquidation distance
@@ -418,7 +380,7 @@ Quick rule:
             "core",
         ),
         (
-            "18) Limitations and responsibility",
+            "21) Limitations and responsibility",
             """
 No model can predict news shocks, listing events, outages, or sudden regime breaks.
 Treat all outputs as probabilistic guidance.
@@ -434,7 +396,7 @@ This dashboard is **not financial advice**.
             "warn",
         ),
         (
-            "19) Quick Smoke Checklist (before daily use)",
+            "22) Quick Smoke Checklist (before daily use)",
             """
 Use this 60-second checklist:
 
@@ -444,7 +406,7 @@ Use this 60-second checklist:
 
 2. **Spot tab**
 - Analyse runs and shows Direction + Strength + AI + Tech vs AI Alignment
-- Spot Action Plan appears
+- Spot Execution Plan appears
 
 3. **Position tab**
 - Raw/Levered PnL and Net PnL render correctly
@@ -454,7 +416,7 @@ Use this 60-second checklist:
 4. **AI Lab**
 - Predict fills timeframe matrix
 - Plan Entry / Plan Target / Plan Source columns populate logically
-- AI Entry / Non-AI Entry appear in debug diagnostics
+- Debug expander shows AI vs non-AI plan levels
 
 5. **Fallback check**
 - If enrichment fails, Market shows **EXCHANGE-ONLY MODE** and core trade columns still render

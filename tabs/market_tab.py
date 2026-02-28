@@ -23,9 +23,7 @@ def render(ctx: dict) -> None:
     POSITIVE = get_ctx(ctx, "POSITIVE")
     NEGATIVE = get_ctx(ctx, "NEGATIVE")
     WARNING = get_ctx(ctx, "WARNING")
-    get_market_indices = get_ctx(ctx, "get_market_indices")
-    get_fear_greed = get_ctx(ctx, "get_fear_greed")
-    get_btc_eth_prices = get_ctx(ctx, "get_btc_eth_prices")
+    get_market_top_snapshot = get_ctx(ctx, "get_market_top_snapshot")
     get_price_change = get_ctx(ctx, "get_price_change")
     _tip = get_ctx(ctx, "_tip")
     get_major_ohlcv_bundle = get_ctx(ctx, "get_major_ohlcv_bundle")
@@ -59,23 +57,63 @@ def render(ctx: dict) -> None:
         "TON/USDT",
     ]
 
-    # Fetch global market data
-    # Unpack market indices.  The function returns BTC/ETH dominance, market caps,
-    # 24h change and dominance values for BNB, SOL, ADA and XRP.  We keep the
-    # additional dominance values for use in the AI market outlook calculation.
-    btc_dom, eth_dom, total_mcap, alt_mcap, mcap_24h_pct, bnb_dom, sol_dom, ada_dom, xrp_dom = get_market_indices()
-    fg_value, fg_label = get_fear_greed()
-    fg_value = fg_value if fg_value is not None else 0
-    btc_price, eth_price = get_btc_eth_prices()
-    btc_price = btc_price or 0
-    eth_price = eth_price or 0
+    # Unified top snapshot (provider-consistent + fallback + last-good cache).
+    top_snapshot = get_market_top_snapshot()
+    btc_dom_raw = top_snapshot.get("btc_dom")
+    eth_dom_raw = top_snapshot.get("eth_dom")
+    total_mcap_raw = top_snapshot.get("total_mcap")
+    alt_mcap_raw = top_snapshot.get("alt_mcap")
+    mcap_24h_pct = top_snapshot.get("mcap_24h_pct")
+    bnb_dom_raw = top_snapshot.get("bnb_dom")
+    sol_dom_raw = top_snapshot.get("sol_dom")
+    ada_dom_raw = top_snapshot.get("ada_dom")
+    xrp_dom_raw = top_snapshot.get("xrp_dom")
+
+    def _to_num(v: object) -> float:
+        try:
+            f = float(v)
+            return f if pd.notna(f) else 0.0
+        except Exception:
+            return 0.0
+
+    btc_dom = _to_num(btc_dom_raw)
+    eth_dom = _to_num(eth_dom_raw)
+    bnb_dom = _to_num(bnb_dom_raw)
+    sol_dom = _to_num(sol_dom_raw)
+    ada_dom = _to_num(ada_dom_raw)
+    xrp_dom = _to_num(xrp_dom_raw)
+    total_mcap = _to_num(total_mcap_raw)
+    alt_mcap = _to_num(alt_mcap_raw)
+    fg_value_raw = top_snapshot.get("fg_value")
+    fg_label = str(top_snapshot.get("fg_label") or "Unavailable")
+    fg_value = fg_value_raw if isinstance(fg_value_raw, (int, float)) else None
+    fg_available = fg_value is not None
+    btc_price_raw = top_snapshot.get("btc_price")
+    eth_price_raw = top_snapshot.get("eth_price")
+    btc_price = float(btc_price_raw) if isinstance(btc_price_raw, (int, float)) else None
+    eth_price = float(eth_price_raw) if isinstance(eth_price_raw, (int, float)) else None
+
+    # Treat all-zero dominance payload as unavailable upstream enrichment.
+    dominance_sum = (
+        max(btc_dom, 0.0)
+        + max(eth_dom, 0.0)
+        + max(bnb_dom, 0.0)
+        + max(sol_dom, 0.0)
+        + max(ada_dom, 0.0)
+        + max(xrp_dom, 0.0)
+    )
+    dominance_feed_ok = dominance_sum > 0.01
+    mcap_feed_ok = total_mcap > 0
+
+    btc_dom_display = btc_dom if dominance_feed_ok else None
+    eth_dom_display = eth_dom if dominance_feed_ok else None
 
     # Compute percentage change for market cap
-    delta_mcap = mcap_24h_pct
+    delta_mcap = float(mcap_24h_pct) if pd.notna(mcap_24h_pct) and mcap_feed_ok else float("nan")
 
-    # Compute price change percentages using ccxt
-    btc_change = get_price_change("BTC/USDT")
-    eth_change = get_price_change("ETH/USDT")
+    # Price changes come from the same provider as price in top snapshot.
+    btc_change = top_snapshot.get("btc_change")
+    eth_change = top_snapshot.get("eth_change")
 
     # Display headline and subtitle
     st.markdown("<h1 class='title'>Crypto Market Intelligence Hub</h1>", unsafe_allow_html=True)
@@ -103,50 +141,83 @@ def render(ctx: dict) -> None:
     m1, m2, m3, m4 = st.columns(4, gap="medium")
     # Bitcoin price
     with m1:
-        delta_class = "metric-delta-positive" if (btc_change or 0) >= 0 else "metric-delta-negative"
-        delta_text = f"({btc_change:+.2f}%)" if btc_change is not None else ""
-        st.markdown(
-            f"<div class='metric-card'>"
-            f"  <div class='metric-label'>Bitcoin Price</div>"
-            f"  <div class='metric-value'>${btc_price:,.2f}</div>"
-            f"  <div class='{delta_class}'>{delta_text}</div>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        if btc_price is not None and btc_price > 0:
+            delta_class = "metric-delta-positive" if (btc_change or 0) >= 0 else "metric-delta-negative"
+            delta_text = f"({btc_change:+.2f}%)" if btc_change is not None else ""
+            st.markdown(
+                f"<div class='metric-card'>"
+                f"  <div class='metric-label'>Bitcoin Price</div>"
+                f"  <div class='metric-value'>${btc_price:,.2f}</div>"
+                f"  <div class='{delta_class}'>{delta_text}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<div class='metric-card'>"
+                f"  <div class='metric-label'>Bitcoin Price</div>"
+                f"  <div class='metric-value'>N/A</div>"
+                f"  <div style='color:{TEXT_MUTED};font-size:0.85rem;'>Data unavailable</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
     # Ethereum price
     with m2:
-        delta_class = "metric-delta-positive" if (eth_change or 0) >= 0 else "metric-delta-negative"
-        delta_text = f"({eth_change:+.2f}%)" if eth_change is not None else ""
-        st.markdown(
-            f"<div class='metric-card'>"
-            f"  <div class='metric-label'>Ethereum Price</div>"
-            f"  <div class='metric-value'>${eth_price:,.2f}</div>"
-            f"  <div class='{delta_class}'>{delta_text}</div>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        if eth_price is not None and eth_price > 0:
+            delta_class = "metric-delta-positive" if (eth_change or 0) >= 0 else "metric-delta-negative"
+            delta_text = f"({eth_change:+.2f}%)" if eth_change is not None else ""
+            st.markdown(
+                f"<div class='metric-card'>"
+                f"  <div class='metric-label'>Ethereum Price</div>"
+                f"  <div class='metric-value'>${eth_price:,.2f}</div>"
+                f"  <div class='{delta_class}'>{delta_text}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<div class='metric-card'>"
+                f"  <div class='metric-label'>Ethereum Price</div>"
+                f"  <div class='metric-value'>N/A</div>"
+                f"  <div style='color:{TEXT_MUTED};font-size:0.85rem;'>Data unavailable</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
     # Total market cap
     with m3:
-        delta_class = "metric-delta-positive" if delta_mcap >= 0 else "metric-delta-negative"
-        st.markdown(
-            f"<div class='metric-card'>"
-            f"  <div class='metric-label'>Total Market Cap</div>"
-            f"  <div class='metric-value'>${total_mcap / 1e12:.2f}T</div>"
-            f"  <div class='{delta_class}'>({delta_mcap:+.2f}%)</div>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+        if mcap_feed_ok:
+            delta_class = "metric-delta-positive" if delta_mcap >= 0 else "metric-delta-negative"
+            delta_text = f"({delta_mcap:+.2f}%)" if pd.notna(delta_mcap) else ""
+            st.markdown(
+                f"<div class='metric-card'>"
+                f"  <div class='metric-label'>Total Market Cap</div>"
+                f"  <div class='metric-value'>${total_mcap / 1e12:.2f}T</div>"
+                f"  <div class='{delta_class}'>{delta_text}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<div class='metric-card'>"
+                f"  <div class='metric-label'>Total Market Cap</div>"
+                f"  <div class='metric-value'>N/A</div>"
+                f"  <div style='color:{TEXT_MUTED};font-size:0.85rem;'>Data unavailable</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
     # Fear & Greed index
     with m4:
         sentiment_color = POSITIVE if "Greed" in fg_label else (NEGATIVE if "Fear" in fg_label else WARNING)
+        fg_value_display = f"{int(fg_value)}" if fg_available else "N/A"
+        fg_label_display = fg_label if fg_available else "Unavailable"
         st.markdown(
             f"<div class='metric-card'>"
             f"  <div class='metric-label'>Fear &amp; Greed "
             f"<span title='Crypto Fear &amp; Greed Index (0-100). "
             f"0-25 = Extreme Fear (potential accumulation zone), 75-100 = Extreme Greed (potential distribution zone).' "
             f"style='cursor:help; font-size:0.7rem;'>ℹ️</span></div>"
-            f"  <div class='metric-value'>{fg_value}</div>"
-            f"  <div style='color:{sentiment_color};font-size:0.9rem;'>{fg_label}</div>"
+            f"  <div class='metric-value'>{fg_value_display}</div>"
+            f"  <div style='color:{sentiment_color};font-size:0.9rem;'>{fg_label_display}</div>"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -177,31 +248,46 @@ def render(ctx: dict) -> None:
             ada_prob, _, _ = ml_ensemble_predict(ada_df_behav)
         if xrp_df_behav is not None and not xrp_df_behav.empty:
             xrp_prob, _, _ = ml_ensemble_predict(xrp_df_behav)
-        # Compute a weighted probability across all assets.  Dominance values
-        # reflect each coin's share of the total crypto market.  If the sum of
-        # dominances is zero (unlikely), default to 1 to avoid division by zero.
-        dom_sum = btc_dom + eth_dom + bnb_dom + sol_dom + ada_dom + xrp_dom
-        dom_sum = dom_sum if dom_sum > 0 else 1.0
+        # Compute a weighted probability across all assets.  Prefer market-cap
+        # dominance weights; if dominance enrichment is unavailable, fall back
+        # to equal weights so the score remains usable in exchange-only mode.
+        dominance_weights = [
+            max(float(btc_dom), 0.0),
+            max(float(eth_dom), 0.0),
+            max(float(bnb_dom), 0.0),
+            max(float(sol_dom), 0.0),
+            max(float(ada_dom), 0.0),
+            max(float(xrp_dom), 0.0),
+        ]
+        dom_sum = float(sum(dominance_weights))
+        if dom_sum > 0.01:
+            weights = [w / dom_sum for w in dominance_weights]
+            behaviour_weight_mode = "dominance"
+        else:
+            weights = [1.0 / 6.0] * 6
+            behaviour_weight_mode = "equal"
         behaviour_prob = (
-            btc_prob * btc_dom
-            + eth_prob * eth_dom
-            + bnb_prob * bnb_dom
-            + sol_prob * sol_dom
-            + ada_prob * ada_dom
-            + xrp_prob * xrp_dom
-        ) / dom_sum
+            btc_prob * weights[0]
+            + eth_prob * weights[1]
+            + bnb_prob * weights[2]
+            + sol_prob * weights[3]
+            + ada_prob * weights[4]
+            + xrp_prob * weights[5]
+        )
     except Exception:
         behaviour_prob = 0.5
+        behaviour_weight_mode = "equal"
+    behaviour_prob = float(max(0.0, min(1.0, behaviour_prob)))
     major_probs = [btc_prob, eth_prob, bnb_prob, sol_prob, ada_prob, xrp_prob]
     # Determine behaviour direction from the combined probability
     behaviour_dir = direction_from_prob(float(behaviour_prob))
     # Map behaviour direction to a label for display and choose colour.  We
     # reuse the POSITIVE/NEGATIVE/WARNING colours defined above.
     if behaviour_dir == "LONG":
-        behaviour_label = "Up"
+        behaviour_label = "Upside"
         behaviour_color = POSITIVE
     elif behaviour_dir == "SHORT":
-        behaviour_label = "Down"
+        behaviour_label = "Downside"
         behaviour_color = NEGATIVE
     else:
         behaviour_label = "Neutral"
@@ -213,15 +299,21 @@ def render(ctx: dict) -> None:
     major_shorts = sum(1 for p in major_probs if float(p) <= AI_SHORT_THRESHOLD)
     breadth_score = float(max(major_longs, major_shorts) / max(len(major_probs), 1) * 100.0)
 
-    mcap_chg = abs(float(delta_mcap or 0.0))
-    # Continuous regime scoring to avoid jumpy mode transitions.
-    if mcap_chg <= 1.5:
-        regime_score = 72.0 + (mcap_chg / 1.5) * 10.0
-    elif mcap_chg <= 4.0:
-        regime_score = 82.0 - ((mcap_chg - 1.5) / 2.5) * 24.0
+    if mcap_feed_ok and pd.notna(delta_mcap):
+        mcap_chg = abs(float(delta_mcap))
+        # Continuous regime scoring to avoid jumpy mode transitions.
+        if mcap_chg <= 1.5:
+            regime_score = 72.0 + (mcap_chg / 1.5) * 10.0
+        elif mcap_chg <= 4.0:
+            regime_score = 82.0 - ((mcap_chg - 1.5) / 2.5) * 24.0
+        else:
+            regime_score = 58.0 - (mcap_chg - 4.0) * 4.0
+        regime_score = float(max(38.0, min(90.0, regime_score)))
+        regime_score_fallback = False
     else:
-        regime_score = 58.0 - (mcap_chg - 4.0) * 4.0
-    regime_score = float(max(38.0, min(90.0, regime_score)))
+        # Neutral fallback when market-cap regime input is unavailable.
+        regime_score = 50.0
+        regime_score_fallback = True
 
     try:
         spread = float(pd.Series(major_probs).std())
@@ -242,12 +334,18 @@ def render(ctx: dict) -> None:
         "Risk-On" if composite_score >= 68 else ("Selective" if composite_score >= 52 else "Risk-Off")
     )
     composite_color = POSITIVE if composite_mode == "Risk-On" else (WARNING if composite_mode == "Selective" else NEGATIVE)
+    ai_bias_tip = (
+        "Dominance-weighted ML direction across BTC/ETH/BNB/SOL/ADA/XRP. "
+        "Direction signal only."
+    )
+    if behaviour_weight_mode == "equal":
+        ai_bias_tip += " Dominance feed unavailable: equal-weight fallback is active."
 
     def _score_tone(v: float) -> tuple[str, str]:
         x = float(v)
-        if x >= 70:
+        if x >= 68:
             return ("Strong", POSITIVE)
-        if x >= 50:
+        if x >= 52:
             return ("Moderate", WARNING)
         return ("Weak", NEGATIVE)
 
@@ -259,20 +357,139 @@ def render(ctx: dict) -> None:
             f"{label} {_tip('', tip_text)}</span></div>"
         )
 
-    def _dom_state(v: float) -> tuple[str, str]:
+    def _dom_state(v: float | None, low_cut: float, high_cut: float) -> tuple[str, str]:
+        if v is None or pd.isna(v):
+            return ("N/A", TEXT_MUTED)
         x = float(v)
-        if x >= 60:
+        if x >= high_cut:
             return ("High", POSITIVE)
-        if x >= 45:
+        if x >= low_cut:
             return ("Balanced", WARNING)
         return ("Low", NEGATIVE)
 
     g1, g2, g3, g4 = st.columns(4, gap="medium")
+    gauge_number_y = 0.16
     # BTC dominance gauge
     with g1:
-        fig_btc = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=btc_dom,
+        if btc_dom_display is not None:
+            fig_btc = go.Figure(go.Indicator(
+                mode="gauge",
+                value=btc_dom_display,
+                gauge={
+                    'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
+                    'bar': {'color': ACCENT},
+                    'bgcolor': CARD_BG,
+                    'steps': [
+                        {'range': [0, AI_SHORT_THRESHOLD * 100], 'color': NEGATIVE},
+                        {'range': [AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100], 'color': WARNING},
+                        {'range': [AI_LONG_THRESHOLD * 100, 100], 'color': POSITIVE},
+                    ],
+                },
+                title={'text': 'BTC Dominance (%)', 'font': {'size': 13, 'color': '#E5E7EB'}},
+            ))
+            fig_btc.update_layout(
+                height=186,
+                margin=dict(l=6, r=6, t=52, b=10),
+                plot_bgcolor="#000000",
+                paper_bgcolor="#000000",
+            )
+            fig_btc.add_annotation(
+                x=0.5,
+                y=gauge_number_y,
+                xref="paper",
+                yref="paper",
+                text=f"{float(btc_dom_display):.1f}",
+                showarrow=False,
+                yanchor="middle",
+                font={"color": "#F8FAFC", "size": 34},
+            )
+            st.plotly_chart(fig_btc, width="stretch")
+        else:
+            st.markdown(
+                f"<div class='metric-card' style='height:186px; display:flex; flex-direction:column; justify-content:center; align-items:center;'>"
+                f"<div class='metric-label'>BTC Dominance (%)</div>"
+                f"<div class='metric-value'>N/A</div>"
+                f"<div style='color:{TEXT_MUTED}; font-size:0.85rem;'>Data unavailable</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        btc_state, btc_color = _dom_state(btc_dom_display, AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100)
+        st.markdown(
+            _chip_center("BTC Weight: " + btc_state, btc_color, "Bitcoin share of total market cap. High values usually indicate BTC-led market."),
+            unsafe_allow_html=True,
+        )
+
+    # ETH dominance gauge
+    with g2:
+        if eth_dom_display is not None:
+            fig_eth = go.Figure(go.Indicator(
+                mode="gauge",
+                value=eth_dom_display,
+                gauge={
+                    'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
+                    'bar': {'color': ACCENT},
+                    'bgcolor': CARD_BG,
+                    'steps': [
+                        {'range': [0, 15], 'color': NEGATIVE},
+                        {'range': [15, 25], 'color': WARNING},
+                        {'range': [25, 100], 'color': POSITIVE},
+                    ],
+                },
+                title={'text': 'ETH Dominance (%)', 'font': {'size': 13, 'color': '#E5E7EB'}},
+            ))
+            fig_eth.update_layout(
+                height=186,
+                margin=dict(l=6, r=6, t=52, b=10),
+                plot_bgcolor="#000000",
+                paper_bgcolor="#000000",
+            )
+            fig_eth.add_annotation(
+                x=0.5,
+                y=gauge_number_y,
+                xref="paper",
+                yref="paper",
+                text=f"{float(eth_dom_display):.1f}",
+                showarrow=False,
+                yanchor="middle",
+                font={"color": "#F8FAFC", "size": 34},
+            )
+            st.plotly_chart(fig_eth, width="stretch")
+        else:
+            st.markdown(
+                f"<div class='metric-card' style='height:186px; display:flex; flex-direction:column; justify-content:center; align-items:center;'>"
+                f"<div class='metric-label'>ETH Dominance (%)</div>"
+                f"<div class='metric-value'>N/A</div>"
+                f"<div style='color:{TEXT_MUTED}; font-size:0.85rem;'>Data unavailable</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        eth_state, eth_color = _dom_state(eth_dom_display, 15.0, 25.0)
+        st.markdown(
+            _chip_center("ETH Weight: " + eth_state, eth_color, "Ethereum share of total market cap. Higher values show stronger ETH participation."),
+            unsafe_allow_html=True,
+        )
+
+    # AI direction bias gauge
+    with g3:
+        ai_direction_hover = (
+            "AI Direction Bias is the market-direction score from BTC/ETH/BNB/SOL/ADA/XRP model outputs. "
+            "If dominance data is available, it uses dominance weighting; otherwise equal weighting fallback is used. "
+            f"Score zones: 0-{int(AI_SHORT_THRESHOLD * 100)} = Downside bias, "
+            f"{int(AI_SHORT_THRESHOLD * 100)}-{int(AI_LONG_THRESHOLD * 100)} = Neutral bias, "
+            f"{int(AI_LONG_THRESHOLD * 100)}-100 = Upside bias."
+        )
+        if behaviour_weight_mode == "equal":
+            ai_direction_hover += " Dominance feed unavailable right now, so equal-weight fallback is active."
+        st.markdown(
+            f"<div style='text-align:center; margin-bottom:2px;'>"
+            f"<span title='{html.escape(ai_direction_hover)}' "
+            f"style='color:#E5E7EB; font-size:13px; cursor:help;'>AI Direction Bias (%)</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        fig_behaviour = go.Figure(go.Indicator(
+            mode="gauge",
+            value=int(round(behaviour_prob * 100)),
             gauge={
                 'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
                 'bar': {'color': ACCENT},
@@ -283,117 +500,86 @@ def render(ctx: dict) -> None:
                     {'range': [AI_LONG_THRESHOLD * 100, 100], 'color': POSITIVE},
                 ],
             },
-            title={'text': 'BTC Dominance (%)', 'font': {'size': 13, 'color': '#E5E7EB'}},
-            number={'font': {'color': '#F8FAFC', 'size': 34}},
-        ))
-        fig_btc.update_layout(
-            height=186,
-            margin=dict(l=6, r=6, t=52, b=10),
-            plot_bgcolor="#000000",
-            paper_bgcolor="#000000",
-        )
-        st.plotly_chart(fig_btc, width="stretch")
-        btc_state, btc_color = _dom_state(btc_dom)
-        st.markdown(
-            _chip_center("BTC Weight: " + btc_state, btc_color, "Bitcoin share of total market cap. High values usually indicate BTC-led market."),
-            unsafe_allow_html=True,
-        )
-
-    # ETH dominance gauge
-    with g2:
-        fig_eth = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=eth_dom,
-            gauge={
-                'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
-                'bar': {'color': ACCENT},
-                'bgcolor': CARD_BG,
-                'steps': [
-                    {'range': [0, 15], 'color': NEGATIVE},
-                    {'range': [15, 25], 'color': WARNING},
-                    {'range': [25, 100], 'color': POSITIVE},
-                ],
-            },
-            title={'text': 'ETH Dominance (%)', 'font': {'size': 13, 'color': '#E5E7EB'}},
-            number={'font': {'color': '#F8FAFC', 'size': 34}},
-        ))
-        fig_eth.update_layout(
-            height=186,
-            margin=dict(l=6, r=6, t=52, b=10),
-            plot_bgcolor="#000000",
-            paper_bgcolor="#000000",
-        )
-        st.plotly_chart(fig_eth, width="stretch")
-        eth_state, eth_color = _dom_state(eth_dom)
-        st.markdown(
-            _chip_center("ETH Weight: " + eth_state, eth_color, "Ethereum share of total market cap. Higher values show stronger ETH participation."),
-            unsafe_allow_html=True,
-        )
-
-    # AI direction bias gauge
-    with g3:
-        fig_behaviour = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=int(round(behaviour_prob * 100)),
-            gauge={
-                'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
-                'bar': {'color': ACCENT},
-                'bgcolor': CARD_BG,
-                'steps': [
-                    {'range': [0, 40], 'color': NEGATIVE},
-                    {'range': [40, 60], 'color': WARNING},
-                    {'range': [60, 100], 'color': POSITIVE},
-                ],
-            },
-            title={'text': 'AI Direction Bias (%)', 'font': {'size': 13, 'color': '#E5E7EB'}},
-            number={'font': {'color': '#F8FAFC', 'size': 34}},
+            title={'text': '', 'font': {'size': 13, 'color': '#E5E7EB'}},
         ))
         fig_behaviour.update_layout(
             height=186,
-            margin=dict(l=6, r=6, t=52, b=10),
+            margin=dict(l=6, r=6, t=36, b=10),
             plot_bgcolor="#000000",
             paper_bgcolor="#000000",
+        )
+        fig_behaviour.add_annotation(
+            x=0.5,
+            y=gauge_number_y,
+            xref="paper",
+            yref="paper",
+            text=f"{int(round(behaviour_prob * 100))}",
+            showarrow=False,
+            yanchor="middle",
+            font={"color": "#F8FAFC", "size": 34},
         )
         st.plotly_chart(fig_behaviour, width="stretch")
         st.markdown(
             _chip_center(
                 f"{behaviour_label} Bias",
                 behaviour_color,
-                "Dominance-weighted ML direction across BTC/ETH/BNB/SOL/ADA/XRP. Direction signal only.",
+                ai_bias_tip,
             ),
             unsafe_allow_html=True,
         )
 
     # Setup quality gauge (composite)
     with g4:
+        setup_quality_hover = (
+            "Setup Quality formula: 35% Direction + 20% Regime + 25% Breadth + 20% Trust. "
+            "Direction = AI Direction Bias strength, Regime = market-cap environment quality, "
+            "Breadth = major-asset participation on one side, Trust = cross-major model consistency. "
+            "This score measures market environment quality, not trade direction alone."
+        )
+        st.markdown(
+            f"<div style='text-align:center; margin-bottom:2px;'>"
+            f"<span title='{html.escape(setup_quality_hover)}' "
+            f"style='color:#E5E7EB; font-size:13px; cursor:help;'>Setup Quality (%)</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
         fig_quality = go.Figure(go.Indicator(
-            mode="gauge+number",
+            mode="gauge",
             value=int(round(composite_score)),
             gauge={
                 'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
                 'bar': {'color': ACCENT},
                 'bgcolor': CARD_BG,
                 'steps': [
-                    {'range': [0, 45], 'color': NEGATIVE},
-                    {'range': [45, 65], 'color': WARNING},
-                    {'range': [65, 100], 'color': POSITIVE},
+                    {'range': [0, 52], 'color': NEGATIVE},
+                    {'range': [52, 68], 'color': WARNING},
+                    {'range': [68, 100], 'color': POSITIVE},
                 ],
             },
-            title={'text': 'Setup Quality (%)', 'font': {'size': 13, 'color': '#E5E7EB'}},
-            number={'font': {'color': '#F8FAFC', 'size': 34}},
+            title={'text': '', 'font': {'size': 13, 'color': '#E5E7EB'}},
         ))
         fig_quality.update_layout(
             height=186,
-            margin=dict(l=6, r=6, t=52, b=10),
+            margin=dict(l=6, r=6, t=36, b=10),
             plot_bgcolor="#000000",
             paper_bgcolor="#000000",
+        )
+        fig_quality.add_annotation(
+            x=0.5,
+            y=gauge_number_y,
+            xref="paper",
+            yref="paper",
+            text=f"{int(round(composite_score))}",
+            showarrow=False,
+            yanchor="middle",
+            font={"color": "#F8FAFC", "size": 34},
         )
         st.plotly_chart(fig_quality, width="stretch")
         st.markdown(
             _chip_center(
                 composite_mode,
                 composite_color,
-                "Setup quality combines Direction, Regime, Breadth and Trust. Measures environment quality, not direction alone.",
+                setup_quality_hover,
             ),
             unsafe_allow_html=True,
         )
@@ -407,7 +593,8 @@ def render(ctx: dict) -> None:
             f"style='background:rgba(255,255,255,0.05); border:1px solid {d_col}; color:{d_col}; "
             f"border-radius:999px; padding:2px 8px; font-size:0.72rem; overflow:visible; cursor:help;'>"
             f"Direction {direction_score:.0f}</span>"
-            f"<span title='Regime: market environment quality proxy from total market-cap move behavior.' "
+            f"<span title='Regime: market environment quality proxy from total market-cap move behavior."
+            f"{' Market-cap feed unavailable, neutral fallback (50) active.' if regime_score_fallback else ''}' "
             f"style='background:rgba(255,255,255,0.05); border:1px solid {r_col}; color:{r_col}; "
             f"border-radius:999px; padding:2px 8px; font-size:0.72rem; overflow:visible; cursor:help;'>"
             f"Regime {regime_score:.0f}</span>"
@@ -428,11 +615,11 @@ def render(ctx: dict) -> None:
 
     # Top coin scanner controls
     st.markdown(
-        f"<h2 class='market-section-title' style='color:{ACCENT};'>Coin Action Scanner</h2>",
+        f"<div class='market-section-title' style='color:{ACCENT};'>Coin Action Scanner</div>",
         unsafe_allow_html=True,
     )
 
-    controls = st.columns([1.4, 1.4, 1, 1], gap="medium")
+    controls = st.columns([1.45, 1.45, 1.05, 0.9], gap="medium")
     with controls[0]:
         # Persist the selected timeframe in session state so the market
         # prediction card updates when this value changes.  The key ensures
@@ -444,25 +631,29 @@ def render(ctx: dict) -> None:
             key="market_timeframe"
         )
     with controls[1]:
-        direction_filter = st.selectbox("Direction", ['Upside', 'Downside', 'Both'], index=2)
+        direction_filter = st.selectbox(
+            "Direction",
+            ['Upside', 'Downside', 'Both'],
+            index=2,
+            format_func=lambda x: "All Directions" if x == "Both" else x,
+        )
     with controls[2]:
-        top_n = st.slider("Top N", min_value=3, max_value=50, value=50)
+        top_n_default = int(st.session_state.get("market_top_n", 50))
+        top_n = st.slider(
+            "Top N",
+            min_value=3,
+            max_value=50,
+            value=top_n_default,
+            key="market_top_n",
+        )
     with controls[3]:
-        refresh_scan = st.button("Refresh Scan", use_container_width=True)
-    filter_controls = st.columns([1.3, 2.7], gap="small")
-    with filter_controls[0]:
-        exclude_stables = st.checkbox(
-            "Exclude stablecoins",
-            value=True,
-            key="market_exclude_stables",
-            help="Hide stable/synthetic USD-pegged coins from scanner universe.",
-        )
-    with filter_controls[1]:
-        st.caption(
-            "Scanner universe filter: stablecoin exclusion is ON by default to reduce noise."
-            if exclude_stables
-            else "Scanner universe filter: stablecoin exclusion is OFF (all symbols included)."
-        )
+        refresh_scan = st.button("Refresh", use_container_width=False)
+    exclude_stables = st.checkbox(
+        "Exclude stablecoins",
+        value=True,
+        key="market_exclude_stables",
+        help="Hide stable/synthetic USD-pegged coins from scanner universe.",
+    )
     # Strict scalp mode is always enabled (non-strict path removed).
 
     STABLE_BASES = {
@@ -747,6 +938,8 @@ def render(ctx: dict) -> None:
         s = str(action_text or "").strip()
         if not s:
             return s
+        if s.upper() in {"WATCH", "👀 WATCH"}:
+            return "WATCH"
         if "ENTER (Trend+AI)" in s:
             return "✅ ENTER T+AI"
         if "ENTER (Trend-Led)" in s:
@@ -857,6 +1050,11 @@ def render(ctx: dict) -> None:
             if txt.startswith("▼"):
                 return f"<span class='mk-delta mk-neg-t'>{html.escape(txt)}</span>"
             return f"<span class='mk-delta mk-muted-t'>{html.escape(txt)}</span>"
+        if col == "Price ($)":
+            if not txt:
+                return ""
+            plain = txt[1:] if txt.startswith("$") else txt
+            return f"<span class='mk-plain'>{html.escape(plain)}</span>"
         if col == "Entry Price":
             if not txt:
                 return ""
@@ -938,6 +1136,7 @@ def render(ctx: dict) -> None:
             for c in cols:
                 sticky = ""
                 width_style = ""
+                cell_class = ""
                 if c in col_widths:
                     w = col_widths[c]
                     width_style = f"min-width:{w}px; max-width:{w}px; width:{w}px;"
@@ -946,7 +1145,9 @@ def render(ctx: dict) -> None:
                         f"position:sticky; left:{left_offsets[c]}; z-index:6; "
                         f"background:rgba(8,12,20,1.0); box-shadow:1px 0 0 rgba(148,163,184,0.22), 2px 0 10px rgba(0,0,0,0.24);"
                     )
-                cell_html.append(f"<td style='{width_style}{sticky}'>{_render_cell(c, row_dict)}</td>")
+                if c == "Coin":
+                    cell_class = " class='mk-coin-cell'"
+                cell_html.append(f"<td{cell_class} style='{width_style}{sticky}'>{_render_cell(c, row_dict)}</td>")
             rows_html.append("<tr>" + "".join(cell_html) + "</tr>")
 
         st.markdown(
@@ -1046,11 +1247,16 @@ def render(ctx: dict) -> None:
               display:inline-flex;
               align-items:center;
             }}
+            .mk-table td.mk-coin-cell {{
+              overflow:visible !important;
+              position:relative;
+            }}
             .mk-coin-tooltip {{
               position:absolute;
-              left:0;
-              top:calc(100% + 6px);
-              z-index:20;
+              left:calc(100% + 8px);
+              top:50%;
+              transform:translateY(-50%);
+              z-index:40;
               opacity:0;
               visibility:hidden;
               transition:opacity 0.14s ease, visibility 0.14s ease;
@@ -1501,20 +1707,7 @@ def render(ctx: dict) -> None:
     if results:
         source_color = POSITIVE if source_label.startswith("LIVE") else WARNING
         source_chip = "LIVE FEED" if source_label.startswith("LIVE") else "CACHED SNAPSHOT"
-        st.markdown(
-            f"<div style='margin:0 0 0.45rem 0;'>"
-            f"<span class='market-inline-chip' style='border:1px solid {source_color}; color:{source_color}; "
-            f"background:rgba(255,255,255,0.04);'>"
-            f"{source_chip} • {source_label}</span></div>",
-            unsafe_allow_html=True,
-        )
         mode_color = ACCENT if data_mode.startswith("FULL") else WARNING
-        st.markdown(
-            f"<div style='margin:0 0 0.6rem 0;'>"
-            f"<span class='market-inline-chip' style='border:1px solid {mode_color}; color:{mode_color}; "
-            f"background:rgba(255,255,255,0.04);'>{data_mode}</span></div>",
-            unsafe_allow_html=True,
-        )
         if source_label.startswith("CACHED"):
             st.markdown(
                 f"<div class='market-note-box' style='border:1px solid rgba(255,209,102,0.4); border-left:4px solid {WARNING}; "
@@ -1538,29 +1731,29 @@ def render(ctx: dict) -> None:
             f"<summary style='color:{ACCENT};'>"
             f"How to read quickly (?)</summary>"
             f"<div class='market-details-body' style='color:{TEXT_MUTED};'>"
-            f"<b>1) Read Action first (what to do now)</b><br>"
-            f"• <b>ENTER (Trend+AI)</b>: highest-quality entry candidate. You can evaluate execution immediately.<br>"
-            f"• <b>ENTER (Trend-Led)</b>: trend leads and AI is used as veto/guardrail only.<br>"
-            f"• <b>ENTER (AI-Led)</b>: AI leads and trend is used as veto/guardrail only.<br>"
-            f"• <b>WATCH</b>: do not enter yet; keep in watchlist and wait for stronger confirmation.<br>"
-            f"• <b>SKIP</b>: no trade candidate for now.<br><br>"
-            f"Tip: hover the <b>Action</b> badge to see the reason behind WATCH/SKIP/ENTER classification.<br><br>"
-            f"Action is computed from <b>Direction + Strength + AI Ensemble + Tech vs AI Alignment</b>, "
-            f"not from scalp plan levels.<br><br>"
-            f"<b>2) Validate side quality</b><br>"
-            f"Check <b>Direction</b> (Upside/Downside) + <b>Strength</b> (WEAK/MIXED/GOOD/STRONG). "
-            f"If Direction is clear but Strength is weak, avoid rushing.<br><br>"
-            f"<b>3) Validate confirmation quality</b><br>"
-            f"Use <b>AI Ensemble</b> + <b>Tech vs AI Alignment</b>. "
-            f"Avoid rows where alignment shows <b>CONFLICT</b>. "
-            f"<b>WEAK</b> means low confirmation quality (not hard conflict) and needs tighter risk.<br><br>"
-            f"<b>4) If you are taking a scalp</b><br>"
-            f"<b>Scalp Opportunity</b> is shown only when all scalp quality gates pass: "
-            f"Direction is clear and scalp side <b>matches Direction</b>, <b>R:R ≥ 1.5</b>, <b>ADX ≥ 20</b>, <b>Strength ≥ 55</b>, "
-            f"<b>Tech vs AI Alignment</b> is not CONFLICT, and <b>Entry/Stop/Target</b> levels are valid. "
-            f"If the column is empty, do not force a scalp trade.<br><br>"
-            f"<b>5) Advanced columns are for diagnostics</b><br>"
-            f"Open <b>+ Show advanced columns</b> only when you need deeper indicator detail (ADX/Ichimoku/VWAP etc.)."
+            f"<b>Decision order (use this sequence):</b> "
+            f"<b>Action</b> → <b>Direction + Strength</b> → <b>AI Ensemble + Tech vs AI Alignment</b> "
+            f"→ <b>Scalp Opportunity + R:R + levels</b>.<br><br>"
+            f"<b>1) Action = final scanner decision</b><br>"
+            f"• <b>ENTER (Trend+AI)</b>: strongest class, trend and AI both confirm.<br>"
+            f"• <b>ENTER (Trend-Led)</b>: trend leads, AI works as guardrail.<br>"
+            f"• <b>ENTER (AI-Led)</b>: AI leads, trend works as guardrail.<br>"
+            f"• <b>WATCH</b>: setup is close, confirmation is not complete.<br>"
+            f"• <b>SKIP</b>: no clear edge now.<br>"
+            f"Hover Action badge to see the exact reason code translated to plain text.<br><br>"
+            f"<b>2) Direction + Strength = side + quality</b><br>"
+            f"<b>Direction</b> tells side (Upside/Downside/Neutral). "
+            f"<b>Strength</b> is a 0-100 power score from technical bias (shown as WEAK/MIXED/GOOD/STRONG).<br><br>"
+            f"<b>3) AI + Alignment = confirmation quality</b><br>"
+            f"<b>AI Ensemble</b> shows model vote support (x/3). "
+            f"<b>Tech vs AI Alignment</b> shows if technical and AI views support each other.<br><br>"
+            f"<b>4) Scalp Opportunity = execution-ready filter (separate from Action)</b><br>"
+            f"It appears only when all gates pass together: "
+            f"Direction match, <b>R:R ≥ 1.5</b>, <b>ADX ≥ 20</b>, <b>Strength ≥ 55</b>, "
+            f"no CONFLICT, and valid Entry/Stop/Target levels.<br>"
+            f"If Scalp Opportunity is empty, do not force a scalp execution.<br><br>"
+            f"<b>5) Advanced columns explain indicator context on this page</b><br>"
+            f"You do not need to open Analysis Guide for basic meaning; hover cells for extra detail."
             f"</div></details>",
             unsafe_allow_html=True,
         )
@@ -1569,44 +1762,52 @@ def render(ctx: dict) -> None:
             f"<summary style='color:{ACCENT};'>"
             f"ℹ️ Column Guide (click to expand)</summary>"
             f"<div class='market-details-body' style='color:{TEXT_MUTED}; padding:0.5rem;'>"
-            "<b>Coin</b>: asset ticker (hover to see exchange pair symbol).<br>"
-            "<b>Price ($)</b>: latest candle close from the active feed.<br>"
-            "<b>Δ (%)</b>: change from previous closed candle to latest closed candle on selected timeframe (fallback: ticker % if candle delta unavailable).<br>"
-            "<b>Action</b>: final decision class (ENTER / WATCH / SKIP). Hover badge for reason text.<br>"
-            "<b>Direction</b>: expected side (Upside / Downside / Neutral). Hover cell for source signal and reason.<br>"
-            "<b>Strength</b>: 0-100 edge power from technical engine (direction-agnostic). Hover cell to see bias->strength conversion and bucket bands.<br>"
-            "<b>AI Ensemble</b>: AI side + model vote support (x/3). For Upside/Downside this is directional vote support; for Neutral this is consensus support. Hover cell for detailed agreements.<br>"
-            "<b>Tech vs AI Alignment</b>: agreement quality between technical side and AI side (HIGH/MEDIUM/TREND/WEAK/CONFLICT). "
-            "CONFLICT = opposite sides; WEAK = low-quality confirmation without hard conflict. Hover cell for details.<br>"
-            "<b>R:R</b>: risk/reward estimate from planned stop-target geometry.<br>"
-            "<b>Entry Price</b>: proposed entry level from setup engine (hover value to see formula/context note).<br>"
-            "<b>Stop Loss</b>: invalidation level for risk control.<br>"
-            "<b>Target Price</b>: first planned take-profit level (hover value to see breakout requirement note, if any).<br>"
-            "<b>R:R marker (*)</b>: this R:R is conditional; target requires breakout. Hover R:R for detail.<br>"
-            "<b>Scalp Opportunity</b>: appears only when scalp quality gates pass (Direction match + R:R ≥ 1.5 + ADX ≥ 20 + Strength ≥ 55 + no CONFLICT + valid Entry/Stop/Target).<br>"
-            "<b>Market Cap ($)</b>: size/liquidity context of the coin.<br>"
-            "<b>ADX</b>: trend-strength bucket used as execution quality filter (not direction).<br>"
-            "<b>Advanced columns</b>: ADX, SuperTrend, Ichimoku, VWAP, Bollinger, StochRSI, PSAR, Williams %R, CCI, Candle Pattern for deeper diagnostics.<br>"
-            "<b>ADX display</b>: bucket label is shown in-cell; hover ADX to see exact value + scalp gate status.<br>"
-            "<b>Spike Alert</b>: volume anomaly marker. Up/Down is based on spike candle close vs open (independent from Action). Hover for Vol Ratio / candle move / VWAP context.<br>"
-            "<b>Ichimoku</b>: shows cloud trend (Bullish/Bearish/Neutral). Hover badge to see TK cross, future cloud bias, and cloud strength details.<br>"
-            "<b>Candle Pattern direction</b>: ▲ bullish, ▼ bearish, → neutral."
+            "<b>Coin</b>: asset ticker (hover shows exchange pair).<br>"
+            "<b>Price ($)</b>: latest closed-candle price from active feed.<br>"
+            "<b>Δ (%)</b>: change from previous closed candle to latest closed candle on selected timeframe (fallback: ticker % if candle delta unavailable).<br><br>"
+            "<b>Action</b>: final scanner class. "
+            "Calculated from Direction + Strength + AI Ensemble + Alignment + ADX regime checks.<br>"
+            "<b>Direction</b>: side from technical signal mapping (Upside / Downside / Neutral).<br>"
+            "<b>Strength</b>: technical signal power (0-100), derived from bias distance to neutral midpoint (50).<br>"
+            "<b>AI Ensemble</b>: 3-model vote summary shown as side + support count (x/3).<br>"
+            "<b>Tech vs AI Alignment</b>: confirmation quality between technical side and AI side (HIGH/MEDIUM/TREND/WEAK/CONFLICT).<br>"
+            "<b>R:R</b>: reward-to-risk ratio from target distance vs stop distance.<br>"
+            "<b>Entry Price</b>: model entry level (close/EMA5 with ATR buffer).<br>"
+            "<b>Stop Loss</b>: risk invalidation level (support/resistance with ATR clamps).<br>"
+            "<b>Target Price</b>: first take-profit level (structure level with minimum ATR extension).<br>"
+            "<b>R:R marker (*)</b>: conditional plan; target may require breakout.<br>"
+            "<b>Scalp Opportunity</b>: shown only when execution gates pass (Direction match + R:R + ADX + Strength + no CONFLICT + valid levels).<br>"
+            "<b>Market Cap ($)</b>: size/liquidity context.<br><br>"
+            "<b>Advanced columns (what they mean + short calc):</b><br>"
+            "<b>ADX</b>: trend strength (14-period directional movement strength; not side).<br>"
+            "<b>SuperTrend</b>: trend state from ATR-based trailing bands (Bullish/Bearish/Neutral).<br>"
+            "<b>Ichimoku</b>: cloud trend state from conversion/base/cloud structure.<br>"
+            "<b>VWAP</b>: price position vs Volume-Weighted Average Price (Above/Below/Near).<br>"
+            "<b>Spike Alert</b>: abnormal volume event (volume ratio vs recent average + spike candle direction).<br>"
+            "<b>Bollinger</b>: price location vs 20-period volatility bands (Overbought/Oversold/Neutral).<br>"
+            "<b>Stochastic RSI</b>: momentum position of RSI in its recent range (Low/High/Neutral).<br>"
+            "<b>Volatility</b>: ATR-based volatility regime label.<br>"
+            "<b>PSAR</b>: Parabolic SAR trend side (Bullish/Bearish).<br>"
+            "<b>Williams %R</b>: momentum oscillator showing near-top / near-bottom conditions.<br>"
+            "<b>CCI</b>: deviation of typical price from its moving average (trend pressure/mean-reversion context).<br>"
+            "<b>Candle Pattern</b>: candlestick pattern classifier with directional label (bullish/bearish/neutral)."
             "</div></details>",
             unsafe_allow_html=True,
         )
-        st.markdown(
-            f"<div style='display:flex; flex-wrap:wrap; gap:8px; margin:0 0 0.55rem 0;'>"
-            f"<span class='market-criteria-chip' style='border:1px solid rgba(0,255,136,0.35); color:{POSITIVE}; background:rgba(0,255,136,0.08);'>"
-            f"ENTER (Trend+AI / Trend-Led / AI-Led): execution-ready class under active risk guards</span>"
-            f"<span class='market-criteria-chip' style='border:1px solid rgba(255,209,102,0.35); color:{WARNING}; background:rgba(255,209,102,0.08);'>"
-            f"WATCH: direction exists, but confirmation is not complete yet</span>"
-            f"<span class='market-criteria-chip' style='border:1px solid rgba(255,51,102,0.35); color:{NEGATIVE}; background:rgba(255,51,102,0.08);'>"
-            f"SKIP: no clear direction, conflict, or very weak edge</span>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
         st.caption("Signals and plan levels are computed on closed candles; Price ($) shows the latest candle close.")
-        show_advanced = st.checkbox("+ Show advanced columns", value=False, key="market_show_adv_cols")
+        controls_col, chips_col = st.columns([1.2, 2.8], gap="small")
+        with controls_col:
+            show_advanced = st.checkbox("+ Show advanced columns", value=False, key="market_show_adv_cols")
+        with chips_col:
+            st.markdown(
+                f"<div style='display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding-top:0.18rem;'>"
+                f"<span class='market-inline-chip' style='border:1px solid {source_color}; color:{source_color}; "
+                f"background:rgba(255,255,255,0.04);'>{source_chip} • {source_label}</span>"
+                f"<span class='market-inline-chip' style='border:1px solid {mode_color}; color:{mode_color}; "
+                f"background:rgba(255,255,255,0.04);'>{data_mode}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
         df_results = pd.DataFrame(results)
 
@@ -1673,26 +1874,26 @@ def render(ctx: dict) -> None:
 
         q1, q2, q3, q4 = st.columns(4, gap="small")
         with q1:
-            status_head = f"{enter_count} Enter Ready" if enter_count > 0 else "No Enter Candidate"
+            status_head = "ENTER READY" if enter_count > 0 else "NO ENTER NOW"
             status_sub = f"ENTER {enter_count} • WATCH {watch_count} • SKIP {skip_count}"
             st.markdown(
-                "<div class='elite-card'>"
-                "<div class='elite-label'>Action Status</div>"
+                "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                "<div class='elite-label'>Execution Status</div>"
                 f"<div class='scan-kpi-value'>{status_head}</div>"
                 f"<div class='scan-kpi-sub'>{status_sub}</div>"
                 "</div>",
                 unsafe_allow_html=True,
             )
         with q2:
-            enter_mix_head = "No Enter Class" if enter_count == 0 else "Enter Class Mix"
+            enter_mix_head = "NO ENTER CLASS" if enter_count == 0 else "CLASS BREAKDOWN"
             enter_mix_sub = (
                 f"Trend+AI {trend_ai_enter_count} • "
                 f"Trend-Led {trend_led_enter_count} • "
                 f"AI-Led {ai_led_enter_count}"
             )
             st.markdown(
-                "<div class='elite-card'>"
-                "<div class='elite-label'>Enter Class Distribution</div>"
+                "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
+                "<div class='elite-label'>Enter Class Mix</div>"
                 f"<div class='scan-kpi-value'>{enter_mix_head}</div>"
                 f"<div class='scan-kpi-sub'>{enter_mix_sub}</div>"
                 "</div>",
@@ -1700,7 +1901,7 @@ def render(ctx: dict) -> None:
             )
         with q3:
             st.markdown(
-                "<div class='elite-card'>"
+                "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
                 "<div class='elite-label'>Best Scalp Opportunity</div>"
                 f"<div class='elite-value'>{best_scalp_coin}</div>"
                 f"<div class='elite-sub' title='{best_scalp_sub}' "
@@ -1710,7 +1911,7 @@ def render(ctx: dict) -> None:
             )
         with q4:
             st.markdown(
-                "<div class='elite-card'>"
+                "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
                 "<div class='elite-label'>Strength Leader</div>"
                 f"<div class='elite-value'>{strength_head}</div>"
                 f"<div class='elite-sub'>{strength_sub}</div>"
@@ -1813,35 +2014,59 @@ def render(ctx: dict) -> None:
 
         _render_pro_table(df_display, display_cols)
 
-        csv_market = (
-            df_results
-            .drop(
-                columns=[
-                    "__strength_val",
-                    "__structure_state",
-                    "__action_reason",
-                    "__entry_note",
-                    "__ichimoku_detail",
-                    "__spike_dir",
-                    "__spike_vol_ratio",
-                    "__spike_candle_pct",
-                    "__spike_vwap_ctx",
-                    "__target_note",
-                    "__rr_note",
-                    "__adx_raw",
-                    "__direction_note",
-                    "__strength_note",
-                    "__ai_note",
-                    "__alignment_note",
-                    "__pair",
-                    "__mcap_val",
-                    "__scalp_gate_reason",
-                ],
-                errors="ignore",
-            )
-            .to_csv(index=False)
-            .encode("utf-8")
-        )
+        def _csv_clean_text(v: object) -> str:
+            if v is None:
+                return ""
+            try:
+                if pd.isna(v):
+                    return ""
+            except Exception:
+                pass
+            s = str(v).strip()
+            if not s or s.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE", "-"}:
+                return ""
+            for token in (
+                "✅", "🟡", "⛔", "👀", "🟢", "🔴", "⚪", "🔥",
+                "⚠️", "⚠", "🚀", "📈", "📉", "•", "*", "★",
+            ):
+                s = s.replace(token, "")
+            s = re.sub(r"[▲▼→–]+", "", s)
+            s = re.sub(r"\s{2,}", " ", s).strip()
+            return s
+
+        def _csv_clean_price(v: object) -> str:
+            s = _csv_clean_text(v)
+            if not s:
+                return ""
+            return s.replace("$", "").replace(",", "").strip()
+
+        def _csv_clean_delta(v: object) -> str:
+            s = str(v or "").strip()
+            if not s:
+                return ""
+            sign = "+"
+            if s.startswith("▼"):
+                sign = "-"
+            elif s.startswith("→"):
+                sign = ""
+            cleaned = re.sub(r"^[\s▲▼→–-]+", "", s).strip()
+            if not cleaned:
+                return ""
+            return f"{sign}{cleaned}" if sign else cleaned
+
+        csv_df = df_results.copy()
+        for col in csv_df.columns:
+            if col in {"Price ($)", "Entry Price", "Stop Loss", "Target Price"}:
+                csv_df[col] = csv_df[col].apply(_csv_clean_price)
+            elif col == "Δ (%)":
+                csv_df[col] = csv_df[col].apply(_csv_clean_delta)
+            elif csv_df[col].dtype == object or pd.api.types.is_string_dtype(csv_df[col]):
+                csv_df[col] = csv_df[col].apply(_csv_clean_text)
+
+        # Never export internal/meta columns.
+        csv_df = csv_df[[c for c in csv_df.columns if not str(c).startswith("__")]]
+
+        csv_market = csv_df.to_csv(index=False).encode("utf-8")
         st.download_button(
             label="Download Scan Results (CSV)",
             data=csv_market,

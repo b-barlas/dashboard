@@ -42,7 +42,7 @@ def get_btc_eth_prices() -> tuple[float | None, float | None]:
     return (btc if btc else None), (eth if eth else None)
 
 
-def get_market_indices() -> tuple[int, int, int, int, float, int, int, int, int]:
+def get_market_indices() -> tuple[float, float, int, int, float, float, float, float, float]:
     data = requests.get("https://api.coingecko.com/api/v3/global", timeout=10).json().get("data", {})
     mcap_pct = data.get("market_cap_percentage", {}) or {}
     btc_dom = float(mcap_pct.get("btc", 0.0))
@@ -55,15 +55,15 @@ def get_market_indices() -> tuple[int, int, int, int, float, int, int, int, int]
     alt_mcap = total_mcap * (1 - btc_dom / 100.0)
     mcap_24h_pct = float(data.get("market_cap_change_percentage_24h_usd", 0.0))
     return (
-        int(round(btc_dom, 0)),
-        int(round(eth_dom, 0)),
+        round(btc_dom, 1),
+        round(eth_dom, 1),
         int(total_mcap),
         int(alt_mcap),
         mcap_24h_pct,
-        int(round(bnb_dom, 0)),
-        int(round(sol_dom, 0)),
-        int(round(ada_dom, 0)),
-        int(round(xrp_dom, 0)),
+        round(bnb_dom, 1),
+        round(sol_dom, 1),
+        round(ada_dom, 1),
+        round(xrp_dom, 1),
     )
 
 
@@ -240,4 +240,3 @@ def get_major_ohlcv_bundle(
     for sym in majors:
         out[sym] = fetcher(sym, timeframe, limit)
     return out
-
