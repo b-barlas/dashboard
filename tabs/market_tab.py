@@ -529,6 +529,20 @@ def render(ctx: dict) -> None:
             "Breadth = major-asset participation on one side, Trust = cross-major model consistency. "
             "This score measures market environment quality, not trade direction alone."
         )
+        setup_mode_hover = {
+            "Risk-On": (
+                "Risk-On: broad market conditions are favorable. "
+                "Direction, participation, and model trust are strong enough for active setup hunting."
+            ),
+            "Selective": (
+                "Selective: market quality is mixed. "
+                "Some setups can work, but confirmation standards should stay strict and risk should stay controlled."
+            ),
+            "Risk-Off": (
+                "Risk-Off: market environment is weak or fragmented. "
+                "Favor capital preservation and avoid forcing setups."
+            ),
+        }.get(composite_mode, setup_quality_hover)
         _render_market_gauge(
             title="Setup Quality (%)",
             value=float(composite_score),
@@ -544,7 +558,7 @@ def render(ctx: dict) -> None:
             _chip_center(
                 composite_mode,
                 composite_color,
-                setup_quality_hover,
+                setup_mode_hover,
             ),
             unsafe_allow_html=True,
         )
