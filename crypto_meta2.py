@@ -31,22 +31,7 @@ from core.services import (
     ml_predict_direction,
     monte_carlo_simulation,
 )
-from ui.helpers import (
-    bias_score_badge,
-    format_adx,
-    format_delta,
-    format_stochrsi,
-    format_trend,
-    leverage_badge,
-    readable_market_cap,
-    direction_key,
-    direction_label,
-    signal_plain,
-    sanitize_trading_terms,
-    style_delta,
-    style_scalp_opp,
-    style_signal,
-)
+import ui.helpers as _ui_helpers
 from ui.theme import (
     ACCENT,
     CARD_BG,
@@ -66,6 +51,106 @@ from ui.theme import (
 from ui.app_shell import render_app
 from ui.deps_factory import build_app_deps
 from ui.styles import app_css
+
+
+def _fallback_direction_key(direction: str) -> str:
+    d = str(direction or "").strip().upper()
+    if d in {"UPSIDE", "LONG", "BUY", "BULLISH", "STRONG BUY"}:
+        return "UPSIDE"
+    if d in {"DOWNSIDE", "SHORT", "SELL", "BEARISH", "STRONG SELL"}:
+        return "DOWNSIDE"
+    return "NEUTRAL"
+
+
+def _fallback_direction_label(direction: str) -> str:
+    d = _fallback_direction_key(direction)
+    if d == "UPSIDE":
+        return "Upside"
+    if d == "DOWNSIDE":
+        return "Downside"
+    return "Neutral"
+
+
+def _fallback_signal_plain(signal: str) -> str:
+    s = str(signal or "").strip().upper()
+    if s in {"STRONG BUY", "BUY"}:
+        return "LONG"
+    if s in {"STRONG SELL", "SELL"}:
+        return "SHORT"
+    return "WAIT"
+
+
+def _fallback_bias_score_badge(bias_score: float) -> str:
+    try:
+        return f"{round(float(bias_score))}"
+    except Exception:
+        return "N/A"
+
+
+def _fallback_format_adx(adx: float) -> str:
+    try:
+        v = float(adx)
+    except Exception:
+        return "N/A"
+    return f"{v:.1f}"
+
+
+def _fallback_format_delta(delta) -> str:
+    try:
+        v = float(delta)
+    except Exception:
+        return ""
+    return f"{v:+.2f}%"
+
+
+def _fallback_format_stochrsi(value, timeframe=None) -> str:
+    try:
+        v = float(value)
+    except Exception:
+        return "N/A"
+    return f"{v:.2f}"
+
+
+def _fallback_format_trend(trend: str) -> str:
+    t = str(trend or "").strip()
+    return t if t else "Neutral"
+
+
+def _fallback_leverage_badge(lev: int) -> str:
+    try:
+        return f"x{int(lev)}"
+    except Exception:
+        return "x1"
+
+
+def _fallback_readable_market_cap(value) -> str:
+    try:
+        v = float(value)
+    except Exception:
+        return "N/A"
+    if v >= 1_000_000_000_000:
+        return f"{v / 1_000_000_000_000:.2f}T"
+    if v >= 1_000_000_000:
+        return f"{v / 1_000_000_000:.2f}B"
+    if v >= 1_000_000:
+        return f"{v / 1_000_000:.2f}M"
+    return f"{v:,.0f}"
+
+
+bias_score_badge = getattr(_ui_helpers, "bias_score_badge", _fallback_bias_score_badge)
+format_adx = getattr(_ui_helpers, "format_adx", _fallback_format_adx)
+format_delta = getattr(_ui_helpers, "format_delta", _fallback_format_delta)
+format_stochrsi = getattr(_ui_helpers, "format_stochrsi", _fallback_format_stochrsi)
+format_trend = getattr(_ui_helpers, "format_trend", _fallback_format_trend)
+leverage_badge = getattr(_ui_helpers, "leverage_badge", _fallback_leverage_badge)
+readable_market_cap = getattr(_ui_helpers, "readable_market_cap", _fallback_readable_market_cap)
+direction_key = getattr(_ui_helpers, "direction_key", _fallback_direction_key)
+direction_label = getattr(_ui_helpers, "direction_label", _fallback_direction_label)
+signal_plain = getattr(_ui_helpers, "signal_plain", _fallback_signal_plain)
+sanitize_trading_terms = getattr(_ui_helpers, "sanitize_trading_terms", lambda t: "" if t is None else str(t))
+style_delta = getattr(_ui_helpers, "style_delta", lambda *_args, **_kwargs: "")
+style_scalp_opp = getattr(_ui_helpers, "style_scalp_opp", lambda *_args, **_kwargs: "")
+style_signal = getattr(_ui_helpers, "style_signal", lambda *_args, **_kwargs: "")
 
 
 def _wma(series: pd.Series, length: int) -> pd.Series:
