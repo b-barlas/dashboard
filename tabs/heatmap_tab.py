@@ -12,7 +12,6 @@ def render(ctx: dict) -> None:
     POSITIVE = get_ctx(ctx, "POSITIVE")
     NEGATIVE = get_ctx(ctx, "NEGATIVE")
     WARNING = get_ctx(ctx, "WARNING")
-    TEXT_LIGHT = get_ctx(ctx, "TEXT_LIGHT")
     PRIMARY_BG = get_ctx(ctx, "PRIMARY_BG")
     NEON_BLUE = get_ctx(ctx, "NEON_BLUE")
     _tip = get_ctx(ctx, "_tip")

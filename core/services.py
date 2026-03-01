@@ -325,32 +325,6 @@ def get_market_top_snapshot() -> dict[str, float | int | str | None]:
 
     return merged
 
-def get_social_sentiment(symbol: str) -> tuple[int, str]:
-    """Return a naive sentiment score (0–100) and label based on 24h price change.
-
-    The score is centred at 50 with each percentage point of change shifting
-    the score by one point.  For example, a +5% move yields a score of 55,
-    while a −10% move yields 40.  The score is clipped between 0 and 100.
-    """
-    try:
-        change = get_price_change(symbol) or 0.0
-    except Exception:
-        change = 0.0
-    # Map change to a 0–100 scale around 50
-    score = int(max(0, min(100, 50 + change)))
-    # Determine sentiment category
-    if score >= 75:
-        label = "Strongly Bullish"
-    elif score >= 55:
-        label = "Bullish"
-    elif score >= 45:
-        label = "Neutral"
-    elif score >= 25:
-        label = "Bearish"
-    else:
-        label = "Strongly Bearish"
-    return score, label
-
 @st.cache_resource(show_spinner=False)
 def get_markets() -> dict:
     try:

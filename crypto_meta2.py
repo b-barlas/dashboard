@@ -25,7 +25,6 @@ from core.services import (
     get_price_change,
     get_scalping_entry_target,
     scalp_quality_gate,
-    get_social_sentiment,
     get_top_volume_usdt_symbols,
     ml_ensemble_predict,
     ml_predict_direction,

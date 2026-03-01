@@ -76,7 +76,6 @@ def render(ctx: dict) -> None:
     is_uptrend = bool(levels.get("_is_uptrend", True))
     regime_name = str(regime.get("regime", "UNKNOWN"))
     regime_desc = str(regime.get("description", ""))
-    regime_color = regime.get("color", WARNING)
     div_count = len(divergences or [])
     poc = float(vp.get("poc_price", current)) if vp else current
     poc_dist = ((current - poc) / current) * 100 if current > 0 else 0.0

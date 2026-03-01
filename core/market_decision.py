@@ -146,44 +146,6 @@ def structure_state(
     return "NONE"
 
 
-def action_decision(
-    signal_dir: str,
-    strength: float,
-    structure_state_val: str,
-    conviction_label: str,
-    agreement: float,
-    adx_val: float,
-) -> str:
-    action, _reason = _action_decision_core(
-        signal_dir,
-        strength,
-        structure_state_val,
-        conviction_label,
-        agreement,
-        adx_val,
-    )
-    return action
-
-
-def action_reason(
-    signal_dir: str,
-    strength: float,
-    structure_state_val: str,
-    conviction_label: str,
-    agreement: float,
-    adx_val: float,
-) -> str:
-    _action, reason = _action_decision_core(
-        signal_dir,
-        strength,
-        structure_state_val,
-        conviction_label,
-        agreement,
-        adx_val,
-    )
-    return reason
-
-
 def action_decision_with_reason(
     signal_dir: str,
     strength: float,

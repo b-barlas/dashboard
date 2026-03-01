@@ -25,7 +25,6 @@ def render(ctx: dict) -> None:
     NEGATIVE = get_ctx(ctx, "NEGATIVE")
     WARNING = get_ctx(ctx, "WARNING")
     CARD_BG = get_ctx(ctx, "CARD_BG")
-    PRIMARY_BG = get_ctx(ctx, "PRIMARY_BG")
     _tip = get_ctx(ctx, "_tip")
     _normalize_coin_input = get_ctx(ctx, "_normalize_coin_input")
     _validate_coin_symbol = get_ctx(ctx, "_validate_coin_symbol")
@@ -410,7 +409,6 @@ def render(ctx: dict) -> None:
                 health_label = str(health_pack["label"])
                 health_action = str(health_pack["action"])
                 health_notes = list(health_pack["notes"])
-                health_color = POSITIVE if health_label == "HOLD" else (WARNING if health_label == "REDUCE" else NEGATIVE)
 
                 notes_txt = ", ".join(health_notes) if health_notes else "no major risk flags"
                 report_rows.append(
@@ -443,53 +441,6 @@ def render(ctx: dict) -> None:
                         "Health Action": health_action,
                     }
                 )
-                suggestion = ""
-
-                if direction == "LONG":
-                    if current_price < support_sr:
-                        suggestion = (
-                            f"🔻 Price has broken below the key support at <b>${support_sr:,.4f}</b>.<br>"
-                            f"This invalidates the bullish setup. <b>Consider closing the position (stop-out).</b>"
-                        )
-                    elif current_price < entry_price:
-                        suggestion = (
-                            f"⚠️ Price is trading below the entry level.<br>"
-                            f"Monitor support at <b>${support_sr:,.4f}</b>. If it fails, risk increases significantly.<br>"
-                            f"<i>Maintain caution unless support holds and momentum returns.</i>"
-                        )
-                    elif current_price < resistance_sr:
-                        suggestion = (
-                            f"📈 Price is above entry but below resistance at <b>${resistance_sr:,.4f}</b>.<br>"
-                            f"<i>Consider holding the position. A breakout may offer further upside.</i>"
-                        )
-                    else:
-                        suggestion = (
-                            f"🟢 Price has broken above resistance at <b>${resistance_sr:,.4f}</b>.<br>"
-                            f"<b>Consider taking partial profits or trailing your stop.</b>"
-                        )
-                else:
-                    if current_price > resistance_sr:
-                        suggestion = (
-                            f"🔺 Price has broken above key resistance at <b>${resistance_sr:,.4f}</b>.<br>"
-                            f"This invalidates the bearish case. <b>Consider closing the position (stop-out).</b>"
-                        )
-                    elif current_price > entry_price:
-                        suggestion = (
-                            f"⚠️ Price is above the downside entry level.<br>"
-                            f"Watch resistance at <b>${resistance_sr:,.4f}</b>. If it holds, the trade may still be valid.<br>"
-                            f"<i>Remain cautious—trend may be reversing.</i>"
-                        )
-                    elif current_price > support_sr:
-                        suggestion = (
-                            f"📉 Price is below entry, approaching support at <b>${support_sr:,.4f}</b>.<br>"
-                            f"<i>Consider holding. Breakdown of support could validate the downside setup further.</i>"
-                        )
-                    else:
-                        suggestion = (
-                            f"🟢 Price has broken below support at <b>${support_sr:,.4f}</b>.<br>"
-                            f"<b>Consider taking partial profits or holding to maximise gain.</b>"
-                        )
-
                 st.caption(
                     f"{tf} decision model: {health_label} ({health_score}/100) — {health_action} "
                     f"Drivers: {notes_txt}."

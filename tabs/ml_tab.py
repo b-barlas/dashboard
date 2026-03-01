@@ -12,7 +12,6 @@ def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
     TEXT_MUTED = get_ctx(ctx, "TEXT_MUTED")
-    TEXT_LIGHT = get_ctx(ctx, "TEXT_LIGHT")
     POSITIVE = get_ctx(ctx, "POSITIVE")
     NEGATIVE = get_ctx(ctx, "NEGATIVE")
     WARNING = get_ctx(ctx, "WARNING")

@@ -24,8 +24,6 @@ def render(ctx: dict) -> None:
     NEGATIVE = get_ctx(ctx, "NEGATIVE")
     WARNING = get_ctx(ctx, "WARNING")
     CARD_BG = get_ctx(ctx, "CARD_BG")
-    PRIMARY_BG = get_ctx(ctx, "PRIMARY_BG")
-    TEXT_LIGHT = get_ctx(ctx, "TEXT_LIGHT")
     _tip = get_ctx(ctx, "_tip")
     _normalize_coin_input = get_ctx(ctx, "_normalize_coin_input")
     _validate_coin_symbol = get_ctx(ctx, "_validate_coin_symbol")
@@ -39,7 +37,6 @@ def render(ctx: dict) -> None:
     get_price_change = get_ctx(ctx, "get_price_change")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
     _build_indicator_grid = get_ctx(ctx, "_build_indicator_grid")
-    get_social_sentiment = get_ctx(ctx, "get_social_sentiment")
     _wma = get_ctx(ctx, "_wma")
     _sr_lookback = get_ctx(ctx, "_sr_lookback")
     _debug = get_ctx(ctx, "_debug")
@@ -153,7 +150,8 @@ def render(ctx: dict) -> None:
         stochrsi_k_val, bollinger_bias, vwap_label = a.stochrsi_k, a.bollinger, a.vwap
         psar_trend, williams_label, cci_label = a.psar, a.williams, a.cci
 
-        current_price = df['close'].iloc[-1]
+        # Keep displayed reference price aligned with decision inputs (closed candles).
+        current_price = df_eval['close'].iloc[-1]
         price_change = None
         delta_note = "Source: selected-timeframe closed candles."
         try:
@@ -165,7 +163,8 @@ def render(ctx: dict) -> None:
             price_change = None
         if price_change is None:
             try:
-                fallback = get_price_change(f"{coin}/USDT")
+                # `coin` is already normalized as BASE/QUOTE (e.g. BTC/USDT).
+                fallback = get_price_change(coin)
                 if fallback is not None:
                     price_change = float(fallback)
                     delta_note = "Fallback source: ticker percentage (closed-candle delta unavailable)."
@@ -331,7 +330,7 @@ def render(ctx: dict) -> None:
             st.markdown(_grid_html, unsafe_allow_html=True,
             )
 
-        # Execution levels (spot-only)
+        # Execution levels (spot-only): separate pullback and breakout paths.
         try:
             atr14 = float(ta.volatility.average_true_range(df_eval["high"], df_eval["low"], df_eval["close"], window=14).iloc[-1])
         except Exception:
@@ -340,20 +339,100 @@ def render(ctx: dict) -> None:
         plan_recent = df_eval.tail(plan_lookback)
         plan_support = float(plan_recent["low"].min())
         plan_resistance = float(plan_recent["high"].max())
-        pullback_low = max(0.0, plan_support - 0.2 * atr14)
-        pullback_high = plan_support + 0.4 * atr14
-        breakout_trigger = plan_resistance + 0.2 * atr14
-        invalidation_level = max(0.0, plan_support - 0.8 * atr14)
-        take_profit_low = plan_resistance
-        take_profit_high = max(plan_resistance, plan_resistance + 0.6 * atr14)
+        atr_unit = float(max(atr14, current_price * 0.003))
+
+        # Pullback path
+        pullback_low = max(0.0, plan_support - 0.25 * atr_unit)
+        pullback_high = plan_support + 0.35 * atr_unit
+        pullback_invalidation = max(0.0, plan_support - 0.90 * atr_unit)
+        pullback_tp_low = max(plan_support, plan_resistance - 0.10 * atr_unit)
+        pullback_tp_high = max(pullback_tp_low, plan_resistance + 0.70 * atr_unit)
+
+        # Breakout path
+        breakout_trigger = plan_resistance + 0.20 * atr_unit
+        breakout_invalidation = max(0.0, plan_resistance - 0.60 * atr_unit)
+        if breakout_invalidation >= breakout_trigger:
+            breakout_invalidation = max(0.0, breakout_trigger - 0.60 * atr_unit)
+        breakout_tp_low = breakout_trigger + 0.80 * atr_unit
+        breakout_tp_high = breakout_trigger + 1.60 * atr_unit
+
+        pullback_zone_text = f"{_fmt_price(pullback_low)}-{_fmt_price(pullback_high)}"
+        pullback_tp_text = f"{_fmt_price(pullback_tp_low)}-{_fmt_price(pullback_tp_high)}"
+        breakout_tp_text = f"{_fmt_price(breakout_tp_low)}-{_fmt_price(breakout_tp_high)}"
 
         st.markdown(
-            f"<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:0.6rem; margin:0.25rem 0 0.55rem 0;'>"
-            f"<div class='elite-card' title='Latest close of selected timeframe (not live tick).'><div class='elite-label'>Latest Candle Close</div><div class='elite-value'>{_fmt_price(current_price)}</div></div>"
-            f"<div class='elite-card'><div class='elite-label'>Primary Accumulation Zone</div><div class='elite-value' style='font-size:1.6rem;'>{_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}</div></div>"
-            f"<div class='elite-card'><div class='elite-label'>Breakout Entry</div><div class='elite-value'>{_fmt_price(breakout_trigger)}</div></div>"
-            f"<div class='elite-card'><div class='elite-label'>Exit If Broken</div><div class='elite-value'>{_fmt_price(invalidation_level)}</div></div>"
-            f"<div class='elite-card'><div class='elite-label'>Take Profit Zone</div><div class='elite-value' style='font-size:1.6rem;'>{_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}</div></div>"
+            f"<style>"
+            f".spot-kpi-row {{"
+            f"  display:grid;"
+            f"  grid-template-columns:repeat(7, minmax(0, 1fr));"
+            f"  gap:0.45rem;"
+            f"  margin:0.25rem 0 0.5rem 0;"
+            f"}}"
+            f".spot-kpi-card {{"
+            f"  background:linear-gradient(140deg, rgba(4, 10, 18, 0.96), rgba(2, 5, 11, 0.96));"
+            f"  border:1px solid rgba(0, 212, 255, 0.16);"
+            f"  border-radius:14px;"
+            f"  padding:10px 11px;"
+            f"  box-shadow:0 10px 30px rgba(0, 0, 0, 0.35);"
+            f"  min-width:0;"
+            f"}}"
+            f".spot-kpi-label {{"
+            f"  color:{TEXT_MUTED};"
+            f"  font-size:0.62rem;"
+            f"  letter-spacing:0.7px;"
+            f"  text-transform:uppercase;"
+            f"  font-weight:650;"
+            f"  white-space:nowrap;"
+            f"  overflow:hidden;"
+            f"  text-overflow:ellipsis;"
+            f"}}"
+            f".spot-kpi-value {{"
+            f"  color:{ACCENT};"
+            f"  font-family:'Space Grotesk','Manrope',sans-serif;"
+            f"  font-size:clamp(0.86rem, 0.95vw, 1.35rem);"
+            f"  font-weight:700;"
+            f"  margin-top:5px;"
+            f"  line-height:1.15;"
+            f"  white-space:nowrap;"
+            f"  overflow:visible;"
+            f"  text-overflow:clip;"
+            f"  font-variant-numeric:tabular-nums;"
+            f"}}"
+            f".spot-kpi-value-range {{"
+            f"  font-size:clamp(0.70rem, 0.72vw, 0.96rem);"
+            f"}}"
+            f".spot-kpi-guide {{"
+            f"  border:1px solid rgba(0, 212, 255, 0.14);"
+            f"  background:rgba(0, 0, 0, 0.62);"
+            f"  border-radius:12px;"
+            f"  padding:10px 12px;"
+            f"  margin:0 0 0.7rem 0;"
+            f"  color:{TEXT_MUTED};"
+            f"  font-size:0.85rem;"
+            f"  line-height:1.64;"
+            f"}}"
+            f".spot-kpi-guide b {{ color:{ACCENT}; }}"
+            f"</style>"
+            f"<div class='spot-kpi-row'>"
+            f"<div class='spot-kpi-card' title='Latest close of selected timeframe (not live tick).'>"
+            f"<div class='spot-kpi-label'>Latest Candle Close</div><div class='spot-kpi-value'>{_fmt_price(current_price)}</div></div>"
+            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Primary Accumulation Zone</div><div class='spot-kpi-value spot-kpi-value-range'>{pullback_zone_text}</div></div>"
+            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Breakout Entry</div><div class='spot-kpi-value'>{_fmt_price(breakout_trigger)}</div></div>"
+            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Pullback Exit If Broken</div><div class='spot-kpi-value'>{_fmt_price(pullback_invalidation)}</div></div>"
+            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Breakout Exit If Broken</div><div class='spot-kpi-value'>{_fmt_price(breakout_invalidation)}</div></div>"
+            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Pullback TP Zone</div><div class='spot-kpi-value spot-kpi-value-range'>{pullback_tp_text}</div></div>"
+            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Breakout TP Zone</div><div class='spot-kpi-value spot-kpi-value-range'>{breakout_tp_text}</div></div>"
+            f"</div>"
+            f"<div class='spot-kpi-guide'>"
+            f"<b>KPI Quick Guide (Beginner):</b><br>"
+            f"1) <b>Latest Candle Close</b>: your current reference price for this timeframe (closed candle).<br>"
+            f"2) <b>Primary Accumulation Zone</b>: first buy area. If price revisits this zone and holds, it is your pullback entry area.<br>"
+            f"3) <b>Breakout Entry</b>: second buy trigger. If price closes above this level, momentum confirmation appears.<br>"
+            f"4) <b>Pullback Exit If Broken</b>: stop level for pullback entry. If price closes below it, pullback setup is invalid.<br>"
+            f"5) <b>Breakout Exit If Broken</b>: stop level for breakout entry. If price falls back below it after breakout, momentum setup weakens.<br>"
+            f"6) <b>Pullback TP Zone</b>: partial/full take-profit area for pullback entries.<br>"
+            f"7) <b>Breakout TP Zone</b>: partial/full take-profit area for breakout entries.<br>"
+            f"<span style='font-size:0.78rem;'>Simple workflow: wait for a valid entry trigger, define the matching exit level first, then use the matching TP zone.</span>"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -365,10 +444,10 @@ def render(ctx: dict) -> None:
             plan_color = NEGATIVE
             plan_lines = (
                 f"1) <b>Setup Confirm is SKIP:</b> do not open a new spot position on this structure.<br>"
-                f"2) <b>Wait for regime improvement:</b> setup must move to WATCH or ENTER class before re-evaluation.<br>"
-                f"3) <b>If already holding:</b> reduce risk into strength and enforce Exit If Broken ({_fmt_price(invalidation_level)}).<br>"
-                f"4) <b>Keep levels prepared:</b> Primary Accumulation Zone ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}), "
-                f"Breakout Entry ({_fmt_price(breakout_trigger)}), Take Profit Zone ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)})."
+                f"2) <b>Wait for regime improvement:</b> setup should move to WATCH or a confirmed class (TREND+AI / TREND-led / AI-led) before re-evaluation.<br>"
+                f"3) <b>If already holding:</b> reduce risk into strength and enforce pullback risk line ({_fmt_price(pullback_invalidation)}).<br>"
+                f"4) <b>Keep both paths prepared:</b> Pullback zone ({pullback_zone_text}) and breakout trigger ({_fmt_price(breakout_trigger)}).<br>"
+                f"5) <b>Profit maps:</b> Pullback TP ({pullback_tp_text}) / Breakout TP ({breakout_tp_text})."
             )
         elif setup_cls == "WATCH":
             plan_status = "Watch"
@@ -376,35 +455,35 @@ def render(ctx: dict) -> None:
             if signal_dir == "UPSIDE":
                 plan_lines = (
                     f"1) <b>Setup Confirm is WATCH:</b> confirmation is partial; monitor, do not force entry.<br>"
-                    f"2) <b>Primary trigger path:</b> reaction quality in Primary Accumulation Zone ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}).<br>"
+                    f"2) <b>Primary trigger path:</b> reaction quality in Primary Accumulation Zone ({pullback_zone_text}).<br>"
                     f"3) <b>Momentum trigger path:</b> candle close above Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
-                    f"4) <b>Risk discipline:</b> keep Exit If Broken at {_fmt_price(invalidation_level)} and pre-plan exits at "
-                    f"{_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}."
+                    f"4) <b>Risk discipline:</b> pullback invalidation {_fmt_price(pullback_invalidation)}, breakout invalidation {_fmt_price(breakout_invalidation)}.<br>"
+                    f"5) <b>Profit discipline:</b> Pullback TP ({pullback_tp_text}) / Breakout TP ({breakout_tp_text})."
                 )
             elif signal_dir == "DOWNSIDE":
                 plan_lines = (
                     f"1) <b>Setup Confirm is WATCH with Downside direction:</b> avoid fresh spot buys until reclaim confirmation.<br>"
                     f"2) <b>Reclaim trigger:</b> wait for a close back above Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
-                    f"3) <b>If already holding:</b> reduce risk into strength and respect Exit If Broken ({_fmt_price(invalidation_level)}).<br>"
-                    f"4) <b>Plan exits early:</b> keep Take Profit Zone ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}) prepared for recovery scenarios."
+                    f"3) <b>If already holding:</b> reduce risk into strength and protect with pullback invalidation ({_fmt_price(pullback_invalidation)}).<br>"
+                    f"4) <b>If reclaim confirms:</b> use breakout invalidation ({_fmt_price(breakout_invalidation)}) and breakout TP ({breakout_tp_text})."
                 )
             else:
                 plan_lines = (
                     f"1) <b>Setup Confirm is WATCH with Neutral direction:</b> no-force zone until a side confirms.<br>"
-                    f"2) <b>Range decision levels:</b> monitor Primary Accumulation Zone ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}) "
+                    f"2) <b>Range decision levels:</b> monitor Primary Accumulation Zone ({pullback_zone_text}) "
                     f"and Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
-                    f"3) <b>Execution only after side confirmation:</b> then map risk to Exit If Broken ({_fmt_price(invalidation_level)}).<br>"
-                    f"4) <b>Keep exits pre-defined:</b> Take Profit Zone ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)})."
+                    f"3) <b>Execution only after side confirmation:</b> map risk to pullback/breakout invalidation lines.<br>"
+                    f"4) <b>Keep exits pre-defined:</b> Pullback TP ({pullback_tp_text}) and Breakout TP ({breakout_tp_text})."
                 )
         elif signal_dir == "UPSIDE":
             plan_status = "Bullish Confirmed"
             plan_color = POSITIVE
             plan_lines = (
                 f"1) <b>Setup Confirm is {setup_label}:</b> execution-ready upside context.<br>"
-                f"2) <b>If price dips into Primary Accumulation Zone</b> ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}): scale in with risk plan.<br>"
-                f"3) <b>If price closes above Breakout Entry</b> ({_fmt_price(breakout_trigger)}): add/confirm continuation.<br>"
-                f"4) <b>Take Profit Zone</b> ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}): take partials, trail remainder.<br>"
-                f"5) <b>Exit If Broken</b> ({_fmt_price(invalidation_level)}): invalidate setup on close below."
+                f"2) <b>Pullback path:</b> accumulate in {pullback_zone_text}, invalidate below {_fmt_price(pullback_invalidation)}.<br>"
+                f"3) <b>Breakout path:</b> execute on close above {_fmt_price(breakout_trigger)}, invalidate below {_fmt_price(breakout_invalidation)}.<br>"
+                f"4) <b>Take profit map:</b> Pullback TP ({pullback_tp_text}), Breakout TP ({breakout_tp_text}).<br>"
+                f"5) <b>Risk management:</b> take partials at TP-low, trail remainder only while structure stays intact."
             )
         else:
             plan_status = "Defensive Confirmed"
@@ -412,8 +491,8 @@ def render(ctx: dict) -> None:
             plan_lines = (
                 f"1) <b>Setup Confirm is {setup_label}, but direction is Downside:</b> spot mode stays defensive.<br>"
                 f"2) <b>No fresh spot buy</b> until direction recovers and closes above Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
-                f"3) <b>If already holding:</b> de-risk into rallies and protect downside via Exit If Broken ({_fmt_price(invalidation_level)}).<br>"
-                f"4) <b>Use Take Profit Zone</b> ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}) only after reclaim confirmation."
+                f"3) <b>If already holding:</b> de-risk into rallies and protect downside via pullback invalidation ({_fmt_price(pullback_invalidation)}).<br>"
+                f"4) <b>Only after reclaim confirmation:</b> use breakout invalidation ({_fmt_price(breakout_invalidation)}) and breakout TP ({breakout_tp_text})."
             )
 
         st.markdown(
@@ -429,56 +508,28 @@ def render(ctx: dict) -> None:
             unsafe_allow_html=True,
         )
 
-        sent_score, sent_label = get_social_sentiment(coin)
-        gauge_sent = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=sent_score,
-            gauge={
-                'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': TEXT_MUTED},
-                'bar': {'color': ACCENT},
-                'bgcolor': PRIMARY_BG,
-                'steps': [
-                    {'range': [0, 25], 'color': NEGATIVE},
-                    {'range': [25, 45], 'color': WARNING},
-                    {'range': [45, 55], 'color': TEXT_MUTED},
-                    {'range': [55, 75], 'color': POSITIVE},
-                    {'range': [75, 100], 'color': POSITIVE},
-                ],
-            },
-            title={'text': f"Price Bias Proxy ({sent_label})", 'font': {'size': 16, 'color': ACCENT}},
-            number={'font': {'color': TEXT_LIGHT, 'size': 36}}
-        ))
-        gauge_sent.update_layout(
-            height=170,
-            margin=dict(l=10, r=10, t=40, b=15),
-            template='plotly_dark',
-            paper_bgcolor=PRIMARY_BG
-        )
-        st.plotly_chart(gauge_sent, width="stretch")
-        st.caption(
-            "Price Bias Proxy is derived from 24h price change (not social-media/NLP sentiment). "
-            "Use as a light context signal only."
-        )
-        st.markdown("<div style='height:0.2rem;'></div>", unsafe_allow_html=True)
+        # Use the same closed-candle frame for charts to avoid visual/decision drift.
+        chart_df = df_eval.copy()
+
         # Plot candlestick with EMAs
         fig = go.Figure()
         fig.add_trace(go.Candlestick(
-            x=df['timestamp'], open=df['open'], high=df['high'], low=df['low'], close=df['close'],
+            x=chart_df['timestamp'], open=chart_df['open'], high=chart_df['high'], low=chart_df['low'], close=chart_df['close'],
             increasing_line_color=POSITIVE, decreasing_line_color=NEGATIVE, name="Price"
         ))
         # Plot EMAs
         for window, color in [(5, '#F472B6'), (9, '#60A5FA'), (21, '#FBBF24'), (50, '#FCD34D')]:
-            ema_series = ta.trend.ema_indicator(df['close'], window=window)
-            fig.add_trace(go.Scatter(x=df['timestamp'], y=ema_series, mode='lines',
+            ema_series = ta.trend.ema_indicator(chart_df['close'], window=window)
+            fig.add_trace(go.Scatter(x=chart_df['timestamp'], y=ema_series, mode='lines',
                                      name=f"EMA{window}", line=dict(color=color, width=1.5)))
         # Plot weighted moving averages (WMA) for additional insight.  The WMA gives
         # more weight to recent prices and can help identify trend shifts earlier.
         try:
-            wma20 = _wma(df['close'], length=20)
-            wma50 = _wma(df['close'], length=50)
-            fig.add_trace(go.Scatter(x=df['timestamp'], y=wma20, mode='lines',
+            wma20 = _wma(chart_df['close'], length=20)
+            wma50 = _wma(chart_df['close'], length=50)
+            fig.add_trace(go.Scatter(x=chart_df['timestamp'], y=wma20, mode='lines',
                                      name="WMA20", line=dict(color='#34D399', width=1, dash='dot')))
-            fig.add_trace(go.Scatter(x=df['timestamp'], y=wma50, mode='lines',
+            fig.add_trace(go.Scatter(x=chart_df['timestamp'], y=wma50, mode='lines',
                                      name="WMA50", line=dict(color='#10B981', width=1, dash='dash')))
         except Exception as e:
             _debug(f"WMA chart overlay error: {e}")
@@ -496,9 +547,9 @@ def render(ctx: dict) -> None:
             # RSI chart
             rsi_fig = go.Figure()
             for period, color in [(6, '#D8B4FE'), (14, '#A78BFA'), (24, '#818CF8')]:
-                rsi_series = ta.momentum.rsi(df['close'], window=period)
+                rsi_series = ta.momentum.rsi(chart_df['close'], window=period)
                 rsi_fig.add_trace(go.Scatter(
-                    x=df['timestamp'], y=rsi_series, mode='lines', name=f"RSI {period}",
+                    x=chart_df['timestamp'], y=rsi_series, mode='lines', name=f"RSI {period}",
                     line=dict(color=color, width=2)
                 ))
             rsi_fig.add_hline(y=70, line=dict(color=NEGATIVE, dash='dot', width=1), name="Overbought")
@@ -514,21 +565,21 @@ def render(ctx: dict) -> None:
             st.plotly_chart(rsi_fig, width="stretch")
 
             # MACD chart
-            macd_ind = ta.trend.MACD(df['close'])
-            df['macd'] = macd_ind.macd()
-            df['macd_signal'] = macd_ind.macd_signal()
-            df['macd_diff'] = macd_ind.macd_diff()
+            macd_ind = ta.trend.MACD(chart_df['close'])
+            chart_df['macd'] = macd_ind.macd()
+            chart_df['macd_signal'] = macd_ind.macd_signal()
+            chart_df['macd_diff'] = macd_ind.macd_diff()
             macd_fig = go.Figure()
             macd_fig.add_trace(go.Scatter(
-                x=df['timestamp'], y=df['macd'], name="MACD",
+                x=chart_df['timestamp'], y=chart_df['macd'], name="MACD",
                 line=dict(color=ACCENT, width=2)
             ))
             macd_fig.add_trace(go.Scatter(
-                x=df['timestamp'], y=df['macd_signal'], name="Signal",
+                x=chart_df['timestamp'], y=chart_df['macd_signal'], name="Signal",
                 line=dict(color=WARNING, width=2, dash='dot')
             ))
             macd_fig.add_trace(go.Bar(
-                x=df['timestamp'], y=df['macd_diff'], name="Histogram",
+                x=chart_df['timestamp'], y=chart_df['macd_diff'], name="Histogram",
                 marker_color=CARD_BG
             ))
             macd_fig.update_layout(
@@ -542,13 +593,13 @@ def render(ctx: dict) -> None:
             st.plotly_chart(macd_fig, width="stretch")
 
             # Volume & OBV chart
-            df['obv'] = ta.volume.on_balance_volume(df['close'], df['volume'])
+            chart_df['obv'] = ta.volume.on_balance_volume(chart_df['close'], chart_df['volume'])
             volume_fig = go.Figure()
             volume_fig.add_trace(go.Bar(
-                x=df['timestamp'], y=df['volume'], name="Volume", marker_color="#6B7280"
+                x=chart_df['timestamp'], y=chart_df['volume'], name="Volume", marker_color="#6B7280"
             ))
             volume_fig.add_trace(go.Scatter(
-                x=df['timestamp'], y=df['obv'], name="OBV",
+                x=chart_df['timestamp'], y=chart_df['obv'], name="OBV",
                 line=dict(color=WARNING, width=1.5, dash='dot'),
                 yaxis='y2'
             ))
@@ -581,9 +632,13 @@ def render(ctx: dict) -> None:
             recent = snap_df.tail(_sr_lookback(timeframe))
             support = recent['low'].min()
             resistance = recent['high'].max()
-            current_price = latest['close']
-            support_dist = abs(current_price - support) / current_price * 100
-            resistance_dist = abs(current_price - resistance) / current_price * 100
+            snapshot_price = latest['close']
+            if np.isfinite(snapshot_price) and snapshot_price > 0:
+                support_dist = abs(snapshot_price - support) / snapshot_price * 100
+                resistance_dist = abs(snapshot_price - resistance) / snapshot_price * 100
+            else:
+                support_dist = 0.0
+                resistance_dist = 0.0
             snapshot_html = f"""
             <div class='panel-box'>
               <b style='color:{ACCENT}; font-size:1.05rem;'>📊 Technical Snapshot</b><br>

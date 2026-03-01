@@ -135,13 +135,12 @@ def render(ctx: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    # Determine which timeframe to use for the market prediction.  We rely on
+    # Determine which timeframe to use for market bias gauges. We rely on
     # Streamlit session state to persist the selected timeframe from the
-    # scanner controls.  On the first render, default to 1h.  This allows
-    # the market prediction card to update automatically when the user
-    # changes the timeframe in the scanner below.  We fetch BTC/USDT as a
-    # proxy for the overall crypto market and compute a prediction using
-    # 500 candles of history.
+    # scanner controls. On first render, default to 1h. Bias is computed
+    # from a six-asset major bundle (BTC/ETH/BNB/SOL/ADA/XRP) on 500
+    # candles, using dominance weights when available and equal-weight
+    # fallback when dominance feed is unavailable.
     selected_timeframe = st.session_state.get("market_timeframe", "1h")
     # Top row: Price and market cap metrics.
     m1, m2, m3, m4 = st.columns(4, gap="medium")
