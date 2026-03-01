@@ -34,6 +34,7 @@ def render(ctx: dict) -> None:
     direction_key = get_ctx(ctx, "direction_key")
     direction_label = get_ctx(ctx, "direction_label")
     format_delta = get_ctx(ctx, "format_delta")
+    format_adx = get_ctx(ctx, "format_adx")
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     get_price_change = get_ctx(ctx, "get_price_change")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
@@ -42,6 +43,12 @@ def render(ctx: dict) -> None:
     _wma = get_ctx(ctx, "_wma")
     _sr_lookback = get_ctx(ctx, "_sr_lookback")
     _debug = get_ctx(ctx, "_debug")
+
+    def _adx_bucket_only(adx_value: float) -> str:
+        raw = str(format_adx(adx_value) or "")
+        if "(" in raw and ")" in raw:
+            return raw.split("(", 1)[1].split(")", 1)[0].strip()
+        return raw.replace("▲▲", "").replace("▲", "").replace("▼", "").replace("→", "").replace("🔥", "").strip()
 
     def _fmt_price(v: float) -> str:
         try:
@@ -216,26 +223,18 @@ def render(ctx: dict) -> None:
             f"<div style='text-align:center; padding:6px;' title='{setup_reason}'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Setup Confirm</div>"
             f"<div style='color:{setup_c_s}; font-size:0.85rem; font-weight:600;'>{setup_confirm}</div></div>"
-            f"<div style='text-align:center; padding:6px;'>"
+            f"<div style='text-align:center; padding:6px;' title='Technical side from closed candles (Upside/Downside/Neutral).'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Direction</div>"
             f"<div style='color:{sig_c_s}; font-size:0.85rem; font-weight:600;'>{signal_clean}</div></div>"
-            f"<div style='text-align:center; padding:6px;'>"
+            f"<div style='text-align:center; padding:6px;' title='Direction-agnostic signal power from the technical stack (0-100).'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Strength</div>"
             f"<div style='color:{conf_c_s}; font-size:0.85rem; font-weight:600;'>{strength_display}</div></div>"
-            f"<div style='text-align:center; padding:6px;'>"
+            f"<div style='text-align:center; padding:6px;' title='Model vote direction and vote count out of 3 models.'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Ensemble</div>"
             f"<div style='color:{ai_c_s}; font-size:0.85rem; font-weight:600;'>{direction_label(ai_dir_key)} ({ai_votes}/3)</div></div>"
-            f"<div style='text-align:center; padding:6px;'>"
+            f"<div style='text-align:center; padding:6px;' title='How well technical direction and AI direction agree.'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Tech vs AI Alignment</div>"
             f"<div style='color:{conv_c_s}; font-size:0.85rem; font-weight:600;'>{conv_lbl_s}</div></div>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f"<div style='color:{TEXT_MUTED}; font-size:0.82rem; margin:0.15rem 0 0.55rem 0;'>"
-            f"<b>Δ (%)</b> = selected-timeframe closed-candle move, <b>Setup Confirm</b> = market decision class, "
-            f"<b>Direction</b> = technical side, <b>Strength</b> = direction-agnostic signal power, "
-            f"<b>AI Ensemble (x/3)</b> = model vote agreement, <b>Tech vs AI Alignment</b> = technical+AI alignment."
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -295,6 +294,7 @@ def render(ctx: dict) -> None:
             spike_label=spike_label, spike_hover=spike_hover,
             timeframe=timeframe,
             ichimoku_hover=ichimoku_hover,
+            adx_label_override=_adx_bucket_only(adx_val),
         )
         if _grid_html:
             st.markdown(_grid_html, unsafe_allow_html=True,

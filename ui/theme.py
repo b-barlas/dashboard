@@ -75,45 +75,122 @@ def build_indicator_grid(
     spike_hover: str = "",
     timeframe: str | None = None,
     ichimoku_hover: str | None = None,
+    adx_label_override: str | None = None,
 ) -> str:
     """Build indicator grid HTML used across Spot/Position/AI tabs."""
     indicators: list[tuple[str, str, str, str]] = []
     if supertrend_trend:
         supertrend_txt = _clean_indicator_label(format_trend(supertrend_trend))
-        indicators.append(("SuperTrend", supertrend_txt, ind_color(supertrend_txt), ""))
+        indicators.append(
+            (
+                "SuperTrend",
+                supertrend_txt,
+                ind_color(supertrend_txt),
+                "ATR-based trend line. Bullish: price above line, Bearish: below line.",
+            )
+        )
     if ichimoku_trend:
         ichimoku_txt = _clean_indicator_label(format_trend(ichimoku_trend))
-        indicators.append(("Ichimoku", ichimoku_txt, ind_color(ichimoku_txt), str(ichimoku_hover or "")))
+        ichi_tip = "Ichimoku cloud trend state."
+        if str(ichimoku_hover or "").strip():
+            ichi_tip = f"{ichi_tip} {str(ichimoku_hover).strip()}"
+        indicators.append(("Ichimoku", ichimoku_txt, ind_color(ichimoku_txt), ichi_tip))
     if vwap_label:
         vwap_txt = _clean_indicator_label(vwap_label)
-        indicators.append(("VWAP", vwap_txt, ind_color(vwap_txt), ""))
+        indicators.append(
+            (
+                "VWAP",
+                vwap_txt,
+                ind_color(vwap_txt),
+                "Volume-weighted average price anchor. Above: relative strength, Below: relative weakness.",
+            )
+        )
     if not _is_nan(adx_val):
-        adx_txt = _clean_indicator_label(format_adx(adx_val))
-        indicators.append(("ADX", adx_txt, ind_color(adx_txt), ""))
+        adx_txt = _clean_indicator_label(adx_label_override or format_adx(adx_val))
+        indicators.append(
+            (
+                "ADX",
+                adx_txt,
+                ind_color(adx_txt),
+                "Trend strength (not direction): Weak <20, Starting 20-25, Strong 25-50, Very Strong 50-75, Extreme >75.",
+            )
+        )
     if bollinger_bias:
         boll_txt = _clean_indicator_label(bollinger_bias)
-        indicators.append(("Bollinger", boll_txt, ind_color(boll_txt), ""))
+        indicators.append(
+            (
+                "Bollinger",
+                boll_txt,
+                ind_color(boll_txt),
+                "Position versus Bollinger bands. Near Top warns extension, Near Bottom suggests pullback zone.",
+            )
+        )
     if not _is_nan(stochrsi_k_val):
         srsi_txt = _clean_indicator_label(format_stochrsi(stochrsi_k_val, timeframe=timeframe))
-        indicators.append(("StochRSI", srsi_txt, ind_color(srsi_txt), ""))
+        indicators.append(
+            (
+                "StochRSI",
+                srsi_txt,
+                ind_color(srsi_txt),
+                "Momentum oscillator. High = overbought pressure, Low = oversold pressure, Neutral = balanced momentum.",
+            )
+        )
     if "Bullish" in psar_trend or "Bearish" in psar_trend:
         psar_txt = _clean_indicator_label(psar_trend)
-        indicators.append(("PSAR", psar_txt, ind_color(psar_txt), ""))
+        indicators.append(
+            (
+                "PSAR",
+                psar_txt,
+                ind_color(psar_txt),
+                "Parabolic SAR trend-following state. Bullish means dots below price, Bearish means dots above.",
+            )
+        )
     if williams_label:
         will_txt = _clean_indicator_label(williams_label)
-        indicators.append(("Williams %R", will_txt, ind_color(will_txt), ""))
+        indicators.append(
+            (
+                "Williams %R",
+                will_txt,
+                ind_color(will_txt),
+                "Momentum location in recent range. Oversold may support rebounds; Overbought may warn exhaustion.",
+            )
+        )
     if cci_label:
         cci_txt = _clean_indicator_label(cci_label)
-        indicators.append(("CCI", cci_txt, ind_color(cci_txt), ""))
+        indicators.append(
+            (
+                "CCI",
+                cci_txt,
+                ind_color(cci_txt),
+                "Commodity Channel Index. Oversold/Overbought flags potential mean-reversion pressure.",
+            )
+        )
     if volume_spike:
         spike_txt = _clean_indicator_label(spike_label) if str(spike_label or "").strip() else "Spike"
-        indicators.append(("Volume", spike_txt, ind_color(spike_txt), str(spike_hover or "")))
+        spike_tip = "Abnormal volume event."
+        if str(spike_hover or "").strip():
+            spike_tip = f"{spike_tip} {str(spike_hover).strip()}"
+        indicators.append(("Volume", spike_txt, ind_color(spike_txt), spike_tip))
     atr_clean = atr_comment.replace("▲", "").replace("▼", "").replace("–", "").strip()
     if atr_clean:
-        indicators.append(("Volatility", atr_clean, ind_color(atr_clean), ""))
+        indicators.append(
+            (
+                "Volatility",
+                atr_clean,
+                ind_color(atr_clean),
+                "ATR/Band-width volatility regime. Higher volatility means wider swings and higher execution risk.",
+            )
+        )
     if candle_pattern:
         pattern_txt = _clean_indicator_label(candle_pattern.split(" (")[0])
-        indicators.append(("Pattern", pattern_txt, ind_color(pattern_txt), ""))
+        indicators.append(
+            (
+                "Pattern",
+                pattern_txt,
+                ind_color(pattern_txt),
+                "Latest candle-pattern classification from closed candles.",
+            )
+        )
     if not indicators:
         return ""
     grid_items = ""
@@ -126,8 +203,8 @@ def build_indicator_grid(
             f"</div>"
         )
     return (
-        f"<div style='display:grid; grid-template-columns:repeat(auto-fill, minmax(90px, 1fr)); "
-        f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
+        f"<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); "
+        f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0; align-items:center;'>"
         f"{grid_items}</div>"
     )
 
