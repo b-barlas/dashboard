@@ -49,8 +49,9 @@ _TAB_DEPS = [
         render_spot_tab_ui,
         [
             "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "CARD_BG", "PRIMARY_BG", "TEXT_LIGHT",
-            "_tip", "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "analyse", "signal_plain", "direction_label",
-            "ml_ensemble_predict", "_calc_conviction", "_build_indicator_grid", "get_social_sentiment",
+            "_tip", "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "analyse",
+            "signal_plain", "direction_key", "direction_label", "format_delta",
+            "ml_ensemble_predict", "get_price_change", "_calc_conviction", "_build_indicator_grid", "get_social_sentiment",
             "_wma", "_sr_lookback", "_debug",
         ],
     ),

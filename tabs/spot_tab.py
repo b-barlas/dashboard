@@ -4,6 +4,12 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
 import ta
+from core.market_decision import (
+    action_decision_with_reason,
+    action_reason_text,
+    normalize_action_class,
+    structure_state,
+)
 from core.signal_contract import strength_from_bias, strength_bucket
 from ui.snapshot_cache import live_or_snapshot
 
@@ -25,8 +31,11 @@ def render(ctx: dict) -> None:
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     analyse = get_ctx(ctx, "analyse")
     signal_plain = get_ctx(ctx, "signal_plain")
+    direction_key = get_ctx(ctx, "direction_key")
     direction_label = get_ctx(ctx, "direction_label")
+    format_delta = get_ctx(ctx, "format_delta")
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
+    get_price_change = get_ctx(ctx, "get_price_change")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
     _build_indicator_grid = get_ctx(ctx, "_build_indicator_grid")
     get_social_sentiment = get_ctx(ctx, "get_social_sentiment")
@@ -70,9 +79,9 @@ def render(ctx: dict) -> None:
         f"<details style='margin-bottom:0.7rem;'>"
         f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
         f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.45rem;'>"
-        f"<b>1.</b> Start with Direction + Strength + AI Ensemble + Tech vs AI Alignment.<br>"
-        f"<b>2.</b> If technical Direction and AI disagree, treat setup as weaker.<br>"
-        f"<b>3.</b> Use indicator grid and snapshot for context, not standalone entry triggers."
+        f"<b>1.</b> Start with Δ (%) + Setup Confirm + Direction + Strength.<br>"
+        f"<b>2.</b> Validate with AI Ensemble + Tech vs AI Alignment before acting.<br>"
+        f"<b>3.</b> Use indicator grid and execution levels for context, not standalone triggers."
         f"</div></details>",
         unsafe_allow_html=True,
     )
@@ -116,42 +125,106 @@ def render(ctx: dict) -> None:
         psar_trend, williams_label, cci_label = a.psar, a.williams, a.cci
 
         current_price = df['close'].iloc[-1]
+        price_change = None
+        delta_note = "Source: selected-timeframe closed candles."
+        try:
+            prev_close = float(df_eval["close"].iloc[-2])
+            last_closed = float(df_eval["close"].iloc[-1])
+            if pd.notna(prev_close) and prev_close > 0 and pd.notna(last_closed):
+                price_change = ((last_closed / prev_close) - 1.0) * 100.0
+        except Exception:
+            price_change = None
+        if price_change is None:
+            try:
+                fallback = get_price_change(f"{coin}/USDT")
+                if fallback is not None:
+                    price_change = float(fallback)
+                    delta_note = "Fallback source: ticker percentage (closed-candle delta unavailable)."
+            except Exception:
+                price_change = None
 
         # Display summary grid
-        signal_dir = signal_plain(signal)
+        signal_dir_raw = signal_plain(signal)
+        signal_dir = direction_key(signal_dir_raw)
         signal_clean = direction_label(signal_dir)
         try:
             _ai_prob_s, ai_dir_s, _ai_details_s = ml_ensemble_predict(df_eval)
             directional_agree = float((_ai_details_s or {}).get("agreement", 0.0))
             consensus_agree = float((_ai_details_s or {}).get("consensus_agreement", 0.0))
-            vote_ratio = directional_agree if ai_dir_s in {"LONG", "SHORT"} else consensus_agree
+            ai_dir_key = direction_key(ai_dir_s)
+            vote_ratio = directional_agree if ai_dir_key in {"UPSIDE", "DOWNSIDE"} else consensus_agree
             ai_votes = max(0, min(3, int(round(vote_ratio * 3.0))))
             ai_agree = vote_ratio * 100.0
         except Exception:
             ai_dir_s = "NEUTRAL"
+            ai_dir_key = "NEUTRAL"
             ai_votes = 0
             ai_agree = 0.0
 
-        sig_dir_s = signal_dir if signal_dir in {"LONG", "SHORT"} else "WAIT"
-        conv_lbl_s, _conv_c_s = _calc_conviction(sig_dir_s, ai_dir_s, strength_score, ai_agree / 100.0)
+        sig_dir_s = signal_dir if signal_dir in {"UPSIDE", "DOWNSIDE"} else "WAIT"
+        conv_lbl_s, _conv_c_s = _calc_conviction(sig_dir_s, ai_dir_key, strength_score, ai_agree / 100.0)
+        structure_val = structure_state(sig_dir_s, ai_dir_key, strength_score, ai_agree / 100.0)
+        action_raw, action_reason_code = action_decision_with_reason(
+            sig_dir_s,
+            strength_score,
+            structure_val,
+            str(conv_lbl_s),
+            ai_agree / 100.0,
+            float(adx_val) if pd.notna(adx_val) else float("nan"),
+        )
 
-        sig_c_s = POSITIVE if signal_dir == "LONG" else (NEGATIVE if signal_dir == "SHORT" else WARNING)
-        ai_c_s = POSITIVE if ai_dir_s == "LONG" else (NEGATIVE if ai_dir_s == "SHORT" else WARNING)
+        def _setup_confirm_display(raw_action: str) -> str:
+            cls = normalize_action_class(raw_action)
+            if cls == "ENTER_TREND_AI":
+                return "TREND+AI"
+            if cls == "ENTER_TREND_LED":
+                return "TREND-led"
+            if cls == "ENTER_AI_LED":
+                return "AI-led"
+            if cls == "WATCH":
+                return "WATCH"
+            if cls == "SKIP":
+                return "SKIP"
+            return str(raw_action or "").strip()
+
+        setup_confirm = _setup_confirm_display(action_raw)
+        setup_reason = action_reason_text(action_reason_code)
+
+        sig_c_s = POSITIVE if signal_dir == "UPSIDE" else (NEGATIVE if signal_dir == "DOWNSIDE" else WARNING)
+        ai_c_s = POSITIVE if ai_dir_key == "UPSIDE" else (NEGATIVE if ai_dir_key == "DOWNSIDE" else WARNING)
         _s_bucket = strength_bucket(strength_score)
+        strength_display = f"{strength_score:.0f}% ({_s_bucket})"
         conf_c_s = POSITIVE if _s_bucket in {"STRONG", "GOOD"} else (WARNING if _s_bucket == "MIXED" else NEGATIVE)
         conv_c_s = POSITIVE if conv_lbl_s == "HIGH" else (WARNING if conv_lbl_s in {"MEDIUM", "TREND"} else NEGATIVE)
+        if normalize_action_class(action_raw).startswith("ENTER_"):
+            setup_c_s = POSITIVE
+        elif normalize_action_class(action_raw) == "WATCH":
+            setup_c_s = WARNING
+        else:
+            setup_c_s = NEGATIVE
+        delta_display = format_delta(price_change) if price_change is not None else ""
+        delta_c_s = (
+            POSITIVE if str(delta_display).strip().startswith("▲")
+            else (NEGATIVE if str(delta_display).strip().startswith("▼") else WARNING)
+        )
         st.markdown(
             f"<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); "
             f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
+            f"<div style='text-align:center; padding:6px;' title='{delta_note}'>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Δ (%)</div>"
+            f"<div style='color:{delta_c_s}; font-size:0.85rem; font-weight:600;'>{delta_display or '—'}</div></div>"
+            f"<div style='text-align:center; padding:6px;' title='{setup_reason}'>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Setup Confirm</div>"
+            f"<div style='color:{setup_c_s}; font-size:0.85rem; font-weight:600;'>{setup_confirm}</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Direction</div>"
             f"<div style='color:{sig_c_s}; font-size:0.85rem; font-weight:600;'>{signal_clean}</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Strength</div>"
-            f"<div style='color:{conf_c_s}; font-size:0.85rem; font-weight:600;'>{strength_score:.0f}%</div></div>"
+            f"<div style='color:{conf_c_s}; font-size:0.85rem; font-weight:600;'>{strength_display}</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Ensemble</div>"
-            f"<div style='color:{ai_c_s}; font-size:0.85rem; font-weight:600;'>{direction_label(ai_dir_s)} ({ai_votes}/3)</div></div>"
+            f"<div style='color:{ai_c_s}; font-size:0.85rem; font-weight:600;'>{direction_label(ai_dir_key)} ({ai_votes}/3)</div></div>"
             f"<div style='text-align:center; padding:6px;'>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Tech vs AI Alignment</div>"
             f"<div style='color:{conv_c_s}; font-size:0.85rem; font-weight:600;'>{conv_lbl_s}</div></div>"
@@ -160,7 +233,8 @@ def render(ctx: dict) -> None:
         )
         st.markdown(
             f"<div style='color:{TEXT_MUTED}; font-size:0.82rem; margin:0.15rem 0 0.55rem 0;'>"
-            f"<b>Direction</b> = technical direction (Upside/Downside/Neutral), <b>Strength</b> = direction-agnostic signal power, "
+            f"<b>Δ (%)</b> = selected-timeframe closed-candle move, <b>Setup Confirm</b> = market decision class, "
+            f"<b>Direction</b> = technical side, <b>Strength</b> = direction-agnostic signal power, "
             f"<b>AI Ensemble (x/3)</b> = model vote agreement, <b>Tech vs AI Alignment</b> = technical+AI alignment."
             f"</div>",
             unsafe_allow_html=True,
@@ -253,7 +327,7 @@ def render(ctx: dict) -> None:
             unsafe_allow_html=True,
         )
 
-        if signal_dir == "LONG":
+        if signal_dir == "UPSIDE":
             plan_status = "Bullish"
             plan_color = POSITIVE
             plan_lines = (
@@ -262,7 +336,7 @@ def render(ctx: dict) -> None:
                 f"3) <b>Take Profit Zone</b> ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}): take partial profit at lower edge, trail the rest.<br>"
                 f"4) <b>Exit If Broken</b> ({_fmt_price(invalidation_level)}): close the spot plan if candle closes below."
             )
-        elif signal_dir == "SHORT":
+        elif signal_dir == "DOWNSIDE":
             plan_status = "Defensive"
             plan_color = NEGATIVE
             plan_lines = (
