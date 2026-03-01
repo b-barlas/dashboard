@@ -706,6 +706,7 @@ def render(ctx: dict) -> None:
         # 4h / 1d (and any slower fallback)
         return 1.70, 22.0, 60.0
 
+    CACHE_TTL_MINUTES = 15
     gate_min_rr, gate_min_adx, gate_min_strength = _scalp_gate_thresholds(timeframe)
 
     STABLE_BASES = {
@@ -1142,11 +1143,13 @@ def render(ctx: dict) -> None:
         if col == "Δ (%)":
             if not txt:
                 return ""
+            delta_note = str(row.get("__delta_note", "")).strip()
+            title_attr = f" title='{html.escape(delta_note, quote=True)}'" if delta_note else ""
             if txt.startswith("▲"):
-                return f"<span class='mk-delta mk-pos-t'>{html.escape(txt)}</span>"
+                return f"<span class='mk-delta mk-pos-t'{title_attr}>{html.escape(txt)}</span>"
             if txt.startswith("▼"):
-                return f"<span class='mk-delta mk-neg-t'>{html.escape(txt)}</span>"
-            return f"<span class='mk-delta mk-muted-t'>{html.escape(txt)}</span>"
+                return f"<span class='mk-delta mk-neg-t'{title_attr}>{html.escape(txt)}</span>"
+            return f"<span class='mk-delta mk-muted-t'{title_attr}>{html.escape(txt)}</span>"
         if col == "Price ($)":
             if not txt:
                 return ""
@@ -1579,6 +1582,7 @@ def render(ctx: dict) -> None:
                 # Delta source of truth: selected-timeframe closed candles.
                 # This keeps table delta aligned with Direction/Strength calculations.
                 price_change = None
+                delta_note = "Source: selected-timeframe closed candles."
                 try:
                     prev_close = float(df_eval["close"].iloc[-2])
                     last_closed = float(df_eval["close"].iloc[-1])
@@ -1593,6 +1597,8 @@ def render(ctx: dict) -> None:
                         # Protect shared exchange ticker fallback under the same lock.
                         with fetch_lock:
                             price_change = get_price_change(sym)
+                        if price_change is not None:
+                            delta_note = "Fallback source: ticker percentage (closed-candle delta unavailable)."
                     except Exception as e:
                         _debug(f"Ticker delta fallback failed for {sym} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
                         price_change = None
@@ -1782,6 +1788,7 @@ def render(ctx: dict) -> None:
                     '__pair': sym,
                     'Price ($)': _fmt_price(price),
                     'Δ (%)': format_delta(price_change) if price_change is not None else '',
+                    '__delta_note': delta_note if price_change is not None else "",
                     'Setup Confirm': _setup_confirm_display(action),
                     '__action_raw': action,
                     '__action_reason': action_reason_code,
@@ -1883,14 +1890,34 @@ def render(ctx: dict) -> None:
                 if prev_results and same_sig_cache:
                     # Only fallback to cache for the exact same scan signature.
                     ts = st.session_state.get("market_scan_cache_ts", "unknown time")
-                    results = prev_results
-                    source_label = f"CACHED ({ts})"
-                    st.session_state["market_scan_source"] = source_label
-                    st.session_state["market_data_mode"] = data_mode
-                    st.warning(
-                        f"Live scan returned no rows. Showing last successful snapshot from {ts} "
-                        f"for the same timeframe/filter. Do not execute directly from cache-only view."
-                    )
+                    ts_parsed = pd.to_datetime(ts, utc=True, errors="coerce")
+                    is_fresh_cache = False
+                    if pd.notna(ts_parsed):
+                        try:
+                            age_minutes = (
+                                pd.Timestamp.now(tz="UTC") - ts_parsed
+                            ).total_seconds() / 60.0
+                            is_fresh_cache = age_minutes <= float(CACHE_TTL_MINUTES)
+                        except Exception:
+                            is_fresh_cache = False
+                    if is_fresh_cache:
+                        results = prev_results
+                        source_label = f"CACHED ({ts})"
+                        st.session_state["market_scan_source"] = source_label
+                        st.session_state["market_data_mode"] = data_mode
+                        st.warning(
+                            f"Live scan returned no rows. Showing last successful snapshot from {ts} "
+                            f"for the same timeframe/filter. Do not execute directly from cache-only view."
+                        )
+                    else:
+                        results = []
+                        source_label = "LIVE"
+                        st.session_state["market_scan_source"] = source_label
+                        st.session_state["market_data_mode"] = data_mode
+                        st.warning(
+                            f"Live scan returned no rows and cache is older than {CACHE_TTL_MINUTES} minutes. "
+                            "Stale snapshot was not used."
+                        )
                 else:
                     # Do not leak stale cache across timeframe/filter changes.
                     results = []
@@ -1931,34 +1958,12 @@ def render(ctx: dict) -> None:
             f"<summary style='color:{ACCENT};'>"
             f"How to read quickly (?)</summary>"
             f"<div class='market-details-body' style='color:{TEXT_MUTED};'>"
-            f"<b>Decision order (use this sequence):</b> "
-            f"<b>Setup Confirm</b> → <b>Direction + Strength</b> → <b>AI Ensemble + Tech vs AI Alignment</b> "
-            f"<br><br>"
-            f"<b>Scan modes:</b> default is Top N market scan. "
-            f"If you enter symbols in <b>Custom Coins</b> (max 10) and click <b>Run Scan</b>, "
-            f"the table scans only that watchlist and Top N is disabled until custom mode is cleared.<br><br>"
-            f"<b>1) Setup Confirm = final confirmation class</b><br>"
-            f"• <b>TREND+AI</b>: strongest class, trend and AI both confirm.<br>"
-            f"• <b>TREND-led</b>: trend leads, AI works as guardrail.<br>"
-            f"• <b>AI-led</b>: AI leads, trend works as guardrail.<br>"
-            f"• <b>WATCH</b>: setup is close, confirmation is not complete.<br>"
-            f"• <b>SKIP</b>: no clear edge now.<br>"
-            f"Hover Setup Confirm badge to see the exact reason code translated to plain text.<br><br>"
-            f"<b>2) Direction + Strength = side + quality</b><br>"
-            f"<b>Direction</b> tells side (Upside/Downside/Neutral). "
-            f"<b>Strength</b> is a 0-100 power score from technical bias (shown as WEAK/MIXED/GOOD/STRONG).<br><br>"
-            f"<b>3) AI + Alignment = confirmation quality</b><br>"
-            f"<b>AI Ensemble</b> shows model direction plus a 3-dot agreement meter (filled dots = stronger model agreement). "
-            f"<b>Tech vs AI Alignment</b> shows if technical and AI views support each other.<br><br>"
-            f"<b>4) Scalp Opportunity = single execution gate (separate from Setup Confirm)</b><br>"
-            f"It appears only when one unified gate passes: "
-            f"Direction match, no CONFLICT, valid Entry/Stop/Target, and timeframe-adaptive thresholds.<br>"
-            f"Thresholds: <b>5m/15m → R:R ≥ 1.30, ADX ≥ 18, Strength ≥ 52</b>; "
-            f"<b>1h → R:R ≥ 1.40, ADX ≥ 18, Strength ≥ 52</b>; "
-            f"<b>4h/1d → R:R ≥ 1.70, ADX ≥ 22, Strength ≥ 60</b>.<br>"
-            f"If Scalp Opportunity is empty, do not force a scalp execution.<br><br>"
-            f"<b>5) Advanced columns explain indicator context on this page</b><br>"
-            f"You do not need to open Analysis Guide for basic meaning; hover cells for extra detail."
+            f"<b>Decision sequence:</b> <b>Setup Confirm</b> → <b>Direction + Strength</b> → "
+            f"<b>AI Ensemble + Tech vs AI Alignment</b>.<br><br>"
+            f"<b>Setup Confirm classes:</b> TREND+AI (strongest), TREND-led, AI-led, WATCH, SKIP.<br>"
+            f"<b>AI Ensemble:</b> direction + 3-dot agreement meter (more filled dots = stronger model agreement).<br>"
+            f"<b>Scalp Opportunity:</b> separate execution gate; shown only when direction/levels/quality thresholds all pass.<br><br>"
+            f"<b>Scan mode:</b> default Top N market scan. Custom Coins (max 10) scans only your watchlist until cleared."
             f"</div></details>",
             unsafe_allow_html=True,
         )
@@ -2063,7 +2068,8 @@ def render(ctx: dict) -> None:
                     best_ai = str(best_row.get("AI Ensemble", "")).strip()
                     best_action_compact = _setup_confirm_compact(best_action)
                     best_scalp_sub = (
-                        f"{best_action_compact} • {best_direction} • {best_strength} • AI {best_ai}"
+                        f"Setup: {best_action_compact} • Direction: {best_direction} • "
+                        f"Strength: {best_strength} • Ensemble: {best_ai}"
                     )
 
         strength_coin = "—"
@@ -2077,15 +2083,15 @@ def render(ctx: dict) -> None:
                 strength_coin = str(row.get("Coin", "—"))
                 strength_val_head = float(row.get("__strength_val", 0.0))
                 strength_sub = (
-                    f"Direction {row.get('Direction', '')} • "
-                    f"AI {row.get('AI Ensemble', '')}"
+                    f"Direction: {row.get('Direction', '')} • "
+                    f"Ensemble: {row.get('AI Ensemble', '')}"
                 )
         strength_head = strength_coin if strength_val_head is None else f"{strength_coin} ({strength_val_head:.0f}%)"
 
         q1, q2, q3, q4 = st.columns(4, gap="small")
         with q1:
             status_head = "SETUP READY" if enter_count > 0 else "NO SETUP READY"
-            status_sub = f"READY {enter_count} • WATCH {watch_count} • SKIP {skip_count}"
+            status_sub = f"READY: {enter_count} • WATCH: {watch_count} • SKIP: {skip_count}"
             st.markdown(
                 "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
                 "<div class='elite-label'>Execution Status</div>"
@@ -2097,9 +2103,9 @@ def render(ctx: dict) -> None:
         with q2:
             enter_mix_head = "NO READY CLASS" if enter_count == 0 else "CLASS BREAKDOWN"
             enter_mix_sub = (
-                f"Trend+AI {trend_ai_enter_count} • "
-                f"Trend-led {trend_led_enter_count} • "
-                f"AI-led {ai_led_enter_count}"
+                f"Trend+AI: {trend_ai_enter_count} • "
+                f"Trend-led: {trend_led_enter_count} • "
+                f"AI-led: {ai_led_enter_count}"
             )
             st.markdown(
                 "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
