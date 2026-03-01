@@ -96,9 +96,9 @@ Scanner input modes:
 - Selected timeframe controls candle context used for Direction/Strength, levels, and Delta
 
 Setup Confirm classes (final confirmation class):
-- CONFIRMED (Trend+AI): strongest class (trend and AI align)
-- CONFIRMED (Trend-Led): trend leads; AI works as guardrail
-- CONFIRMED (AI-Led): AI leads; trend works as guardrail
+- TREND+AI: strongest class (trend and AI align)
+- TREND-led: trend leads; AI works as guardrail
+- AI-led: AI leads; trend works as guardrail
 - WATCH: setup exists but confirmation incomplete
 - SKIP: no direction, conflict, or weak edge
 

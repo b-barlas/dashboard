@@ -11,7 +11,6 @@ from core.market_decision import (
     action_decision_with_reason,
     action_rank,
     action_reason_text,
-    compact_action_label,
     normalize_action_class,
     structure_state,
 )
@@ -798,20 +797,39 @@ def render(ctx: dict) -> None:
     def _setup_confirm_display(raw_action: str) -> str:
         cls = normalize_action_class(raw_action)
         if cls == "ENTER_TREND_AI":
-            return "✅ CONFIRMED (Trend+AI)"
+            return "TREND+AI"
         if cls == "ENTER_TREND_LED":
-            return "🟡 CONFIRMED (Trend-Led)"
+            return "TREND-led"
         if cls == "ENTER_AI_LED":
-            return "🟡 CONFIRMED (AI-Led)"
+            return "AI-led"
         if cls == "WATCH":
-            return "⌛ WATCH"
+            return "WATCH"
         if cls == "SKIP":
-            return "⛔ SKIP"
+            return "SKIP"
         return str(raw_action or "").strip()
 
     def _setup_confirm_compact(raw_action: str) -> str:
-        compact = compact_action_label(raw_action)
-        return compact.replace("ENTER", "CONF")
+        return _setup_confirm_display(raw_action)
+
+    def _setup_confirm_class(value: str) -> str:
+        s = str(value or "").strip().upper()
+        if "TREND+AI" in s:
+            return "ENTER_TREND_AI"
+        if s == "TREND" or s == "TREND-LED" or "TREND-LED" in s:
+            return "ENTER_TREND_LED"
+        if s == "AI" or s == "AI-LED" or "AI-LED" in s:
+            return "ENTER_AI_LED"
+        return normalize_action_class(s)
+
+    def _setup_confirm_rank(value: str) -> int:
+        cls = _setup_confirm_class(value)
+        if cls.startswith("ENTER_"):
+            return 3
+        if cls == "WATCH":
+            return 2
+        if cls == "SKIP":
+            return 1
+        return 0
 
     def _tone_for_text(text: str, *, neutral_tone: str = "muted") -> str:
         s = str(text).strip().upper()
@@ -835,7 +853,7 @@ def render(ctx: dict) -> None:
         if any(
             k in s
             for k in [
-                "ENTER", "CONFIRMED", "UPSIDE", "ALIGNED", "GOOD", "STRONG", "VERY STRONG", "EXTREME",
+                "ENTER", "UPSIDE", "ALIGNED", "GOOD", "STRONG", "VERY STRONG", "EXTREME",
                 "ABOVE", "BULLISH", "OVERSOLD", "NEAR BOTTOM",
             ]
         ):
@@ -867,9 +885,12 @@ def render(ctx: dict) -> None:
             return "muted"
 
         if col == "Setup Confirm":
-            if "ENTER" in s or "CONFIRMED" in s:
+            cls = _setup_confirm_class(s)
+            if cls in {"ENTER_TREND_AI", "ENTER_TREND_LED", "ENTER_AI_LED"}:
                 return "pos"
-            if "SKIP" in s:
+            if cls == "WATCH":
+                return "warn"
+            if cls == "SKIP":
                 return "neg"
             return "warn"
 
@@ -1024,12 +1045,20 @@ def render(ctx: dict) -> None:
             if col == "Setup Confirm":
                 reason_code = str(row.get("__action_reason", "")).strip()
                 reason_text = action_reason_text(reason_code)
-                title_txt = txt if not reason_text else f"{txt} | Reason: {reason_text}"
+                raw_action = str(row.get("__action_raw", txt))
+                display_txt = _setup_confirm_compact(raw_action)
+                sc_cls = _setup_confirm_class(raw_action or txt)
+                extra_cls = "mk-chip-action"
+                if sc_cls == "ENTER_TREND_LED":
+                    extra_cls += " mk-sc-trend-led"
+                elif sc_cls == "ENTER_AI_LED":
+                    extra_cls += " mk-sc-ai-led"
+                title_txt = display_txt if not reason_text else f"{display_txt} | Reason: {reason_text}"
                 return _chip(
-                    _setup_confirm_compact(str(row.get("__action_raw", txt))),
-                    _tone_for_col(col, txt),
+                    display_txt,
+                    _tone_for_col(col, raw_action or txt),
                     title=title_txt,
-                    extra_class="mk-chip-action",
+                    extra_class=extra_cls,
                 )
             if col == "Direction":
                 direction_note = str(row.get("__direction_note", "")).strip()
@@ -1052,7 +1081,33 @@ def render(ctx: dict) -> None:
         if col == "AI Ensemble":
             t = _tone_for_col(col, txt)
             ai_note = str(row.get("__ai_note", "")).strip()
-            return _chip(txt, t, title=ai_note or None)
+            base_txt = re.sub(r"\s*\(\s*\d+\s*/\s*3\s*\)\s*$", "", txt).strip() or txt
+            votes = row.get("__ai_votes")
+            try:
+                votes_n = int(votes)
+            except Exception:
+                m = re.search(r"\((\d)\s*/\s*3\)", txt)
+                votes_n = int(m.group(1)) if m else 0
+            votes_n = max(0, min(3, votes_n))
+            tone_map = {
+                "pos": "mk-pos",
+                "neg": "mk-neg",
+                "warn": "mk-warn",
+                "muted": "mk-muted",
+                "info": "mk-info",
+            }
+            tone_cls = tone_map.get(t, "mk-muted")
+            title_attr = f" title='{html.escape(ai_note)}'" if ai_note else ""
+            dots_html = "".join(
+                f"<span class='mk-ai-dot{' is-filled' if i < votes_n else ''}'></span>"
+                for i in range(3)
+            )
+            return (
+                f"<span class='mk-chip {tone_cls} mk-chip-ai'{title_attr}>"
+                f"<span class='mk-ai-text'>{html.escape(base_txt)}</span>"
+                f"<span class='mk-ai-dots'>{dots_html}</span>"
+                f"</span>"
+            )
         if col == "Spike Alert":
             if not txt:
                 return ""
@@ -1281,6 +1336,43 @@ def render(ctx: dict) -> None:
               padding:2px 6px;
               letter-spacing:0.1px;
               gap:4px;
+            }}
+            .mk-chip-ai {{
+              gap:8px;
+              min-height:26px;
+              padding:2px 8px;
+            }}
+            .mk-ai-text {{
+              line-height:1.15;
+            }}
+            .mk-ai-dots {{
+              display:inline-flex;
+              align-items:center;
+              gap:3px;
+              min-height:12px;
+            }}
+            .mk-ai-dot {{
+              width:8px;
+              height:8px;
+              border-radius:999px;
+              border:1px solid currentColor;
+              background:transparent;
+              opacity:0.55;
+              flex:0 0 8px;
+            }}
+            .mk-ai-dot.is-filled {{
+              background:currentColor;
+              opacity:1;
+            }}
+            .mk-sc-trend-led {{
+              color:#38BDF8 !important;
+              border-color:rgba(56,189,248,0.52) !important;
+              background:rgba(56,189,248,0.12) !important;
+            }}
+            .mk-sc-ai-led {{
+              color:#22D3EE !important;
+              border-color:rgba(34,211,238,0.52) !important;
+              background:rgba(34,211,238,0.12) !important;
             }}
             .mk-pos {{ color:{POSITIVE}; border-color:rgba(0,255,136,0.42); background:rgba(0,255,136,0.10); }}
             .mk-neg {{ color:{NEGATIVE}; border-color:rgba(255,51,102,0.44); background:rgba(255,51,102,0.10); }}
@@ -1698,6 +1790,7 @@ def render(ctx: dict) -> None:
                     'Strength': _strength_badge(float(bias_score_v)),
                     '__strength_note': strength_note,
                     'AI Ensemble': ai_display,
+                    '__ai_votes': consensus_votes,
                     '__ai_note': ai_note,
                     'Tech vs AI Alignment': conviction,
                     '__alignment_note': align_note,
@@ -1840,14 +1933,14 @@ def render(ctx: dict) -> None:
             f"<div class='market-details-body' style='color:{TEXT_MUTED};'>"
             f"<b>Decision order (use this sequence):</b> "
             f"<b>Setup Confirm</b> → <b>Direction + Strength</b> → <b>AI Ensemble + Tech vs AI Alignment</b> "
-            f"→ <b>Scalp Opportunity + R:R + levels</b>.<br><br>"
+            f"<br><br>"
             f"<b>Scan modes:</b> default is Top N market scan. "
             f"If you enter symbols in <b>Custom Coins</b> (max 10) and click <b>Run Scan</b>, "
             f"the table scans only that watchlist and Top N is disabled until custom mode is cleared.<br><br>"
             f"<b>1) Setup Confirm = final confirmation class</b><br>"
-            f"• <b>CONFIRMED (Trend+AI)</b>: strongest class, trend and AI both confirm.<br>"
-            f"• <b>CONFIRMED (Trend-Led)</b>: trend leads, AI works as guardrail.<br>"
-            f"• <b>CONFIRMED (AI-Led)</b>: AI leads, trend works as guardrail.<br>"
+            f"• <b>TREND+AI</b>: strongest class, trend and AI both confirm.<br>"
+            f"• <b>TREND-led</b>: trend leads, AI works as guardrail.<br>"
+            f"• <b>AI-led</b>: AI leads, trend works as guardrail.<br>"
             f"• <b>WATCH</b>: setup is close, confirmation is not complete.<br>"
             f"• <b>SKIP</b>: no clear edge now.<br>"
             f"Hover Setup Confirm badge to see the exact reason code translated to plain text.<br><br>"
@@ -1855,7 +1948,7 @@ def render(ctx: dict) -> None:
             f"<b>Direction</b> tells side (Upside/Downside/Neutral). "
             f"<b>Strength</b> is a 0-100 power score from technical bias (shown as WEAK/MIXED/GOOD/STRONG).<br><br>"
             f"<b>3) AI + Alignment = confirmation quality</b><br>"
-            f"<b>AI Ensemble</b> shows model vote support (x/3). "
+            f"<b>AI Ensemble</b> shows model direction plus a 3-dot agreement meter (filled dots = stronger model agreement). "
             f"<b>Tech vs AI Alignment</b> shows if technical and AI views support each other.<br><br>"
             f"<b>4) Scalp Opportunity = single execution gate (separate from Setup Confirm)</b><br>"
             f"It appears only when one unified gate passes: "
@@ -1881,7 +1974,7 @@ def render(ctx: dict) -> None:
             "Calculated from Direction + Strength + AI Ensemble + Alignment + ADX regime checks.<br>"
             "<b>Direction</b>: side from technical signal mapping (Upside / Downside / Neutral).<br>"
             "<b>Strength</b>: technical signal power (0-100), derived from bias distance to neutral midpoint (50).<br>"
-            "<b>AI Ensemble</b>: 3-model vote summary shown as side + support count (x/3).<br>"
+            "<b>AI Ensemble</b>: side label plus 3-dot model-agreement meter (filled dots = stronger agreement).<br>"
             "<b>Tech vs AI Alignment</b>: confirmation quality between technical side and AI side (HIGH/MEDIUM/TREND/WEAK/CONFLICT).<br>"
             "<b>R:R</b>: reward-to-risk ratio from target distance vs stop distance.<br>"
             "<b>Entry Price</b>: model entry level (close/EMA5 with ATR buffer).<br>"
@@ -1928,12 +2021,8 @@ def render(ctx: dict) -> None:
         if "__action_raw" in df_results.columns:
             action_series = df_results["__action_raw"].astype(str)
         else:
-            action_series = (
-                df_results.get("Setup Confirm", pd.Series(dtype=str))
-                .astype(str)
-                .str.replace("CONFIRMED", "ENTER", regex=False)
-            )
-        action_class_series = action_series.apply(normalize_action_class)
+            action_series = df_results.get("Setup Confirm", pd.Series(dtype=str)).astype(str)
+        action_class_series = action_series.apply(_setup_confirm_class)
         enter_count = int(action_class_series.str.startswith("ENTER_").sum())
         watch_count = int((action_class_series == "WATCH").sum())
         skip_count = int((action_class_series == "SKIP").sum())
@@ -1959,8 +2048,7 @@ def render(ctx: dict) -> None:
                 scoped["__action_rank"] = (
                     scoped.get("__action_raw", scoped.get("Setup Confirm", pd.Series(dtype=str)))
                     .astype(str)
-                    .str.replace("CONFIRMED", "ENTER", regex=False)
-                    .apply(action_rank)
+                    .apply(_setup_confirm_rank)
                 )
                 scoped = scoped.dropna(subset=["__rr"])
                 scoped = scoped[scoped["__rr"] > 0]
@@ -1996,8 +2084,8 @@ def render(ctx: dict) -> None:
 
         q1, q2, q3, q4 = st.columns(4, gap="small")
         with q1:
-            status_head = "CONFIRMED READY" if enter_count > 0 else "NO CONFIRMED NOW"
-            status_sub = f"CONFIRMED {enter_count} • WATCH {watch_count} • SKIP {skip_count}"
+            status_head = "SETUP READY" if enter_count > 0 else "NO SETUP READY"
+            status_sub = f"READY {enter_count} • WATCH {watch_count} • SKIP {skip_count}"
             st.markdown(
                 "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
                 "<div class='elite-label'>Execution Status</div>"
@@ -2007,15 +2095,15 @@ def render(ctx: dict) -> None:
                 unsafe_allow_html=True,
             )
         with q2:
-            enter_mix_head = "NO CONFIRMED CLASS" if enter_count == 0 else "CLASS BREAKDOWN"
+            enter_mix_head = "NO READY CLASS" if enter_count == 0 else "CLASS BREAKDOWN"
             enter_mix_sub = (
                 f"Trend+AI {trend_ai_enter_count} • "
-                f"Trend-Led {trend_led_enter_count} • "
-                f"AI-Led {ai_led_enter_count}"
+                f"Trend-led {trend_led_enter_count} • "
+                f"AI-led {ai_led_enter_count}"
             )
             st.markdown(
                 "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                "<div class='elite-label'>Confirmed Class Mix</div>"
+                "<div class='elite-label'>Setup Class Mix</div>"
                 f"<div class='scan-kpi-value'>{enter_mix_head}</div>"
                 f"<div class='scan-kpi-sub'>{enter_mix_sub}</div>"
                 "</div>",
