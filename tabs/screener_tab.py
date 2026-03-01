@@ -21,6 +21,24 @@ def render(ctx: dict) -> None:
     analyse = get_ctx(ctx, "analyse")
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     get_top_volume_usdt_symbols = get_ctx(ctx, "get_top_volume_usdt_symbols")
+
+    signal_display_to_raw = {
+        "Strong Upside": "STRONG BUY",
+        "Upside": "BUY",
+        "Wait": "WAIT",
+        "Downside": "SELL",
+        "Strong Downside": "STRONG SELL",
+    }
+    signal_raw_to_display = {v: k for k, v in signal_display_to_raw.items()}
+
+    def _ai_display(v: str) -> str:
+        s = str(v or "").strip().upper()
+        if s in {"LONG", "UPSIDE", "BUY"}:
+            return "Upside"
+        if s in {"SHORT", "DOWNSIDE", "SELL"}:
+            return "Downside"
+        return "Neutral"
+
     """Advanced multi-condition screener."""
     st.markdown(
         f"""
@@ -66,23 +84,45 @@ def render(ctx: dict) -> None:
         f"Use it to shortlist candidates before deep validation in Spot/Position/Fibonacci.</p>"
         f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
         f"<b>Filters:</b> "
-        f"{_tip('Min Strength', 'Direction-agnostic signal strength. High values can come from strong LONG or strong SHORT regimes.')} | "
-        f"{_tip('Signal Filter', 'Choose which signal types to display: STRONG BUY, BUY, SELL, etc.')} | "
+        f"{_tip('Min Strength', 'Direction-agnostic signal strength. High values can come from strong Upside or strong Downside regimes.')} | "
+        f"{_tip('Signal Filter', 'Choose which signal types to display: Strong Upside, Upside, Downside, etc.')} | "
         f"{_tip('Min ADX', 'Minimum trend strength. ADX above 20 means a trending market. 25+ is a strong trend.')} | "
         f"{_tip('RSI Range', 'Sets the RSI range. 30-70 is neutral, below 30 is oversold, above 70 is overbought.')} | "
         f"{_tip('Volume Spike Only', 'When checked, only coins showing abnormal volume increases are listed.')} | "
-        f"{_tip('AI Agree', 'Directional model agreement inside Ensemble AI (x/3 for final LONG/SHORT direction). NEUTRAL consensus does not count as directional agreement.')} </p>"
+        f"{_tip('AI Agree', 'Directional model agreement inside Ensemble AI (x/3 for final Upside/Downside direction). Neutral consensus does not count as directional agreement.')} </p>"
         f"</div>",
         unsafe_allow_html=True,
     )
+
+    signal_options = ["Strong Upside", "Upside", "Wait", "Downside", "Strong Downside"]
+    legacy_signal_map = {
+        "STRONG BUY": "Strong Upside",
+        "BUY": "Upside",
+        "WAIT": "Wait",
+        "SELL": "Downside",
+        "STRONG SELL": "Strong Downside",
+    }
+    existing_signal_state = st.session_state.get("scr_signal")
+    if isinstance(existing_signal_state, list):
+        mapped = [
+            legacy_signal_map.get(str(v).upper(), str(v))
+            for v in existing_signal_state
+        ]
+        mapped = [v for v in mapped if v in signal_options]
+        st.session_state["scr_signal"] = mapped or ["Strong Upside", "Upside"]
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         scr_tf = st.selectbox("Timeframe", ['5m', '15m', '1h', '4h', '1d'], index=2, key="scr_tf")
         min_strength = st.slider("Min Strength %", 0, 100, 55, key="scr_strength")
     with col2:
-        signal_filter = st.multiselect("Signal Filter", ['STRONG BUY', 'BUY', 'WAIT', 'SELL', 'STRONG SELL'],
-                                        default=['STRONG BUY', 'BUY'], key="scr_signal")
+        signal_filter_display = st.multiselect(
+            "Signal Filter",
+            signal_options,
+            default=["Strong Upside", "Upside"],
+            key="scr_signal",
+        )
+        signal_filter_raw = [signal_display_to_raw[s] for s in signal_filter_display if s in signal_display_to_raw]
         min_adx = st.slider("Min ADX", 0, 80, 20, key="scr_adx")
     with col3:
         rsi_range = st.slider("RSI Range", 0, 100, (20, 80), key="scr_rsi")
@@ -129,7 +169,7 @@ def render(ctx: dict) -> None:
                     strength = float(strength_from_bias(bias))
                     if strength < min_strength:
                         return True, None
-                    if signal_filter and a.signal not in signal_filter:
+                    if signal_filter_raw and a.signal not in signal_filter_raw:
                         return True, None
                     if not np.isnan(a.adx) and a.adx < min_adx:
                         return True, None
@@ -168,9 +208,9 @@ def render(ctx: dict) -> None:
                     row = {
                         "Symbol": sym.split("/")[0],
                         "Price": float(df_eval["close"].iloc[-1]),
-                        "Signal": a.signal,
+                        "Signal": signal_raw_to_display.get(str(a.signal), str(a.signal)),
                         "Strength": strength,
-                        "AI Ensemble": ai_dir,
+                        "AI Ensemble": _ai_display(ai_dir),
                         "AI Agree": f"{ai_votes}/3",
                         "RSI": round(float(rsi_val), 1),
                         "ADX": round(float(a.adx), 1) if not np.isnan(a.adx) else 0.0,
@@ -214,8 +254,8 @@ def render(ctx: dict) -> None:
             buy_sell = df_results["Signal"].astype(str).str.upper()
             ai_side = df_results["AI Ensemble"].astype(str).str.upper()
             aligned_mask = (
-                ((buy_sell.isin(["STRONG BUY", "BUY"])) & (ai_side == "LONG"))
-                | ((buy_sell.isin(["STRONG SELL", "SELL"])) & (ai_side == "SHORT"))
+                ((buy_sell.isin(["STRONG UPSIDE", "UPSIDE", "STRONG BUY", "BUY"])) & (ai_side.isin(["UPSIDE", "LONG"])))
+                | ((buy_sell.isin(["STRONG DOWNSIDE", "DOWNSIDE", "STRONG SELL", "SELL"])) & (ai_side.isin(["DOWNSIDE", "SHORT"])))
             )
             aligned_share = float(aligned_mask.mean() * 100.0) if len(df_results) else 0.0
             avg_strength = float(df_results["Strength"].mean()) if len(df_results) else 0.0
@@ -273,9 +313,9 @@ def render(ctx: dict) -> None:
                 f"<details style='margin-bottom:0.8rem;'>"
                 f"<summary style='color:{ACCENT}; cursor:pointer;'>Column Guide</summary>"
                 f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:0.5rem;'>"
-                f"<b>Signal</b>: technical engine output (BUY/SELL/WAIT).<br>"
+                f"<b>Signal</b>: technical engine output (Strong Upside/Upside/Wait/Downside/Strong Downside).<br>"
                 f"<b>Strength</b>: direction-agnostic signal power from directional bias (0-100).<br>"
-                f"<b>AI Ensemble</b>: 3-model combined direction.<br>"
+                f"<b>AI Ensemble</b>: 3-model combined direction (Upside/Downside/Neutral).<br>"
                 f"<b>AI Agree</b>: directional vote agreement inside the ensemble (x/3).<br>"
                 f"<b>Volume Spike</b>: latest volume anomaly label (Up/Down/Neutral spike, with ratio).<br>"
                 f"<b>RSI</b>: momentum location in the 0-100 range."
@@ -288,16 +328,18 @@ def render(ctx: dict) -> None:
             df_show["Strength"] = df_show["Strength"].map(lambda x: f"{x:.0f}%")
 
             def _sig_style(v: str) -> str:
-                if v in {"STRONG BUY", "BUY"}:
+                s = str(v or "").strip().upper()
+                if s in {"STRONG UPSIDE", "UPSIDE", "STRONG BUY", "BUY"}:
                     return f"color:{POSITIVE}; font-weight:700;"
-                if v in {"STRONG SELL", "SELL"}:
+                if s in {"STRONG DOWNSIDE", "DOWNSIDE", "STRONG SELL", "SELL"}:
                     return f"color:{NEGATIVE}; font-weight:700;"
                 return f"color:{WARNING}; font-weight:700;"
 
             def _ai_style(v: str) -> str:
-                if v == "LONG":
+                s = str(v or "").strip().upper()
+                if s in {"UPSIDE", "LONG"}:
                     return f"color:{POSITIVE}; font-weight:700;"
-                if v == "SHORT":
+                if s in {"DOWNSIDE", "SHORT"}:
                     return f"color:{NEGATIVE}; font-weight:700;"
                 return f"color:{WARNING}; font-weight:700;"
 

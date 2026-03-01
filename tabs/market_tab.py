@@ -994,7 +994,7 @@ def render(ctx: dict) -> None:
                 return "neg"
             if s.startswith("→") or s.startswith("-"):
                 return "warn"
-            # Fallback safety for legacy rows without arrow prefixes.
+            # Compatibility fallback when arrow prefixes are missing.
             if "BULLISH" in s:
                 return "pos"
             if "BEARISH" in s:

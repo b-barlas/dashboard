@@ -25,7 +25,7 @@ def render(ctx: dict) -> None:
         f"{_tip('Take Profit', 'Price where you exit on profit.')}, "
         f"{_tip('Margin Used', 'Cash allocated to this position.')}, and "
         f"{_tip('Leverage', 'Position multiplier. Notional = margin x leverage.')}. "
-        f"PnL includes optional {_tip('Funding Rate (%)', 'Positive funding: LONG pays SHORT. Negative funding: SHORT pays LONG.')}. "
+        f"PnL includes optional {_tip('Funding Rate (%)', 'Positive funding: Upside side pays Downside side. Negative funding: Downside side pays Upside side.')}. "
         f"Trading fees are not included in this simplified model."
         f"</p></div>",
         unsafe_allow_html=True,
@@ -38,7 +38,8 @@ def render(ctx: dict) -> None:
         target = st.number_input("Take Profit ($)", min_value=0.0, value=105000.0, format="%.4f")
     with c2:
         margin = st.number_input("Margin Used ($)", min_value=0.0, value=1000.0, format="%.2f")
-        direction = st.selectbox("Direction", ["LONG", "SHORT"])
+        direction_ui = st.selectbox("Direction", ["Upside", "Downside"])
+        direction = "LONG" if direction_ui == "Upside" else "SHORT"
         leverage = st.selectbox("Main Leverage", [1, 2, 3, 5, 10, 15, 20, 25, 50, 100], index=4)
     with c3:
         funding_rate = st.number_input(
@@ -48,7 +49,7 @@ def render(ctx: dict) -> None:
             value=0.00000,
             step=0.00001,
             format="%.5f",
-            help="Per funding period in decimal form (e.g. 0.00010 = 0.01%). Positive: LONG pays, SHORT receives.",
+            help="Per funding period in decimal form (e.g. 0.00010 = 0.01%). Positive: Upside side pays, Downside side receives.",
         )
         funding_periods = st.number_input(
             "Funding Period Count",
@@ -73,10 +74,10 @@ def render(ctx: dict) -> None:
             st.error("Margin must be greater than 0.")
             return
         if direction == "LONG" and not (stop < entry < target):
-            st.error("For LONG, use: Stop < Entry < Target.")
+            st.error("For Upside setup, use: Stop < Entry < Target.")
             return
         if direction == "SHORT" and not (target < entry < stop):
-            st.error("For SHORT, use: Target < Entry < Stop.")
+            st.error("For Downside setup, use: Target < Entry < Stop.")
             return
 
         notional = margin * leverage

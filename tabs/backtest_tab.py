@@ -28,7 +28,7 @@ def render(ctx: dict) -> None:
         f"<ul style='color:{TEXT_MUTED}; font-size:0.88rem; line-height:1.7; margin-top:0.5rem;'>"
         "<li>The engine slides a window through historical candles and runs the <b>full technical analysis</b> "
         "(EMA, RSI, MACD, SuperTrend, Ichimoku, Bollinger, ADX, etc.) at each step.</li>"
-        "<li>When the <b>Signal</b> is LONG or SHORT <b>and</b> the <b>Strength Score</b> exceeds your threshold, "
+        "<li>When the <b>Signal</b> is Upside or Downside <b>and</b> the <b>Strength Score</b> exceeds your threshold, "
         "a simulated trade is opened at the closing price.</li>"
         "<li>The trade is automatically closed after <b>N candles</b> (your exit setting). "
         "Commission is deducted on both entry and exit.</li>"
@@ -160,7 +160,7 @@ def render(ctx: dict) -> None:
             suggested = int(max(35, min(85, round(p70 / 5) * 5)))
             st.info(
                 f"Diagnostics: {len(actionable_strengths)} actionable bars found "
-                f"(LONG {long_count}, SHORT {short_count}), but very few pass threshold {threshold}%. "
+                f"(Upside {long_count}, Downside {short_count}), but very few pass threshold {threshold}%. "
                 f"Suggested threshold: {suggested}%."
             )
             if suggested != threshold and st.button(
@@ -197,8 +197,8 @@ def render(ctx: dict) -> None:
                     avg_s = float(np.mean(bias_strengths))
                     p75_s = float(np.percentile(np.array(bias_strengths), 75))
                     st.info(
-                        "No actionable LONG/SHORT bars were produced by the full signal gate in this window. "
-                        f"Bias-only diagnostics: LONG candidates={bias_long}, SHORT candidates={bias_short}, "
+                        "No actionable Upside/Downside bars were produced by the full signal gate in this window. "
+                        f"Bias-only diagnostics: Upside candidates={bias_long}, Downside candidates={bias_short}, "
                         f"avg strength={avg_s:.1f}%, 75th percentile={p75_s:.1f}%."
                     )
                     st.caption(
@@ -206,9 +206,9 @@ def render(ctx: dict) -> None:
                         "Try lower timeframe, more candles, or a less selective market phase."
                     )
                 else:
-                    st.info("No actionable LONG/SHORT bars were produced in this window. Try lower timeframe or more candles.")
+                    st.info("No actionable Upside/Downside bars were produced in this window. Try lower timeframe or more candles.")
             else:
-                st.info("No actionable LONG/SHORT bars were produced in this window. Try lower timeframe or more candles.")
+                st.info("No actionable Upside/Downside bars were produced in this window. Try lower timeframe or more candles.")
             return
         return
 
@@ -343,6 +343,12 @@ def render(ctx: dict) -> None:
 
     st.markdown(f"<h3 style='color:{ACCENT}; margin-top:2rem;'>📜 Trade History</h3>", unsafe_allow_html=True)
     styled_df = result_df.copy()
+    if "Signal" in styled_df.columns:
+        styled_df["Signal"] = (
+            styled_df["Signal"]
+            .astype(str)
+            .replace({"LONG": "Upside", "SHORT": "Downside"})
+        )
     styled_df["Date"] = styled_df["Date"].dt.strftime("%Y-%m-%d %H:%M")
     styled_df["Entry"] = styled_df["Entry"].apply(lambda x: f"${x:,.4f}")
     styled_df["Exit"] = styled_df["Exit"].apply(lambda x: f"${x:,.4f}")
@@ -359,7 +365,7 @@ def render(ctx: dict) -> None:
         f"<details style='margin:0.35rem 0 0.45rem 0;'>"
         f"<summary style='color:{ACCENT}; cursor:pointer;'>Trade History Column Guide (?)</summary>"
         f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"{_tip('Signal', 'Direction opened by the model at that bar (LONG/SHORT).')} | "
+        f"{_tip('Signal', 'Direction opened by the model at that bar (Upside/Downside).')} | "
         f"{_tip('Strength', 'Signal power score at entry (0-100).')} | "
         f"{_tip('PnL (%)', 'Net trade return after commission and slippage assumptions.')} | "
         f"{_tip('Regime', 'Market state around the trade (TREND/RANGE/MIXED).')} | "
