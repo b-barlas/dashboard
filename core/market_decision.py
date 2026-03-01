@@ -21,6 +21,7 @@ ACTION_REASON_TEXT = {
     "ENTER_TREND_LED": "Trend leads and passes quality gates; AI is used as veto only.",
     "ENTER_AI_LED": "AI leads with strong agreement; trend is used as veto only.",
     "NEEDS_CONFIRMATION": "Direction exists, but confirmation is incomplete.",
+    "AI_UNAVAILABLE": "AI ensemble is unavailable; forcing WATCH until model context recovers.",
 }
 
 

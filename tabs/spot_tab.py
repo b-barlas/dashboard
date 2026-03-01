@@ -176,6 +176,7 @@ def render(ctx: dict) -> None:
         signal_dir_raw = signal_plain(signal)
         signal_dir = direction_key(signal_dir_raw)
         signal_clean = direction_label(signal_dir)
+        ai_decision_available = True
         try:
             _ai_prob_s, ai_dir_s, _ai_details_s = ml_ensemble_predict(df_eval)
             directional_agree = float((_ai_details_s or {}).get("agreement", 0.0))
@@ -186,10 +187,13 @@ def render(ctx: dict) -> None:
                 directional_agree,
                 consensus_agree,
             )
+            ai_status = str((_ai_details_s or {}).get("status") or "ok").strip().lower()
+            ai_decision_available = ai_status == "ok"
         except Exception:
             ai_dir_key = "NEUTRAL"
             ai_votes = 0
             decision_agreement = 0.0
+            ai_decision_available = False
 
         sig_dir_s = signal_dir if signal_dir in {"UPSIDE", "DOWNSIDE"} else "WAIT"
         conv_lbl_s, _conv_c_s = _calc_conviction(sig_dir_s, ai_dir_key, strength_score, decision_agreement)
@@ -202,6 +206,10 @@ def render(ctx: dict) -> None:
             decision_agreement,
             float(adx_val) if pd.notna(adx_val) else float("nan"),
         )
+        # Fail-safe: if AI context is unavailable, never promote to ENTER.
+        if (not ai_decision_available) and normalize_action_class(action_raw).startswith("ENTER_"):
+            action_raw = "WATCH"
+            action_reason_code = "AI_UNAVAILABLE"
 
         def _setup_confirm_display(raw_action: str) -> str:
             cls = normalize_action_class(raw_action)
@@ -341,7 +349,7 @@ def render(ctx: dict) -> None:
 
         st.markdown(
             f"<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:0.6rem; margin:0.25rem 0 0.55rem 0;'>"
-            f"<div class='elite-card'><div class='elite-label'>Current Price</div><div class='elite-value'>{_fmt_price(current_price)}</div></div>"
+            f"<div class='elite-card' title='Latest close of selected timeframe (not live tick).'><div class='elite-label'>Latest Candle Close</div><div class='elite-value'>{_fmt_price(current_price)}</div></div>"
             f"<div class='elite-card'><div class='elite-label'>Primary Accumulation Zone</div><div class='elite-value' style='font-size:1.6rem;'>{_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}</div></div>"
             f"<div class='elite-card'><div class='elite-label'>Breakout Entry</div><div class='elite-value'>{_fmt_price(breakout_trigger)}</div></div>"
             f"<div class='elite-card'><div class='elite-label'>Exit If Broken</div><div class='elite-value'>{_fmt_price(invalidation_level)}</div></div>"
@@ -365,13 +373,29 @@ def render(ctx: dict) -> None:
         elif setup_cls == "WATCH":
             plan_status = "Watch"
             plan_color = WARNING
-            plan_lines = (
-                f"1) <b>Setup Confirm is WATCH:</b> confirmation is partial; monitor, do not force entry.<br>"
-                f"2) <b>Primary trigger path:</b> reaction quality in Primary Accumulation Zone ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}).<br>"
-                f"3) <b>Momentum trigger path:</b> candle close above Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
-                f"4) <b>Risk discipline:</b> keep Exit If Broken at {_fmt_price(invalidation_level)} and pre-plan exits at "
-                f"{_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}."
-            )
+            if signal_dir == "UPSIDE":
+                plan_lines = (
+                    f"1) <b>Setup Confirm is WATCH:</b> confirmation is partial; monitor, do not force entry.<br>"
+                    f"2) <b>Primary trigger path:</b> reaction quality in Primary Accumulation Zone ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}).<br>"
+                    f"3) <b>Momentum trigger path:</b> candle close above Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
+                    f"4) <b>Risk discipline:</b> keep Exit If Broken at {_fmt_price(invalidation_level)} and pre-plan exits at "
+                    f"{_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}."
+                )
+            elif signal_dir == "DOWNSIDE":
+                plan_lines = (
+                    f"1) <b>Setup Confirm is WATCH with Downside direction:</b> avoid fresh spot buys until reclaim confirmation.<br>"
+                    f"2) <b>Reclaim trigger:</b> wait for a close back above Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
+                    f"3) <b>If already holding:</b> reduce risk into strength and respect Exit If Broken ({_fmt_price(invalidation_level)}).<br>"
+                    f"4) <b>Plan exits early:</b> keep Take Profit Zone ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}) prepared for recovery scenarios."
+                )
+            else:
+                plan_lines = (
+                    f"1) <b>Setup Confirm is WATCH with Neutral direction:</b> no-force zone until a side confirms.<br>"
+                    f"2) <b>Range decision levels:</b> monitor Primary Accumulation Zone ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}) "
+                    f"and Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
+                    f"3) <b>Execution only after side confirmation:</b> then map risk to Exit If Broken ({_fmt_price(invalidation_level)}).<br>"
+                    f"4) <b>Keep exits pre-defined:</b> Take Profit Zone ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)})."
+                )
         elif signal_dir == "UPSIDE":
             plan_status = "Bullish Confirmed"
             plan_color = POSITIVE
