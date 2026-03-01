@@ -39,6 +39,7 @@ from ui.helpers import (
     format_trend,
     leverage_badge,
     readable_market_cap,
+    direction_key,
     direction_label,
     signal_plain,
     sanitize_trading_terms,

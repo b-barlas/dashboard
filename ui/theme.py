@@ -139,20 +139,28 @@ def calc_conviction(
     ai_agreement: float = 0.0,
 ) -> tuple[str, str]:
     """Return alignment quality using Direction + AI agreement + strength."""
-    sdir = str(signal_dir or "").upper()
-    adir = str(ai_dir or "").upper()
+    def _dir_key(value: str) -> str:
+        s = str(value or "").strip().upper()
+        if s in {"UPSIDE", "LONG", "BUY", "BULLISH"}:
+            return "UPSIDE"
+        if s in {"DOWNSIDE", "SHORT", "SELL", "BEARISH"}:
+            return "DOWNSIDE"
+        return "NEUTRAL"
+
+    sdir = _dir_key(signal_dir)
+    adir = _dir_key(ai_dir)
     agree = max(0.0, min(1.0, float(ai_agreement)))
     s = float(strength)
 
-    if sdir not in {"LONG", "SHORT"}:
+    if sdir == "NEUTRAL":
         return "WEAK", TEXT_MUTED
-    if adir in {"LONG", "SHORT"} and sdir != adir:
+    if adir != "NEUTRAL" and sdir != adir:
         return "CONFLICT", NEGATIVE
     if adir == "NEUTRAL":
         if s >= 70:
             return "TREND", WARNING
         return "WEAK", TEXT_MUTED
-    if adir in {"LONG", "SHORT"} and sdir == adir:
+    if sdir == adir:
         if s >= 72 and agree >= 0.67:
             return "HIGH", POSITIVE
         if s >= 60 and agree >= 0.50:

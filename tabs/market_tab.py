@@ -3,10 +3,18 @@ from ui.ctx import get_ctx
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import html
 import re
+from threading import Lock
 
 import pandas as pd
 import plotly.graph_objs as go
-from core.market_decision import action_decision_with_reason, structure_state
+from core.market_decision import (
+    action_decision_with_reason,
+    action_rank,
+    action_reason_text,
+    compact_action_label,
+    normalize_action_class,
+    structure_state,
+)
 from core.signal_contract import strength_from_bias, strength_bucket
 from core.metric_catalog import (
     AI_LONG_THRESHOLD,
@@ -35,6 +43,7 @@ def render(ctx: dict) -> None:
     scalp_quality_gate = get_ctx(ctx, "scalp_quality_gate")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
     signal_plain = get_ctx(ctx, "signal_plain")
+    direction_key = get_ctx(ctx, "direction_key")
     direction_label = get_ctx(ctx, "direction_label")
     readable_market_cap = get_ctx(ctx, "readable_market_cap")
     format_delta = get_ctx(ctx, "format_delta")
@@ -62,7 +71,6 @@ def render(ctx: dict) -> None:
     btc_dom_raw = top_snapshot.get("btc_dom")
     eth_dom_raw = top_snapshot.get("eth_dom")
     total_mcap_raw = top_snapshot.get("total_mcap")
-    alt_mcap_raw = top_snapshot.get("alt_mcap")
     mcap_24h_pct = top_snapshot.get("mcap_24h_pct")
     bnb_dom_raw = top_snapshot.get("bnb_dom")
     sol_dom_raw = top_snapshot.get("sol_dom")
@@ -83,7 +91,6 @@ def render(ctx: dict) -> None:
     ada_dom = _to_num(ada_dom_raw)
     xrp_dom = _to_num(xrp_dom_raw)
     total_mcap = _to_num(total_mcap_raw)
-    alt_mcap = _to_num(alt_mcap_raw)
     fg_value_raw = top_snapshot.get("fg_value")
     fg_label = str(top_snapshot.get("fg_label") or "Unavailable")
     fg_value = fg_value_raw if isinstance(fg_value_raw, (int, float)) else None
@@ -283,10 +290,11 @@ def render(ctx: dict) -> None:
     behaviour_dir = direction_from_prob(float(behaviour_prob))
     # Map behaviour direction to a label for display and choose colour.  We
     # reuse the POSITIVE/NEGATIVE/WARNING colours defined above.
-    if behaviour_dir == "LONG":
+    behaviour_side = direction_key(behaviour_dir)
+    if behaviour_side == "UPSIDE":
         behaviour_label = "Upside"
         behaviour_color = POSITIVE
-    elif behaviour_dir == "SHORT":
+    elif behaviour_side == "DOWNSIDE":
         behaviour_label = "Downside"
         behaviour_color = NEGATIVE
     else:
@@ -295,9 +303,9 @@ def render(ctx: dict) -> None:
 
     # Composite market score (0-100): Direction + Regime + Breadth + Trust
     direction_score = float(max(0.0, min(100.0, abs(float(behaviour_prob) - 0.5) * 200.0)))
-    major_longs = sum(1 for p in major_probs if float(p) >= AI_LONG_THRESHOLD)
-    major_shorts = sum(1 for p in major_probs if float(p) <= AI_SHORT_THRESHOLD)
-    breadth_score = float(max(major_longs, major_shorts) / max(len(major_probs), 1) * 100.0)
+    major_upsides = sum(1 for p in major_probs if float(p) >= AI_LONG_THRESHOLD)
+    major_downsides = sum(1 for p in major_probs if float(p) <= AI_SHORT_THRESHOLD)
+    breadth_score = float(max(major_upsides, major_downsides) / max(len(major_probs), 1) * 100.0)
 
     if mcap_feed_ok and pd.notna(delta_mcap):
         mcap_chg = abs(float(delta_mcap))
@@ -368,58 +376,95 @@ def render(ctx: dict) -> None:
         return ("Low", NEGATIVE)
 
     g1, g2, g3, g4 = st.columns(4, gap="medium")
-    gauge_number_y = 0.16
-    # BTC dominance gauge
-    with g1:
-        st.markdown(
-            "<div style='text-align:center; margin-bottom:2px;'>"
-            "<span style='color:#E5E7EB; font-size:13px;'>BTC Dominance (%)</span>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-        if btc_dom_display is not None:
-            fig_btc = go.Figure(go.Indicator(
-                mode="gauge",
-                value=btc_dom_display,
-                domain={"x": [0.06, 0.94], "y": [0, 1]},
-                gauge={
-                    'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
-                    'bar': {'color': ACCENT},
-                    'bgcolor': CARD_BG,
-                    'steps': [
-                        {'range': [0, AI_SHORT_THRESHOLD * 100], 'color': NEGATIVE},
-                        {'range': [AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100], 'color': WARNING},
-                        {'range': [AI_LONG_THRESHOLD * 100, 100], 'color': POSITIVE},
-                    ],
-                },
-                title={'text': '', 'font': {'size': 13, 'color': '#E5E7EB'}},
-            ))
-            fig_btc.update_layout(
-                height=186,
-                margin=dict(l=12, r=12, t=52, b=10),
-                plot_bgcolor="#000000",
-                paper_bgcolor="#000000",
+    GAUGE_DOMAIN = {"x": [0.06, 0.94], "y": [0, 1]}
+    GAUGE_HEIGHT = 186
+    GAUGE_MARGIN = dict(l=12, r=12, t=52, b=10)
+    GAUGE_NUMBER_Y = 0.16
+
+    def _render_market_gauge(
+        *,
+        title: str,
+        value: float | None,
+        steps: list[dict[str, float | str]],
+        value_text: str,
+        title_hover: str | None = None,
+    ) -> None:
+        title_text = html.escape(title)
+        if title_hover:
+            title_html = (
+                "<div style='text-align:center; margin-bottom:2px;'>"
+                f"<span title='{html.escape(title_hover)}' style='color:#E5E7EB; font-size:13px; cursor:help;'>"
+                f"{title_text}</span></div>"
             )
-            fig_btc.add_annotation(
-                x=0.5,
-                y=gauge_number_y,
-                xref="paper",
-                yref="paper",
-                text=f"{float(btc_dom_display):.1f}",
-                showarrow=False,
-                yanchor="middle",
-                font={"color": "#F8FAFC", "size": 34},
-            )
-            st.plotly_chart(fig_btc, width="stretch")
         else:
+            title_html = (
+                "<div style='text-align:center; margin-bottom:2px;'>"
+                f"<span style='color:#E5E7EB; font-size:13px;'>{title_text}</span></div>"
+            )
+        st.markdown(title_html, unsafe_allow_html=True)
+
+        if value is None or pd.isna(value):
             st.markdown(
-                f"<div class='metric-card' style='height:186px; display:flex; flex-direction:column; justify-content:center; align-items:center;'>"
-                f"<div class='metric-label'>BTC Dominance (%)</div>"
+                f"<div class='metric-card' style='height:{GAUGE_HEIGHT}px; display:flex; flex-direction:column; "
+                f"justify-content:center; align-items:center;'>"
+                f"<div class='metric-label'>{title_text}</div>"
                 f"<div class='metric-value'>N/A</div>"
                 f"<div style='color:{TEXT_MUTED}; font-size:0.85rem;'>Data unavailable</div>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
+            return
+
+        safe_val = float(max(0.0, min(100.0, float(value))))
+        fig = go.Figure(
+            go.Indicator(
+                mode="gauge",
+                value=safe_val,
+                domain=GAUGE_DOMAIN,
+                gauge={
+                    "axis": {
+                        "range": [0, 100],
+                        "tickwidth": 1,
+                        "tickvals": [0, 50, 100],
+                        "tickfont": {"size": 12, "color": TEXT_MUTED},
+                    },
+                    "bar": {"color": ACCENT},
+                    "bgcolor": CARD_BG,
+                    "steps": steps,
+                },
+                title={"text": "", "font": {"size": 13, "color": "#E5E7EB"}},
+            )
+        )
+        fig.update_layout(
+            height=GAUGE_HEIGHT,
+            margin=GAUGE_MARGIN,
+            plot_bgcolor="#000000",
+            paper_bgcolor="#000000",
+        )
+        fig.add_annotation(
+            x=0.5,
+            y=GAUGE_NUMBER_Y,
+            xref="paper",
+            yref="paper",
+            text=html.escape(value_text),
+            showarrow=False,
+            yanchor="middle",
+            font={"color": "#F8FAFC", "size": 34},
+        )
+        st.plotly_chart(fig, width="stretch")
+
+    # BTC dominance gauge
+    with g1:
+        _render_market_gauge(
+            title="BTC Dominance (%)",
+            value=btc_dom_display,
+            steps=[
+                {"range": [0, AI_SHORT_THRESHOLD * 100], "color": NEGATIVE},
+                {"range": [AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100], "color": WARNING},
+                {"range": [AI_LONG_THRESHOLD * 100, 100], "color": POSITIVE},
+            ],
+            value_text=f"{float(btc_dom_display):.1f}" if btc_dom_display is not None else "N/A",
+        )
         btc_state, btc_color = _dom_state(btc_dom_display, AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100)
         st.markdown(
             _chip_center("BTC Weight: " + btc_state, btc_color, "Bitcoin share of total market cap. High values usually indicate BTC-led market."),
@@ -428,55 +473,16 @@ def render(ctx: dict) -> None:
 
     # ETH dominance gauge
     with g2:
-        st.markdown(
-            "<div style='text-align:center; margin-bottom:2px;'>"
-            "<span style='color:#E5E7EB; font-size:13px;'>ETH Dominance (%)</span>"
-            "</div>",
-            unsafe_allow_html=True,
+        _render_market_gauge(
+            title="ETH Dominance (%)",
+            value=eth_dom_display,
+            steps=[
+                {"range": [0, 15], "color": NEGATIVE},
+                {"range": [15, 25], "color": WARNING},
+                {"range": [25, 100], "color": POSITIVE},
+            ],
+            value_text=f"{float(eth_dom_display):.1f}" if eth_dom_display is not None else "N/A",
         )
-        if eth_dom_display is not None:
-            fig_eth = go.Figure(go.Indicator(
-                mode="gauge",
-                value=eth_dom_display,
-                domain={"x": [0.06, 0.94], "y": [0, 1]},
-                gauge={
-                    'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
-                    'bar': {'color': ACCENT},
-                    'bgcolor': CARD_BG,
-                    'steps': [
-                        {'range': [0, 15], 'color': NEGATIVE},
-                        {'range': [15, 25], 'color': WARNING},
-                        {'range': [25, 100], 'color': POSITIVE},
-                    ],
-                },
-                title={'text': '', 'font': {'size': 13, 'color': '#E5E7EB'}},
-            ))
-            fig_eth.update_layout(
-                height=186,
-                margin=dict(l=12, r=12, t=52, b=10),
-                plot_bgcolor="#000000",
-                paper_bgcolor="#000000",
-            )
-            fig_eth.add_annotation(
-                x=0.5,
-                y=gauge_number_y,
-                xref="paper",
-                yref="paper",
-                text=f"{float(eth_dom_display):.1f}",
-                showarrow=False,
-                yanchor="middle",
-                font={"color": "#F8FAFC", "size": 34},
-            )
-            st.plotly_chart(fig_eth, width="stretch")
-        else:
-            st.markdown(
-                f"<div class='metric-card' style='height:186px; display:flex; flex-direction:column; justify-content:center; align-items:center;'>"
-                f"<div class='metric-label'>ETH Dominance (%)</div>"
-                f"<div class='metric-value'>N/A</div>"
-                f"<div style='color:{TEXT_MUTED}; font-size:0.85rem;'>Data unavailable</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
         eth_state, eth_color = _dom_state(eth_dom_display, 15.0, 25.0)
         st.markdown(
             _chip_center("ETH Weight: " + eth_state, eth_color, "Ethereum share of total market cap. Higher values show stronger ETH participation."),
@@ -494,46 +500,18 @@ def render(ctx: dict) -> None:
         )
         if behaviour_weight_mode == "equal":
             ai_direction_hover += " Dominance feed unavailable right now, so equal-weight fallback is active."
-        st.markdown(
-            f"<div style='text-align:center; margin-bottom:2px;'>"
-            f"<span title='{html.escape(ai_direction_hover)}' "
-            f"style='color:#E5E7EB; font-size:13px; cursor:help;'>AI Direction Bias (%)</span>"
-            f"</div>",
-            unsafe_allow_html=True,
+        ai_direction_score = int(round(behaviour_prob * 100))
+        _render_market_gauge(
+            title="AI Direction Bias (%)",
+            value=float(ai_direction_score),
+            steps=[
+                {"range": [0, AI_SHORT_THRESHOLD * 100], "color": NEGATIVE},
+                {"range": [AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100], "color": WARNING},
+                {"range": [AI_LONG_THRESHOLD * 100, 100], "color": POSITIVE},
+            ],
+            value_text=f"{ai_direction_score:d}",
+            title_hover=ai_direction_hover,
         )
-        fig_behaviour = go.Figure(go.Indicator(
-            mode="gauge",
-            value=int(round(behaviour_prob * 100)),
-            domain={"x": [0.06, 0.94], "y": [0, 1]},
-            gauge={
-                'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
-                'bar': {'color': ACCENT},
-                'bgcolor': CARD_BG,
-                'steps': [
-                    {'range': [0, AI_SHORT_THRESHOLD * 100], 'color': NEGATIVE},
-                    {'range': [AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100], 'color': WARNING},
-                    {'range': [AI_LONG_THRESHOLD * 100, 100], 'color': POSITIVE},
-                ],
-            },
-            title={'text': '', 'font': {'size': 13, 'color': '#E5E7EB'}},
-        ))
-        fig_behaviour.update_layout(
-            height=186,
-            margin=dict(l=12, r=12, t=52, b=10),
-            plot_bgcolor="#000000",
-            paper_bgcolor="#000000",
-        )
-        fig_behaviour.add_annotation(
-            x=0.5,
-            y=gauge_number_y,
-            xref="paper",
-            yref="paper",
-            text=f"{int(round(behaviour_prob * 100))}",
-            showarrow=False,
-            yanchor="middle",
-            font={"color": "#F8FAFC", "size": 34},
-        )
-        st.plotly_chart(fig_behaviour, width="stretch")
         st.markdown(
             _chip_center(
                 f"{behaviour_label} Bias",
@@ -551,46 +529,17 @@ def render(ctx: dict) -> None:
             "Breadth = major-asset participation on one side, Trust = cross-major model consistency. "
             "This score measures market environment quality, not trade direction alone."
         )
-        st.markdown(
-            f"<div style='text-align:center; margin-bottom:2px;'>"
-            f"<span title='{html.escape(setup_quality_hover)}' "
-            f"style='color:#E5E7EB; font-size:13px; cursor:help;'>Setup Quality (%)</span>"
-            f"</div>",
-            unsafe_allow_html=True,
+        _render_market_gauge(
+            title="Setup Quality (%)",
+            value=float(composite_score),
+            steps=[
+                {"range": [0, 52], "color": NEGATIVE},
+                {"range": [52, 68], "color": WARNING},
+                {"range": [68, 100], "color": POSITIVE},
+            ],
+            value_text=f"{int(round(composite_score)):d}",
+            title_hover=setup_quality_hover,
         )
-        fig_quality = go.Figure(go.Indicator(
-            mode="gauge",
-            value=int(round(composite_score)),
-            domain={"x": [0.06, 0.94], "y": [0, 1]},
-            gauge={
-                'axis': {'range': [0, 100], 'tickwidth': 1, 'tickvals': [0, 50, 100], 'tickfont': {'size': 12, 'color': TEXT_MUTED}},
-                'bar': {'color': ACCENT},
-                'bgcolor': CARD_BG,
-                'steps': [
-                    {'range': [0, 52], 'color': NEGATIVE},
-                    {'range': [52, 68], 'color': WARNING},
-                    {'range': [68, 100], 'color': POSITIVE},
-                ],
-            },
-            title={'text': '', 'font': {'size': 13, 'color': '#E5E7EB'}},
-        ))
-        fig_quality.update_layout(
-            height=186,
-            margin=dict(l=12, r=12, t=52, b=10),
-            plot_bgcolor="#000000",
-            paper_bgcolor="#000000",
-        )
-        fig_quality.add_annotation(
-            x=0.5,
-            y=gauge_number_y,
-            xref="paper",
-            yref="paper",
-            text=f"{int(round(composite_score))}",
-            showarrow=False,
-            yanchor="middle",
-            font={"color": "#F8FAFC", "size": 34},
-        )
-        st.plotly_chart(fig_quality, width="stretch")
         st.markdown(
             _chip_center(
                 composite_mode,
@@ -670,7 +619,16 @@ def render(ctx: dict) -> None:
         key="market_exclude_stables",
         help="Hide stable/synthetic USD-pegged coins from scanner universe.",
     )
-    # Strict scalp mode is always enabled (non-strict path removed).
+    def _scalp_gate_thresholds(tf: str) -> tuple[float, float, float]:
+        t = str(tf or "").strip().lower()
+        if t in {"5m", "15m"}:
+            return 1.30, 18.0, 52.0
+        if t == "1h":
+            return 1.50, 20.0, 55.0
+        # 4h / 1d (and any slower fallback)
+        return 1.70, 22.0, 60.0
+
+    gate_min_rr, gate_min_adx, gate_min_strength = _scalp_gate_thresholds(timeframe)
 
     STABLE_BASES = {
         "USDT", "USDC", "BUSD", "DAI", "TUSD", "USDE", "FDUSD", "PYUSD",
@@ -780,7 +738,7 @@ def render(ctx: dict) -> None:
         if any(
             k in s
             for k in [
-                "ENTER", "LONG", "UPSIDE", "ALIGNED", "GOOD", "STRONG", "VERY STRONG", "EXTREME",
+                "ENTER", "UPSIDE", "ALIGNED", "GOOD", "STRONG", "VERY STRONG", "EXTREME",
                 "ABOVE", "BULLISH", "OVERSOLD", "NEAR BOTTOM",
             ]
         ):
@@ -788,7 +746,7 @@ def render(ctx: dict) -> None:
         if any(
             k in s
             for k in [
-                "SKIP", "SHORT", "DOWNSIDE", "CONFLICT", "WEAK", "BEARISH",
+                "SKIP", "DOWNSIDE", "CONFLICT", "WEAK", "BEARISH",
                 "OVERBOUGHT", "BELOW", "NEAR TOP",
             ]
         ):
@@ -950,35 +908,6 @@ def render(ctx: dict) -> None:
         cls_full = f"mk-chip {cls} {extra_class}".strip()
         return f"<span class='{cls_full}'{title_attr}>{html.escape(raw)}</span>"
 
-    def _compact_action_label(action_text: str) -> str:
-        s = str(action_text or "").strip()
-        if not s:
-            return s
-        if s.upper() in {"WATCH", "👀 WATCH"}:
-            return "WATCH"
-        if "ENTER (Trend+AI)" in s:
-            return "✅ ENTER T+AI"
-        if "ENTER (Trend-Led)" in s:
-            return "🟡 ENTER Trend"
-        if "ENTER (AI-Led)" in s:
-            return "🟡 ENTER AI"
-        return s
-
-    def _action_reason_text(code: str) -> str:
-        mapping = {
-            "NO_DIRECTION": "No clear direction (neutral signal).",
-            "TECH_AI_CONFLICT": "Technical and AI directions are in conflict.",
-            "LOW_STRENGTH": "Strength is below minimum threshold.",
-            "NO_STRUCTURE": "Structure quality is not actionable.",
-            "ADX_UNKNOWN": "Trend strength (ADX) is unavailable; waiting.",
-            "ADX_TOO_LOW": "Trend strength is too low for execution.",
-            "ENTER_TREND_AI": "Trend and AI confirmations align with quality gates.",
-            "ENTER_TREND_LED": "Trend leads and passes quality gates; AI is used as veto only.",
-            "ENTER_AI_LED": "AI leads with strong agreement; trend is used as veto only.",
-            "NEEDS_CONFIRMATION": "Direction exists, but confirmation is incomplete.",
-        }
-        return mapping.get(str(code or "").upper(), "")
-
     def _render_cell(col: str, row: dict) -> str:
         val = row.get(col, "")
         txt = "" if val is None else str(val).strip()
@@ -997,10 +926,10 @@ def render(ctx: dict) -> None:
         if col in {"Action", "Direction", "Strength", "R:R", "Scalp Opportunity"}:
             if col == "Action":
                 reason_code = str(row.get("__action_reason", "")).strip()
-                reason_text = _action_reason_text(reason_code)
+                reason_text = action_reason_text(reason_code)
                 title_txt = txt if not reason_text else f"{txt} | Reason: {reason_text}"
                 return _chip(
-                    _compact_action_label(txt),
+                    compact_action_label(txt),
                     _tone_for_col(col, txt),
                     title=title_txt,
                     extra_class="mk-chip-action",
@@ -1107,7 +1036,7 @@ def render(ctx: dict) -> None:
             except Exception:
                 adx_title = None
             return _chip(txt, _tone_for_col(col, txt), title=adx_title) if txt else ""
-        if col in {"ADX", "SuperTrend", "Ichimoku", "VWAP", "Bollinger", "Stochastic RSI", "Volatility", "PSAR", "Williams %R", "CCI", "Candle Pattern"}:
+        if col in {"SuperTrend", "Ichimoku", "VWAP", "Bollinger", "Stochastic RSI", "Volatility", "PSAR", "Williams %R", "CCI", "Candle Pattern"}:
             return _chip(txt, _tone_for_col(col, txt)) if txt else ""
         return f"<span class='mk-plain'>{html.escape(txt)}</span>"
 
@@ -1387,10 +1316,14 @@ def render(ctx: dict) -> None:
                     f"(requested {top_n}). Scanner remains strict to top-volume matched pairs."
                 )
 
-            # Analysis — parallelised data fetching for speed
+            # Analysis — parallelised row processing with thread-safe exchange fetch.
+            fetch_lock = Lock()
+
             def _scan_one(sym: str) -> dict | None:
                 """Analyse a single symbol for the scanner. Returns a row dict or None."""
-                df = fetch_ohlcv(sym, timeframe, limit=500)
+                # EXCHANGE instance is shared; protect live fetch against concurrent access.
+                with fetch_lock:
+                    df = fetch_ohlcv(sym, timeframe, limit=500)
                 if df is None or len(df) <= 60:
                     return None
 
@@ -1404,12 +1337,12 @@ def render(ctx: dict) -> None:
                 directional_agreement = float(ai_details.get("directional_agreement", agreement)) if isinstance(ai_details, dict) else agreement
                 consensus_agreement = float(ai_details.get("consensus_agreement", 0.0)) if isinstance(ai_details, dict) else 0.0
                 model_votes = list(ai_details.get("model_votes", [])) if isinstance(ai_details, dict) else []
-                latest = df.iloc[-1]
                 latest_closed = df_eval.iloc[-1]
 
                 base = sym.split('/')[0].upper()
                 mcap_val = mcap_map.get(base)
-                price = float(latest['close'])
+                # Keep price semantics aligned with all decision metrics (closed-candle context).
+                price = float(latest_closed["close"])
                 # Delta source of truth: selected-timeframe closed candles.
                 # This keeps table delta aligned with Direction/Strength calculations.
                 price_change = None
@@ -1423,7 +1356,9 @@ def render(ctx: dict) -> None:
                 # Safety fallback (rare): if candle delta is unavailable, use ticker percentage.
                 if price_change is None:
                     try:
-                        price_change = get_price_change(sym)
+                        # Protect shared exchange ticker fallback under the same lock.
+                        with fetch_lock:
+                            price_change = get_price_change(sym)
                     except Exception:
                         price_change = None
 
@@ -1461,22 +1396,24 @@ def render(ctx: dict) -> None:
                     except Exception:
                         spike_dir = "NEUTRAL"
 
+                # Plan generator produces candidate levels; final execution decision is
+                # made by a single external gate (scalp_quality_gate) below.
                 scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note = get_scalping_entry_target(
                     df_eval, bias_score_v, supertrend_trend_v, ichimoku_trend_v, vwap_label_v,
-                    volume_spike, strict_mode=True,
+                    volume_spike, strict_mode=False,
                 )
                 entry_price = entry_s if scalp_direction else 0.0
                 target_price = target_s if scalp_direction else 0.0
 
+                signal_direction = direction_key(signal_plain(signal))
                 include = (
-                    (direction_filter == 'Both') or
-                    (direction_filter == 'Upside' and signal in ['STRONG BUY', 'BUY']) or
-                    (direction_filter == 'Downside' and signal in ['STRONG SELL', 'SELL'])
+                    (direction_filter == 'Both')
+                    or (direction_filter == 'Upside' and signal_direction == "UPSIDE")
+                    or (direction_filter == 'Downside' and signal_direction == "DOWNSIDE")
                 )
                 if not include:
                     return None
 
-                signal_direction = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "NEUTRAL")
                 signal_text = sanitize_trading_terms(signal)
                 comment_text = sanitize_trading_terms(str(getattr(a, 'comment', '') or '').strip())
                 direction_note = (
@@ -1485,7 +1422,8 @@ def render(ctx: dict) -> None:
                 ).strip()
 
                 ai_display = direction_label(ai_direction)
-                vote_ratio = directional_agreement if ai_direction in {"LONG", "SHORT"} else consensus_agreement
+                ai_direction_key = direction_key(ai_direction)
+                vote_ratio = directional_agreement if ai_direction_key != "NEUTRAL" else consensus_agreement
                 consensus_votes = max(0, min(3, int(round(float(vote_ratio) * 3.0))))
                 ai_display = f"{ai_display} ({consensus_votes}/3)"
                 ai_note = (
@@ -1544,7 +1482,7 @@ def render(ctx: dict) -> None:
                     float(directional_agreement),
                     float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
                 )
-                scalp_gate_pass, scalp_gate_reason = scalp_quality_gate(
+                scalp_gate_pass, _ = scalp_quality_gate(
                     scalp_direction=scalp_direction,
                     signal_direction=signal_direction,
                     rr_ratio=rr_val,
@@ -1554,6 +1492,9 @@ def render(ctx: dict) -> None:
                     entry=entry_s,
                     stop=stop_s,
                     target=target_s,
+                    min_rr=gate_min_rr,
+                    min_adx=gate_min_adx,
+                    min_strength=gate_min_strength,
                 )
                 scalp_opportunity_label = direction_label(scalp_direction or "") if scalp_gate_pass else ""
 
@@ -1563,11 +1504,12 @@ def render(ctx: dict) -> None:
                     target_price = 0.0
                     rr_val = 0.0
                 entry_note = ""
-                if scalp_gate_pass and scalp_direction in {"LONG", "SHORT"} and entry_s:
+                scalp_dir_key = direction_key(scalp_direction)
+                if scalp_gate_pass and scalp_dir_key != "NEUTRAL" and entry_s:
                     try:
                         close_ref = float(latest_closed["close"])
                         ema5_ref = float(df_eval["close"].ewm(span=5, adjust=False).mean().iloc[-1])
-                        if scalp_direction == "LONG":
+                        if scalp_dir_key == "UPSIDE":
                             base_ref = max(close_ref, ema5_ref)
                             atr_used = (float(entry_s) - base_ref) / 0.20
                             rule_txt = "max(Close, EMA5) + 0.20×ATR"
@@ -1632,7 +1574,6 @@ def render(ctx: dict) -> None:
                     '__spike_vol_ratio': spike_vol_ratio,
                     '__spike_candle_pct': spike_candle_pct,
                     '__spike_vwap_ctx': spike_vwap_ctx,
-                    '__scalp_gate_reason': scalp_gate_reason,
                     'ADX': round(adx_val_v, 1) if pd.notna(adx_val_v) else float("nan"),
                     '__adx_raw': round(adx_val_v, 2) if pd.notna(adx_val_v) else float("nan"),
                     'SuperTrend': supertrend_trend_v,
@@ -1651,6 +1592,7 @@ def render(ctx: dict) -> None:
 
             # Parallel scan using ThreadPoolExecutor (5-10x faster than sequential)
             fresh_results: list[dict] = []
+            scan_errors: list[tuple[str, str]] = []
             with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {executor.submit(_scan_one, sym): sym for sym in working_symbols}
                 for future in as_completed(futures):
@@ -1659,24 +1601,29 @@ def render(ctx: dict) -> None:
                         if row is not None:
                             fresh_results.append(row)
                     except Exception as e:
-                        _debug(f"Scanner error for {futures[future]}: {e}")
+                        sym = futures[future]
+                        err = str(e).strip() or e.__class__.__name__
+                        scan_errors.append((sym, err))
+                        _debug(f"Scanner error for {sym}: {err}")
+
+            if scan_errors:
+                st.session_state["market_scan_error_count"] = len(scan_errors)
+                sample = ", ".join(f"{sym} ({err})" for sym, err in scan_errors[:3])
+                more = "" if len(scan_errors) <= 3 else f" +{len(scan_errors) - 3} more"
+                st.warning(
+                    "Some symbols were skipped due to temporary fetch/analysis errors. "
+                    f"Skipped: {len(scan_errors)} | Sample: {sample}{more}."
+                )
+            else:
+                st.session_state["market_scan_error_count"] = 0
 
             prev_results = st.session_state.get("market_scan_results", [])
             # Sort by execution priority: Action > Structure > Strength
-            def _action_rank(v: str) -> int:
-                s = str(v or "").upper()
-                if "ENTER" in s:
-                    return 3
-                if "WATCH" in s:
-                    return 2
-                if "SKIP" in s:
-                    return 1
-                return 0
             setup_rank = {"FULL": 4, "TREND": 3, "EARLY": 2, "NONE": 1}
             fresh_results = sorted(
                 fresh_results,
                 key=lambda x: (
-                    -_action_rank(str(x.get("Action"))),
+                    -action_rank(str(x.get("Action"))),
                     -setup_rank.get(str(x.get("__structure_state")), 0),
                     -float(x.get("__strength_val", 0.0)),
                     -float(x.get("__mcap_val", 0)),
@@ -1763,10 +1710,12 @@ def render(ctx: dict) -> None:
             f"<b>3) AI + Alignment = confirmation quality</b><br>"
             f"<b>AI Ensemble</b> shows model vote support (x/3). "
             f"<b>Tech vs AI Alignment</b> shows if technical and AI views support each other.<br><br>"
-            f"<b>4) Scalp Opportunity = execution-ready filter (separate from Action)</b><br>"
-            f"It appears only when all gates pass together: "
-            f"Direction match, <b>R:R ≥ 1.5</b>, <b>ADX ≥ 20</b>, <b>Strength ≥ 55</b>, "
-            f"no CONFLICT, and valid Entry/Stop/Target levels.<br>"
+            f"<b>4) Scalp Opportunity = single execution gate (separate from Action)</b><br>"
+            f"It appears only when one unified gate passes: "
+            f"Direction match, no CONFLICT, valid Entry/Stop/Target, and timeframe-adaptive thresholds.<br>"
+            f"Thresholds: <b>5m/15m → R:R ≥ 1.30, ADX ≥ 18, Strength ≥ 52</b>; "
+            f"<b>1h → R:R ≥ 1.50, ADX ≥ 20, Strength ≥ 55</b>; "
+            f"<b>4h/1d → R:R ≥ 1.70, ADX ≥ 22, Strength ≥ 60</b>.<br>"
             f"If Scalp Opportunity is empty, do not force a scalp execution.<br><br>"
             f"<b>5) Advanced columns explain indicator context on this page</b><br>"
             f"You do not need to open Analysis Guide for basic meaning; hover cells for extra detail."
@@ -1792,7 +1741,8 @@ def render(ctx: dict) -> None:
             "<b>Stop Loss</b>: risk invalidation level (support/resistance with ATR clamps).<br>"
             "<b>Target Price</b>: first take-profit level (structure level with minimum ATR extension).<br>"
             "<b>R:R marker (*)</b>: conditional plan; target may require breakout.<br>"
-            "<b>Scalp Opportunity</b>: shown only when execution gates pass (Direction match + R:R + ADX + Strength + no CONFLICT + valid levels).<br>"
+            "<b>Scalp Opportunity</b>: shown only when the single execution gate passes "
+            "(Direction match + no CONFLICT + valid levels + timeframe-adaptive R:R/ADX/Strength thresholds).<br>"
             "<b>Market Cap ($)</b>: size/liquidity context.<br><br>"
             "<b>Advanced columns (what they mean + short calc):</b><br>"
             "<b>ADX</b>: trend strength (14-period directional movement strength; not side).<br>"
@@ -1829,12 +1779,13 @@ def render(ctx: dict) -> None:
 
         # Quick scan health summary (visual-first, logic unchanged)
         action_series = df_results.get("Action", pd.Series(dtype=str)).astype(str)
-        enter_count = int(action_series.str.contains("ENTER", na=False).sum())
-        watch_count = int(action_series.str.contains("WATCH", na=False).sum())
-        skip_count = int(action_series.str.contains("SKIP", na=False).sum())
-        trend_ai_enter_count = int(action_series.str.contains(r"ENTER \(Trend\+AI\)", na=False, regex=True).sum())
-        trend_led_enter_count = int(action_series.str.contains(r"ENTER \(Trend-Led\)", na=False, regex=True).sum())
-        ai_led_enter_count = int(action_series.str.contains(r"ENTER \(AI-Led\)", na=False, regex=True).sum())
+        action_class_series = action_series.apply(normalize_action_class)
+        enter_count = int(action_class_series.str.startswith("ENTER_").sum())
+        watch_count = int((action_class_series == "WATCH").sum())
+        skip_count = int((action_class_series == "SKIP").sum())
+        trend_ai_enter_count = int((action_class_series == "ENTER_TREND_AI").sum())
+        trend_led_enter_count = int((action_class_series == "ENTER_TREND_LED").sum())
+        ai_led_enter_count = int((action_class_series == "ENTER_AI_LED").sum())
 
         best_scalp_coin = "—"
         best_scalp_sub = ""
@@ -1854,7 +1805,7 @@ def render(ctx: dict) -> None:
                 scoped["__action_rank"] = (
                     scoped["Action"]
                     .astype(str)
-                    .apply(lambda a: 3 if "ENTER" in a.upper() else (2 if "WATCH" in a.upper() else 1))
+                    .apply(action_rank)
                 )
                 scoped = scoped.dropna(subset=["__rr"])
                 scoped = scoped[scoped["__rr"] > 0]
@@ -1867,7 +1818,7 @@ def render(ctx: dict) -> None:
                     best_direction = str(best_row.get("Direction", "")).strip()
                     best_strength = str(best_row.get("Strength", "")).strip()
                     best_ai = str(best_row.get("AI Ensemble", "")).strip()
-                    best_action_compact = _compact_action_label(best_action).replace("✅ ", "").replace("🟡 ", "")
+                    best_action_compact = compact_action_label(best_action)
                     best_scalp_sub = (
                         f"{best_action_compact} • {best_direction} • {best_strength} • AI {best_ai}"
                     )
@@ -2008,9 +1959,9 @@ def render(ctx: dict) -> None:
         all_cols = primary_cols + [c for c in advanced_extra_cols if c not in primary_cols]
         display_cols = all_cols if show_advanced else primary_cols
         hidden_meta_cols = [
-            c for c in [
-                "__action_reason",
-                "__entry_note",
+                c for c in [
+                    "__action_reason",
+                    "__entry_note",
                 "__ichimoku_detail",
                 "__spike_dir",
                 "__spike_vol_ratio",
@@ -2021,11 +1972,11 @@ def render(ctx: dict) -> None:
                 "__adx_raw",
                 "__direction_note",
                 "__strength_note",
-                "__ai_note",
-                "__alignment_note",
-                "__pair",
-            ] if c in df_results.columns and c not in display_cols
-        ]
+                    "__ai_note",
+                    "__alignment_note",
+                    "__pair",
+                ] if c in df_results.columns and c not in display_cols
+            ]
         df_display = df_results[display_cols + hidden_meta_cols].copy()
 
         _render_pro_table(df_display, display_cols)

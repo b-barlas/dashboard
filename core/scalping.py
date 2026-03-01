@@ -8,6 +8,15 @@ import pandas as pd
 import ta
 
 
+def _dir_key(value: str | None) -> str:
+    s = str(value or "").strip().upper()
+    if s in {"LONG", "UPSIDE", "BUY", "BULLISH"}:
+        return "UPSIDE"
+    if s in {"SHORT", "DOWNSIDE", "SELL", "BEARISH"}:
+        return "DOWNSIDE"
+    return "NEUTRAL"
+
+
 def scalp_quality_gate(
     *,
     scalp_direction: str | None,
@@ -28,13 +37,13 @@ def scalp_quality_gate(
     Returns:
       (True, "PASS") when all guards pass, otherwise (False, REASON_CODE).
     """
-    dir_norm = str(scalp_direction or "").upper().strip()
-    sig_norm = str(signal_direction or "").upper().strip()
+    dir_norm = _dir_key(scalp_direction)
+    sig_norm = _dir_key(signal_direction)
     conv = str(conviction_label or "").upper().strip()
 
-    if dir_norm not in {"LONG", "SHORT"}:
+    if dir_norm not in {"UPSIDE", "DOWNSIDE"}:
         return False, "NO_SCALP_DIRECTION"
-    if sig_norm not in {"LONG", "SHORT"}:
+    if sig_norm not in {"UPSIDE", "DOWNSIDE"}:
         return False, "SIGNAL_DIRECTION_NEUTRAL"
     if dir_norm != sig_norm:
         return False, "DIRECTION_MISMATCH"

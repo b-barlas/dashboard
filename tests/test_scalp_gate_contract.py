@@ -4,6 +4,21 @@ from core.scalping import scalp_quality_gate
 
 
 class ScalpGateContractTests(unittest.TestCase):
+    def test_pass_with_canonical_direction_labels(self):
+        ok, reason = scalp_quality_gate(
+            scalp_direction="Upside",
+            signal_direction="Upside",
+            rr_ratio=1.8,
+            adx_val=24.0,
+            strength=61.0,
+            conviction_label="MEDIUM",
+            entry=100.0,
+            stop=98.5,
+            target=103.0,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "PASS")
+
     def test_pass_when_all_quality_gates_pass(self):
         ok, reason = scalp_quality_gate(
             scalp_direction="LONG",

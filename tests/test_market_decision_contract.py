@@ -1,9 +1,18 @@
 import unittest
 
 from core.market_decision import (
+    ACTION_ENTER_AI_LED,
+    ACTION_ENTER_TREND_AI,
+    ACTION_ENTER_TREND_LED,
+    ACTION_SKIP,
+    ACTION_WATCH,
     action_decision,
     action_decision_with_reason,
+    action_rank,
+    action_reason_text,
     action_reason,
+    compact_action_label,
+    normalize_action_class,
     structure_state,
 )
 
@@ -76,8 +85,30 @@ class MarketDecisionContractTests(unittest.TestCase):
 
     def test_action_decision_with_reason_contract(self):
         action, reason = action_decision_with_reason("LONG", 70, "FULL", "HIGH", 0.8, 30.0)
-        self.assertEqual(action, "✅ ENTER (Trend+AI)")
+        self.assertEqual(action, ACTION_ENTER_TREND_AI)
         self.assertEqual(reason, "ENTER_TREND_AI")
+
+    def test_action_class_normalization_contract(self):
+        self.assertEqual(normalize_action_class(ACTION_ENTER_TREND_AI), "ENTER_TREND_AI")
+        self.assertEqual(normalize_action_class(ACTION_ENTER_TREND_LED), "ENTER_TREND_LED")
+        self.assertEqual(normalize_action_class(ACTION_ENTER_AI_LED), "ENTER_AI_LED")
+        self.assertEqual(normalize_action_class(ACTION_WATCH), "WATCH")
+        self.assertEqual(normalize_action_class(ACTION_SKIP), "SKIP")
+
+    def test_action_rank_contract(self):
+        self.assertEqual(action_rank(ACTION_ENTER_TREND_AI), 3)
+        self.assertEqual(action_rank(ACTION_WATCH), 2)
+        self.assertEqual(action_rank(ACTION_SKIP), 1)
+
+    def test_compact_action_label_contract(self):
+        self.assertEqual(compact_action_label(ACTION_ENTER_TREND_AI), "ENTER T+AI")
+        self.assertEqual(compact_action_label(ACTION_ENTER_TREND_LED), "ENTER Trend")
+        self.assertEqual(compact_action_label(ACTION_ENTER_AI_LED), "ENTER AI")
+        self.assertEqual(compact_action_label(ACTION_WATCH), "WATCH")
+        self.assertEqual(compact_action_label(ACTION_SKIP), "SKIP")
+
+    def test_action_reason_text_contract(self):
+        self.assertIn("Trend and AI confirmations align", action_reason_text("ENTER_TREND_AI"))
 
 
 if __name__ == "__main__":

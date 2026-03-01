@@ -15,7 +15,7 @@ class MarketTablePriceDeltaContractTests(unittest.TestCase):
     def test_price_column_uses_latest_candle_close(self):
         self.assertRegex(
             self.text,
-            r"price\s*=\s*float\(latest\['close'\]\)",
+            r"price\s*=\s*float\(latest_closed\[['\"]close['\"]\]\)",
             msg="Price ($) must come from latest candle close.",
         )
         self.assertIn(

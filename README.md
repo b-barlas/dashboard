@@ -25,7 +25,13 @@ By default, Streamlit serves the app locally (typically `http://localhost:8501`)
 
 ## Deploy Readiness
 
-Run preflight before every deploy:
+Run quality gate before every push:
+
+```bash
+./scripts/quality_gate.sh
+```
+
+Run full preflight before every deploy:
 
 ```bash
 ./scripts/preflight.sh
@@ -33,6 +39,7 @@ Run preflight before every deploy:
 
 This runs:
 - compile checks
+- smoke contracts
 - full test suite
 - dependency snapshot output
 
@@ -59,7 +66,7 @@ This is configured in `core/services.py` and is designed to avoid relying on com
 
 GitHub Actions runs on `push` and `pull_request` to `main`:
 
-- `compileall` syntax check
+- `quality_gate.sh` (compile + smoke contracts)
 - `ruff` critical checks (`E9,F63,F7,F82`)
 - `mypy` on core engine contracts
 - full `pytest` suite

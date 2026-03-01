@@ -26,8 +26,8 @@ jobs:
           pip install -r requirements.txt
           pip install pytest ruff mypy
 
-      - name: Compile check
-        run: python -m compileall -q core tabs ui crypto_meta2.py
+      - name: Quality gate (compile + smoke contracts)
+        run: ./scripts/quality_gate.sh
 
       - name: Ruff (critical checks)
         run: ruff check . --select E9,F63,F7,F82

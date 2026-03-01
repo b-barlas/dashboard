@@ -49,12 +49,24 @@ def signal_plain(signal: str) -> str:
 
 
 def direction_label(direction: str) -> str:
-    d = str(direction or "").upper()
-    if d == "LONG":
+    d = direction_key(direction)
+    if d == "UPSIDE":
         return "Upside"
-    if d == "SHORT":
+    if d == "DOWNSIDE":
         return "Downside"
     return "Neutral"
+
+
+def direction_key(direction: str) -> str:
+    """Normalize any direction-like text into UPSIDE/DOWNSIDE/NEUTRAL."""
+    d = str(direction or "").strip().upper()
+    if not d:
+        return "NEUTRAL"
+    if d in {"UPSIDE", "LONG", "BUY", "BULLISH", "STRONG BUY"}:
+        return "UPSIDE"
+    if d in {"DOWNSIDE", "SHORT", "SELL", "BEARISH", "STRONG SELL"}:
+        return "DOWNSIDE"
+    return "NEUTRAL"
 
 
 def format_delta(delta):
@@ -132,17 +144,18 @@ def style_delta(val: str, positive: str = POSITIVE, negative: str = NEGATIVE) ->
 
 
 def style_signal(val: str, positive: str = POSITIVE, negative: str = NEGATIVE, warning: str = WARNING) -> str:
-    if "LONG" in val or "UPSIDE" in val or "BULLISH" in val:
+    if "UPSIDE" in val or "BULLISH" in val:
         return f"color: {positive}; font-weight: 600;"
-    if "SHORT" in val or "DOWNSIDE" in val or "BEARISH" in val:
+    if "DOWNSIDE" in val or "BEARISH" in val:
         return f"color: {negative}; font-weight: 600;"
     return f"color: {warning}; font-weight: 600;"
 
 
 def style_scalp_opp(val: str, positive: str = POSITIVE, negative: str = NEGATIVE) -> str:
-    if val in {"LONG", "Upside", "Bullish"}:
+    k = direction_key(val)
+    if k == "UPSIDE":
         return f"color: {positive}; font-weight: 600;"
-    if val in {"SHORT", "Downside", "Bearish"}:
+    if k == "DOWNSIDE":
         return f"color: {negative}; font-weight: 600;"
     return ""
 

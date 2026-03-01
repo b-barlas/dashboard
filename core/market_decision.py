@@ -4,6 +4,86 @@ from __future__ import annotations
 
 from math import isnan
 
+ACTION_SKIP = "⛔ SKIP"
+ACTION_WATCH = "WATCH"
+ACTION_ENTER_TREND_AI = "✅ ENTER (Trend+AI)"
+ACTION_ENTER_TREND_LED = "🟡 ENTER (Trend-Led)"
+ACTION_ENTER_AI_LED = "🟡 ENTER (AI-Led)"
+
+ACTION_REASON_TEXT = {
+    "NO_DIRECTION": "No clear direction (neutral signal).",
+    "TECH_AI_CONFLICT": "Technical and AI directions are in conflict.",
+    "LOW_STRENGTH": "Strength is below minimum threshold.",
+    "NO_STRUCTURE": "Structure quality is not actionable.",
+    "ADX_UNKNOWN": "Trend strength (ADX) is unavailable; waiting.",
+    "ADX_TOO_LOW": "Trend strength is too low for execution.",
+    "ENTER_TREND_AI": "Trend and AI confirmations align with quality gates.",
+    "ENTER_TREND_LED": "Trend leads and passes quality gates; AI is used as veto only.",
+    "ENTER_AI_LED": "AI leads with strong agreement; trend is used as veto only.",
+    "NEEDS_CONFIRMATION": "Direction exists, but confirmation is incomplete.",
+}
+
+
+def normalize_action_class(action: str) -> str:
+    """Normalize action text to a stable class key.
+
+    Returns one of: ENTER_TREND_AI, ENTER_TREND_LED, ENTER_AI_LED, WATCH, SKIP, UNKNOWN.
+    """
+    s = str(action or "").strip().upper()
+    if not s:
+        return "UNKNOWN"
+    if "ENTER (TREND+AI)" in s:
+        return "ENTER_TREND_AI"
+    if "ENTER (TREND-LED)" in s:
+        return "ENTER_TREND_LED"
+    if "ENTER (AI-LED)" in s:
+        return "ENTER_AI_LED"
+    if "WATCH" in s:
+        return "WATCH"
+    if "SKIP" in s:
+        return "SKIP"
+    return "UNKNOWN"
+
+
+def action_rank(action: str) -> int:
+    cls = normalize_action_class(action)
+    if cls.startswith("ENTER_"):
+        return 3
+    if cls == "WATCH":
+        return 2
+    if cls == "SKIP":
+        return 1
+    return 0
+
+
+def compact_action_label(action: str) -> str:
+    """Compact, UI-safe action label for tables/kpi."""
+    cls = normalize_action_class(action)
+    if cls == "WATCH":
+        return "WATCH"
+    if cls == "ENTER_TREND_AI":
+        return "ENTER T+AI"
+    if cls == "ENTER_TREND_LED":
+        return "ENTER Trend"
+    if cls == "ENTER_AI_LED":
+        return "ENTER AI"
+    if cls == "SKIP":
+        return "SKIP"
+    return str(action or "").strip()
+
+
+def action_reason_text(code: str) -> str:
+    return ACTION_REASON_TEXT.get(str(code or "").upper(), "")
+
+
+def _dir_key(value: str) -> str:
+    s = str(value or "").strip().upper()
+    if s in {"UPSIDE", "LONG", "BUY", "BULLISH"}:
+        return "UPSIDE"
+    if s in {"DOWNSIDE", "SHORT", "SELL", "BEARISH"}:
+        return "DOWNSIDE"
+    return "NEUTRAL"
+
 
 def structure_state(
     signal_dir: str,
@@ -19,17 +99,18 @@ def structure_state(
     - EARLY: early structure, requires tighter risk controls
     - NONE: no actionable structure
     """
-    if signal_dir not in {"LONG", "SHORT"}:
+    sdir = _dir_key(signal_dir)
+    ad = _dir_key(ai_dir)
+    if sdir == "NEUTRAL":
         return "NONE"
 
     s = float(strength)
     a = float(agreement)
-    ad = str(ai_dir or "").upper()
 
-    if ad in {"LONG", "SHORT"} and ad != signal_dir:
+    if ad != "NEUTRAL" and ad != sdir:
         return "NONE"
 
-    if ad == signal_dir:
+    if ad == sdir:
         if s >= 60 and a >= 0.67:
             return "FULL"
         if s >= 55:
@@ -111,22 +192,22 @@ def _action_decision_core(
     agreement: float,
     adx_val: float,
 ) -> tuple[str, str]:
-    if signal_dir not in {"LONG", "SHORT"}:
-        return "⛔ SKIP", "NO_DIRECTION"
+    if _dir_key(signal_dir) == "NEUTRAL":
+        return ACTION_SKIP, "NO_DIRECTION"
     if conviction_label == "CONFLICT" or strength < 35:
         if conviction_label == "CONFLICT":
-            return "⛔ SKIP", "TECH_AI_CONFLICT"
-        return "⛔ SKIP", "LOW_STRENGTH"
+            return ACTION_SKIP, "TECH_AI_CONFLICT"
+        return ACTION_SKIP, "LOW_STRENGTH"
     if structure_state_val == "NONE":
-        return "⛔ SKIP", "NO_STRUCTURE"
+        return ACTION_SKIP, "NO_STRUCTURE"
     # Require known trend-strength context for ENTER. Unknown ADX can still be WATCH.
     if isnan(adx_val):
-        return "WATCH", "ADX_UNKNOWN"
+        return ACTION_WATCH, "ADX_UNKNOWN"
 
     adx_f = float(adx_val)
     # In very weak trend, skip only when strength is also weak-mid.
     if adx_f < 12 and strength < 70:
-        return "⛔ SKIP", "ADX_TOO_LOW"
+        return ACTION_SKIP, "ADX_TOO_LOW"
 
     # ENTER classes require non-weak trend context (ADX >= 20) so Action
     # semantics stay consistent with the ADX label model.
@@ -159,9 +240,9 @@ def _action_decision_core(
     )
 
     if enter_trend_ai:
-        return "✅ ENTER (Trend+AI)", "ENTER_TREND_AI"
+        return ACTION_ENTER_TREND_AI, "ENTER_TREND_AI"
     if enter_trend_led:
-        return "🟡 ENTER (Trend-Led)", "ENTER_TREND_LED"
+        return ACTION_ENTER_TREND_LED, "ENTER_TREND_LED"
     if enter_ai_led:
-        return "🟡 ENTER (AI-Led)", "ENTER_AI_LED"
-    return "WATCH", "NEEDS_CONFIRMATION"
+        return ACTION_ENTER_AI_LED, "ENTER_AI_LED"
+    return ACTION_WATCH, "NEEDS_CONFIRMATION"
