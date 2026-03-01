@@ -52,7 +52,6 @@ def render(ctx: dict) -> None:
     format_stochrsi = get_ctx(ctx, "format_stochrsi")
     sanitize_trading_terms = get_ctx(ctx, "sanitize_trading_terms")
     _debug = get_ctx(ctx, "_debug")
-    """Render the Market Dashboard tab containing top‑level crypto metrics and scanning."""
     major_fallback_symbols = [
         "BTC/USDT",
         "ETH/USDT",
@@ -281,7 +280,8 @@ def render(ctx: dict) -> None:
             + ada_prob * weights[4]
             + xrp_prob * weights[5]
         )
-    except Exception:
+    except Exception as e:
+        _debug(f"AI market-bias fallback to neutral: {e.__class__.__name__}: {str(e).strip()}")
         behaviour_prob = 0.5
         behaviour_weight_mode = "equal"
     behaviour_prob = float(max(0.0, min(1.0, behaviour_prob)))
@@ -325,7 +325,8 @@ def render(ctx: dict) -> None:
 
     try:
         spread = float(pd.Series(major_probs).std())
-    except Exception:
+    except Exception as e:
+        _debug(f"Trust-score spread fallback used: {e.__class__.__name__}: {str(e).strip()}")
         spread = 0.18
     trust_score = float(max(0.0, min(100.0, 78.0 - spread * 100.0)))
     if direction_score < 25:
@@ -1316,21 +1317,28 @@ def render(ctx: dict) -> None:
                     f"(requested {top_n}). Scanner remains strict to top-volume matched pairs."
                 )
 
-            # Analysis — parallelised row processing with thread-safe exchange fetch.
+            # Two-phase scan:
+            # 1) Fetch OHLCV with a narrow lock for shared exchange safety.
+            # 2) Run analysis/model pipeline in parallel on fetched frames.
             fetch_lock = Lock()
 
-            def _scan_one(sym: str) -> dict | None:
-                """Analyse a single symbol for the scanner. Returns a row dict or None."""
-                # EXCHANGE instance is shared; protect live fetch against concurrent access.
+            def _fetch_ohlcv_thread_safe(sym: str) -> pd.DataFrame | None:
                 with fetch_lock:
-                    df = fetch_ohlcv(sym, timeframe, limit=500)
-                if df is None or len(df) <= 60:
-                    return None
+                    return fetch_ohlcv(sym, timeframe, limit=500)
 
+            fetched_frames: list[tuple[str, pd.DataFrame]] = []
+            for sym in working_symbols:
+                df = _fetch_ohlcv_thread_safe(sym)
+                if df is None or len(df) <= 60:
+                    continue
                 # Align analysis and scalp planning on same closed-candle context.
                 df_eval = df.iloc[:-1].copy()
                 if df_eval is None or len(df_eval) <= 55:
-                    return None
+                    continue
+                fetched_frames.append((sym, df_eval))
+
+            def _scan_one(sym: str, df_eval: pd.DataFrame) -> dict | None:
+                """Analyse a single symbol for the scanner. Returns a row dict or None."""
 
                 _ai_prob, ai_direction, ai_details = ml_ensemble_predict(df_eval)
                 agreement = float(ai_details.get("agreement", 0.0)) if isinstance(ai_details, dict) else 0.0
@@ -1351,7 +1359,8 @@ def render(ctx: dict) -> None:
                     last_closed = float(df_eval["close"].iloc[-1])
                     if pd.notna(prev_close) and prev_close > 0 and pd.notna(last_closed):
                         price_change = ((last_closed / prev_close) - 1.0) * 100.0
-                except Exception:
+                except Exception as e:
+                    _debug(f"Delta candle fallback for {sym} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
                     price_change = None
                 # Safety fallback (rare): if candle delta is unavailable, use ticker percentage.
                 if price_change is None:
@@ -1359,7 +1368,8 @@ def render(ctx: dict) -> None:
                         # Protect shared exchange ticker fallback under the same lock.
                         with fetch_lock:
                             price_change = get_price_change(sym)
-                    except Exception:
+                    except Exception as e:
+                        _debug(f"Ticker delta fallback failed for {sym} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
                         price_change = None
 
                 a = analyse(df_eval)
@@ -1590,11 +1600,11 @@ def render(ctx: dict) -> None:
                     '__strength_val': strength_val,
                 }
 
-            # Parallel scan using ThreadPoolExecutor (5-10x faster than sequential)
+            # Parallel analysis pass over fetched frames
             fresh_results: list[dict] = []
             scan_errors: list[tuple[str, str]] = []
             with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {executor.submit(_scan_one, sym): sym for sym in working_symbols}
+                futures = {executor.submit(_scan_one, sym, df_eval): sym for sym, df_eval in fetched_frames}
                 for future in as_completed(futures):
                     try:
                         row = future.result()
@@ -1602,7 +1612,7 @@ def render(ctx: dict) -> None:
                             fresh_results.append(row)
                     except Exception as e:
                         sym = futures[future]
-                        err = str(e).strip() or e.__class__.__name__
+                        err = f"{e.__class__.__name__}: {str(e).strip()}".strip(": ")
                         scan_errors.append((sym, err))
                         _debug(f"Scanner error for {sym}: {err}")
 
