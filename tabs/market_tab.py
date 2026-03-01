@@ -8,6 +8,7 @@ from threading import Lock
 import pandas as pd
 import plotly.graph_objs as go
 from core.market_decision import (
+    ai_vote_metrics,
     action_decision_with_reason,
     action_rank,
     action_reason_text,
@@ -1677,8 +1678,11 @@ def render(ctx: dict) -> None:
 
                 ai_display = direction_label(ai_direction)
                 ai_direction_key = direction_key(ai_direction)
-                vote_ratio = directional_agreement if ai_direction_key != "NEUTRAL" else consensus_agreement
-                consensus_votes = max(0, min(3, int(round(float(vote_ratio) * 3.0))))
+                consensus_votes, vote_ratio, decision_agreement = ai_vote_metrics(
+                    ai_direction_key,
+                    float(directional_agreement),
+                    float(consensus_agreement),
+                )
                 ai_display = f"{ai_display} ({consensus_votes}/3)"
                 ai_note = (
                     f"AI direction: {direction_label(ai_direction)} | "
@@ -1701,13 +1705,13 @@ def render(ctx: dict) -> None:
                     signal_direction,
                     ai_direction,
                     strength_val,
-                    float(directional_agreement),
+                    float(decision_agreement),
                 )
                 _conv_lbl, _ = _calc_conviction(
                     signal_direction,
                     ai_direction,
                     strength_val,
-                    float(directional_agreement),
+                    float(decision_agreement),
                 )
                 conviction = f"{_emoji_map.get(_conv_lbl, '')} {_conv_lbl}" if _conv_lbl else ""
                 structure_desc = {
@@ -1733,7 +1737,7 @@ def render(ctx: dict) -> None:
                     strength_val,
                     structure_val,
                     str(_conv_lbl),
-                    float(directional_agreement),
+                    float(decision_agreement),
                     float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
                 )
                 scalp_gate_pass, _ = scalp_quality_gate(

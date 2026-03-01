@@ -24,6 +24,24 @@ ACTION_REASON_TEXT = {
 }
 
 
+def ai_vote_metrics(
+    ai_dir: str,
+    directional_agreement: float,
+    consensus_agreement: float,
+) -> tuple[int, float, float]:
+    """Return (display_votes, display_ratio, decision_agreement).
+
+    - display_ratio/votes: for UI display. If AI direction is neutral, use consensus agreement.
+    - decision_agreement: for decision engine. Always directional agreement (market/spot parity).
+    """
+    ai_key = _dir_key(ai_dir)
+    dir_agree = max(0.0, min(1.0, float(directional_agreement)))
+    cons_agree = max(0.0, min(1.0, float(consensus_agreement)))
+    display_ratio = dir_agree if ai_key in {"UPSIDE", "DOWNSIDE"} else cons_agree
+    display_votes = max(0, min(3, int(round(display_ratio * 3.0))))
+    return display_votes, display_ratio, dir_agree
+
+
 def normalize_action_class(action: str) -> str:
     """Normalize action text to a stable class key.
 

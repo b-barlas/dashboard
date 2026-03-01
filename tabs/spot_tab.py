@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objs as go
 import ta
 from core.market_decision import (
+    ai_vote_metrics,
     action_decision_with_reason,
     action_reason_text,
     normalize_action_class,
@@ -34,7 +35,6 @@ def render(ctx: dict) -> None:
     direction_key = get_ctx(ctx, "direction_key")
     direction_label = get_ctx(ctx, "direction_label")
     format_delta = get_ctx(ctx, "format_delta")
-    format_adx = get_ctx(ctx, "format_adx")
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     get_price_change = get_ctx(ctx, "get_price_change")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
@@ -45,10 +45,32 @@ def render(ctx: dict) -> None:
     _debug = get_ctx(ctx, "_debug")
 
     def _adx_bucket_only(adx_value: float) -> str:
-        raw = str(format_adx(adx_value) or "")
-        if "(" in raw and ")" in raw:
-            return raw.split("(", 1)[1].split(")", 1)[0].strip()
-        return raw.replace("▲▲", "").replace("▲", "").replace("▼", "").replace("→", "").replace("🔥", "").strip()
+        try:
+            adx_f = float(adx_value)
+        except Exception:
+            return ""
+        if not np.isfinite(adx_f):
+            return ""
+        if adx_f < 20:
+            return "Weak"
+        if adx_f < 25:
+            return "Starting"
+        if adx_f < 50:
+            return "Strong"
+        if adx_f < 75:
+            return "Very Strong"
+        return "Extreme"
+
+    def _spot_cache_ttl(tf: str) -> int:
+        return {
+            "1m": 120,
+            "3m": 180,
+            "5m": 300,
+            "15m": 600,
+            "1h": 900,
+            "4h": 1800,
+            "1d": 3600,
+        }.get(str(tf or "").strip(), 900)
 
     def _fmt_price(v: float) -> str:
         try:
@@ -108,7 +130,7 @@ def render(ctx: dict) -> None:
             st,
             f"spot_df::{coin}::{timeframe}",
             df_live,
-            max_age_sec=900,
+            max_age_sec=_spot_cache_ttl(timeframe),
             current_sig=(coin, timeframe),
         )
         if used_cache:
@@ -159,24 +181,25 @@ def render(ctx: dict) -> None:
             directional_agree = float((_ai_details_s or {}).get("agreement", 0.0))
             consensus_agree = float((_ai_details_s or {}).get("consensus_agreement", 0.0))
             ai_dir_key = direction_key(ai_dir_s)
-            vote_ratio = directional_agree if ai_dir_key in {"UPSIDE", "DOWNSIDE"} else consensus_agree
-            ai_votes = max(0, min(3, int(round(vote_ratio * 3.0))))
-            ai_agree = vote_ratio * 100.0
+            ai_votes, _display_ratio, decision_agreement = ai_vote_metrics(
+                ai_dir_key,
+                directional_agree,
+                consensus_agree,
+            )
         except Exception:
-            ai_dir_s = "NEUTRAL"
             ai_dir_key = "NEUTRAL"
             ai_votes = 0
-            ai_agree = 0.0
+            decision_agreement = 0.0
 
         sig_dir_s = signal_dir if signal_dir in {"UPSIDE", "DOWNSIDE"} else "WAIT"
-        conv_lbl_s, _conv_c_s = _calc_conviction(sig_dir_s, ai_dir_key, strength_score, ai_agree / 100.0)
-        structure_val = structure_state(sig_dir_s, ai_dir_key, strength_score, ai_agree / 100.0)
+        conv_lbl_s, _conv_c_s = _calc_conviction(sig_dir_s, ai_dir_key, strength_score, decision_agreement)
+        structure_val = structure_state(sig_dir_s, ai_dir_key, strength_score, decision_agreement)
         action_raw, action_reason_code = action_decision_with_reason(
             sig_dir_s,
             strength_score,
             structure_val,
             str(conv_lbl_s),
-            ai_agree / 100.0,
+            decision_agreement,
             float(adx_val) if pd.notna(adx_val) else float("nan"),
         )
 
@@ -327,39 +350,53 @@ def render(ctx: dict) -> None:
             unsafe_allow_html=True,
         )
 
-        if signal_dir == "UPSIDE":
-            plan_status = "Bullish"
-            plan_color = POSITIVE
-            plan_lines = (
-                f"1) <b>If price dips into Primary Accumulation Zone</b> ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}): start scaling in.<br>"
-                f"2) <b>If price closes above Breakout Entry</b> ({_fmt_price(breakout_trigger)}): add to position / confirm continuation.<br>"
-                f"3) <b>Take Profit Zone</b> ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}): take partial profit at lower edge, trail the rest.<br>"
-                f"4) <b>Exit If Broken</b> ({_fmt_price(invalidation_level)}): close the spot plan if candle closes below."
-            )
-        elif signal_dir == "DOWNSIDE":
-            plan_status = "Defensive"
+        setup_cls = normalize_action_class(action_raw)
+        setup_label = setup_confirm
+        if setup_cls == "SKIP":
+            plan_status = "No-Trade"
             plan_color = NEGATIVE
             plan_lines = (
-                f"1) <b>Spot mode is defensive:</b> avoid fresh entries while downside pressure persists.<br>"
-                f"2) <b>Re-entry condition:</b> wait for a close back above Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
-                f"3) <b>If already holding:</b> reduce risk into rallies, and respect Exit If Broken ({_fmt_price(invalidation_level)}).<br>"
-                f"4) <b>Take Profit Zone</b> ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}): use only after reclaim confirmation."
+                f"1) <b>Setup Confirm is SKIP:</b> do not open a new spot position on this structure.<br>"
+                f"2) <b>Wait for regime improvement:</b> setup must move to WATCH or ENTER class before re-evaluation.<br>"
+                f"3) <b>If already holding:</b> reduce risk into strength and enforce Exit If Broken ({_fmt_price(invalidation_level)}).<br>"
+                f"4) <b>Keep levels prepared:</b> Primary Accumulation Zone ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}), "
+                f"Breakout Entry ({_fmt_price(breakout_trigger)}), Take Profit Zone ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)})."
             )
-        else:
-            plan_status = "Wait"
+        elif setup_cls == "WATCH":
+            plan_status = "Watch"
             plan_color = WARNING
             plan_lines = (
-                f"1) <b>No-force zone:</b> wait until price reaches a decision level.<br>"
-                f"2) <b>If price falls into Primary Accumulation Zone</b> ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}): look for hold/reaction before entry.<br>"
-                f"3) <b>If price closes above Breakout Entry</b> ({_fmt_price(breakout_trigger)}): momentum entry becomes valid.<br>"
-                f"4) <b>Take Profit Zone</b> ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}): plan exits in advance.<br>"
-                f"5) <b>Exit If Broken</b> ({_fmt_price(invalidation_level)}): cancel setup if level is lost on close."
+                f"1) <b>Setup Confirm is WATCH:</b> confirmation is partial; monitor, do not force entry.<br>"
+                f"2) <b>Primary trigger path:</b> reaction quality in Primary Accumulation Zone ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}).<br>"
+                f"3) <b>Momentum trigger path:</b> candle close above Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
+                f"4) <b>Risk discipline:</b> keep Exit If Broken at {_fmt_price(invalidation_level)} and pre-plan exits at "
+                f"{_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}."
+            )
+        elif signal_dir == "UPSIDE":
+            plan_status = "Bullish Confirmed"
+            plan_color = POSITIVE
+            plan_lines = (
+                f"1) <b>Setup Confirm is {setup_label}:</b> execution-ready upside context.<br>"
+                f"2) <b>If price dips into Primary Accumulation Zone</b> ({_fmt_price(pullback_low)} - {_fmt_price(pullback_high)}): scale in with risk plan.<br>"
+                f"3) <b>If price closes above Breakout Entry</b> ({_fmt_price(breakout_trigger)}): add/confirm continuation.<br>"
+                f"4) <b>Take Profit Zone</b> ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}): take partials, trail remainder.<br>"
+                f"5) <b>Exit If Broken</b> ({_fmt_price(invalidation_level)}): invalidate setup on close below."
+            )
+        else:
+            plan_status = "Defensive Confirmed"
+            plan_color = NEGATIVE
+            plan_lines = (
+                f"1) <b>Setup Confirm is {setup_label}, but direction is Downside:</b> spot mode stays defensive.<br>"
+                f"2) <b>No fresh spot buy</b> until direction recovers and closes above Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
+                f"3) <b>If already holding:</b> de-risk into rallies and protect downside via Exit If Broken ({_fmt_price(invalidation_level)}).<br>"
+                f"4) <b>Use Take Profit Zone</b> ({_fmt_price(take_profit_low)} - {_fmt_price(take_profit_high)}) only after reclaim confirmation."
             )
 
         st.markdown(
             f"<div class='panel-box' style='border-left:4px solid {plan_color};'>"
             f"<b style='color:{plan_color}; font-size:1rem;'>Spot Execution Plan</b>"
             f"<div style='color:{plan_color}; font-size:0.82rem; margin-top:4px;'><b>Mode:</b> {plan_status}</div>"
+            f"<div style='color:{plan_color}; font-size:0.82rem; margin-top:2px;'><b>Setup Confirm:</b> {setup_label}</div>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; line-height:1.7; margin-top:6px;'>"
             f"{plan_lines}"
             f"<br><span style='color:{TEXT_MUTED}; font-size:0.78rem;'>Guide only, not financial advice. "

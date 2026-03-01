@@ -6,6 +6,7 @@ from core.market_decision import (
     ACTION_ENTER_TREND_LED,
     ACTION_SKIP,
     ACTION_WATCH,
+    ai_vote_metrics,
     action_decision,
     action_decision_with_reason,
     action_rank,
@@ -18,6 +19,18 @@ from core.market_decision import (
 
 
 class MarketDecisionContractTests(unittest.TestCase):
+    def test_ai_vote_metrics_uses_consensus_only_for_neutral_display(self):
+        votes, display_ratio, decision_agree = ai_vote_metrics("NEUTRAL", 0.0, 2.0 / 3.0)
+        self.assertEqual(votes, 2)
+        self.assertAlmostEqual(display_ratio, 2.0 / 3.0, places=6)
+        self.assertEqual(decision_agree, 0.0)
+
+    def test_ai_vote_metrics_uses_directional_agreement_for_directional_ai(self):
+        votes, display_ratio, decision_agree = ai_vote_metrics("UPSIDE", 2.0 / 3.0, 1.0 / 3.0)
+        self.assertEqual(votes, 2)
+        self.assertAlmostEqual(display_ratio, 2.0 / 3.0, places=6)
+        self.assertAlmostEqual(decision_agree, 2.0 / 3.0, places=6)
+
     def test_structure_state_full(self):
         self.assertEqual(structure_state("LONG", "LONG", 68, 0.8), "FULL")
 
