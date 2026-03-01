@@ -89,8 +89,6 @@ def get_scalping_entry_target(
     supertrend_trend: str,
     ichimoku_trend: str,
     vwap_label: str,
-    volume_spike: bool,
-    strict_mode: bool = True,
     *,
     sr_lookback_fn: Callable[[str | None], int],
 ):
@@ -136,23 +134,7 @@ def get_scalping_entry_target(
     except Exception:
         adx_val = float("nan")
 
-    stoch = ta.momentum.StochRSIIndicator(close=df["close"], window=14, smooth1=3, smooth2=3)
-    stoch_k = stoch.stochrsi_k()
-    stochrsi_k_val = float(stoch_k.iloc[latest_idx]) if not pd.isna(stoch_k.iloc[latest_idx]) else float("nan")
-
-    bb = ta.volatility.BollingerBands(close=df["close"], window=20, window_dev=2)
     latest = df.iloc[latest_idx]
-    last_close = float(latest["close"])
-    hband_v = bb.bollinger_hband().iloc[latest_idx]
-    lband_v = bb.bollinger_lband().iloc[latest_idx]
-    hband = float(hband_v) if not pd.isna(hband_v) else float("nan")
-    lband = float(lband_v) if not pd.isna(lband_v) else float("nan")
-    if last_close > hband:
-        bollinger_bias = "Overbought"
-    elif last_close < lband:
-        bollinger_bias = "Oversold"
-    else:
-        bollinger_bias = "Neutral"
 
     close_price = latest["close"]
     atr = latest["atr"]
@@ -208,45 +190,12 @@ def get_scalping_entry_target(
     elif short_votes >= 4 and short_votes > long_votes:
         scalp_direction = "SHORT"
 
-    if strict_mode and scalp_direction is not None:
-        # Trend-strength gate.
-        if pd.isna(adx_val) or adx_val < 20:
-            return None, None, None, None, None, "No trend strength (ADX < 20)"
-
-        if scalp_direction == "LONG":
-            if long_regime_confirms < 2:
-                return None, None, None, None, None, "Regime filters not aligned (need 2/3)"
-
-            if bollinger_bias == "Overbought" and not volume_spike:
-                return None, None, None, None, None, "Overbought"
-            # Adaptive stoch range by trend quality.
-            if not pd.isna(adx_val) and adx_val >= 25:
-                stoch_lo, stoch_hi = 0.18, 0.88
-            else:
-                stoch_lo, stoch_hi = 0.20, 0.82
-            if pd.isna(stochrsi_k_val) or not (stoch_lo <= stochrsi_k_val <= stoch_hi and rsi_confirm_long and macd_confirm_long):
-                return None, None, None, None, None, "Momentum fail"
-
-        elif scalp_direction == "SHORT":
-            if short_regime_confirms < 2:
-                return None, None, None, None, None, "Regime filters not aligned (need 2/3)"
-
-            if bollinger_bias == "Oversold" and not volume_spike:
-                return None, None, None, None, None, "Oversold"
-            if not pd.isna(adx_val) and adx_val >= 25:
-                stoch_lo, stoch_hi = 0.12, 0.82
-            else:
-                stoch_lo, stoch_hi = 0.15, 0.78
-            if pd.isna(stochrsi_k_val) or not (stoch_lo <= stochrsi_k_val <= stoch_hi and rsi_confirm_short and macd_confirm_short):
-                return None, None, None, None, None, "Momentum fail"
-
     recent = closed_df.tail(sr_lookback_fn(_inferred_tf))
     support = recent["low"].min()
     resistance = recent["high"].max()
 
     entry_s = stop_s = target_s = 0.0
     breakout_note = ""
-    min_rr_strict = 1.50
 
     if scalp_direction == "LONG":
         entry_s = max(float(close_price), float(latest["ema5"])) + 0.20 * float(atr)
@@ -276,6 +225,4 @@ def get_scalping_entry_target(
     if stop_s <= 0.0 or target_s <= 0.0 or entry_s <= 0.0:
         return None, None, None, None, None, "Invalid plan levels"
     rr_ratio = abs(target_s - entry_s) / abs(entry_s - stop_s) if entry_s != stop_s else 0.0
-    if strict_mode and rr_ratio < min_rr_strict:
-        return None, None, None, None, None, f"Poor R:R ({rr_ratio:.2f} < {min_rr_strict:.2f})"
     return scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note

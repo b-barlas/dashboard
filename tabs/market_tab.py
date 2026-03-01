@@ -581,11 +581,49 @@ def render(ctx: dict) -> None:
 
     # Top coin scanner controls
     st.markdown(
-        f"<div class='market-section-title' style='color:{ACCENT};'>Coin Action Scanner</div>",
+        f"<div class='market-section-title' style='color:{ACCENT};'>Coin Setup Scanner</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stButton"] > button {
+          white-space: nowrap;
+        }
+        </style>
+        """,
         unsafe_allow_html=True,
     )
 
-    controls = st.columns([1.45, 1.45, 1.05, 0.9], gap="medium")
+    def _parse_custom_bases(raw: str, limit: int = 10) -> list[str]:
+        tokens = re.split(r"[\s,;\n]+", str(raw or "").upper().strip())
+        out: list[str] = []
+        seen: set[str] = set()
+        for tok in tokens:
+            t = tok.strip()
+            if not t:
+                continue
+            if "/" in t:
+                t = t.split("/", 1)[0].strip()
+            for suf in ("-USDT", "_USDT", "USDT", "-USD", "_USD", "USD"):
+                if t.endswith(suf) and len(t) > len(suf):
+                    t = t[: -len(suf)]
+                    break
+            t = re.sub(r"[^A-Z0-9]", "", t)
+            if len(t) < 2 or len(t) > 15:
+                continue
+            if t in seen:
+                continue
+            seen.add(t)
+            out.append(t)
+            if len(out) >= int(limit):
+                break
+        return out
+
+    custom_bases_applied = list(st.session_state.get("market_custom_bases_applied", []))
+    custom_mode_active = bool(custom_bases_applied)
+
+    controls = st.columns([1.08, 1.18, 0.90, 1.52, 0.92], gap="medium")
     with controls[0]:
         # Persist the selected timeframe in session state so the market
         # prediction card updates when this value changes.  The key ensures
@@ -611,9 +649,49 @@ def render(ctx: dict) -> None:
             max_value=50,
             value=top_n_default,
             key="market_top_n",
+            disabled=custom_mode_active,
         )
     with controls[3]:
-        refresh_scan = st.button("Refresh", use_container_width=False)
+        custom_coin_input = st.text_input(
+            "Custom Coins (max 10)",
+            value=st.session_state.get("market_custom_coin_input", ""),
+            key="market_custom_coin_input",
+            placeholder="BTC, ETH, SOL",
+            help="Optional watchlist mode. Enter up to 10 symbols separated by comma.",
+        )
+    with controls[4]:
+        run_scan = st.button("Run Scan", use_container_width=True)
+        clear_custom = st.button(
+            "Clear Custom",
+            use_container_width=True,
+            disabled=not bool(st.session_state.get("market_custom_bases_applied", [])),
+            key="market_clear_custom",
+        )
+
+    custom_bases_draft = _parse_custom_bases(custom_coin_input, limit=10)
+    if run_scan:
+        st.session_state["market_custom_bases_applied"] = custom_bases_draft
+        custom_bases_applied = list(custom_bases_draft)
+        custom_mode_active = bool(custom_bases_applied)
+    if clear_custom:
+        st.session_state["market_custom_coin_input"] = ""
+        st.session_state["market_custom_bases_applied"] = []
+        st.rerun()
+
+    if custom_mode_active:
+        preview = ", ".join(custom_bases_applied[:6])
+        more = "" if len(custom_bases_applied) <= 6 else f" +{len(custom_bases_applied) - 6}"
+        st.markdown(
+            f"<div class='market-note-box' style='border:1px solid rgba(0,212,255,0.34); border-left:4px solid {ACCENT}; "
+            f"background:rgba(0,212,255,0.06); color:{TEXT_MUTED}; margin-top:0.25rem;'>"
+            f"<b style='color:{ACCENT};'>Custom Watchlist Mode:</b> scanning {len(custom_bases_applied)} coin(s): "
+            f"{preview}{more}. Top N is disabled while custom mode is active."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    elif custom_coin_input.strip() and custom_bases_draft:
+        st.caption("Custom symbols are ready. Click Run Scan to apply watchlist mode.")
+
     exclude_stables = st.checkbox(
         "Exclude stablecoins",
         value=True,
@@ -625,7 +703,7 @@ def render(ctx: dict) -> None:
         if t in {"5m", "15m"}:
             return 1.30, 18.0, 52.0
         if t == "1h":
-            return 1.50, 20.0, 55.0
+            return 1.40, 18.0, 52.0
         # 4h / 1d (and any slower fallback)
         return 1.70, 22.0, 60.0
 
@@ -717,6 +795,24 @@ def render(ctx: dict) -> None:
         label = strength_bucket(strength)
         return f"{strength:.0f}% ({label})"
 
+    def _setup_confirm_display(raw_action: str) -> str:
+        cls = normalize_action_class(raw_action)
+        if cls == "ENTER_TREND_AI":
+            return "✅ CONFIRMED (Trend+AI)"
+        if cls == "ENTER_TREND_LED":
+            return "🟡 CONFIRMED (Trend-Led)"
+        if cls == "ENTER_AI_LED":
+            return "🟡 CONFIRMED (AI-Led)"
+        if cls == "WATCH":
+            return "⌛ WATCH"
+        if cls == "SKIP":
+            return "⛔ SKIP"
+        return str(raw_action or "").strip()
+
+    def _setup_confirm_compact(raw_action: str) -> str:
+        compact = compact_action_label(raw_action)
+        return compact.replace("ENTER", "CONF")
+
     def _tone_for_text(text: str, *, neutral_tone: str = "muted") -> str:
         s = str(text).strip().upper()
         if not s or s in {"N/A", "NA", "NAN", "UNAVAILABLE", "-"}:
@@ -739,7 +835,7 @@ def render(ctx: dict) -> None:
         if any(
             k in s
             for k in [
-                "ENTER", "UPSIDE", "ALIGNED", "GOOD", "STRONG", "VERY STRONG", "EXTREME",
+                "ENTER", "CONFIRMED", "UPSIDE", "ALIGNED", "GOOD", "STRONG", "VERY STRONG", "EXTREME",
                 "ABOVE", "BULLISH", "OVERSOLD", "NEAR BOTTOM",
             ]
         ):
@@ -770,8 +866,8 @@ def render(ctx: dict) -> None:
         if not s or s in {"N/A", "NA", "NAN", "UNAVAILABLE", "-"}:
             return "muted"
 
-        if col == "Action":
-            if "ENTER" in s:
+        if col == "Setup Confirm":
+            if "ENTER" in s or "CONFIRMED" in s:
                 return "pos"
             if "SKIP" in s:
                 return "neg"
@@ -924,13 +1020,13 @@ def render(ctx: dict) -> None:
                     f"</span>"
                 )
             return f"<span class='mk-coin'>{html.escape(txt)}</span>"
-        if col in {"Action", "Direction", "Strength", "R:R", "Scalp Opportunity"}:
-            if col == "Action":
+        if col in {"Setup Confirm", "Direction", "Strength", "R:R", "Scalp Opportunity"}:
+            if col == "Setup Confirm":
                 reason_code = str(row.get("__action_reason", "")).strip()
                 reason_text = action_reason_text(reason_code)
                 title_txt = txt if not reason_text else f"{txt} | Reason: {reason_text}"
                 return _chip(
-                    compact_action_label(txt),
+                    _setup_confirm_compact(str(row.get("__action_raw", txt))),
                     _tone_for_col(col, txt),
                     title=title_txt,
                     extra_class="mk-chip-action",
@@ -1032,7 +1128,11 @@ def render(ctx: dict) -> None:
             try:
                 if pd.notna(adx_raw):
                     adx_f = float(adx_raw)
-                    gate_txt = "PASS (>=20)" if adx_f >= 20.0 else "LOW (<20)"
+                    gate_txt = (
+                        f"PASS (>={gate_min_adx:.0f})"
+                        if adx_f >= float(gate_min_adx)
+                        else f"LOW (<{gate_min_adx:.0f})"
+                    )
                     adx_title = f"ADX {adx_f:.1f} | Scalp trend gate: {gate_txt}"
             except Exception:
                 adx_title = None
@@ -1047,7 +1147,7 @@ def render(ctx: dict) -> None:
             "Coin": 120,
             "Price ($)": 122,
             "Δ (%)": 92,
-            "Action": 140,
+            "Setup Confirm": 160,
             "Direction": 130,
             "Strength": 132,
             "AI Ensemble": 170,
@@ -1238,9 +1338,15 @@ def render(ctx: dict) -> None:
             unsafe_allow_html=True,
         )
 
-    scan_sig = (timeframe, direction_filter, int(top_n), bool(exclude_stables))
+    scan_sig = (
+        timeframe,
+        direction_filter,
+        int(top_n),
+        bool(exclude_stables),
+        tuple(custom_bases_applied),
+    )
     last_sig = st.session_state.get("market_scan_sig")
-    should_scan = refresh_scan or (last_sig != scan_sig) or ("market_scan_results" not in st.session_state)
+    should_scan = run_scan or (last_sig != scan_sig) or ("market_scan_results" not in st.session_state)
 
     results: list[dict] = st.session_state.get("market_scan_results", [])
     source_label = st.session_state.get("market_scan_source", "LIVE")
@@ -1248,8 +1354,14 @@ def render(ctx: dict) -> None:
 
     # Fetch top coins
     if should_scan:
-        with st.spinner(f"Scanning {top_n} coins ({direction_filter}) [{timeframe}] ..."):
-            usdt_symbols, market_data = get_top_volume_usdt_symbols(max(top_n, 50))
+        spinner_label = (
+            f"Scanning custom watchlist ({len(custom_bases_applied)}) ({direction_filter}) [{timeframe}] ..."
+            if custom_mode_active
+            else f"Scanning {top_n} coins ({direction_filter}) [{timeframe}] ..."
+        )
+        with st.spinner(spinner_label):
+            universe_fetch_n = max(top_n, 200) if custom_mode_active else max(top_n, 50)
+            usdt_symbols, market_data = get_top_volume_usdt_symbols(universe_fetch_n)
 
             # skip "wrapped"
             seen_symbols = set()
@@ -1282,19 +1394,29 @@ def render(ctx: dict) -> None:
                     mcap_map[symbol] = mcap
             is_exchange_only_mode = len(unique_market_data) == 0
 
-            # USDT match
-            if unique_market_data:
-                valid_bases = {(c.get("symbol") or "").upper() for c in unique_market_data}
-                working_symbols = [s for s in usdt_symbols if s.split("/")[0].upper() in valid_bases]
+            requested_n = len(custom_bases_applied) if custom_mode_active else int(top_n)
+
+            if custom_mode_active:
+                working_symbols = [f"{b}/USDT" for b in custom_bases_applied]
             else:
-                # If market rows are empty (e.g. CoinGecko rate-limit), keep scan alive
-                # using exchange pairs directly.
-                working_symbols = list(usdt_symbols)
+                # USDT match
+                if unique_market_data:
+                    valid_bases = {(c.get("symbol") or "").upper() for c in unique_market_data}
+                    working_symbols = [s for s in usdt_symbols if s.split("/")[0].upper() in valid_bases]
+                else:
+                    # If market rows are empty (e.g. CoinGecko rate-limit), keep scan alive
+                    # using exchange pairs directly.
+                    working_symbols = list(usdt_symbols)
+
             if exclude_stables:
                 working_symbols = [s for s in working_symbols if not _is_stable_base(s.split("/")[0].upper())]
-            working_symbols = working_symbols[:top_n]
 
-            if not working_symbols:
+            if custom_mode_active:
+                working_symbols = working_symbols[:len(custom_bases_applied)]
+            else:
+                working_symbols = working_symbols[:top_n]
+
+            if not working_symbols and not custom_mode_active:
                 # Hard fallback universe for temporary upstream outages.
                 working_symbols = major_fallback_symbols[: min(top_n, len(major_fallback_symbols))]
                 if working_symbols:
@@ -1306,16 +1428,27 @@ def render(ctx: dict) -> None:
             st.session_state["market_data_mode"] = data_mode
 
             if not working_symbols:
-                st.warning(
-                    "No scanner symbols matched current market filters. "
-                    f"Source pairs: {len(usdt_symbols)}, market rows: {len(unique_market_data)}, "
-                    f"requested top_n: {top_n}."
+                if custom_mode_active:
+                    st.warning(
+                        "Custom watchlist did not produce eligible symbols after normalization/filtering. "
+                        "Check symbol spelling (e.g., BTC, ETH, SOL) or disable stablecoin exclusion."
                     )
-            elif len(working_symbols) < top_n:
-                st.info(
-                    f"Liquidity universe currently returned {len(working_symbols)} eligible symbols "
-                    f"(requested {top_n}). Scanner remains strict to top-volume matched pairs."
-                )
+                else:
+                    st.warning(
+                        "No scanner symbols matched current market filters. "
+                        f"Source pairs: {len(usdt_symbols)}, market rows: {len(unique_market_data)}, "
+                        f"requested top_n: {top_n}."
+                        )
+            elif len(working_symbols) < requested_n:
+                if custom_mode_active:
+                    st.info(
+                        f"Custom mode active: scanning {len(working_symbols)} / {requested_n} requested symbols."
+                    )
+                else:
+                    st.info(
+                        f"Liquidity universe currently returned {len(working_symbols)} eligible symbols "
+                        f"(requested {top_n}). Scanner remains strict to top-volume matched pairs."
+                    )
 
             # Two-phase scan:
             # 1) Fetch OHLCV with a narrow lock for shared exchange safety.
@@ -1410,7 +1543,6 @@ def render(ctx: dict) -> None:
                 # made by a single external gate (scalp_quality_gate) below.
                 scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note = get_scalping_entry_target(
                     df_eval, bias_score_v, supertrend_trend_v, ichimoku_trend_v, vwap_label_v,
-                    volume_spike, strict_mode=False,
                 )
                 entry_price = entry_s if scalp_direction else 0.0
                 target_price = target_s if scalp_direction else 0.0
@@ -1558,7 +1690,8 @@ def render(ctx: dict) -> None:
                     '__pair': sym,
                     'Price ($)': _fmt_price(price),
                     'Δ (%)': format_delta(price_change) if price_change is not None else '',
-                    'Action': action,
+                    'Setup Confirm': _setup_confirm_display(action),
+                    '__action_raw': action,
                     '__action_reason': action_reason_code,
                     'Direction': direction_label(signal_plain(signal)),
                     '__direction_note': direction_note,
@@ -1628,18 +1761,19 @@ def render(ctx: dict) -> None:
                 st.session_state["market_scan_error_count"] = 0
 
             prev_results = st.session_state.get("market_scan_results", [])
-            # Sort by execution priority: Action > Structure > Strength
+            # Sort by execution priority: Setup Confirm > Structure > Strength
             setup_rank = {"FULL": 4, "TREND": 3, "EARLY": 2, "NONE": 1}
+            limit_n = len(custom_bases_applied) if custom_mode_active else int(top_n)
             fresh_results = sorted(
                 fresh_results,
                 key=lambda x: (
-                    -action_rank(str(x.get("Action"))),
+                    -action_rank(str(x.get("__action_raw", x.get("Setup Confirm", "")))),
                     -setup_rank.get(str(x.get("__structure_state")), 0),
                     -float(x.get("__strength_val", 0.0)),
                     -float(x.get("__mcap_val", 0)),
                     str(x.get("Coin", "")),
                 ),
-            )[:top_n]
+            )[:limit_n]
             if fresh_results:
                 st.session_state["market_scan_results"] = fresh_results
                 st.session_state["market_scan_sig"] = scan_sig
@@ -1705,26 +1839,29 @@ def render(ctx: dict) -> None:
             f"How to read quickly (?)</summary>"
             f"<div class='market-details-body' style='color:{TEXT_MUTED};'>"
             f"<b>Decision order (use this sequence):</b> "
-            f"<b>Action</b> → <b>Direction + Strength</b> → <b>AI Ensemble + Tech vs AI Alignment</b> "
+            f"<b>Setup Confirm</b> → <b>Direction + Strength</b> → <b>AI Ensemble + Tech vs AI Alignment</b> "
             f"→ <b>Scalp Opportunity + R:R + levels</b>.<br><br>"
-            f"<b>1) Action = final scanner decision</b><br>"
-            f"• <b>ENTER (Trend+AI)</b>: strongest class, trend and AI both confirm.<br>"
-            f"• <b>ENTER (Trend-Led)</b>: trend leads, AI works as guardrail.<br>"
-            f"• <b>ENTER (AI-Led)</b>: AI leads, trend works as guardrail.<br>"
+            f"<b>Scan modes:</b> default is Top N market scan. "
+            f"If you enter symbols in <b>Custom Coins</b> (max 10) and click <b>Run Scan</b>, "
+            f"the table scans only that watchlist and Top N is disabled until custom mode is cleared.<br><br>"
+            f"<b>1) Setup Confirm = final confirmation class</b><br>"
+            f"• <b>CONFIRMED (Trend+AI)</b>: strongest class, trend and AI both confirm.<br>"
+            f"• <b>CONFIRMED (Trend-Led)</b>: trend leads, AI works as guardrail.<br>"
+            f"• <b>CONFIRMED (AI-Led)</b>: AI leads, trend works as guardrail.<br>"
             f"• <b>WATCH</b>: setup is close, confirmation is not complete.<br>"
             f"• <b>SKIP</b>: no clear edge now.<br>"
-            f"Hover Action badge to see the exact reason code translated to plain text.<br><br>"
+            f"Hover Setup Confirm badge to see the exact reason code translated to plain text.<br><br>"
             f"<b>2) Direction + Strength = side + quality</b><br>"
             f"<b>Direction</b> tells side (Upside/Downside/Neutral). "
             f"<b>Strength</b> is a 0-100 power score from technical bias (shown as WEAK/MIXED/GOOD/STRONG).<br><br>"
             f"<b>3) AI + Alignment = confirmation quality</b><br>"
             f"<b>AI Ensemble</b> shows model vote support (x/3). "
             f"<b>Tech vs AI Alignment</b> shows if technical and AI views support each other.<br><br>"
-            f"<b>4) Scalp Opportunity = single execution gate (separate from Action)</b><br>"
+            f"<b>4) Scalp Opportunity = single execution gate (separate from Setup Confirm)</b><br>"
             f"It appears only when one unified gate passes: "
             f"Direction match, no CONFLICT, valid Entry/Stop/Target, and timeframe-adaptive thresholds.<br>"
             f"Thresholds: <b>5m/15m → R:R ≥ 1.30, ADX ≥ 18, Strength ≥ 52</b>; "
-            f"<b>1h → R:R ≥ 1.50, ADX ≥ 20, Strength ≥ 55</b>; "
+            f"<b>1h → R:R ≥ 1.40, ADX ≥ 18, Strength ≥ 52</b>; "
             f"<b>4h/1d → R:R ≥ 1.70, ADX ≥ 22, Strength ≥ 60</b>.<br>"
             f"If Scalp Opportunity is empty, do not force a scalp execution.<br><br>"
             f"<b>5) Advanced columns explain indicator context on this page</b><br>"
@@ -1740,7 +1877,7 @@ def render(ctx: dict) -> None:
             "<b>Coin</b>: asset ticker (hover shows exchange pair).<br>"
             "<b>Price ($)</b>: latest closed-candle price from active feed.<br>"
             "<b>Δ (%)</b>: change from previous closed candle to latest closed candle on selected timeframe (fallback: ticker % if candle delta unavailable).<br><br>"
-            "<b>Action</b>: final scanner class. "
+            "<b>Setup Confirm</b>: final scanner confirmation class (not a direct execution order). "
             "Calculated from Direction + Strength + AI Ensemble + Alignment + ADX regime checks.<br>"
             "<b>Direction</b>: side from technical signal mapping (Upside / Downside / Neutral).<br>"
             "<b>Strength</b>: technical signal power (0-100), derived from bias distance to neutral midpoint (50).<br>"
@@ -1788,7 +1925,14 @@ def render(ctx: dict) -> None:
         df_results = pd.DataFrame(results)
 
         # Quick scan health summary (visual-first, logic unchanged)
-        action_series = df_results.get("Action", pd.Series(dtype=str)).astype(str)
+        if "__action_raw" in df_results.columns:
+            action_series = df_results["__action_raw"].astype(str)
+        else:
+            action_series = (
+                df_results.get("Setup Confirm", pd.Series(dtype=str))
+                .astype(str)
+                .str.replace("CONFIRMED", "ENTER", regex=False)
+            )
         action_class_series = action_series.apply(normalize_action_class)
         enter_count = int(action_class_series.str.startswith("ENTER_").sum())
         watch_count = int((action_class_series == "WATCH").sum())
@@ -1813,8 +1957,9 @@ def render(ctx: dict) -> None:
                     errors="coerce",
                 )
                 scoped["__action_rank"] = (
-                    scoped["Action"]
+                    scoped.get("__action_raw", scoped.get("Setup Confirm", pd.Series(dtype=str)))
                     .astype(str)
+                    .str.replace("CONFIRMED", "ENTER", regex=False)
                     .apply(action_rank)
                 )
                 scoped = scoped.dropna(subset=["__rr"])
@@ -1824,11 +1969,11 @@ def render(ctx: dict) -> None:
                     best_coin = str(best_row.get("Coin", "—"))
                     best_rr = float(best_row["__rr"])
                     best_scalp_coin = f"{best_coin} ({best_rr:.2f})"
-                    best_action = str(best_row.get("Action", "")).strip()
+                    best_action = str(best_row.get("__action_raw", best_row.get("Setup Confirm", ""))).strip()
                     best_direction = str(best_row.get("Direction", "")).strip()
                     best_strength = str(best_row.get("Strength", "")).strip()
                     best_ai = str(best_row.get("AI Ensemble", "")).strip()
-                    best_action_compact = compact_action_label(best_action)
+                    best_action_compact = _setup_confirm_compact(best_action)
                     best_scalp_sub = (
                         f"{best_action_compact} • {best_direction} • {best_strength} • AI {best_ai}"
                     )
@@ -1851,8 +1996,8 @@ def render(ctx: dict) -> None:
 
         q1, q2, q3, q4 = st.columns(4, gap="small")
         with q1:
-            status_head = "ENTER READY" if enter_count > 0 else "NO ENTER NOW"
-            status_sub = f"ENTER {enter_count} • WATCH {watch_count} • SKIP {skip_count}"
+            status_head = "CONFIRMED READY" if enter_count > 0 else "NO CONFIRMED NOW"
+            status_sub = f"CONFIRMED {enter_count} • WATCH {watch_count} • SKIP {skip_count}"
             st.markdown(
                 "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
                 "<div class='elite-label'>Execution Status</div>"
@@ -1862,7 +2007,7 @@ def render(ctx: dict) -> None:
                 unsafe_allow_html=True,
             )
         with q2:
-            enter_mix_head = "NO ENTER CLASS" if enter_count == 0 else "CLASS BREAKDOWN"
+            enter_mix_head = "NO CONFIRMED CLASS" if enter_count == 0 else "CLASS BREAKDOWN"
             enter_mix_sub = (
                 f"Trend+AI {trend_ai_enter_count} • "
                 f"Trend-Led {trend_led_enter_count} • "
@@ -1870,7 +2015,7 @@ def render(ctx: dict) -> None:
             )
             st.markdown(
                 "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                "<div class='elite-label'>Enter Class Mix</div>"
+                "<div class='elite-label'>Confirmed Class Mix</div>"
                 f"<div class='scan-kpi-value'>{enter_mix_head}</div>"
                 f"<div class='scan-kpi-sub'>{enter_mix_sub}</div>"
                 "</div>",
@@ -1940,7 +2085,7 @@ def render(ctx: dict) -> None:
             "Coin",
             "Price ($)",
             "Δ (%)",
-            "Action",
+            "Setup Confirm",
             "Direction",
             "Strength",
             "AI Ensemble",
@@ -1971,6 +2116,7 @@ def render(ctx: dict) -> None:
         hidden_meta_cols = [
                 c for c in [
                     "__action_reason",
+                    "__action_raw",
                     "__entry_note",
                 "__ichimoku_detail",
                 "__spike_dir",
@@ -2003,7 +2149,7 @@ def render(ctx: dict) -> None:
             if not s or s.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE", "-"}:
                 return ""
             for token in (
-                "✅", "🟡", "⛔", "👀", "🟢", "🔴", "⚪", "🔥",
+                "✅", "🟡", "⛔", "⌛", "👀", "🟢", "🔴", "⚪", "🔥",
                 "⚠️", "⚠", "🚀", "📈", "📉", "•", "*", "★",
             ):
                 s = s.replace(token, "")

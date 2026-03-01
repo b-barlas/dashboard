@@ -418,8 +418,6 @@ def get_scalping_entry_target(
     supertrend_trend: str,
     ichimoku_trend: str,
     vwap_label: str,
-    volume_spike: bool,
-    strict_mode: bool = True
 ):
     return get_scalping_entry_target_core(
         df,
@@ -427,8 +425,6 @@ def get_scalping_entry_target(
         supertrend_trend,
         ichimoku_trend,
         vwap_label,
-        volume_spike,
-        strict_mode=strict_mode,
         sr_lookback_fn=_sr_lookback,
     )
 

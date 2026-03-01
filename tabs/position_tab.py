@@ -155,8 +155,6 @@ def render(ctx: dict) -> None:
             help="Signed value on notional. Use negative when you pay funding.",
         )
 
-    # Strict scalp mode is always enabled (non-strict path removed).
-   
     if st.button("Analyse Position", type="primary"):
         st.session_state["position_analysis_active"] = True
 
@@ -550,8 +548,6 @@ def render(ctx: dict) -> None:
                         supertrend_trend,
                         ichimoku_trend,
                         vwap_label,
-                        volume_spike,
-                        strict_mode=True
                     )
                     scalp_ok, scalp_reason = scalp_quality_gate(
                         scalp_direction=scalp_direction,

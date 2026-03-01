@@ -21,7 +21,8 @@ class MarketCoinColumnContractTests(unittest.TestCase):
         )
 
     def test_stablecoin_filter_is_part_of_scan_signature_and_universe_filter(self):
-        self.assertIn("scan_sig = (timeframe, direction_filter, int(top_n), bool(exclude_stables))", self.text)
+        self.assertIn("bool(exclude_stables)", self.text)
+        self.assertIn("tuple(custom_bases_applied)", self.text)
         self.assertIn("if exclude_stables:", self.text)
         self.assertIn(
             "working_symbols = [s for s in working_symbols if not _is_stable_base(s.split(\"/\")[0].upper())]",

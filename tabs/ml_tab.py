@@ -258,8 +258,6 @@ def render(ctx: dict) -> None:
                     ar.supertrend,
                     ar.ichimoku,
                     ar.vwap,
-                    ar.volume_spike,
-                    strict_mode=True,
                 )
                 signal_dir = (
                     "LONG" if ar.signal in {"STRONG BUY", "BUY"}

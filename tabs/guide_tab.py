@@ -75,13 +75,13 @@ Ensemble AI (3 models) is used as confirmation:
             "core",
         ),
         (
-            "1) Market tab (Coin Action Scanner)",
+            "1) Market tab (Coin Setup Scanner)",
             """
 This is the primary scan tab. Start here.
 
 Main table columns:
 - Coin, Price ($), Delta (%)
-- Action
+- Setup Confirm
 - Direction
 - Strength
 - AI Ensemble
@@ -89,21 +89,30 @@ Main table columns:
 - R:R, Entry/Stop/Target, Scalp Opportunity
 - Optional advanced indicator columns
 
-Action classes (final decision class):
-- ENTER (Trend+AI): strongest class (trend and AI align)
-- ENTER (Trend-Led): trend leads; AI works as guardrail
-- ENTER (AI-Led): AI leads; trend works as guardrail
+Scanner input modes:
+- Default mode: Top N liquidity scan (market-wide)
+- Custom mode: enter up to 10 symbols in Custom Coins, click Run Scan, and scanner analyzes only that watchlist
+- Top N control is disabled while custom mode is active
+- Selected timeframe controls candle context used for Direction/Strength, levels, and Delta
+
+Setup Confirm classes (final confirmation class):
+- CONFIRMED (Trend+AI): strongest class (trend and AI align)
+- CONFIRMED (Trend-Led): trend leads; AI works as guardrail
+- CONFIRMED (AI-Led): AI leads; trend works as guardrail
 - WATCH: setup exists but confirmation incomplete
 - SKIP: no direction, conflict, or weak edge
 
-Scalp Opportunity is separate from Action.
+Scalp Opportunity is separate from Setup Confirm.
 It appears only if all execution gates pass:
 - Direction match
-- R:R >= 1.5
-- ADX >= 20
-- Strength >= 55
+- Timeframe-adaptive R:R / ADX / Strength thresholds
 - No tech/AI conflict
 - Valid entry/stop/target
+
+Timeframe gate matrix:
+- 5m / 15m: R:R >= 1.30, ADX >= 18, Strength >= 52
+- 1h: R:R >= 1.40, ADX >= 18, Strength >= 52
+- 4h / 1d: R:R >= 1.70, ADX >= 22, Strength >= 60
 
 Important consistency rule:
 - Direction/Strength and plan levels are computed from **closed candles**
@@ -336,7 +345,7 @@ Execution/indicator data order:
 1. Exchange OHLCV/ticker from the active UK-safe exchange
 2. If exchange fails, app falls back to the next UK-safe exchange
 
-This means trade-critical fields (price, candles, indicators, Action/Direction/Strength)
+This means trade-critical fields (price, candles, indicators, Setup Confirm/Direction/Strength)
 remain exchange-driven even when enrichment providers are rate-limited.
 Enrichment fields (for example Market Cap) may show as `—` in exchange-only mode.
 
@@ -402,7 +411,7 @@ Use this 60-second checklist:
 
 1. **Market tab**
 - Scanner table loads and shows multiple rows
-- Action / Direction / AI columns are not empty
+- Setup Confirm / Direction / AI columns are not empty
 
 2. **Spot tab**
 - Analyse runs and shows Direction + Strength + AI + Tech vs AI Alignment

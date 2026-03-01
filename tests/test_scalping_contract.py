@@ -28,7 +28,6 @@ class ScalpingContractTests(unittest.TestCase):
             "Bullish",
             "Bullish",
             "🟢 Above",
-            True,
             sr_lookback_fn=lambda _tf=None: 30,
         )
         self.assertEqual(out, (None, 0.0, 0.0, 0.0, 0.0, ""))
@@ -51,8 +50,6 @@ class ScalpingContractTests(unittest.TestCase):
             "Bullish",
             "Bullish",
             "🟢 Above",
-            True,
-            strict_mode=False,
             sr_lookback_fn=lambda _tf=None: 30,
         )
         self.assertEqual(direction, "LONG")
@@ -81,8 +78,6 @@ class ScalpingContractTests(unittest.TestCase):
             "Bearish",
             "Bearish",
             "🔴 Below",
-            True,
-            strict_mode=False,
             sr_lookback_fn=lambda _tf=None: 30,
         )
         self.assertEqual(direction, "SHORT")

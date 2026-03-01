@@ -64,8 +64,6 @@ class TradingFlowE2ETests(unittest.TestCase):
             str(a.supertrend),
             str(a.ichimoku),
             str(a.vwap),
-            bool(a.volume_spike),
-            strict_mode=True,
             sr_lookback_fn=lambda _tf=None: 30,
         )
         self.assertEqual(len(scalp), 6)
