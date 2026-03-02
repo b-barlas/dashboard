@@ -175,10 +175,10 @@ def render(ctx: dict) -> None:
         signal_dir_raw = signal_plain(signal)
         signal_dir = direction_key(signal_dir_raw)
         signal_clean = direction_label(signal_dir)
-        ai_decision_available = True
         try:
             _ai_prob_s, ai_dir_s, _ai_details_s = ml_ensemble_predict(df_eval)
-            directional_agree = float((_ai_details_s or {}).get("agreement", 0.0))
+            agreement = float((_ai_details_s or {}).get("agreement", 0.0))
+            directional_agree = float((_ai_details_s or {}).get("directional_agreement", agreement))
             consensus_agree = float((_ai_details_s or {}).get("consensus_agreement", 0.0))
             ai_dir_key = direction_key(ai_dir_s)
             ai_votes, _display_ratio, decision_agreement = ai_vote_metrics(
@@ -186,13 +186,10 @@ def render(ctx: dict) -> None:
                 directional_agree,
                 consensus_agree,
             )
-            ai_status = str((_ai_details_s or {}).get("status") or "ok").strip().lower()
-            ai_decision_available = ai_status == "ok"
         except Exception:
             ai_dir_key = "NEUTRAL"
             ai_votes = 0
             decision_agreement = 0.0
-            ai_decision_available = False
 
         sig_dir_s = signal_dir if signal_dir in {"UPSIDE", "DOWNSIDE"} else "WAIT"
         conv_lbl_s, _conv_c_s = _calc_conviction(sig_dir_s, ai_dir_key, strength_score, decision_agreement)
@@ -205,10 +202,6 @@ def render(ctx: dict) -> None:
             decision_agreement,
             float(adx_val) if pd.notna(adx_val) else float("nan"),
         )
-        # Fail-safe: if AI context is unavailable, never promote to ENTER.
-        if (not ai_decision_available) and normalize_action_class(action_raw).startswith("ENTER_"):
-            action_raw = "WATCH"
-            action_reason_code = "AI_UNAVAILABLE"
 
         def _setup_confirm_display(raw_action: str) -> str:
             cls = normalize_action_class(raw_action)

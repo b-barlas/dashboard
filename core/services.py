@@ -214,6 +214,75 @@ def _valid_top_metric_field(field: str, value) -> bool:
     return value is not None
 
 
+def _indices_payload_ok(payload) -> bool:
+    """Minimal validity gate for market indices tuple."""
+    try:
+        if not isinstance(payload, (list, tuple)) or len(payload) != 9:
+            return False
+        total_mcap = _safe_float(payload[2])
+        return total_mcap is not None and total_mcap > 0
+    except Exception:
+        return False
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_market_indices_coinpaprika() -> tuple[float, float, int, int, float, float, float, float, float] | None:
+    """Fallback global metrics from CoinPaprika tickers endpoint.
+
+    Derives total market cap, selected asset dominance and weighted 24h cap change.
+    """
+    data = _http_get_json("https://api.coinpaprika.com/v1/tickers", timeout=12, retries=2)
+    if not isinstance(data, list):
+        return None
+
+    symbol_caps = {"BTC": 0.0, "ETH": 0.0, "BNB": 0.0, "SOL": 0.0, "ADA": 0.0, "XRP": 0.0}
+    total_mcap = 0.0
+    weighted_change_num = 0.0
+    weighted_change_den = 0.0
+
+    for row in data:
+        try:
+            symbol = str((row or {}).get("symbol") or "").upper()
+            quotes = (row or {}).get("quotes") if isinstance(row, dict) else {}
+            usd = quotes.get("USD") if isinstance(quotes, dict) else {}
+            mcap = _safe_float(usd.get("market_cap")) if isinstance(usd, dict) else None
+            chg24 = _safe_float(usd.get("percent_change_24h")) if isinstance(usd, dict) else None
+            if mcap is None or mcap <= 0:
+                continue
+            total_mcap += float(mcap)
+            if chg24 is not None:
+                weighted_change_num += float(mcap) * float(chg24)
+                weighted_change_den += float(mcap)
+            if symbol in symbol_caps:
+                symbol_caps[symbol] += float(mcap)
+        except Exception:
+            continue
+
+    if total_mcap <= 0:
+        return None
+
+    btc_cap = symbol_caps["BTC"]
+    eth_cap = symbol_caps["ETH"]
+    bnb_cap = symbol_caps["BNB"]
+    sol_cap = symbol_caps["SOL"]
+    ada_cap = symbol_caps["ADA"]
+    xrp_cap = symbol_caps["XRP"]
+    alt_mcap = max(total_mcap - btc_cap, 0.0)
+    mcap_24h_pct = (weighted_change_num / weighted_change_den) if weighted_change_den > 0 else 0.0
+
+    return (
+        round((btc_cap / total_mcap) * 100.0, 1),
+        round((eth_cap / total_mcap) * 100.0, 1),
+        int(total_mcap),
+        int(alt_mcap),
+        float(mcap_24h_pct),
+        round((bnb_cap / total_mcap) * 100.0, 1),
+        round((sol_cap / total_mcap) * 100.0, 1),
+        round((ada_cap / total_mcap) * 100.0, 1),
+        round((xrp_cap / total_mcap) * 100.0, 1),
+    )
+
+
 def get_market_top_snapshot() -> dict[str, float | int | str | None]:
     """Unified top-of-market snapshot with provider fallback and last-good cache.
 
@@ -258,19 +327,28 @@ def get_market_top_snapshot() -> dict[str, float | int | str | None]:
         if cg_complete:
             live.update(cg)
 
-    # 2) Market indices
+    # 2) Market indices (CoinGecko global -> CoinPaprika fallback)
     try:
-        (
-            btc_dom,
-            eth_dom,
-            total_mcap,
-            alt_mcap,
-            mcap_24h_pct,
-            bnb_dom,
-            sol_dom,
-            ada_dom,
-            xrp_dom,
-        ) = get_market_indices_core()
+        indices_payload = get_market_indices_core()
+        if not _indices_payload_ok(indices_payload):
+            cp_payload = _fetch_market_indices_coinpaprika()
+            if _indices_payload_ok(cp_payload):
+                indices_payload = cp_payload
+                _debug("Market indices fallback active: CoinPaprika.")
+        if _indices_payload_ok(indices_payload):
+            (
+                btc_dom,
+                eth_dom,
+                total_mcap,
+                alt_mcap,
+                mcap_24h_pct,
+                bnb_dom,
+                sol_dom,
+                ada_dom,
+                xrp_dom,
+            ) = indices_payload
+        else:
+            raise RuntimeError("No valid market indices payload from providers.")
         live.update(
             {
                 "btc_dom": _safe_float(btc_dom),
