@@ -673,10 +673,10 @@ def render(ctx: dict) -> None:
             help="Optional watchlist mode. Enter up to 10 symbols separated by comma.",
         )
     with controls[4]:
-        run_scan = st.button("Run Scan", use_container_width=True)
+        run_scan = st.button("Run Scan", width="stretch")
         clear_custom = st.button(
             "Clear Custom",
-            use_container_width=True,
+            width="stretch",
             disabled=not bool(st.session_state.get("market_custom_bases_applied", [])),
             key="market_clear_custom",
         )

@@ -181,4 +181,4 @@ def render(ctx: dict) -> None:
         ))
         fig_gauge.update_layout(height=280, margin=dict(l=30, r=30, t=60, b=20),
                                  template='plotly_dark', paper_bgcolor=PRIMARY_BG)
-        st.plotly_chart(fig_gauge, use_container_width=True)
+        st.plotly_chart(fig_gauge, width="stretch")

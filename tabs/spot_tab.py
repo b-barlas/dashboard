@@ -1,5 +1,6 @@
 from ui.ctx import get_ctx
 
+import html
 import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
@@ -33,10 +34,10 @@ def render(ctx: dict) -> None:
     direction_key = get_ctx(ctx, "direction_key")
     direction_label = get_ctx(ctx, "direction_label")
     format_delta = get_ctx(ctx, "format_delta")
+    format_stochrsi = get_ctx(ctx, "format_stochrsi")
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     get_price_change = get_ctx(ctx, "get_price_change")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
-    _build_indicator_grid = get_ctx(ctx, "_build_indicator_grid")
     _wma = get_ctx(ctx, "_wma")
     _sr_lookback = get_ctx(ctx, "_sr_lookback")
     _debug = get_ctx(ctx, "_debug")
@@ -91,13 +92,14 @@ def render(ctx: dict) -> None:
         f"<div class='panel-box'>"
         f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
         f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"In-depth technical analysis for any coin. Combines "
+        f"Spot-focused decision workspace for a single coin/timeframe. Uses the same core signal engine as Market tab, then maps it into "
+        f"<b>Setup Confirm</b> classes (TREND+AI / TREND-led / AI-led / WATCH / SKIP) for non-leverage execution. Combines "
         f"{_tip('Trend', 'EMA crossovers, SuperTrend, Ichimoku Cloud, Parabolic SAR, and ADX indicators.')} (40%), "
         f"{_tip('Momentum', 'RSI, MACD, Stochastic RSI, Williams %R, and CCI indicators.')} (30%), "
         f"{_tip('Volume', 'OBV direction, volume spikes, and VWAP positioning.')} (20%), and "
         f"{_tip('Volatility', 'Bollinger Band width, ATR level, and Keltner Channel breakouts.')} (10%) "
-        f"into a single direction output (Upside / Downside / Neutral) with a direction-agnostic strength score from 0-100%. "
-        f"Designed for spot trading without leverage.</p>"
+        f"into <b>Direction</b> (Upside / Downside / Neutral) and a direction-agnostic <b>Strength</b> score (0-100). "
+        f"All setup/level outputs are based on closed candles.</p>"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -105,9 +107,11 @@ def render(ctx: dict) -> None:
         f"<details style='margin-bottom:0.7rem;'>"
         f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
         f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.45rem;'>"
-        f"<b>1.</b> Start with Δ (%) + Setup Confirm + Direction + Strength.<br>"
-        f"<b>2.</b> Validate with AI Ensemble + Tech vs AI Alignment before acting.<br>"
-        f"<b>3.</b> Use indicator grid and execution levels for context, not standalone triggers."
+        f"<b>1.</b> Start with <b>Setup Snapshot</b>: Δ (%) + Setup Confirm + Direction + Strength.<br>"
+        f"<b>2.</b> Read <b>Setup Confirm</b> first: TREND+AI strongest, TREND-led/AI-led conditional, WATCH monitor, SKIP no-trade.<br>"
+        f"<b>3.</b> Validate with <b>AI Ensemble</b> + <b>Tech vs AI Alignment</b>.<br>"
+        f"<b>4.</b> Use <b>Technical Regime Breakdown</b> only as confirmation context (not standalone trigger).<br>"
+        f"<b>5.</b> In <b>Execution Levels</b>, choose one path (Buy Zone or Breakout), define matching stop first, then TP zone."
         f"</div></details>",
         unsafe_allow_html=True,
     )
@@ -146,7 +150,7 @@ def render(ctx: dict) -> None:
             return
 
         a = analyse(df_eval)
-        signal, _comment, volume_spike = a.signal, a.comment, a.volume_spike
+        signal, volume_spike = a.signal, a.volume_spike
         atr_comment, candle_pattern, bias_score = a.atr_comment, a.candle_pattern, a.bias
         strength_score = float(strength_from_bias(float(bias_score)))
         adx_val, supertrend_trend, ichimoku_trend = a.adx, a.supertrend, a.ichimoku
@@ -162,7 +166,11 @@ def render(ctx: dict) -> None:
             last_closed = float(df_eval["close"].iloc[-1])
             if pd.notna(prev_close) and prev_close > 0 and pd.notna(last_closed):
                 price_change = ((last_closed / prev_close) - 1.0) * 100.0
-        except Exception:
+        except Exception as e:
+            _debug(
+                f"Spot delta candle path failed for {coin} ({timeframe}): "
+                f"{e.__class__.__name__}: {str(e).strip()}"
+            )
             price_change = None
         if price_change is None:
             try:
@@ -171,7 +179,11 @@ def render(ctx: dict) -> None:
                 if fallback is not None:
                     price_change = float(fallback)
                     delta_note = "Fallback source: ticker percentage (closed-candle delta unavailable)."
-            except Exception:
+            except Exception as e:
+                _debug(
+                    f"Spot delta ticker fallback failed for {coin} ({timeframe}): "
+                    f"{e.__class__.__name__}: {str(e).strip()}"
+                )
                 price_change = None
 
         # Display summary grid
@@ -241,27 +253,67 @@ def render(ctx: dict) -> None:
             else (NEGATIVE if str(delta_display).strip().startswith("▼") else WARNING)
         )
         st.markdown(
-            f"<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); "
-            f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
-            f"<div style='text-align:center; padding:6px;' title='{delta_note}'>"
-            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Δ (%)</div>"
-            f"<div style='color:{delta_c_s}; font-size:0.85rem; font-weight:600;'>{delta_display or '—'}</div></div>"
-            f"<div style='text-align:center; padding:6px;' title='{setup_reason}'>"
-            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Setup Confirm</div>"
-            f"<div style='color:{setup_c_s}; font-size:0.85rem; font-weight:600;'>{setup_confirm}</div></div>"
-            f"<div style='text-align:center; padding:6px;' title='Technical side from closed candles (Upside/Downside/Neutral).'>"
-            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Direction</div>"
-            f"<div style='color:{sig_c_s}; font-size:0.85rem; font-weight:600;'>{signal_clean}</div></div>"
-            f"<div style='text-align:center; padding:6px;' title='Direction-agnostic signal power from the technical stack (0-100).'>"
-            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Strength</div>"
-            f"<div style='color:{conf_c_s}; font-size:0.85rem; font-weight:600;'>{strength_display}</div></div>"
-            f"<div style='text-align:center; padding:6px;' title='Model vote direction and vote count out of 3 models.'>"
-            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Ensemble</div>"
-            f"<div style='color:{ai_c_s}; font-size:0.85rem; font-weight:600;'>{direction_label(ai_dir_key)} ({ai_votes}/3)</div></div>"
-            f"<div style='text-align:center; padding:6px;' title='How well technical direction and AI direction agree.'>"
-            f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Tech vs AI Alignment</div>"
-            f"<div style='color:{conv_c_s}; font-size:0.85rem; font-weight:600;'>{conv_lbl_s}</div></div>"
-            f"</div>",
+            f"<style>"
+            f".spot-summary-title{{"
+            f"  margin:0.40rem 0 0.28rem 0;"
+            f"  text-align:center;"
+            f"  color:{TEXT_MUTED};"
+            f"  font-size:0.78rem;"
+            f"  text-transform:uppercase;"
+            f"  letter-spacing:0.45px;"
+            f"}}"
+            f".spot-summary-wrap{{"
+            f"  background:linear-gradient(140deg, rgba(4, 10, 18, 0.95), rgba(2, 5, 11, 0.95));"
+            f"  border:1px solid rgba(0, 212, 255, 0.16);"
+            f"  border-radius:12px;"
+            f"  padding:10px 12px;"
+            f"  margin:0.1rem 0 0.48rem 0;"
+            f"}}"
+            f".spot-summary-grid{{"
+            f"  display:flex;"
+            f"  flex-wrap:wrap;"
+            f"  justify-content:center;"
+            f"  gap:0.45rem 0.75rem;"
+            f"}}"
+            f".spot-summary-item{{"
+            f"  flex:0 1 150px;"
+            f"  min-width:130px;"
+            f"  text-align:center;"
+            f"  padding:4px 6px;"
+            f"}}"
+            f".spot-summary-label{{"
+            f"  color:{TEXT_MUTED};"
+            f"  font-size:0.67rem;"
+            f"  text-transform:uppercase;"
+            f"  letter-spacing:0.55px;"
+            f"}}"
+            f".spot-summary-value{{"
+            f"  font-size:1.03rem;"
+            f"  font-weight:700;"
+            f"  margin-top:3px;"
+            f"}}"
+            f"</style>"
+            f"<div class='spot-summary-title'>Setup Snapshot</div>"
+            f"<div class='spot-summary-wrap'><div class='spot-summary-grid'>"
+            f"<div class='spot-summary-item' title='{delta_note}'>"
+            f"<div class='spot-summary-label'>Δ (%)</div>"
+            f"<div class='spot-summary-value' style='color:{delta_c_s};'>{delta_display or '—'}</div></div>"
+            f"<div class='spot-summary-item' title='{setup_reason}'>"
+            f"<div class='spot-summary-label'>Setup Confirm</div>"
+            f"<div class='spot-summary-value' style='color:{setup_c_s};'>{setup_confirm}</div></div>"
+            f"<div class='spot-summary-item' title='Technical side from closed candles (Upside/Downside/Neutral).'>"
+            f"<div class='spot-summary-label'>Direction</div>"
+            f"<div class='spot-summary-value' style='color:{sig_c_s};'>{signal_clean}</div></div>"
+            f"<div class='spot-summary-item' title='Direction-agnostic signal power from the technical stack (0-100).'>"
+            f"<div class='spot-summary-label'>Strength</div>"
+            f"<div class='spot-summary-value' style='color:{conf_c_s};'>{strength_display}</div></div>"
+            f"<div class='spot-summary-item' title='Model vote direction and vote count out of 3 models.'>"
+            f"<div class='spot-summary-label'>AI Ensemble</div>"
+            f"<div class='spot-summary-value' style='color:{ai_c_s};'>{direction_label(ai_dir_key)} ({ai_votes}/3)</div></div>"
+            f"<div class='spot-summary-item' title='How well technical direction and AI direction agree.'>"
+            f"<div class='spot-summary-label'>Tech vs AI Alignment</div>"
+            f"<div class='spot-summary-value' style='color:{conv_c_s};'>{conv_lbl_s}</div></div>"
+            f"</div></div>",
             unsafe_allow_html=True,
         )
 
@@ -312,18 +364,144 @@ def render(ctx: dict) -> None:
                 parts.append(f"VWAP: {vwap_ctx}")
             spike_hover = " | ".join(parts)
 
-        # Indicator grid (professional card layout)
-        _grid_html = _build_indicator_grid(
-            supertrend_trend, ichimoku_trend, vwap_label, adx_val, bollinger_bias,
-            stochrsi_k_val, psar_trend, williams_label, cci_label,
-            volume_spike, atr_comment, candle_pattern,
-            spike_label=spike_label, spike_hover=spike_hover,
-            timeframe=timeframe,
-            ichimoku_hover=ichimoku_hover,
-            adx_label_override=_adx_bucket_only(adx_val),
+        def _clean_indicator_text(v: str) -> str:
+            txt = str(v or "").strip()
+            for token in ["🟢", "🔴", "🟡", "⚪", "🔥", "▲▲", "▲", "▼", "→", "–"]:
+                txt = txt.replace(token, "")
+            return " ".join(txt.split()).strip()
+
+        def _indicator_color(v: str) -> str:
+            u = str(v or "").upper()
+            if "VERY STRONG" in u or "EXTREME" in u:
+                return POSITIVE
+            if "STRONG" in u and "NOT" not in u:
+                return POSITIVE
+            if "WEAK" in u:
+                return NEGATIVE
+            if "STARTING" in u:
+                return WARNING
+            if any(k in u for k in ["BULLISH", "ABOVE", "OVERSOLD", "LOW", "NEAR BOTTOM", "UP SPIKE"]):
+                return POSITIVE
+            if any(k in u for k in ["BEARISH", "BELOW", "OVERBOUGHT", "HIGH", "NEAR TOP", "DOWN SPIKE"]):
+                return NEGATIVE
+            return WARNING
+
+        def _indicator_cell(name: str, value: str, tooltip: str) -> str:
+            val = _clean_indicator_text(value)
+            if not val:
+                return ""
+            color = _indicator_color(val)
+            tip = html.escape(tooltip, quote=True)
+            return (
+                f"<div class='spot-indicator-item'>"
+                f"<div class='spot-indicator-name'>{name}</div>"
+                f"<div class='spot-indicator-value' style='color:{color};' title='{tip}'>{val}</div>"
+                f"</div>"
+            )
+
+        supertrend_txt = _clean_indicator_text(supertrend_trend)
+        ichimoku_txt = _clean_indicator_text(ichimoku_trend)
+        vwap_txt = _clean_indicator_text(vwap_label)
+        adx_txt = _clean_indicator_text(_adx_bucket_only(adx_val))
+        bollinger_txt = _clean_indicator_text(bollinger_bias)
+        stochrsi_txt = _clean_indicator_text(format_stochrsi(stochrsi_k_val, timeframe=timeframe))
+        psar_txt = _clean_indicator_text(psar_trend)
+        will_txt = _clean_indicator_text(williams_label)
+        cci_txt = _clean_indicator_text(cci_label)
+        volume_txt = _clean_indicator_text(spike_label) if volume_spike else ""
+        volatility_txt = _clean_indicator_text(atr_comment.replace("▲", "").replace("▼", "").replace("–", ""))
+        pattern_txt = _clean_indicator_text(candle_pattern.split(" (")[0] if candle_pattern else "")
+
+        trend_cells = "".join(
+            [
+                _indicator_cell("SuperTrend", supertrend_txt, "ATR-based trend line direction."),
+                _indicator_cell("Ichimoku", ichimoku_txt, f"Cloud trend context. {ichimoku_hover}".strip()),
+                _indicator_cell("VWAP", vwap_txt, "Price relative to volume-weighted average price."),
+                _indicator_cell("ADX", adx_txt, "Trend strength (not direction)."),
+                _indicator_cell("PSAR", psar_txt, "Parabolic SAR trend-following state."),
+            ]
         )
-        if _grid_html:
-            st.markdown(_grid_html, unsafe_allow_html=True,
+        momentum_cells = "".join(
+            [
+                _indicator_cell("StochRSI", stochrsi_txt, "Momentum pressure zone."),
+                _indicator_cell("Williams %R", will_txt, "Range-position momentum signal."),
+                _indicator_cell("CCI", cci_txt, "Mean-reversion momentum signal."),
+                _indicator_cell("Pattern", pattern_txt, "Latest candle pattern direction."),
+            ]
+        )
+        vol_cells = "".join(
+            [
+                _indicator_cell("Bollinger", bollinger_txt, "Band location (extension / pullback context)."),
+                _indicator_cell("Volatility", volatility_txt, "ATR/band-width regime."),
+                _indicator_cell("Volume", volume_txt, f"Abnormal volume event. {spike_hover}".strip()),
+            ]
+        )
+
+        if trend_cells or momentum_cells or vol_cells:
+            st.markdown(
+                f"<style>"
+                f".spot-indicator-sep{{"
+                f"  margin:8px 0 6px 0;"
+                f"  text-align:center;"
+                f"  color:{TEXT_MUTED};"
+                f"  font-size:0.80rem;"
+                f"  text-transform:uppercase;"
+                f"  letter-spacing:0.45px;"
+                f"}}"
+                f".spot-indicator-wrap{{"
+                f"  display:grid;"
+                f"  grid-template-columns:repeat(auto-fit,minmax(250px,1fr));"
+                f"  gap:0.55rem;"
+                f"  margin:0.2rem 0 0.45rem 0;"
+                f"}}"
+                f".spot-indicator-group{{"
+                f"  background:rgba(0,0,0,0.56);"
+                f"  border:1px solid rgba(0, 212, 255, 0.14);"
+                f"  border-radius:12px;"
+                f"  padding:8px 8px 6px 8px;"
+                f"}}"
+                f".spot-indicator-group-title{{"
+                f"  color:{ACCENT};"
+                f"  text-align:center;"
+                f"  font-size:0.74rem;"
+                f"  text-transform:uppercase;"
+                f"  letter-spacing:0.55px;"
+                f"  margin-bottom:4px;"
+                f"}}"
+                f".spot-indicator-grid{{"
+                f"  display:flex;"
+                f"  flex-wrap:wrap;"
+                f"  justify-content:center;"
+                f"  gap:4px 10px;"
+                f"  align-items:center;"
+                f"}}"
+                f".spot-indicator-item{{"
+                f"  text-align:center;"
+                f"  padding:4px 2px;"
+                f"  flex:0 1 118px;"
+                f"}}"
+                f".spot-indicator-name{{"
+                f"  color:{TEXT_MUTED};"
+                f"  font-size:0.68rem;"
+                f"  text-transform:uppercase;"
+                f"  letter-spacing:0.5px;"
+                f"}}"
+                f".spot-indicator-value{{"
+                f"  font-size:0.95rem;"
+                f"  font-weight:700;"
+                f"  margin-top:2px;"
+                f"}}"
+                f"</style>"
+                f"<div class='spot-indicator-sep'>Technical Regime Breakdown (closed-candle context)</div>"
+                f"<div class='spot-indicator-wrap'>"
+                f"<div class='spot-indicator-group'><div class='spot-indicator-group-title'>Trend Structure</div>"
+                f"<div class='spot-indicator-grid'>{trend_cells}</div></div>"
+                f"<div class='spot-indicator-group'><div class='spot-indicator-group-title'>Momentum Signals</div>"
+                f"<div class='spot-indicator-grid'>{momentum_cells}</div></div>"
+                f"<div class='spot-indicator-group'><div class='spot-indicator-group-title'>Volatility & Volume</div>"
+                f"<div class='spot-indicator-grid'>{vol_cells}</div></div>"
+                f"</div>",
+                unsafe_allow_html=True,
             )
 
         # Execution levels (spot-only): separate pullback and breakout paths.
@@ -358,23 +536,25 @@ def render(ctx: dict) -> None:
 
         st.markdown(
             f"<style>"
-            f".spot-kpi-row {{"
-            f"  display:flex;"
-            f"  flex-wrap:nowrap;"
-            f"  gap:0.45rem;"
-            f"  margin:0.25rem 0 0.5rem 0;"
-            f"  overflow-x:auto;"
-            f"  padding-bottom:4px;"
-            f"  scrollbar-width:thin;"
-            f"}}"
-            f".spot-kpi-card {{"
-            f"  flex:0 0 clamp(190px, 13.2vw, 240px);"
+            f".spot-kpi-panel {{"
             f"  background:linear-gradient(140deg, rgba(4, 10, 18, 0.96), rgba(2, 5, 11, 0.96));"
             f"  border:1px solid rgba(0, 212, 255, 0.16);"
             f"  border-radius:14px;"
-            f"  padding:10px 11px;"
+            f"  padding:10px 12px;"
             f"  box-shadow:0 10px 30px rgba(0, 0, 0, 0.35);"
-            f"  min-width:0;"
+            f"  margin:0.25rem 0 0.5rem 0;"
+            f"}}"
+            f".spot-kpi-grid {{"
+            f"  display:flex;"
+            f"  flex-wrap:wrap;"
+            f"  justify-content:center;"
+            f"  gap:0.55rem 0.9rem;"
+            f"}}"
+            f".spot-kpi-item {{"
+            f"  flex:0 1 clamp(220px, 22vw, 290px);"
+            f"  min-width:200px;"
+            f"  text-align:center;"
+            f"  padding:4px 6px;"
             f"}}"
             f".spot-kpi-label {{"
             f"  color:{TEXT_MUTED};"
@@ -389,44 +569,58 @@ def render(ctx: dict) -> None:
             f".spot-kpi-value {{"
             f"  color:{ACCENT};"
             f"  font-family:'Space Grotesk','Manrope',sans-serif;"
-            f"  font-size:clamp(0.86rem, 0.95vw, 1.35rem);"
+            f"  font-size:1.08rem;"
             f"  font-weight:700;"
             f"  margin-top:5px;"
-            f"  line-height:1.15;"
-            f"  white-space:nowrap;"
-            f"  overflow:visible;"
-            f"  text-overflow:clip;"
+            f"  line-height:1.24;"
+            f"  white-space:normal;"
+            f"  overflow-wrap:anywhere;"
             f"  font-variant-numeric:tabular-nums;"
             f"}}"
-            f".spot-kpi-value-range {{"
-            f"  font-size:clamp(0.68rem, 0.69vw, 0.92rem);"
-            f"}}"
             f".spot-kpi-guide {{"
-            f"  border:1px solid rgba(0, 212, 255, 0.14);"
+            f"  border:1px solid rgba(0, 212, 255, 0.28);"
+            f"  border-left:4px solid {ACCENT};"
             f"  background:rgba(0, 0, 0, 0.62);"
             f"  border-radius:12px;"
             f"  padding:10px 12px;"
             f"  margin:0 0 0.7rem 0;"
             f"  color:{TEXT_MUTED};"
-            f"  font-size:0.85rem;"
-            f"  line-height:1.64;"
+            f"  font-family:'Manrope','Segoe UI',sans-serif;"
+            f"  font-size:0.86rem;"
+            f"  font-weight:500;"
+            f"  line-height:1.7;"
             f"}}"
-            f".spot-kpi-guide b {{ color:{ACCENT}; }}"
+            f".spot-kpi-guide b {{ color:inherit; font-weight:700; }}"
             f".spot-kpi-guide ul {{ margin:0.2rem 0 0.25rem 1.1rem; padding:0; }}"
             f".spot-kpi-guide li {{ margin:0.15rem 0; }}"
+            f".spot-kpi-guide ul, .spot-kpi-guide li, .spot-kpi-guide span {{"
+            f"  font-family:'Manrope','Segoe UI',sans-serif;"
+            f"  font-size:0.86rem;"
+            f"  font-weight:500;"
+            f"  line-height:1.7;"
+            f"}}"
+            f".spot-kpi-section-title {{"
+            f"  margin:0.30rem 0 0.34rem 0;"
+            f"  text-align:center;"
+            f"  color:{TEXT_MUTED};"
+            f"  font-size:0.78rem;"
+            f"  text-transform:uppercase;"
+            f"  letter-spacing:0.45px;"
+            f"}}"
             f"</style>"
-            f"<div class='spot-kpi-row'>"
-            f"<div class='spot-kpi-card' title='Latest close of selected timeframe (not live tick).'>"
+            f"<div class='spot-kpi-section-title'>Execution Levels (spot-only)</div>"
+            f"<div class='spot-kpi-panel'><div class='spot-kpi-grid'>"
+            f"<div class='spot-kpi-item' title='Latest close of selected timeframe (not live tick).'>"
             f"<div class='spot-kpi-label'>Reference Price</div><div class='spot-kpi-value'>{_fmt_price(current_price)}</div></div>"
-            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Buy Zone</div><div class='spot-kpi-value spot-kpi-value-range'>{pullback_zone_text}</div></div>"
-            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Buy Above (Breakout)</div><div class='spot-kpi-value'>{_fmt_price(breakout_trigger)}</div></div>"
-            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Stop (Buy Zone)</div><div class='spot-kpi-value'>{_fmt_price(pullback_invalidation)}</div></div>"
-            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Stop (Breakout)</div><div class='spot-kpi-value'>{_fmt_price(breakout_invalidation)}</div></div>"
-            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Take-Profit (Buy Zone)</div><div class='spot-kpi-value spot-kpi-value-range'>{pullback_tp_text}</div></div>"
-            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Take-Profit (Breakout)</div><div class='spot-kpi-value spot-kpi-value-range'>{breakout_tp_text}</div></div>"
-            f"</div>"
+            f"<div class='spot-kpi-item'><div class='spot-kpi-label'>Buy Zone</div><div class='spot-kpi-value'>{pullback_zone_text}</div></div>"
+            f"<div class='spot-kpi-item'><div class='spot-kpi-label'>Buy Above (Breakout)</div><div class='spot-kpi-value'>{_fmt_price(breakout_trigger)}</div></div>"
+            f"<div class='spot-kpi-item'><div class='spot-kpi-label'>Stop (Buy Zone)</div><div class='spot-kpi-value'>{_fmt_price(pullback_invalidation)}</div></div>"
+            f"<div class='spot-kpi-item'><div class='spot-kpi-label'>Stop (Breakout)</div><div class='spot-kpi-value'>{_fmt_price(breakout_invalidation)}</div></div>"
+            f"<div class='spot-kpi-item'><div class='spot-kpi-label'>Take-Profit (Buy Zone)</div><div class='spot-kpi-value'>{pullback_tp_text}</div></div>"
+            f"<div class='spot-kpi-item'><div class='spot-kpi-label'>Take-Profit (Breakout)</div><div class='spot-kpi-value'>{breakout_tp_text}</div></div>"
+            f"</div></div>"
             f"<div class='spot-kpi-guide'>"
-            f"<b>KPI Quick Guide:</b>"
+            f"<b style='font-size:1rem;'>Info | KPI Quick Guide:</b>"
             f"<ul>"
             f"<li><b>Reference Price</b>: latest closed candle for this timeframe.</li>"
             f"<li><b>Buy Zone</b>: first accumulation area if price reacts and holds.</li>"
@@ -434,7 +628,7 @@ def render(ctx: dict) -> None:
             f"<li><b>Stop levels</b>: if price breaks stop, that specific path is invalid.</li>"
             f"<li><b>Take-Profit zones</b>: scale out in the matching zone (buy-zone path vs breakout path).</li>"
             f"</ul>"
-            f"<span style='font-size:0.79rem;'>Workflow: choose one path, define stop first, then execute the matching take-profit zone.</span>"
+            f"<span style='font-size:0.86rem;'>Workflow: choose one path, define stop first, then execute the matching take-profit zone.</span>"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -499,11 +693,11 @@ def render(ctx: dict) -> None:
         st.markdown(
             f"<div class='panel-box' style='border-left:4px solid {plan_color};'>"
             f"<b style='color:{plan_color}; font-size:1rem;'>Spot Execution Plan</b>"
-            f"<div style='color:{plan_color}; font-size:0.82rem; margin-top:4px;'><b>Mode:</b> {plan_status}</div>"
-            f"<div style='color:{plan_color}; font-size:0.82rem; margin-top:2px;'><b>Setup Confirm:</b> {setup_label}</div>"
-            f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; line-height:1.7; margin-top:6px;'>"
+            f"<div style='color:{plan_color}; font-family:\"Manrope\",\"Segoe UI\",sans-serif; font-size:0.86rem; font-weight:500; line-height:1.7; margin-top:4px;'><b>Mode:</b> {plan_status}</div>"
+            f"<div style='color:{plan_color}; font-family:\"Manrope\",\"Segoe UI\",sans-serif; font-size:0.86rem; font-weight:500; line-height:1.7; margin-top:2px;'><b>Setup Confirm:</b> {setup_label}</div>"
+            f"<div style='color:{TEXT_MUTED}; font-family:\"Manrope\",\"Segoe UI\",sans-serif; font-size:0.86rem; font-weight:500; line-height:1.7; margin-top:6px;'>"
             f"{plan_lines}"
-            f"<br><span style='color:{TEXT_MUTED}; font-size:0.78rem;'>Guide only, not financial advice. "
+            f"<br><span style='color:{TEXT_MUTED}; font-family:\"Manrope\",\"Segoe UI\",sans-serif; font-size:0.86rem; font-weight:500; line-height:1.7;'>Guide only, not financial advice. "
             f"Always confirm with your own risk plan.</span>"
             f"</div></div>",
             unsafe_allow_html=True,

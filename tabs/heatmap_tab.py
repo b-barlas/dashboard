@@ -220,7 +220,7 @@ def render(ctx: dict) -> None:
         paper_bgcolor=PRIMARY_BG,
         font=dict(size=12),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     st.markdown(f"<div class='god-header'><b style='color:{NEON_BLUE};'>Top Movers (24h)</b></div>", unsafe_allow_html=True)
     df_sorted = df_hm.sort_values("Change 24h (%)", ascending=False).copy()

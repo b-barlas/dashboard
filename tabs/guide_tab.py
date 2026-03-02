@@ -127,12 +127,42 @@ Mode badges:
         (
             "2) Spot tab",
             """
-Single-coin analysis for spot execution planning.
-What to read:
-- Direction + Strength + AI Ensemble + Tech vs AI Alignment (signal quality)
-- Indicator strip (SuperTrend, Ichimoku, VWAP, ADX, Bollinger, StochRSI, PSAR, Williams %R, CCI, Volatility)
-- Current Price / Breakout Entry / Exit If Broken cards
-- Spot Execution Plan text (scenario-based execution steps)
+Single-coin spot decision workspace (non-leverage), synchronized with Market tab decision logic.
+
+Read in this order:
+1) Setup Snapshot:
+- Delta (%)
+- Setup Confirm
+- Direction
+- Strength
+- AI Ensemble
+- Tech vs AI Alignment
+
+Setup Confirm classes:
+- TREND+AI: strongest confirmation class
+- TREND-led: trend leads, AI acts as guardrail
+- AI-led: AI leads, trend acts as guardrail
+- WATCH: setup exists, confirmation incomplete
+- SKIP: no actionable setup
+
+2) Technical Regime Breakdown:
+- Trend Structure: SuperTrend, Ichimoku, VWAP, ADX, PSAR
+- Momentum Signals: StochRSI, Williams %R, CCI, Pattern
+- Volatility & Volume: Bollinger, Volatility, Volume spike context
+
+3) Execution Levels (spot-only):
+- Reference Price
+- Buy Zone + Buy Above (Breakout)
+- Stop (Buy Zone) + Stop (Breakout)
+- Take-Profit (Buy Zone) + Take-Profit (Breakout)
+
+4) Spot Execution Plan:
+- Scenario-specific action text driven by Setup Confirm + Direction context
+- Use it as execution workflow guidance, not as a guaranteed outcome
+
+Important:
+- Decision fields and levels are based on closed candles.
+- Spot tab uses the same core signal/decision engine as Market tab.
             """,
             "core",
         ),
