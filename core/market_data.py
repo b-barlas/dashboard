@@ -160,14 +160,22 @@ def get_top_volume_usdt_symbols(
     def _exchange_fallback_pairs() -> list[str]:
         # Fallback to exchange-available USD/USDT markets when CoinGecko symbols
         # cannot be mapped (rate-limit / payload drift / symbol mismatch).
-        pairs: list[str] = []
+        per_base: dict[str, set[str]] = {}
         for pair in sorted(markets.keys()):
             if not isinstance(pair, str) or "/" not in pair:
                 continue
             base, quote = pair.split("/", 1)
             if not base or quote not in {"USDT", "USD"}:
                 continue
-            pairs.append(pair)
+            per_base.setdefault(base, set()).add(quote)
+
+        pairs: list[str] = []
+        for base in sorted(per_base.keys()):
+            quotes = per_base[base]
+            if "USDT" in quotes:
+                pairs.append(f"{base}/USDT")
+            elif "USD" in quotes:
+                pairs.append(f"{base}/USD")
             if len(pairs) >= top_n:
                 break
         return pairs

@@ -122,13 +122,16 @@ def render(ctx: dict) -> None:
         if _val_err:
             st.error(_val_err)
             return
-        df_live = fetch_ohlcv(coin, timeframe)
+        # Keep Spot analysis history depth aligned with Market scanner (500 candles).
+        # This avoids setup-confirm drift between tabs for the same coin/timeframe.
+        spot_limit = 500
+        df_live = fetch_ohlcv(coin, timeframe, limit=spot_limit)
         df, used_cache, cache_ts = live_or_snapshot(
             st,
-            f"spot_df::{coin}::{timeframe}",
+            f"spot_df::{coin}::{timeframe}::{spot_limit}",
             df_live,
             max_age_sec=_spot_cache_ttl(timeframe),
-            current_sig=(coin, timeframe),
+            current_sig=(coin, timeframe, spot_limit),
         )
         if used_cache:
             st.warning(f"Live data unavailable. Showing cached snapshot from {cache_ts}.")
@@ -356,12 +359,16 @@ def render(ctx: dict) -> None:
         st.markdown(
             f"<style>"
             f".spot-kpi-row {{"
-            f"  display:grid;"
-            f"  grid-template-columns:repeat(7, minmax(0, 1fr));"
+            f"  display:flex;"
+            f"  flex-wrap:nowrap;"
             f"  gap:0.45rem;"
             f"  margin:0.25rem 0 0.5rem 0;"
+            f"  overflow-x:auto;"
+            f"  padding-bottom:4px;"
+            f"  scrollbar-width:thin;"
             f"}}"
             f".spot-kpi-card {{"
+            f"  flex:0 0 clamp(190px, 13.2vw, 240px);"
             f"  background:linear-gradient(140deg, rgba(4, 10, 18, 0.96), rgba(2, 5, 11, 0.96));"
             f"  border:1px solid rgba(0, 212, 255, 0.16);"
             f"  border-radius:14px;"
@@ -392,7 +399,7 @@ def render(ctx: dict) -> None:
             f"  font-variant-numeric:tabular-nums;"
             f"}}"
             f".spot-kpi-value-range {{"
-            f"  font-size:clamp(0.70rem, 0.72vw, 0.96rem);"
+            f"  font-size:clamp(0.68rem, 0.69vw, 0.92rem);"
             f"}}"
             f".spot-kpi-guide {{"
             f"  border:1px solid rgba(0, 212, 255, 0.14);"
@@ -405,27 +412,29 @@ def render(ctx: dict) -> None:
             f"  line-height:1.64;"
             f"}}"
             f".spot-kpi-guide b {{ color:{ACCENT}; }}"
+            f".spot-kpi-guide ul {{ margin:0.2rem 0 0.25rem 1.1rem; padding:0; }}"
+            f".spot-kpi-guide li {{ margin:0.15rem 0; }}"
             f"</style>"
             f"<div class='spot-kpi-row'>"
             f"<div class='spot-kpi-card' title='Latest close of selected timeframe (not live tick).'>"
-            f"<div class='spot-kpi-label'>Latest Candle Close</div><div class='spot-kpi-value'>{_fmt_price(current_price)}</div></div>"
-            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Primary Accumulation Zone</div><div class='spot-kpi-value spot-kpi-value-range'>{pullback_zone_text}</div></div>"
-            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Breakout Entry</div><div class='spot-kpi-value'>{_fmt_price(breakout_trigger)}</div></div>"
-            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Pullback Exit If Broken</div><div class='spot-kpi-value'>{_fmt_price(pullback_invalidation)}</div></div>"
-            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Breakout Exit If Broken</div><div class='spot-kpi-value'>{_fmt_price(breakout_invalidation)}</div></div>"
-            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Pullback TP Zone</div><div class='spot-kpi-value spot-kpi-value-range'>{pullback_tp_text}</div></div>"
-            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Breakout TP Zone</div><div class='spot-kpi-value spot-kpi-value-range'>{breakout_tp_text}</div></div>"
+            f"<div class='spot-kpi-label'>Reference Price</div><div class='spot-kpi-value'>{_fmt_price(current_price)}</div></div>"
+            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Buy Zone</div><div class='spot-kpi-value spot-kpi-value-range'>{pullback_zone_text}</div></div>"
+            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Buy Above (Breakout)</div><div class='spot-kpi-value'>{_fmt_price(breakout_trigger)}</div></div>"
+            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Stop (Buy Zone)</div><div class='spot-kpi-value'>{_fmt_price(pullback_invalidation)}</div></div>"
+            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Stop (Breakout)</div><div class='spot-kpi-value'>{_fmt_price(breakout_invalidation)}</div></div>"
+            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Take-Profit (Buy Zone)</div><div class='spot-kpi-value spot-kpi-value-range'>{pullback_tp_text}</div></div>"
+            f"<div class='spot-kpi-card'><div class='spot-kpi-label'>Take-Profit (Breakout)</div><div class='spot-kpi-value spot-kpi-value-range'>{breakout_tp_text}</div></div>"
             f"</div>"
             f"<div class='spot-kpi-guide'>"
-            f"<b>KPI Quick Guide (Beginner):</b><br>"
-            f"1) <b>Latest Candle Close</b>: your current reference price for this timeframe (closed candle).<br>"
-            f"2) <b>Primary Accumulation Zone</b>: first buy area. If price revisits this zone and holds, it is your pullback entry area.<br>"
-            f"3) <b>Breakout Entry</b>: second buy trigger. If price closes above this level, momentum confirmation appears.<br>"
-            f"4) <b>Pullback Exit If Broken</b>: stop level for pullback entry. If price closes below it, pullback setup is invalid.<br>"
-            f"5) <b>Breakout Exit If Broken</b>: stop level for breakout entry. If price falls back below it after breakout, momentum setup weakens.<br>"
-            f"6) <b>Pullback TP Zone</b>: partial/full take-profit area for pullback entries.<br>"
-            f"7) <b>Breakout TP Zone</b>: partial/full take-profit area for breakout entries.<br>"
-            f"<span style='font-size:0.78rem;'>Simple workflow: wait for a valid entry trigger, define the matching exit level first, then use the matching TP zone.</span>"
+            f"<b>KPI Quick Guide:</b>"
+            f"<ul>"
+            f"<li><b>Reference Price</b>: latest closed candle for this timeframe.</li>"
+            f"<li><b>Buy Zone</b>: first accumulation area if price reacts and holds.</li>"
+            f"<li><b>Buy Above (Breakout)</b>: second trigger if a candle closes above this level.</li>"
+            f"<li><b>Stop levels</b>: if price breaks stop, that specific path is invalid.</li>"
+            f"<li><b>Take-Profit zones</b>: scale out in the matching zone (buy-zone path vs breakout path).</li>"
+            f"</ul>"
+            f"<span style='font-size:0.79rem;'>Workflow: choose one path, define stop first, then execute the matching take-profit zone.</span>"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -438,9 +447,9 @@ def render(ctx: dict) -> None:
             plan_lines = (
                 f"1) <b>Setup Confirm is SKIP:</b> do not open a new spot position on this structure.<br>"
                 f"2) <b>Wait for regime improvement:</b> setup should move to WATCH or a confirmed class (TREND+AI / TREND-led / AI-led) before re-evaluation.<br>"
-                f"3) <b>If already holding:</b> reduce risk into strength and enforce pullback risk line ({_fmt_price(pullback_invalidation)}).<br>"
-                f"4) <b>Keep both paths prepared:</b> Pullback zone ({pullback_zone_text}) and breakout trigger ({_fmt_price(breakout_trigger)}).<br>"
-                f"5) <b>Profit maps:</b> Pullback TP ({pullback_tp_text}) / Breakout TP ({breakout_tp_text})."
+                f"3) <b>If already holding:</b> reduce risk and keep stop (Buy Zone) at {_fmt_price(pullback_invalidation)}.<br>"
+                f"4) <b>Keep both paths prepared:</b> Buy Zone ({pullback_zone_text}) and Buy Above trigger ({_fmt_price(breakout_trigger)}).<br>"
+                f"5) <b>Take-profit maps:</b> Buy Zone TP ({pullback_tp_text}) / Breakout TP ({breakout_tp_text})."
             )
         elif setup_cls == "WATCH":
             plan_status = "Watch"
@@ -448,34 +457,33 @@ def render(ctx: dict) -> None:
             if signal_dir == "UPSIDE":
                 plan_lines = (
                     f"1) <b>Setup Confirm is WATCH:</b> confirmation is partial; monitor, do not force entry.<br>"
-                    f"2) <b>Primary trigger path:</b> reaction quality in Primary Accumulation Zone ({pullback_zone_text}).<br>"
-                    f"3) <b>Momentum trigger path:</b> candle close above Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
-                    f"4) <b>Risk discipline:</b> pullback invalidation {_fmt_price(pullback_invalidation)}, breakout invalidation {_fmt_price(breakout_invalidation)}.<br>"
-                    f"5) <b>Profit discipline:</b> Pullback TP ({pullback_tp_text}) / Breakout TP ({breakout_tp_text})."
+                    f"2) <b>Primary trigger path:</b> reaction quality in Buy Zone ({pullback_zone_text}).<br>"
+                    f"3) <b>Momentum trigger path:</b> candle close above Buy Above trigger ({_fmt_price(breakout_trigger)}).<br>"
+                    f"4) <b>Risk discipline:</b> stop (Buy Zone) {_fmt_price(pullback_invalidation)}, stop (Breakout) {_fmt_price(breakout_invalidation)}.<br>"
+                    f"5) <b>Take-profit discipline:</b> Buy Zone TP ({pullback_tp_text}) / Breakout TP ({breakout_tp_text})."
                 )
             elif signal_dir == "DOWNSIDE":
                 plan_lines = (
                     f"1) <b>Setup Confirm is WATCH with Downside direction:</b> avoid fresh spot buys until reclaim confirmation.<br>"
-                    f"2) <b>Reclaim trigger:</b> wait for a close back above Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
-                    f"3) <b>If already holding:</b> reduce risk into strength and protect with pullback invalidation ({_fmt_price(pullback_invalidation)}).<br>"
-                    f"4) <b>If reclaim confirms:</b> use breakout invalidation ({_fmt_price(breakout_invalidation)}) and breakout TP ({breakout_tp_text})."
+                    f"2) <b>Reclaim trigger:</b> wait for a close back above Buy Above trigger ({_fmt_price(breakout_trigger)}).<br>"
+                    f"3) <b>If already holding:</b> reduce risk and protect with stop (Buy Zone) {_fmt_price(pullback_invalidation)}.<br>"
+                    f"4) <b>If reclaim confirms:</b> use stop (Breakout) {_fmt_price(breakout_invalidation)} and breakout TP ({breakout_tp_text})."
                 )
             else:
                 plan_lines = (
                     f"1) <b>Setup Confirm is WATCH with Neutral direction:</b> no-force zone until a side confirms.<br>"
-                    f"2) <b>Range decision levels:</b> monitor Primary Accumulation Zone ({pullback_zone_text}) "
-                    f"and Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
-                    f"3) <b>Execution only after side confirmation:</b> map risk to pullback/breakout invalidation lines.<br>"
-                    f"4) <b>Keep exits pre-defined:</b> Pullback TP ({pullback_tp_text}) and Breakout TP ({breakout_tp_text})."
+                    f"2) <b>Range decision levels:</b> monitor Buy Zone ({pullback_zone_text}) and Buy Above trigger ({_fmt_price(breakout_trigger)}).<br>"
+                    f"3) <b>Execution only after side confirmation:</b> map risk to stop (Buy Zone / Breakout).<br>"
+                    f"4) <b>Keep exits pre-defined:</b> Buy Zone TP ({pullback_tp_text}) and Breakout TP ({breakout_tp_text})."
                 )
         elif signal_dir == "UPSIDE":
             plan_status = "Bullish Confirmed"
             plan_color = POSITIVE
             plan_lines = (
                 f"1) <b>Setup Confirm is {setup_label}:</b> execution-ready upside context.<br>"
-                f"2) <b>Pullback path:</b> accumulate in {pullback_zone_text}, invalidate below {_fmt_price(pullback_invalidation)}.<br>"
-                f"3) <b>Breakout path:</b> execute on close above {_fmt_price(breakout_trigger)}, invalidate below {_fmt_price(breakout_invalidation)}.<br>"
-                f"4) <b>Take profit map:</b> Pullback TP ({pullback_tp_text}), Breakout TP ({breakout_tp_text}).<br>"
+                f"2) <b>Buy Zone path:</b> accumulate in {pullback_zone_text}, stop at {_fmt_price(pullback_invalidation)}.<br>"
+                f"3) <b>Breakout path:</b> execute on close above {_fmt_price(breakout_trigger)}, stop at {_fmt_price(breakout_invalidation)}.<br>"
+                f"4) <b>Take-profit map:</b> Buy Zone TP ({pullback_tp_text}), Breakout TP ({breakout_tp_text}).<br>"
                 f"5) <b>Risk management:</b> take partials at TP-low, trail remainder only while structure stays intact."
             )
         else:
@@ -483,9 +491,9 @@ def render(ctx: dict) -> None:
             plan_color = NEGATIVE
             plan_lines = (
                 f"1) <b>Setup Confirm is {setup_label}, but direction is Downside:</b> spot mode stays defensive.<br>"
-                f"2) <b>No fresh spot buy</b> until direction recovers and closes above Breakout Entry ({_fmt_price(breakout_trigger)}).<br>"
-                f"3) <b>If already holding:</b> de-risk into rallies and protect downside via pullback invalidation ({_fmt_price(pullback_invalidation)}).<br>"
-                f"4) <b>Only after reclaim confirmation:</b> use breakout invalidation ({_fmt_price(breakout_invalidation)}) and breakout TP ({breakout_tp_text})."
+                f"2) <b>No fresh spot buy</b> until direction recovers and closes above Buy Above trigger ({_fmt_price(breakout_trigger)}).<br>"
+                f"3) <b>If already holding:</b> de-risk into rallies and protect downside with stop (Buy Zone) {_fmt_price(pullback_invalidation)}.<br>"
+                f"4) <b>Only after reclaim confirmation:</b> use stop (Breakout) {_fmt_price(breakout_invalidation)} and breakout TP ({breakout_tp_text})."
             )
 
         st.markdown(
