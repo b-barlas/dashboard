@@ -335,20 +335,60 @@ Outputs:
             "risk",
         ),
         (
-            "16) Backtest tab",
+            "16) Model Lab tab",
             """
-Historical replay for strategy validation.
-Core reading order:
-1) trade count and sample quality
-2) win rate + profit factor
-3) drawdown and risk-adjusted metrics
+Signal-engine diagnostics backtest.
+Use it to calibrate:
+- strength threshold
+- fixed holding bars
+- fee/slippage assumptions
 
-A high win rate alone is not enough if drawdown/risk quality is poor.
+This mode validates the raw Direction + Strength engine, not the full setup class model.
             """,
             "risk",
         ),
         (
-            "17) Analysis Guide tab (this page)",
+            "17) Setup Backtest tab",
+            """
+Setup outcome study for Setup Confirm:
+- TREND+AI
+- TREND-led
+- AI-led
+
+Inputs:
+- setup class filter
+- timeframe
+- lookback candles
+- forward bars (for outcome window)
+
+Outputs:
+- how many events were generated
+- event price and forward path over next N bars
+- class-level favorable rate and directional return quality
+            """,
+            "risk",
+        ),
+        (
+            "18) Scalp Backtest tab",
+            """
+Scalp outcome study for execution-ready scalp events.
+
+Uses the same market scalp pipeline:
+- top-volume multi-coin scan (stablecoins excluded by default)
+- scalp gate (timeframe-adaptive R:R / ADX / Strength thresholds)
+- generated scalp levels (entry / stop / target)
+
+Outputs:
+- event count and TP-hit behavior
+- direction-level and coin-level scalp outcome quality
+- forward path table with event-relative price movement
+
+Use this tab to validate scalp execution behavior before relying on scalp labels live.
+            """,
+            "risk",
+        ),
+        (
+            "19) Analysis Guide tab (this page)",
             """
 This guide mirrors the live dashboard behavior.
 Use it as:
@@ -359,7 +399,7 @@ Use it as:
             "info",
         ),
         (
-            "18) Data sources, fallback policy, and UK-safe exchanges",
+            "20) Data sources, fallback policy, and UK-safe exchanges",
             """
 Primary exchange fallback list is intentionally UK-safe for this setup:
 - Kraken
@@ -388,7 +428,7 @@ Cache policy:
             "info",
         ),
         (
-            "19) How to run with Streamlit",
+            "21) How to run with Streamlit",
             """
 Run locally:
 1. Install dependencies from `requirements.txt`
@@ -402,7 +442,7 @@ If data looks stale:
             "info",
         ),
         (
-            "20) Practical workflow (recommended)",
+            "22) Practical workflow (recommended)",
             """
 Recommended daily flow:
 1. Market tab: check regime + scanner shortlist
@@ -410,7 +450,9 @@ Recommended daily flow:
 3. Position: if already in trade, follow Technical Invalidation + decision model first
 4. Fibonacci/Risk: validate structure and downside risk
 5. Tools: confirm R:R and liquidation distance
-6. Backtest: validate settings before using new setup live
+6. Setup Backtest: validate Setup Confirm class edge before using new setup live
+7. Scalp Backtest: validate scalp gate behavior and TP/SL outcome profile
+8. Model Lab: tune raw signal threshold/holding parameters
 
 Quick rule:
 - If Direction/AI conflict and Health says REDUCE or EXIT, reduce risk first.
@@ -419,7 +461,7 @@ Quick rule:
             "core",
         ),
         (
-            "21) Limitations and responsibility",
+            "23) Limitations and responsibility",
             """
 No model can predict news shocks, listing events, outages, or sudden regime breaks.
 Treat all outputs as probabilistic guidance.
@@ -435,7 +477,7 @@ This dashboard is **not financial advice**.
             "warn",
         ),
         (
-            "22) Quick Smoke Checklist (before daily use)",
+            "24) Quick Smoke Checklist (before daily use)",
             """
 Use this 60-second checklist:
 
@@ -461,6 +503,11 @@ Use this 60-second checklist:
 - If enrichment fails, Market shows **EXCHANGE-ONLY MODE** and core trade columns still render
 - If live endpoint fails, cached snapshot warning with UTC timestamp appears
 - Market should not reuse stale snapshot from a different timeframe/filter
+
+6. **Model Lab + Setup/Scalp Backtest**
+- Model Lab runs and returns trades/metrics for raw signal diagnostics
+- Setup Backtest returns setup-event count, forward-bar outcome table, and class breakdown
+- Scalp Backtest returns scalp-qualified event count, class outcome table, and TP/SL behavior
             """,
             "info",
         ),

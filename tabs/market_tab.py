@@ -15,6 +15,7 @@ from core.market_decision import (
     normalize_action_class,
     structure_state,
 )
+from core.scalping import scalp_gate_thresholds
 from core.signal_contract import strength_from_bias, strength_bucket
 from core.metric_catalog import (
     AI_LONG_THRESHOLD,
@@ -711,17 +712,8 @@ def render(ctx: dict) -> None:
         key="market_exclude_stables",
         help="Hide stable/synthetic USD-pegged coins from scanner universe.",
     )
-    def _scalp_gate_thresholds(tf: str) -> tuple[float, float, float]:
-        t = str(tf or "").strip().lower()
-        if t in {"5m", "15m"}:
-            return 1.30, 18.0, 52.0
-        if t == "1h":
-            return 1.40, 18.0, 52.0
-        # 4h / 1d (and any slower fallback)
-        return 1.70, 22.0, 60.0
-
     CACHE_TTL_MINUTES = 15
-    gate_min_rr, gate_min_adx, gate_min_strength = _scalp_gate_thresholds(timeframe)
+    gate_min_rr, gate_min_adx, gate_min_strength = scalp_gate_thresholds(timeframe)
 
     STABLE_BASES = {
         "USDT", "USDC", "BUSD", "DAI", "TUSD", "USDE", "FDUSD", "PYUSD",
@@ -822,10 +814,6 @@ def render(ctx: dict) -> None:
         if cls == "SKIP":
             return "SKIP"
         return str(raw_action or "").strip()
-
-    def _setup_confirm_compact(raw_action: str) -> str:
-        return _setup_confirm_display(raw_action)
-
     def _setup_confirm_class(value: str) -> str:
         s = str(value or "").strip().upper()
         if "TREND+AI" in s:
@@ -1061,7 +1049,7 @@ def render(ctx: dict) -> None:
                 reason_code = str(row.get("__action_reason", "")).strip()
                 reason_text = action_reason_text(reason_code)
                 raw_action = str(row.get("__action_raw", txt))
-                display_txt = _setup_confirm_compact(raw_action)
+                display_txt = _setup_confirm_display(raw_action)
                 sc_cls = _setup_confirm_class(raw_action or txt)
                 extra_cls = "mk-chip-action"
                 if sc_cls == "ENTER_TREND_LED":
@@ -1677,7 +1665,7 @@ def render(ctx: dict) -> None:
 
                 ai_display = direction_label(ai_direction)
                 ai_direction_key = direction_key(ai_direction)
-                consensus_votes, vote_ratio, decision_agreement = ai_vote_metrics(
+                consensus_votes, _display_ratio, decision_agreement = ai_vote_metrics(
                     ai_direction_key,
                     float(directional_agreement),
                     float(consensus_agreement),
@@ -2083,7 +2071,7 @@ def render(ctx: dict) -> None:
                     best_direction = str(best_row.get("Direction", "")).strip()
                     best_strength = str(best_row.get("Strength", "")).strip()
                     best_ai = str(best_row.get("AI Ensemble", "")).strip()
-                    best_action_compact = _setup_confirm_compact(best_action)
+                    best_action_compact = _setup_confirm_display(best_action)
                     best_scalp_sub = (
                         f"Setup: {best_action_compact} • Direction: {best_direction} • "
                         f"Strength: {best_strength} • Ensemble: {best_ai}"

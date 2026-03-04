@@ -17,6 +17,17 @@ def _dir_key(value: str | None) -> str:
     return "NEUTRAL"
 
 
+def scalp_gate_thresholds(timeframe: str | None) -> tuple[float, float, float]:
+    """Timeframe-adaptive scalp gate thresholds: (min_rr, min_adx, min_strength)."""
+    t = str(timeframe or "").strip().lower()
+    if t in {"5m", "15m"}:
+        return 1.30, 18.0, 52.0
+    if t == "1h":
+        return 1.40, 18.0, 52.0
+    # 4h / 1d and any slower fallback
+    return 1.70, 22.0, 60.0
+
+
 def scalp_quality_gate(
     *,
     scalp_direction: str | None,

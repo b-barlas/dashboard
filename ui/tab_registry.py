@@ -17,8 +17,10 @@ from tabs.multitf_tab import render as render_multitf_tab_ui
 from tabs.position_tab import render as render_position_tab_ui
 from tabs.risk_tab import render as render_risk_analytics_tab_ui
 from tabs.screener_tab import render as render_screener_tab_ui
+from tabs.scalp_backtest_tab import render as render_scalp_backtest_tab_ui
 from tabs.sessions_tab import render as render_sessions_tab_ui
 from tabs.spot_tab import render as render_spot_tab_ui
+from tabs.setup_backtest_tab import render as render_setup_backtest_tab_ui
 from tabs.tools_tab import render as render_tools_tab_ui
 from tabs.whale_tab import render as render_whale_tab_ui
 
@@ -28,7 +30,7 @@ TAB_TITLES = [
     "Ensemble AI", "Heatmap", "Monte Carlo",
     "Fibonacci", "Risk Analytics", "Whale Tracker",
     "Screener", "Multi-TF", "Correlation",
-    "Sessions", "Tools", "Backtest", "Analysis Guide",
+    "Sessions", "Tools", "Model Lab", "Setup Backtest", "Scalp Backtest", "Analysis Guide",
 ]
 
 
@@ -155,6 +157,24 @@ _TAB_DEPS = [
         [
             "ACCENT", "TEXT_MUTED", "POSITIVE", "WARNING", "_normalize_coin_input", "_validate_coin_symbol",
             "fetch_ohlcv", "run_backtest", "analyse",
+        ],
+    ),
+    (
+        render_setup_backtest_tab_ui,
+        [
+            "ACCENT", "TEXT_MUTED", "POSITIVE", "WARNING",
+            "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "analyse",
+            "ml_ensemble_predict", "signal_plain", "direction_key", "_calc_conviction",
+        ],
+    ),
+    (
+        render_scalp_backtest_tab_ui,
+        [
+            "ACCENT", "TEXT_MUTED", "POSITIVE", "WARNING",
+            "fetch_ohlcv", "analyse",
+            "ml_ensemble_predict", "signal_plain", "direction_key", "_calc_conviction",
+            "get_scalping_entry_target", "scalp_quality_gate", "_sr_lookback",
+            "get_top_volume_usdt_symbols",
         ],
     ),
     (render_guide_tab_ui, []),

@@ -27,6 +27,8 @@ TAB_MODULES = [
     "tabs.screener_tab",
     "tabs.sessions_tab",
     "tabs.spot_tab",
+    "tabs.setup_backtest_tab",
+    "tabs.scalp_backtest_tab",
     "tabs.tools_tab",
     "tabs.whale_tab",
 ]

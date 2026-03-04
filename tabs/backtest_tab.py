@@ -4,6 +4,7 @@ from ui.ctx import get_ctx
 
 import numpy as np
 import plotly.graph_objs as go
+from core.backtest import _normalize_direction_signal
 from core.signal_contract import strength_from_bias
 from ui.snapshot_cache import live_or_snapshot
 
@@ -21,19 +22,20 @@ def render(ctx: dict) -> None:
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     run_backtest = get_ctx(ctx, "run_backtest")
 
-    st.markdown(f"<h2 style='color:{ACCENT};'>Backtest Simulator</h2>", unsafe_allow_html=True)
+    st.markdown(f"<h2 style='color:{ACCENT};'>Model Lab</h2>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='panel-box' style='margin-bottom:1rem;'>"
-        f"<b style='color:{ACCENT};'>How the backtest works:</b>"
+        f"<b style='color:{ACCENT};'>Signal-engine backtest (diagnostics mode):</b>"
         f"<ul style='color:{TEXT_MUTED}; font-size:0.88rem; line-height:1.7; margin-top:0.5rem;'>"
         "<li>The engine slides a window through historical candles and runs the <b>full technical analysis</b> "
         "(EMA, RSI, MACD, SuperTrend, Ichimoku, Bollinger, ADX, etc.) at each step.</li>"
         "<li>When the <b>Signal</b> is Upside or Downside <b>and</b> the <b>Strength Score</b> exceeds your threshold, "
-        "a simulated trade is opened at the closing price.</li>"
+        "a simulated trade is opened at the <b>next candle open</b> "
+        "(with your slippage assumption applied).</li>"
         "<li>The trade is automatically closed after <b>N candles</b> (your exit setting). "
         "Commission is deducted on both entry and exit.</li>"
-        "<li>This tests whether the dashboard's signal + strength system would have been profitable "
-        "on the chosen coin and timeframe. Use it to calibrate your strength threshold and hold duration.</li>"
+        "<li>This tests the raw <b>Direction + Strength</b> engine quality. "
+        "Use this as diagnostics to calibrate threshold and hold duration.</li>"
         "</ul></div>",
         unsafe_allow_html=True,
     )
@@ -140,11 +142,7 @@ def render(ctx: dict) -> None:
                     continue
                 try:
                     a = analyse(df_slice)
-                    sig = (
-                        "LONG"
-                        if a.signal in ["STRONG BUY", "BUY"]
-                        else ("SHORT" if a.signal in ["STRONG SELL", "SELL"] else "WAIT")
-                    )
+                    sig = _normalize_direction_signal(a.signal)
                     if sig == "LONG":
                         long_count += 1
                     elif sig == "SHORT":

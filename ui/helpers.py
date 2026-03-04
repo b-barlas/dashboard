@@ -41,9 +41,28 @@ def bias_score_badge(bias_score: float) -> str:
 
 def signal_plain(signal: str) -> str:
     """Map detailed signals to an internal LONG/SHORT/WAIT label."""
-    if signal in ("STRONG BUY", "BUY"):
+    s = str(signal or "").strip().upper()
+    if not s:
+        return "WAIT"
+    if s in {
+        "STRONG BUY",
+        "BUY",
+        "LONG",
+        "UPSIDE",
+        "STRONG UPSIDE",
+        "BULLISH",
+        "STRONG BULLISH",
+    }:
         return "LONG"
-    if signal in ("STRONG SELL", "SELL"):
+    if s in {
+        "STRONG SELL",
+        "SELL",
+        "SHORT",
+        "DOWNSIDE",
+        "STRONG DOWNSIDE",
+        "BEARISH",
+        "STRONG BEARISH",
+    }:
         return "SHORT"
     return "WAIT"
 
