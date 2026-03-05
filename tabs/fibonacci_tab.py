@@ -108,7 +108,7 @@ def render(ctx: dict) -> None:
     st.markdown(f"<h2 style='color:{ACCENT};'>Fibonacci Analysis</h2>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='panel-box'>"
-        f"<b style='color:{ACCENT}; font-size:1rem;'>What this page is for</b>"
+        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
         f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
         f"Builds a decision-oriented Fib map from "
         f"{_tip('Context', 'Trend + regime + POC distance to detect when structure supports continuation.')}, "

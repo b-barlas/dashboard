@@ -1,8 +1,58 @@
-from ui.ctx import get_ctx
+from __future__ import annotations
+
+import math
+import zlib
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
+
+from ui.ctx import get_ctx
+
+
+def _mc_thresholds(days: int) -> dict[str, float]:
+    safe_days = max(1, int(days))
+    risk_scale = min(2.2, math.sqrt(safe_days / 30.0))
+    linear_scale = safe_days / 30.0
+    if safe_days <= 30:
+        prob_healthy, prob_watch = 60.0, 48.0
+    elif safe_days <= 90:
+        prob_healthy, prob_watch = 58.0, 47.0
+    else:
+        prob_healthy, prob_watch = 56.0, 46.0
+    return {
+        "prob_healthy": prob_healthy,
+        "prob_watch": prob_watch,
+        "ret_healthy": 3.0 * linear_scale,
+        "ret_watch": -2.0 * linear_scale,
+        "var_healthy": -8.0 * risk_scale,
+        "var_watch": -15.0 * risk_scale,
+        "cvar_healthy": -10.0 * risk_scale,
+        "cvar_watch": -18.0 * risk_scale,
+        "med_healthy": 2.0 * linear_scale,
+        "med_watch": -2.0 * linear_scale,
+    }
+
+
+def _band_from_floor(
+    value: float,
+    healthy_floor: float,
+    watch_floor: float,
+    *,
+    positive_color: str,
+    warning_color: str,
+    negative_color: str,
+) -> tuple[str, str]:
+    if value >= healthy_floor:
+        return "Healthy", positive_color
+    if value >= watch_floor:
+        return "Watch", warning_color
+    return "Risky", negative_color
+
+
+def _history_limit(horizon_steps: int) -> int:
+    # Keep enough context for robust return distribution on longer horizons.
+    return int(min(4000, max(700, round(horizon_steps * 1.8))))
 
 
 def render(ctx: dict) -> None:
@@ -20,7 +70,6 @@ def render(ctx: dict) -> None:
     _validate_coin_symbol = get_ctx(ctx, "_validate_coin_symbol")
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     monte_carlo_simulation = get_ctx(ctx, "monte_carlo_simulation")
-    """Monte Carlo scenario engine with timeframe-aware horizon scaling."""
 
     st.markdown(
         f"""
@@ -61,63 +110,83 @@ def render(ctx: dict) -> None:
             border:1px solid rgba(255,255,255,0.18);
             background:rgba(0,0,0,0.28);
         }}
+        @media (max-width: 1100px) {{
+            .mc-kpi-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
+        }}
+        @media (max-width: 640px) {{
+            .mc-kpi-grid {{ grid-template-columns:1fr; }}
+        }}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown(f"<h2 style='color:{ACCENT};'>Monte Carlo Simulation</h2>", unsafe_allow_html=True)
+    st.markdown(f"<h2 style='color:{ACCENT};'>Monte Carlo Scenario Engine</h2>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='panel-box'>"
         f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
         f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Projects many possible future price paths from historical return distribution. "
-        f"Use it for probability-aware planning, not exact price prediction."
+        f"Projects many possible future paths from historical return behavior. "
+        f"Use this tab for probability-aware risk planning, not direct entry timing."
         f"</p>"
         f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
-        f"{_tip('Profit Probability', 'Share of simulated paths ending above current price at horizon.')} | "
-        f"{_tip('Expected Return', 'Average terminal return across all simulations.')} | "
-        f"{_tip('VaR 95%', '5th percentile terminal return: downside threshold in bad scenarios.')} | "
-        f"{_tip('CVaR 95%', 'Average return of the worst 5% terminal outcomes; captures tail severity beyond VaR.')} | "
-        f"{_tip('Median Target', 'Middle terminal price; more robust than mean against outliers.')}"
+        f"{_tip('Profit Probability', 'Share of simulations ending above current price at the selected horizon.')} | "
+        f"{_tip('Expected Return', 'Average terminal return across all simulations at horizon.')} | "
+        f"{_tip('VaR 95%', '5th percentile terminal return; downside line in bad scenarios.')} | "
+        f"{_tip('CVaR 95%', 'Average terminal return in worst 5% paths; deeper tail-risk gauge.')} | "
+        f"{_tip('Median Target', 'Middle terminal price; robust planning anchor less sensitive to outliers.')}"
         f"</p>"
         f"</div>",
         unsafe_allow_html=True,
     )
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         mc_coin = _normalize_coin_input(st.text_input("Coin", value="BTC", key="mc_coin"))
     with c2:
-        mc_sims = st.slider("Simulations", 200, 3000, 800, step=100, key="mc_sims")
+        mc_tf = st.selectbox("Base Timeframe", ["1h", "4h", "1d"], index=2, key="mc_tf")
     with c3:
+        mc_sims = st.slider("Simulations", 200, 3000, 800, step=100, key="mc_sims")
+    with c4:
         mc_days = st.slider("Forecast Days", 7, 120, 30, key="mc_days")
-    mc_tf = st.selectbox("Base Timeframe", ["1h", "4h", "1d"], index=2, key="mc_tf")
 
     if not st.button("Run Simulation", type="primary", key="mc_run"):
         return
 
-    _val_err = _validate_coin_symbol(mc_coin)
-    if _val_err:
-        st.error(_val_err)
+    validation_error = _validate_coin_symbol(mc_coin)
+    if validation_error:
+        st.error(validation_error)
         return
 
     tf_to_steps_per_day = {"1h": 24, "4h": 6, "1d": 1}
     steps_per_day = tf_to_steps_per_day.get(mc_tf, 1)
     horizon_steps = int(mc_days * steps_per_day)
+    fetch_limit = _history_limit(horizon_steps)
+    min_required_rows = max(90, int(horizon_steps * 0.70))
+    seed = zlib.crc32(f"{mc_coin}|{mc_tf}|{mc_days}|{mc_sims}".encode("utf-8")) & 0xFFFFFFFF
 
     with st.spinner(f"Running {mc_sims} simulations ({mc_days} days, {horizon_steps} steps)..."):
-        # Need enough data for stable distribution estimate.
-        df = fetch_ohlcv(mc_coin, mc_tf, limit=700)
+        df = fetch_ohlcv(mc_coin, mc_tf, limit=fetch_limit)
         if df is None or len(df) < 60:
             st.error("Not enough data. Try a different coin/timeframe.")
             return
+        if len(df) < min_required_rows:
+            st.warning(
+                f"History is limited for this horizon ({len(df)} rows vs recommended {min_required_rows}). "
+                "Interpret probability and tail metrics as lower-confidence."
+            )
 
-        result = monte_carlo_simulation(df, num_simulations=mc_sims, num_days=horizon_steps)
+        result = monte_carlo_simulation(
+            df,
+            num_simulations=mc_sims,
+            num_days=horizon_steps,
+            seed=seed,
+        )
         if not result:
             st.error("Simulation failed.")
             return
 
+    thresholds = _mc_thresholds(mc_days)
     prob = float(result["prob_profit"]) * 100.0
     exp_ret = float(result["expected_return"])
     var95 = float(result["var_95"])
@@ -126,24 +195,61 @@ def render(ctx: dict) -> None:
     last_price = float(result["last_price"])
     median_ret = ((median_price / last_price) - 1.0) * 100.0 if last_price > 0 else 0.0
 
-    prob_status = ("Healthy", POSITIVE) if prob >= 60 else (("Watch", WARNING) if prob >= 45 else ("Risky", NEGATIVE))
-    ret_status = ("Healthy", POSITIVE) if exp_ret > 3 else (("Watch", WARNING) if exp_ret >= -2 else ("Risky", NEGATIVE))
-    var_status = ("Healthy", POSITIVE) if var95 >= -8 else (("Watch", WARNING) if var95 >= -15 else ("Risky", NEGATIVE))
-    cvar_status = ("Healthy", POSITIVE) if cvar95 >= -10 else (("Watch", WARNING) if cvar95 >= -18 else ("Risky", NEGATIVE))
-    med_status = ("Healthy", POSITIVE) if median_ret > 2 else (("Watch", WARNING) if median_ret >= -2 else ("Risky", NEGATIVE))
+    prob_status = _band_from_floor(
+        prob,
+        thresholds["prob_healthy"],
+        thresholds["prob_watch"],
+        positive_color=POSITIVE,
+        warning_color=WARNING,
+        negative_color=NEGATIVE,
+    )
+    ret_status = _band_from_floor(
+        exp_ret,
+        thresholds["ret_healthy"],
+        thresholds["ret_watch"],
+        positive_color=POSITIVE,
+        warning_color=WARNING,
+        negative_color=NEGATIVE,
+    )
+    var_status = _band_from_floor(
+        var95,
+        thresholds["var_healthy"],
+        thresholds["var_watch"],
+        positive_color=POSITIVE,
+        warning_color=WARNING,
+        negative_color=NEGATIVE,
+    )
+    cvar_status = _band_from_floor(
+        cvar95,
+        thresholds["cvar_healthy"],
+        thresholds["cvar_watch"],
+        positive_color=POSITIVE,
+        warning_color=WARNING,
+        negative_color=NEGATIVE,
+    )
+    med_status = _band_from_floor(
+        median_ret,
+        thresholds["med_healthy"],
+        thresholds["med_watch"],
+        positive_color=POSITIVE,
+        warning_color=WARNING,
+        negative_color=NEGATIVE,
+    )
 
-    if prob >= 60 and cvar95 > -12:
-        decision_tone = "Favourable"
-        decision_color = POSITIVE
-        decision_note = "Upside probability is healthy and tail risk is controlled."
-    elif prob < 45 or cvar95 <= -18:
+    risky_count = sum(x[0] == "Risky" for x in [prob_status, ret_status, var_status, cvar_status, med_status])
+    healthy_count = sum(x[0] == "Healthy" for x in [prob_status, ret_status, var_status, cvar_status, med_status])
+    if risky_count >= 2 or cvar_status[0] == "Risky":
         decision_tone = "Defensive"
         decision_color = NEGATIVE
-        decision_note = "Tail-risk profile is heavy. Use smaller size or avoid aggressive positioning."
+        decision_note = "Tail-risk profile is heavy. Reduce size and avoid aggressive exposure."
+    elif healthy_count >= 3 and prob_status[0] == "Healthy":
+        decision_tone = "Favourable"
+        decision_color = POSITIVE
+        decision_note = "Probability and tail-risk profile are constructive for selective risk-on plans."
     else:
         decision_tone = "Selective"
         decision_color = WARNING
-        decision_note = "Mixed profile. Prefer selective entries and tighter risk controls."
+        decision_note = "Mixed profile. Keep sizing disciplined and require stronger confluence."
 
     st.markdown(
         f"<div class='mc-kpi-grid'>"
@@ -182,23 +288,26 @@ def render(ctx: dict) -> None:
         f"<details style='margin-bottom:0.7rem;'>"
         f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
         f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"<b>1.</b> Check Profit Probability, VaR and CVaR together, not separately.<br>"
-        f"<b>2.</b> If expected return is positive but CVaR is deeply negative, size down.<br>"
-        f"<b>3.</b> Median target is usually better than max/best-case for planning.<br>"
-        f"<b>4.</b> This model assumes historical volatility structure persists."
+        f"<b>1.</b> Prioritize Prob + VaR + CVaR together before reading expected return.<br>"
+        f"<b>2.</b> If expected return is positive but CVaR is Risky, treat it as fragile edge.<br>"
+        f"<b>3.</b> Median target is usually a better planning anchor than best-case tails.<br>"
+        f"<b>4.</b> Threshold bands are horizon-aware: longer windows require wider risk tolerance."
         f"</div></details>",
         unsafe_allow_html=True,
     )
-
     st.caption(
-        f"Horizon scaling: {mc_days} calendar days x {steps_per_day} steps/day ({mc_tf}) = {horizon_steps} simulation steps."
+        f"Horizon scaling: {mc_days} days x {steps_per_day} steps/day ({mc_tf}) = {horizon_steps} steps. "
+        f"History fetched: {len(df)} rows (recommended >= {min_required_rows})."
     )
 
-    sims = result["simulations"]
-    horizon_range = list(range(1, horizon_steps + 1))
-    sample_count = min(120, mc_sims)
-    sample_idx = np.random.choice(mc_sims, sample_count, replace=False)
+    sims = np.asarray(result["simulations"], dtype=float)
+    step_count = int(sims.shape[1]) if sims.ndim == 2 else horizon_steps
+    horizon_range = np.arange(1, step_count + 1)
+    sample_count = min(120, int(sims.shape[0]))
+    sample_rng = np.random.default_rng(seed + 17)
+    sample_idx = sample_rng.choice(int(sims.shape[0]), sample_count, replace=False)
 
+    st.markdown(f"<b style='color:{ACCENT};'>Path Cloud</b>", unsafe_allow_html=True)
     fig = go.Figure()
     for idx in sample_idx:
         fig.add_trace(
@@ -223,7 +332,7 @@ def render(ctx: dict) -> None:
             y=p5,
             mode="lines",
             fill="tonexty",
-            fillcolor="rgba(0, 212, 255, 0.1)",
+            fillcolor="rgba(0, 212, 255, 0.10)",
             line=dict(width=0),
             name="90% CI",
         )
@@ -240,8 +349,20 @@ def render(ctx: dict) -> None:
             name="50% CI",
         )
     )
-    fig.add_trace(go.Scatter(x=horizon_range, y=p50, mode="lines", line=dict(color=NEON_BLUE, width=2), name="Median Path"))
-    fig.add_hline(y=last_price, line=dict(color=WARNING, dash="dash", width=1), annotation_text=f"Current: ${last_price:,.2f}")
+    fig.add_trace(
+        go.Scatter(
+            x=horizon_range,
+            y=p50,
+            mode="lines",
+            line=dict(color=NEON_BLUE, width=2),
+            name="Median Path",
+        )
+    )
+    fig.add_hline(
+        y=last_price,
+        line=dict(color=WARNING, dash="dash", width=1),
+        annotation_text=f"Current: ${last_price:,.2f}",
+    )
     fig.update_layout(
         height=500,
         template="plotly_dark",

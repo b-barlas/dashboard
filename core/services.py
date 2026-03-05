@@ -528,9 +528,18 @@ def calculate_fibonacci_levels(df: pd.DataFrame, lookback: int = 100) -> dict:
     return calculate_fibonacci_levels_core(df, lookback=lookback)
 
 
-def monte_carlo_simulation(df: pd.DataFrame, num_simulations: int = 500,
-                           num_days: int = 30) -> dict:
-    return monte_carlo_simulation_core(df, num_simulations=num_simulations, num_days=num_days)
+def monte_carlo_simulation(
+    df: pd.DataFrame,
+    num_simulations: int = 500,
+    num_days: int = 30,
+    seed: int | None = None,
+) -> dict:
+    return monte_carlo_simulation_core(
+        df,
+        num_simulations=num_simulations,
+        num_days=num_days,
+        seed=seed,
+    )
 
 
 def detect_divergence(df: pd.DataFrame) -> list[dict]:

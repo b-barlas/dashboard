@@ -222,11 +222,26 @@ Shows:
         (
             "7) Monte Carlo tab",
             """
-Scenario simulation from historical return behavior.
+Scenario-risk simulation from historical return behavior.
 Use it for:
 - Distribution-aware expectation
-- Downside path stress context
+- Tail-risk stress context (VaR/CVaR)
 - Probability-band interpretation (not certainty)
+
+How it works:
+- Horizon is converted into timeframe steps (1h/4h/1d)
+- Path generation blends empirical bootstrap shocks + Gaussian shocks
+- Metric bands are horizon-aware (short vs long horizon risk context)
+
+Primary outputs:
+- Profit Probability
+- Expected Return
+- VaR 95%
+- CVaR 95%
+- Median Target
+
+Read this tab as a risk-planning layer (position sizing / scenario quality),
+not as a direct entry trigger.
             """,
             "risk",
         ),

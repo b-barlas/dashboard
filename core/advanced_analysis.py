@@ -73,7 +73,12 @@ def calculate_fibonacci_levels(df: pd.DataFrame, lookback: int = 100) -> dict:
     return levels
 
 
-def monte_carlo_simulation(df: pd.DataFrame, num_simulations: int = 500, num_days: int = 30) -> dict:
+def monte_carlo_simulation(
+    df: pd.DataFrame,
+    num_simulations: int = 500,
+    num_days: int = 30,
+    seed: int | None = None,
+) -> dict:
     if df is None or len(df) < 30:
         return {}
     num_simulations = int(max(50, min(20000, num_simulations)))
@@ -99,7 +104,7 @@ def monte_carlo_simulation(df: pd.DataFrame, num_simulations: int = 500, num_day
     if last_price <= 0:
         return {}
 
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed)
     hist = returns.to_numpy(dtype=float)
     # Robust path generation: blend empirical bootstrap shocks with Gaussian shocks.
     boot = rng.choice(hist, size=(num_simulations, num_days), replace=True)
