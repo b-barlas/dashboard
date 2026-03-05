@@ -546,10 +546,19 @@ def detect_divergence(df: pd.DataFrame) -> list[dict]:
     return detect_divergence_core(df)
 
 
-def calculate_risk_metrics(df: pd.DataFrame, risk_free_rate: float = 0.02,
-                           timeframe: str = "1d") -> dict:
+def calculate_risk_metrics(
+    df: pd.DataFrame,
+    risk_free_rate: float = 0.02,
+    timeframe: str = "1d",
+    close_series: pd.Series | None = None,
+) -> dict:
     """Backward-compatible wrapper to the core risk engine."""
-    return calculate_risk_metrics_core(df, risk_free_rate=risk_free_rate, timeframe=timeframe)
+    return calculate_risk_metrics_core(
+        df,
+        risk_free_rate=risk_free_rate,
+        timeframe=timeframe,
+        close_series=close_series,
+    )
 
 
 def calculate_volume_profile(df: pd.DataFrame, num_bins: int = 30) -> dict:

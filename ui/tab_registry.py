@@ -6,7 +6,6 @@ from ui.ctx import get_ctx, require_keys
 
 from tabs.backtest_tab import render as render_backtest_tab_ui
 from tabs.correlation_tab import render as render_correlation_tab_ui
-from tabs.ensemble_ml_tab import render as render_ensemble_ml_tab_ui
 from tabs.fibonacci_tab import render as render_fibonacci_tab_ui
 from tabs.guide_tab import render as render_guide_tab_ui
 from tabs.heatmap_tab import render as render_heatmap_tab_ui
@@ -26,8 +25,8 @@ from tabs.whale_tab import render as render_whale_tab_ui
 
 
 TAB_TITLES = [
-    "Market", "Spot", "Position", "AI Lab",
-    "Ensemble AI", "Heatmap", "Monte Carlo",
+    "Market", "Spot", "Position", "AI Workspace",
+    "Heatmap", "Monte Carlo",
     "Fibonacci", "Risk Analytics", "Whale Tracker",
     "Screener", "Multi-TF", "Correlation",
     "Sessions", "Tools", "Model Lab", "Setup Backtest", "Scalp Backtest", "Analysis Guide",
@@ -72,19 +71,11 @@ _TAB_DEPS = [
     (
         render_ml_tab_ui,
         [
-            "ACCENT", "TEXT_MUTED", "TEXT_LIGHT", "POSITIVE", "NEGATIVE", "WARNING", "CARD_BG", "_tip",
+            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "CARD_BG", "_tip",
             "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "ml_ensemble_predict",
             "get_scalping_entry_target", "scalp_quality_gate", "_calc_conviction", "analyse",
-            "_build_indicator_grid", "_wma", "_debug",
-            "get_major_ohlcv_bundle", "get_market_indices", "_sr_lookback",
-        ],
-    ),
-    (
-        render_ensemble_ml_tab_ui,
-        [
-            "ACCENT", "TEXT_MUTED", "TEXT_LIGHT", "POSITIVE", "NEGATIVE", "WARNING", "NEON_BLUE",
-            "NEON_PURPLE", "PRIMARY_BG", "_tip", "_normalize_coin_input", "_validate_coin_symbol",
-            "fetch_ohlcv", "ml_ensemble_predict",
+            "_debug",
+            "get_major_ohlcv_bundle", "get_market_indices",
         ],
     ),
     (

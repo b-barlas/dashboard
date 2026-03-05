@@ -181,46 +181,44 @@ Main outputs:
             "core",
         ),
         (
-            "4) AI Lab tab",
+            "4) AI Workspace tab",
             """
-Model diagnostics across multiple timeframes for one coin.
+Single AI tab with 2 modes:
+- Quick Prediction: one coin/timeframe fast ensemble output
+- Model & Timeframe Matrix: compare direction/probability/agreement across up to 3 timeframes
+
 Shows:
-- Selected model direction/probability
-- Ensemble agreement (x/3)
+- Direction (Upside/Downside/Neutral)
+- Probability
+- Effective agreement (x/3)
 - AI Direction Bias (same market-wide bias logic as Market tab)
-- Plan Entry/Target + plan source (AI-filtered vs technical fallback)
+- Plan Entry/Target + Plan Source (AI-filtered vs technical fallback)
 
-Use AI Lab for diagnostics and model behavior checks, not as a standalone execution trigger.
+Use this tab for model diagnostics and confirmation quality checks, not as a standalone execution trigger.
             """,
             "core",
         ),
         (
-            "5) Ensemble AI tab",
-            """
-Pure ensemble prediction view for one coin/timeframe.
-Shows:
-- Ensemble direction and probability
-- Effective agreement (directional or consensus-aware)
-- Individual model outputs
-- Confidence gauge
-
-If training window is unstable/insufficient, the tab intentionally returns a neutral fallback output.
-            """,
-            "core",
-        ),
-        (
-            "6) Heatmap tab",
+            "5) Heatmap tab",
             """
 Top-coin market breadth view.
 Shows:
 - Cap-weighted heatmap
 - Breadth (advancers share), A/D ratio, average change
 - Quick read of market leadership concentration
+- Provider-aware feed state (LIVE/CACHED) with fallback chain
+- Stablecoin exclusion toggle (default ON for cleaner beta read)
+- Flat classification with a ±0.05% dead-band to reduce micro-noise
+
+Provider order:
+- CoinGecko (primary)
+- CoinPaprika (fallback)
+- Last-good snapshot (temporary cache fallback)
             """,
             "info",
         ),
         (
-            "7) Monte Carlo tab",
+            "6) Monte Carlo tab",
             """
 Scenario-risk simulation from historical return behavior.
 Use it for:
@@ -246,7 +244,7 @@ not as a direct entry trigger.
             "risk",
         ),
         (
-            "8) Fibonacci tab",
+            "7) Fibonacci tab",
             """
 Decision-oriented structure/zone map tab.
 Main outputs:
@@ -263,7 +261,7 @@ Important:
             "core",
         ),
         (
-            "9) Risk Analytics tab",
+            "8) Risk Analytics tab",
             """
 Portfolio-style risk metrics from recent return series.
 Includes:
@@ -271,13 +269,15 @@ Includes:
 - Max drawdown
 - VaR / CVaR
 - Skew / Kurtosis
+- Timeframe-aware risk regime labels (1h / 4h / 1d)
+- Closed-candle evaluation (reduces live-candle noise)
 
 Use this tab to understand risk shape, not to create entry signals alone.
             """,
             "risk",
         ),
         (
-            "10) Whale Tracker tab",
+            "9) Whale Tracker tab",
             """
 Attention/liquidity proxy tab (not on-chain wallet tracking).
 Combines:
@@ -290,7 +290,7 @@ Use it to find attention shifts, then validate entries in Market/Spot/Position.
             "info",
         ),
         (
-            "11) Screener tab",
+            "10) Screener tab",
             """
 Rule-based shortlist tab over liquid symbols.
 Typical filters:
@@ -305,7 +305,7 @@ Use Screener as pre-filter, then confirm execution context in Market/Spot/Positi
             "core",
         ),
         (
-            "12) Multi-TF tab",
+            "11) Multi-TF tab",
             """
 Cross-timeframe alignment view for a single coin.
 Shows:
@@ -318,7 +318,7 @@ Purpose: avoid taking a low-timeframe setup fully against higher-timeframe struc
             "core",
         ),
         (
-            "13) Correlation tab",
+            "12) Correlation tab",
             """
 Co-movement matrix for selected symbols.
 Use it to:
@@ -329,7 +329,7 @@ Use it to:
             "info",
         ),
         (
-            "14) Sessions tab",
+            "13) Sessions tab",
             """
 Session behavior split (Asia / Europe / US windows).
 Shows:
@@ -340,7 +340,7 @@ Shows:
             "info",
         ),
         (
-            "15) Tools tab",
+            "14) Tools tab",
             """
 Beginner-friendly pre-trade calculator.
 Inputs:
@@ -355,7 +355,7 @@ Outputs:
             "risk",
         ),
         (
-            "16) Model Lab tab",
+            "15) Model Lab tab",
             """
 Signal-engine diagnostics backtest.
 Use it to calibrate:
@@ -368,7 +368,7 @@ This mode validates the raw Direction + Strength engine, not the full setup clas
             "risk",
         ),
         (
-            "17) Setup Backtest tab",
+            "16) Setup Backtest tab",
             """
 Setup outcome study for Setup Confirm:
 - TREND+AI
@@ -389,7 +389,7 @@ Outputs:
             "risk",
         ),
         (
-            "18) Scalp Backtest tab",
+            "17) Scalp Backtest tab",
             """
 Scalp outcome study for execution-ready scalp events.
 
@@ -408,7 +408,7 @@ Use this tab to validate scalp execution behavior before relying on scalp labels
             "risk",
         ),
         (
-            "19) Analysis Guide tab (this page)",
+            "18) Analysis Guide tab (this page)",
             """
 This guide mirrors the live dashboard behavior.
 Use it as:
@@ -419,7 +419,7 @@ Use it as:
             "info",
         ),
         (
-            "20) Data sources, fallback policy, and UK-safe exchanges",
+            "19) Data sources, fallback policy, and UK-safe exchanges",
             """
 Primary exchange fallback list is intentionally UK-safe for this setup:
 - Kraken
@@ -448,7 +448,7 @@ Cache policy:
             "info",
         ),
         (
-            "21) How to run with Streamlit",
+            "20) How to run with Streamlit",
             """
 Run locally:
 1. Install dependencies from `requirements.txt`
@@ -462,7 +462,7 @@ If data looks stale:
             "info",
         ),
         (
-            "22) Practical workflow (recommended)",
+            "21) Practical workflow (recommended)",
             """
 Recommended daily flow:
 1. Market tab: check regime + scanner shortlist
@@ -481,7 +481,7 @@ Quick rule:
             "core",
         ),
         (
-            "23) Limitations and responsibility",
+            "22) Limitations and responsibility",
             """
 No model can predict news shocks, listing events, outages, or sudden regime breaks.
 Treat all outputs as probabilistic guidance.
@@ -497,7 +497,7 @@ This dashboard is **not financial advice**.
             "warn",
         ),
         (
-            "24) Quick Smoke Checklist (before daily use)",
+            "23) Quick Smoke Checklist (before daily use)",
             """
 Use this 60-second checklist:
 
@@ -514,9 +514,9 @@ Use this 60-second checklist:
 - Technical Invalidation line is visible
 - Excel report downloads without resetting analysis view
 
-4. **AI Lab**
-- Predict fills timeframe matrix
-- Plan Entry / Plan Target / Plan Source columns populate logically
+4. **AI Workspace**
+- Quick Prediction mode returns Direction / Probability / Agreement in one run
+- Model & Timeframe Matrix mode fills timeframe matrix with plan source fields
 - Debug expander shows AI vs non-AI plan levels
 
 5. **Fallback check**

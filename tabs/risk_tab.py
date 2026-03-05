@@ -62,6 +62,16 @@ def render(ctx: dict) -> None:
             border:1px solid rgba(255,255,255,0.18);
             background:rgba(0,0,0,0.28);
         }}
+        @media (max-width: 1200px) {{
+            .risk-kpi-grid {{
+                grid-template-columns:repeat(2,minmax(0,1fr));
+            }}
+        }}
+        @media (max-width: 680px) {{
+            .risk-kpi-grid {{
+                grid-template-columns:1fr;
+            }}
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -103,19 +113,85 @@ def render(ctx: dict) -> None:
         st.error(_val_err)
         return
 
+    def _closed_close_series(frame: pd.DataFrame) -> pd.Series:
+        close = pd.to_numeric(frame.get("close"), errors="coerce")
+        close = close.replace([np.inf, -np.inf], np.nan).dropna()
+        close = close[close > 0]
+        # Risk analytics should run on closed candles only.
+        if len(close) >= 2:
+            close = close.iloc[:-1]
+        return close
+
+    def _closed_timestamp_series(frame: pd.DataFrame, close_series: pd.Series):
+        if "timestamp" not in frame.columns:
+            return None
+        ts = pd.to_datetime(frame["timestamp"], errors="coerce")
+        ts = ts.reindex(close_series.index)
+        ts = ts.dropna()
+        return ts
+
+    def _tf_thresholds(tf: str) -> dict[str, float]:
+        profile = (tf or "").lower().strip()
+        if profile == "1h":
+            return {
+                "regime_dd_high": 45.0,
+                "regime_dd_med": 28.0,
+                "regime_var_high": -3.2,
+                "regime_var_med": -2.0,
+                "regime_sharpe_high": 0.2,
+                "regime_sharpe_med": 0.8,
+                "dd_good": 22.0,
+                "dd_neutral": 35.0,
+                "var_good": 1.8,
+                "var_neutral": 3.0,
+                "cvar_good": 2.6,
+                "cvar_neutral": 4.5,
+            }
+        if profile == "4h":
+            return {
+                "regime_dd_high": 38.0,
+                "regime_dd_med": 24.0,
+                "regime_var_high": -4.2,
+                "regime_var_med": -2.8,
+                "regime_sharpe_high": 0.1,
+                "regime_sharpe_med": 0.8,
+                "dd_good": 18.0,
+                "dd_neutral": 30.0,
+                "var_good": 2.3,
+                "var_neutral": 3.8,
+                "cvar_good": 3.2,
+                "cvar_neutral": 5.0,
+            }
+        return {
+            "regime_dd_high": 32.0,
+            "regime_dd_med": 20.0,
+            "regime_var_high": -5.0,
+            "regime_var_med": -3.5,
+            "regime_sharpe_high": 0.0,
+            "regime_sharpe_med": 0.8,
+            "dd_good": 15.0,
+            "dd_neutral": 27.0,
+            "var_good": 3.0,
+            "var_neutral": 4.8,
+            "cvar_good": 4.2,
+            "cvar_neutral": 6.2,
+        }
+
     with st.spinner("Calculating risk metrics..."):
         df = fetch_ohlcv(risk_coin, risk_tf, limit=int(lookback))
         if df is None or len(df) < 30:
             st.error("Not enough data.")
             return
-        metrics = calculate_risk_metrics(df, timeframe=risk_tf)
+        close_eval = _closed_close_series(df)
+        if len(close_eval) < 30:
+            st.error("Not enough closed-candle data.")
+            return
+        ts_eval = _closed_timestamp_series(df, close_eval)
+        metrics = calculate_risk_metrics(df, timeframe=risk_tf, close_series=close_eval)
         if not metrics:
             st.error("Could not calculate metrics.")
             return
 
-    close_eval = pd.to_numeric(df["close"], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
-    if len(close_eval) > 40:
-        close_eval = close_eval.iloc[:-1]
     returns = close_eval.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
     rolling_window = min(30, max(10, len(returns) // 5))
     rolling_vol = (returns.rolling(rolling_window).std() * 100.0).dropna()
@@ -141,11 +217,21 @@ def render(ctx: dict) -> None:
             return "Watch", WARNING
         return "Risky", NEGATIVE
 
-    # Simple risk regime classifier for beginner readability.
-    if dd_abs > 35 or var95 < -5.0 or sharpe < 0:
+    tf_thresholds = _tf_thresholds(risk_tf)
+
+    # Timeframe-aware regime classifier for beginner readability.
+    if (
+        dd_abs > tf_thresholds["regime_dd_high"]
+        or var95 < tf_thresholds["regime_var_high"]
+        or sharpe < tf_thresholds["regime_sharpe_high"]
+    ):
         regime = "High Risk"
         regime_color = NEGATIVE
-    elif dd_abs > 20 or var95 < -3.0 or sharpe < 0.8:
+    elif (
+        dd_abs > tf_thresholds["regime_dd_med"]
+        or var95 < tf_thresholds["regime_var_med"]
+        or sharpe < tf_thresholds["regime_sharpe_med"]
+    ):
         regime = "Medium Risk"
         regime_color = WARNING
     else:
@@ -154,9 +240,9 @@ def render(ctx: dict) -> None:
 
     sharpe_s, sharpe_c = _status(sharpe, good=1.2, neutral=0.4)
     sortino_s, sortino_c = _status(sortino, good=1.6, neutral=0.6)
-    dd_s, dd_c = _status(dd_abs, good=15.0, neutral=30.0, lower_better=True)
-    var_s, var_c = _status(abs(var95), good=2.5, neutral=4.0, lower_better=True)
-    cvar_s, cvar_c = _status(abs(cvar95), good=3.2, neutral=5.5, lower_better=True)
+    dd_s, dd_c = _status(dd_abs, good=tf_thresholds["dd_good"], neutral=tf_thresholds["dd_neutral"], lower_better=True)
+    var_s, var_c = _status(abs(var95), good=tf_thresholds["var_good"], neutral=tf_thresholds["var_neutral"], lower_better=True)
+    cvar_s, cvar_c = _status(abs(cvar95), good=tf_thresholds["cvar_good"], neutral=tf_thresholds["cvar_neutral"], lower_better=True)
     cal_s, cal_c = _status(calmar, good=1.2, neutral=0.6)
     vol_s, vol_c = _status(ann_vol, good=45.0, neutral=80.0, lower_better=True)
 
@@ -191,6 +277,12 @@ def render(ctx: dict) -> None:
         f"</div></div>",
         unsafe_allow_html=True,
     )
+    st.markdown(
+        f"<div style='color:{TEXT_MUTED}; font-size:0.80rem; margin:0 0 8px 0;'>"
+        f"Threshold profile adjusts by timeframe ({risk_tf}) so risk labels stay realistic across 1h / 4h / 1d candles."
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
     st.markdown(
         f"<details style='margin-bottom:0.7rem;'>"
@@ -199,7 +291,8 @@ def render(ctx: dict) -> None:
         f"<b>1.</b> Start with <b>Risk Regime</b> and <b>Max Drawdown</b> to estimate downside stress.<br>"
         f"<b>2.</b> Check <b>VaR/CVaR</b> for tail risk: more negative values mean deeper bad-day losses.<br>"
         f"<b>3.</b> Use <b>Sharpe/Sortino/Calmar</b> to judge if returns justify risk taken.<br>"
-        f"<b>4.</b> Confirm if volatility is expanding using the rolling-vol chart before sizing up."
+        f"<b>4.</b> Confirm if volatility is expanding using the rolling-vol chart before sizing up.<br>"
+        f"<b>5.</b> Metrics run on <b>closed candles</b> to avoid live-candle noise."
         f"</div></details>",
         unsafe_allow_html=True,
     )
@@ -218,13 +311,16 @@ def render(ctx: dict) -> None:
         unsafe_allow_html=True,
     )
 
+    best_period = float(metrics.get("best_period", metrics.get("best_day", 0.0)))
+    worst_period = float(metrics.get("worst_period", metrics.get("worst_day", 0.0)))
+
     summary_df = pd.DataFrame(
         [
             {"Metric": "Total Return", "Value": f"{metrics['total_return']:+.2f}%", "Status": "Info"},
             {"Metric": "Annualized Return", "Value": f"{metrics['ann_return']:+.2f}%", "Status": "Info"},
             {"Metric": "Win Rate", "Value": f"{metrics['win_rate']:.1f}%", "Status": ("Healthy" if metrics["win_rate"] >= 55 else ("Watch" if metrics["win_rate"] >= 45 else "Risky"))},
-            {"Metric": "Best Candle", "Value": f"{metrics['best_day']:+.2f}%", "Status": "Info"},
-            {"Metric": "Worst Candle", "Value": f"{metrics['worst_day']:+.2f}%", "Status": ("Healthy" if metrics["worst_day"] > -4 else ("Watch" if metrics["worst_day"] > -8 else "Risky"))},
+            {"Metric": "Best Candle", "Value": f"{best_period:+.2f}%", "Status": "Info"},
+            {"Metric": "Worst Candle", "Value": f"{worst_period:+.2f}%", "Status": ("Healthy" if worst_period > -4 else ("Watch" if worst_period > -8 else "Risky"))},
             {"Metric": "Skewness", "Value": f"{metrics['skewness']:.3f}", "Status": ("Healthy" if metrics["skewness"] > -0.3 else ("Watch" if metrics["skewness"] > -1.0 else "Risky"))},
             {"Metric": "Kurtosis", "Value": f"{metrics['kurtosis']:.3f}", "Status": ("Healthy" if metrics["kurtosis"] < 3 else ("Watch" if metrics["kurtosis"] < 6 else "Risky"))},
             {"Metric": "Max Drawdown Duration", "Value": f"{int(metrics['max_dd_duration'])} candles", "Status": ("Healthy" if metrics["max_dd_duration"] < 40 else ("Watch" if metrics["max_dd_duration"] < 100 else "Risky"))},
@@ -260,7 +356,11 @@ def render(ctx: dict) -> None:
     )
 
     dd_series = metrics["drawdown_series"]
-    ts_vals = df["timestamp"].iloc[1 : len(dd_series) + 1] if "timestamp" in df.columns else list(range(len(dd_series)))
+    if ts_eval is not None:
+        ts_vals = ts_eval.reindex(dd_series.index)
+        ts_vals = ts_vals if not ts_vals.isna().all() else list(range(len(dd_series)))
+    else:
+        ts_vals = list(range(len(dd_series)))
     fig_dd = go.Figure()
     fig_dd.add_trace(
         go.Scatter(
@@ -283,7 +383,11 @@ def render(ctx: dict) -> None:
     st.plotly_chart(fig_dd, width="stretch")
 
     cum_ret = metrics["cumulative_returns"]
-    ts_vals2 = df["timestamp"].iloc[1 : len(cum_ret) + 1] if "timestamp" in df.columns else list(range(len(cum_ret)))
+    if ts_eval is not None:
+        ts_vals2 = ts_eval.reindex(cum_ret.index)
+        ts_vals2 = ts_vals2 if not ts_vals2.isna().all() else list(range(len(cum_ret)))
+    else:
+        ts_vals2 = list(range(len(cum_ret)))
     fig_cum = go.Figure()
     fig_cum.add_trace(
         go.Scatter(
@@ -335,7 +439,11 @@ def render(ctx: dict) -> None:
 
         fig_rv = go.Figure()
         if not rolling_vol.empty:
-            rv_ts = df["timestamp"].iloc[len(df) - len(rolling_vol):] if "timestamp" in df.columns else list(range(len(rolling_vol)))
+            if ts_eval is not None:
+                rv_ts = ts_eval.reindex(rolling_vol.index)
+                rv_ts = rv_ts if not rv_ts.isna().all() else list(range(len(rolling_vol)))
+            else:
+                rv_ts = list(range(len(rolling_vol)))
             fig_rv.add_trace(
                 go.Scatter(
                     x=rv_ts,

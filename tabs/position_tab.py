@@ -151,7 +151,13 @@ def render(ctx: dict) -> None:
         value="BTC",
         key="position_coin_input",
     ))
-    selected_timeframes = st.multiselect("Select up to 3 Timeframes", ['1m', '3m', '5m', '15m', '1h', '4h', '1d'], default=['3m'], max_selections=3)
+    selected_timeframes = st.multiselect(
+        "Select up to 3 Timeframes",
+        ['1m', '3m', '5m', '15m', '1h', '4h', '1d'],
+        default=['15m'],
+        max_selections=3,
+        key="position_timeframes",
+    )
 
     default_entry_price: float = 0.0
     for _v in _symbol_variants(coin):

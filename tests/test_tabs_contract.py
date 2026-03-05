@@ -14,7 +14,6 @@ except Exception:
 TAB_MODULES = [
     "tabs.backtest_tab",
     "tabs.correlation_tab",
-    "tabs.ensemble_ml_tab",
     "tabs.fibonacci_tab",
     "tabs.guide_tab",
     "tabs.heatmap_tab",

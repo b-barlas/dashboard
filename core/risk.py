@@ -20,13 +20,19 @@ def annualization_factor(timeframe: str) -> int:
 
 
 def calculate_risk_metrics(
-    df: pd.DataFrame, risk_free_rate: float = 0.02, timeframe: str = "1d"
+    df: pd.DataFrame,
+    risk_free_rate: float = 0.02,
+    timeframe: str = "1d",
+    close_series: pd.Series | None = None,
 ) -> dict:
     """Calculate VaR, Sharpe, Sortino, Calmar, drawdown, and distribution stats."""
     if df is None or len(df) < 20:
         return {}
 
-    close = pd.to_numeric(df.get("close"), errors="coerce")
+    if close_series is not None:
+        close = pd.to_numeric(close_series, errors="coerce")
+    else:
+        close = pd.to_numeric(df.get("close"), errors="coerce")
     close = close.replace([np.inf, -np.inf], np.nan).dropna()
     close = close[close > 0]
     if len(close) < 20:
@@ -87,6 +93,10 @@ def calculate_risk_metrics(
         "win_rate": win_rate,
         "skewness": float(returns.skew()),
         "kurtosis": float(returns.kurtosis()),
+        "best_period": float(returns.max() * 100),
+        "worst_period": float(returns.min() * 100),
+        "mean_period": mean_return * 100,
+        # Backward-compatible aliases
         "best_day": float(returns.max() * 100),
         "worst_day": float(returns.min() * 100),
         "mean_daily": mean_return * 100,
