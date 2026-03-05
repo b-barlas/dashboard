@@ -7,6 +7,14 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
 import ta
+from core.market_decision import (
+    action_decision_with_reason,
+    action_reason_text,
+    normalize_action_class,
+    structure_state,
+)
+from core.market_decision import ai_vote_metrics
+from core.scalping import scalp_gate_thresholds
 from core.signal_contract import strength_from_bias, strength_bucket
 from core.position_metrics import (
     compute_hard_invalidation,
@@ -18,13 +26,13 @@ from ui.snapshot_cache import live_or_snapshot
 
 
 def render(ctx: dict) -> None:
+    """Render the Position Analyser tab for evaluating open positions."""
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
     TEXT_MUTED = get_ctx(ctx, "TEXT_MUTED")
     POSITIVE = get_ctx(ctx, "POSITIVE")
     NEGATIVE = get_ctx(ctx, "NEGATIVE")
     WARNING = get_ctx(ctx, "WARNING")
-    CARD_BG = get_ctx(ctx, "CARD_BG")
     _tip = get_ctx(ctx, "_tip")
     _normalize_coin_input = get_ctx(ctx, "_normalize_coin_input")
     _validate_coin_symbol = get_ctx(ctx, "_validate_coin_symbol")
@@ -33,17 +41,17 @@ def render(ctx: dict) -> None:
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     analyse = get_ctx(ctx, "analyse")
     signal_plain = get_ctx(ctx, "signal_plain")
+    direction_key = get_ctx(ctx, "direction_key")
     direction_label = get_ctx(ctx, "direction_label")
-    sanitize_trading_terms = get_ctx(ctx, "sanitize_trading_terms")
+    format_delta = get_ctx(ctx, "format_delta")
+    format_stochrsi = get_ctx(ctx, "format_stochrsi")
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
-    _build_indicator_grid = get_ctx(ctx, "_build_indicator_grid")
     _sr_lookback = get_ctx(ctx, "_sr_lookback")
     _wma = get_ctx(ctx, "_wma")
     _debug = get_ctx(ctx, "_debug")
     get_scalping_entry_target = get_ctx(ctx, "get_scalping_entry_target")
     scalp_quality_gate = get_ctx(ctx, "scalp_quality_gate")
-    """Render the Position Analyser tab for evaluating open positions."""
     st.markdown(
         f"<h2 style='color:{ACCENT};margin-bottom:0.5rem;'>Position Analyser</h2>",
         unsafe_allow_html=True,
@@ -71,32 +79,72 @@ def render(ctx: dict) -> None:
         f"</div></details>",
         unsafe_allow_html=True,
     )
-    prefill = st.session_state.get("position_prefill_plan")
-    if isinstance(prefill, dict):
+
+    def _adx_bucket_only(adx_value: float) -> str:
         try:
-            plan_coin = str(prefill.get("coin") or "").strip().upper()
-            plan_dir = str(prefill.get("direction") or "LONG").strip().upper()
-            plan_entry = float(prefill.get("entry") or 0.0)
-            if plan_coin:
-                st.session_state["position_coin_input"] = plan_coin
-            if plan_dir in {"LONG", "SHORT"}:
-                st.session_state["position_direction_input"] = direction_label(plan_dir)
-            if plan_entry > 0:
-                st.session_state["position_entry_input"] = plan_entry
-            st.session_state["position_prefill_note"] = (
-                f"Loaded from {prefill.get('source', 'Scanner')}: "
-                f"{plan_coin} {direction_label(plan_dir)} | Entry {plan_entry:.6f} | "
-                f"SL {prefill.get('sl', 'N/A')} | TP1 {prefill.get('tp1', 'N/A')}"
-            )
+            adx_f = float(adx_value)
         except Exception:
-            pass
-        finally:
-            st.session_state.pop("position_prefill_plan", None)
+            return ""
+        if not np.isfinite(adx_f):
+            return ""
+        if adx_f < 20:
+            return "Weak"
+        if adx_f < 25:
+            return "Starting"
+        if adx_f < 50:
+            return "Strong"
+        if adx_f < 75:
+            return "Very Strong"
+        return "Extreme"
 
-    if st.session_state.get("position_prefill_note"):
-        st.info(st.session_state.get("position_prefill_note"))
-        st.session_state.pop("position_prefill_note", None)
+    def _setup_confirm_display(raw_action: str) -> str:
+        cls = normalize_action_class(raw_action)
+        if cls == "ENTER_TREND_AI":
+            return "TREND+AI"
+        if cls == "ENTER_TREND_LED":
+            return "TREND-led"
+        if cls == "ENTER_AI_LED":
+            return "AI-led"
+        if cls == "WATCH":
+            return "WATCH"
+        if cls == "SKIP":
+            return "SKIP"
+        return str(raw_action or "").strip()
 
+    def _clean_indicator_text(v: str) -> str:
+        txt = str(v or "").strip()
+        for token in ["🟢", "🔴", "🟡", "⚪", "🔥", "▲▲", "▲", "▼", "→", "–"]:
+            txt = txt.replace(token, "")
+        return " ".join(txt.split()).strip()
+
+    def _indicator_color(v: str) -> str:
+        u = str(v or "").upper()
+        if "VERY STRONG" in u or "EXTREME" in u:
+            return POSITIVE
+        if "STRONG" in u and "NOT" not in u:
+            return POSITIVE
+        if "WEAK" in u:
+            return NEGATIVE
+        if "STARTING" in u:
+            return WARNING
+        if any(k in u for k in ["BULLISH", "ABOVE", "OVERSOLD", "LOW", "NEAR BOTTOM", "UP SPIKE"]):
+            return POSITIVE
+        if any(k in u for k in ["BEARISH", "BELOW", "OVERBOUGHT", "HIGH", "NEAR TOP", "DOWN SPIKE"]):
+            return NEGATIVE
+        return WARNING
+
+    def _indicator_cell(name: str, value: str, tooltip: str) -> str:
+        val = _clean_indicator_text(value)
+        if not val:
+            return ""
+        color = _indicator_color(val)
+        tip = str(tooltip or "").replace("'", "&#39;")
+        return (
+            f"<div class='spot-indicator-item'>"
+            f"<div class='spot-indicator-name'>{name}</div>"
+            f"<div class='spot-indicator-value' style='color:{color};' title='{tip}'>{val}</div>"
+            f"</div>"
+        )
     # Assign a unique key to avoid StreamlitDuplicateElementId errors
     coin = _normalize_coin_input(st.text_input(
         "Coin (e.g. BTC, ETH, TAO)",
@@ -114,7 +162,7 @@ def render(ctx: dict) -> None:
         except Exception:
             continue
 
-    # Auto-refresh entry field when coin changes (unless value was prefilled from scanner plan).
+    # Auto-refresh entry field when coin changes.
     prev_coin = str(st.session_state.get("position_last_coin", "")).strip().upper()
     if coin and coin != prev_coin and default_entry_price > 0:
         st.session_state["position_entry_input"] = float(default_entry_price)
@@ -168,6 +216,16 @@ def render(ctx: dict) -> None:
         report_rows: list[dict] = []
         tf_order = {'1m': 1, '3m': 2, '5m': 3, '15m': 4, '1h': 5, '4h': 6, '1d': 7}
         largest_tf = max(selected_timeframes, key=lambda tf: tf_order[tf])
+        live_position_price: float | None = None
+        for _v in _symbol_variants(coin):
+            try:
+                _ticker = EXCHANGE.fetch_ticker(_v)
+                _last = float(_ticker.get("last", 0) or 0)
+                if _last > 0:
+                    live_position_price = _last
+                    break
+            except Exception:
+                continue
 
         tf_tabs = st.tabs(selected_timeframes)
 
@@ -194,14 +252,15 @@ def render(ctx: dict) -> None:
                     continue
 
                 a = analyse(df_eval)
-                signal, comment, volume_spike = a.signal, a.comment, a.volume_spike
+                signal, volume_spike = a.signal, a.volume_spike
                 atr_comment, candle_pattern, bias_score = a.atr_comment, a.candle_pattern, a.bias
                 strength_score = float(strength_from_bias(float(bias_score)))
                 adx_val, supertrend_trend, ichimoku_trend = a.adx, a.supertrend, a.ichimoku
                 stochrsi_k_val, bollinger_bias, vwap_label = a.stochrsi_k, a.bollinger, a.vwap
                 psar_trend, williams_label, cci_label = a.psar, a.williams, a.cci
 
-                current_price = df['close'].iloc[-1]
+                # Keep open-position PnL/liquidation on one live price source across TF tabs.
+                current_price = float(live_position_price) if live_position_price and live_position_price > 0 else float(df["close"].iloc[-1])
                 pnl_pack = compute_position_pnl(
                     entry_price=float(entry_price),
                     current_price=float(current_price),
@@ -228,13 +287,12 @@ def render(ctx: dict) -> None:
                 liq_note = "Simple estimate"
 
                 col = POSITIVE if pnl_percent > 0 else (WARNING if abs(pnl_percent) < 1 else NEGATIVE)
-                icon = '🟢' if pnl_percent > 0 else ('🟠' if abs(pnl_percent) < 1 else '🔴')
 
                 pos_side_label = direction_label(direction)
                 st.markdown(
                     f"<div class='panel-box' style='border-left:4px solid {col}; padding:16px 18px;'>"
                     f"  <div style='display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;'>"
-                    f"    <span style='color:{col}; font-weight:800;'>{icon} {pos_side_label} Position ({tf})</span>"
+                    f"    <span style='color:{col}; font-weight:800;'>{pos_side_label} Position ({tf})</span>"
                     f"    <span style='color:{col}; font-weight:800;'>Levered {pnl_percent:+.2f}%</span>"
                     f"  </div>"
                     f"  <div style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px;'>"
@@ -269,67 +327,265 @@ def render(ctx: dict) -> None:
                         f"<span style='color:{NEGATIVE}; font-weight:600;'>Liquidation Risk</span>"
                         f"<span style='color:{TEXT_MUTED};'> — With current settings, liquidation is only "
                         f"{liq_dist_pct:.2f}% away. Tighten risk controls.</span></div>",
-                        unsafe_allow_html=True,
-                    )
+                    unsafe_allow_html=True,
+                )
 
-                signal_dir_display = signal_plain(signal)
-                signal_clean = direction_label(signal_dir_display)
+                signal_dir = direction_key(signal_plain(signal))
+                signal_clean = direction_label(signal_dir)
+                signal_dir_legacy = (
+                    "LONG" if signal_dir == "UPSIDE" else ("SHORT" if signal_dir == "DOWNSIDE" else "WAIT")
+                )
 
                 # -- AI ensemble prediction for this coin/timeframe --
+                ai_votes = 0
                 try:
-                    _ai_prob, ai_dir, _ai_details = ml_ensemble_predict(df_eval)
-                    ai_agree = float((_ai_details or {}).get("agreement", 0.0))
+                    _ai_prob, ai_dir_raw, ai_details = ml_ensemble_predict(df_eval)
+                    ai_dir = direction_key(ai_dir_raw)
+                    directional_agreement = float(
+                        (ai_details or {}).get(
+                            "directional_agreement",
+                            (ai_details or {}).get("agreement", 0.0),
+                        )
+                    )
+                    consensus_agreement = float(
+                        (ai_details or {}).get("consensus_agreement", directional_agreement)
+                    )
+                    ai_votes, _display_ratio, decision_agreement = ai_vote_metrics(
+                        ai_dir,
+                        directional_agreement,
+                        consensus_agreement,
+                    )
                 except Exception:
                     ai_dir = "NEUTRAL"
-                    ai_agree = 0.0
+                    decision_agreement = 0.0
 
                 # Alignment: alignment of Direction + AI + Strength
-                sig_direction = "LONG" if signal in ['STRONG BUY', 'BUY'] else ("SHORT" if signal in ['STRONG SELL', 'SELL'] else "WAIT")
-                conviction_lbl, conviction_c = _calc_conviction(sig_direction, ai_dir, strength_score, ai_agree)
+                conviction_lbl, _ = _calc_conviction(signal_dir, ai_dir, strength_score, decision_agreement)
 
-                # Direction / Strength / AI / Alignment summary grid
-                sig_color = POSITIVE if signal_dir_display == "LONG" else (NEGATIVE if signal_dir_display == "SHORT" else WARNING)
-                ai_color = POSITIVE if ai_dir == "LONG" else (NEGATIVE if ai_dir == "SHORT" else WARNING)
+                # Setup confirm mirrors market/spot decision policy.
+                structure_state_val = structure_state(signal_dir, ai_dir, strength_score, decision_agreement)
+                action_raw, action_reason_code = action_decision_with_reason(
+                    signal_dir,
+                    float(strength_score),
+                    structure_state_val,
+                    conviction_lbl,
+                    float(decision_agreement),
+                    float(adx_val),
+                )
+
+                # Spot-style setup snapshot (selected coin/timeframe).
+                price_change = None
+                if len(df_eval) >= 2:
+                    p0 = float(df_eval["close"].iloc[-2])
+                    p1 = float(df_eval["close"].iloc[-1])
+                    if p0 > 0:
+                        price_change = ((p1 / p0) - 1.0) * 100.0
+                delta_note = "Closed-candle move on selected timeframe."
+                delta_display = format_delta(price_change) if price_change is not None else ""
+                delta_c = (
+                    POSITIVE if str(delta_display).strip().startswith("▲")
+                    else (NEGATIVE if str(delta_display).strip().startswith("▼") else WARNING)
+                )
+
+                sig_color = POSITIVE if signal_dir == "UPSIDE" else (NEGATIVE if signal_dir == "DOWNSIDE" else WARNING)
+                ai_color = POSITIVE if ai_dir == "UPSIDE" else (NEGATIVE if ai_dir == "DOWNSIDE" else WARNING)
                 _s_bucket = strength_bucket(strength_score)
+                strength_display = f"{strength_score:.0f}% ({_s_bucket})"
                 conf_color = POSITIVE if _s_bucket in {"STRONG", "GOOD"} else (WARNING if _s_bucket == "MIXED" else NEGATIVE)
-                summary_row = (
-                    f"<div style='text-align:center; padding:6px;'>"
-                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Direction</div>"
-                    f"<div style='color:{sig_color}; font-size:0.85rem; font-weight:600;'>{signal_clean}</div></div>"
-                    f"<div style='text-align:center; padding:6px;'>"
-                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Strength</div>"
-                    f"<div style='color:{conf_color}; font-size:0.85rem; font-weight:600;'>{strength_score:.0f}%</div></div>"
-                    f"<div style='text-align:center; padding:6px;'>"
-                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>AI Ensemble</div>"
-                    f"<div style='color:{ai_color}; font-size:0.85rem; font-weight:600;'>{direction_label(ai_dir)}</div></div>"
-                    f"<div style='text-align:center; padding:6px;'>"
-                    f"<div style='color:{TEXT_MUTED}; font-size:0.7rem; text-transform:uppercase;'>Alignment</div>"
-                    f"<div style='color:{conviction_c}; font-size:0.85rem; font-weight:600;'>{conviction_lbl}</div></div>"
-                )
+                conv_color = POSITIVE if conviction_lbl == "HIGH" else (WARNING if conviction_lbl in {"MEDIUM", "TREND"} else NEGATIVE)
+                setup_confirm = _setup_confirm_display(action_raw)
+                setup_reason = action_reason_text(action_reason_code)
+                action_class = normalize_action_class(action_raw)
+                if action_class.startswith("ENTER_"):
+                    setup_color = POSITIVE
+                elif action_class == "WATCH":
+                    setup_color = WARNING
+                else:
+                    setup_color = NEGATIVE
+
                 st.markdown(
-                    f"<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); "
-                    f"gap:4px; background:{CARD_BG}; border-radius:8px; padding:10px; margin:8px 0;'>"
-                    f"{summary_row}</div>",
+                    f"<style>"
+                    f".spot-summary-title{{"
+                    f"  margin:0.40rem 0 0.28rem 0;"
+                    f"  text-align:center;"
+                    f"  color:{TEXT_MUTED};"
+                    f"  font-size:0.78rem;"
+                    f"  text-transform:uppercase;"
+                    f"  letter-spacing:0.45px;"
+                    f"}}"
+                    f".spot-summary-wrap{{"
+                    f"  background:linear-gradient(140deg, rgba(4, 10, 18, 0.95), rgba(2, 5, 11, 0.95));"
+                    f"  border:1px solid rgba(0, 212, 255, 0.16);"
+                    f"  border-radius:12px;"
+                    f"  padding:10px 12px;"
+                    f"  margin:0.1rem 0 0.48rem 0;"
+                    f"}}"
+                    f".spot-summary-grid{{"
+                    f"  display:flex;"
+                    f"  flex-wrap:wrap;"
+                    f"  justify-content:center;"
+                    f"  gap:0.45rem 0.75rem;"
+                    f"}}"
+                    f".spot-summary-item{{"
+                    f"  flex:0 1 150px;"
+                    f"  min-width:130px;"
+                    f"  text-align:center;"
+                    f"  padding:4px 6px;"
+                    f"}}"
+                    f".spot-summary-label{{"
+                    f"  color:{TEXT_MUTED};"
+                    f"  font-size:0.67rem;"
+                    f"  text-transform:uppercase;"
+                    f"  letter-spacing:0.55px;"
+                    f"}}"
+                    f".spot-summary-value{{"
+                    f"  font-size:1.03rem;"
+                    f"  font-weight:700;"
+                    f"  margin-top:3px;"
+                    f"}}"
+                    f"</style>"
+                    f"<div class='spot-summary-title'>Setup Snapshot</div>"
+                    f"<div class='spot-summary-wrap'><div class='spot-summary-grid'>"
+                    f"<div class='spot-summary-item' title='{delta_note}'>"
+                    f"<div class='spot-summary-label'>Δ (%)</div>"
+                    f"<div class='spot-summary-value' style='color:{delta_c};'>{delta_display or '—'}</div></div>"
+                    f"<div class='spot-summary-item' title='{setup_reason}'>"
+                    f"<div class='spot-summary-label'>Setup Confirm</div>"
+                    f"<div class='spot-summary-value' style='color:{setup_color};'>{setup_confirm}</div></div>"
+                    f"<div class='spot-summary-item' title='Technical side from closed candles (Upside/Downside/Neutral).'>"
+                    f"<div class='spot-summary-label'>Direction</div>"
+                    f"<div class='spot-summary-value' style='color:{sig_color};'>{signal_clean}</div></div>"
+                    f"<div class='spot-summary-item' title='Direction-agnostic signal power from the technical stack (0-100).'>"
+                    f"<div class='spot-summary-label'>Strength</div>"
+                    f"<div class='spot-summary-value' style='color:{conf_color};'>{strength_display}</div></div>"
+                    f"<div class='spot-summary-item' title='Model vote direction and vote count out of 3 models.'>"
+                    f"<div class='spot-summary-label'>AI Ensemble</div>"
+                    f"<div class='spot-summary-value' style='color:{ai_color};'>{direction_label(ai_dir)} ({ai_votes}/3)</div></div>"
+                    f"<div class='spot-summary-item' title='How well technical direction and AI direction agree.'>"
+                    f"<div class='spot-summary-label'>Tech vs AI Alignment</div>"
+                    f"<div class='spot-summary-value' style='color:{conv_color};'>{conviction_lbl}</div></div>"
+                    f"</div></div>",
                     unsafe_allow_html=True,
                 )
 
+                supertrend_txt = _clean_indicator_text(supertrend_trend)
+                ichimoku_txt = _clean_indicator_text(ichimoku_trend)
+                vwap_txt = _clean_indicator_text(vwap_label)
+                adx_txt = _clean_indicator_text(_adx_bucket_only(adx_val))
+                bollinger_txt = _clean_indicator_text(bollinger_bias)
+                stochrsi_txt = _clean_indicator_text(format_stochrsi(stochrsi_k_val, timeframe=tf))
+                psar_txt = _clean_indicator_text(psar_trend)
+                will_txt = _clean_indicator_text(williams_label)
+                cci_txt = _clean_indicator_text(cci_label)
+                volume_txt = ""
+                if volume_spike:
+                    try:
+                        o = float(df_eval["open"].iloc[-1])
+                        c = float(df_eval["close"].iloc[-1])
+                        if pd.notna(o) and pd.notna(c) and c > o:
+                            volume_txt = "▲ Up Spike"
+                        elif pd.notna(o) and pd.notna(c) and c < o:
+                            volume_txt = "▼ Down Spike"
+                        else:
+                            volume_txt = "→ Spike"
+                    except Exception:
+                        volume_txt = "→ Spike"
+                volatility_txt = _clean_indicator_text(str(atr_comment).replace("▲", "").replace("▼", "").replace("–", ""))
+                pattern_txt = _clean_indicator_text(candle_pattern.split(" (")[0] if candle_pattern else "")
+
+                trend_cells = "".join(
+                    [
+                        _indicator_cell("SuperTrend", supertrend_txt, "ATR-based trend line direction."),
+                        _indicator_cell("Ichimoku", ichimoku_txt, "Cloud trend context."),
+                        _indicator_cell("VWAP", vwap_txt, "Price relative to volume-weighted average price."),
+                        _indicator_cell("ADX", adx_txt, "Trend strength (not direction)."),
+                        _indicator_cell("PSAR", psar_txt, "Parabolic SAR trend-following state."),
+                    ]
+                )
+                momentum_cells = "".join(
+                    [
+                        _indicator_cell("StochRSI", stochrsi_txt, "Momentum pressure zone."),
+                        _indicator_cell("Williams %R", will_txt, "Range-position momentum signal."),
+                        _indicator_cell("CCI", cci_txt, "Mean-reversion momentum signal."),
+                        _indicator_cell("Pattern", pattern_txt, "Latest candle pattern direction."),
+                    ]
+                )
+                vol_cells = "".join(
+                    [
+                        _indicator_cell("Bollinger", bollinger_txt, "Band location (extension / pullback context)."),
+                        _indicator_cell("Volatility", volatility_txt, "ATR/band-width regime."),
+                        _indicator_cell("Volume", volume_txt, "Abnormal volume event."),
+                    ]
+                )
                 st.markdown(
-                    f"<p style='color:{TEXT_MUTED}; font-size:0.88rem;'>{sanitize_trading_terms(comment)}</p>",
+                    f"<style>"
+                    f".spot-indicator-sep{{"
+                    f"  margin:8px 0 6px 0;"
+                    f"  text-align:center;"
+                    f"  color:{TEXT_MUTED};"
+                    f"  font-size:0.80rem;"
+                    f"  text-transform:uppercase;"
+                    f"  letter-spacing:0.45px;"
+                    f"}}"
+                    f".spot-indicator-wrap{{"
+                    f"  display:grid;"
+                    f"  grid-template-columns:repeat(auto-fit,minmax(250px,1fr));"
+                    f"  gap:0.55rem;"
+                    f"  margin:0.2rem 0 0.45rem 0;"
+                    f"}}"
+                    f".spot-indicator-group{{"
+                    f"  background:rgba(0,0,0,0.56);"
+                    f"  border:1px solid rgba(0, 212, 255, 0.14);"
+                    f"  border-radius:12px;"
+                    f"  padding:8px 8px 6px 8px;"
+                    f"}}"
+                    f".spot-indicator-group-title{{"
+                    f"  color:{ACCENT};"
+                    f"  text-align:center;"
+                    f"  font-size:0.74rem;"
+                    f"  text-transform:uppercase;"
+                    f"  letter-spacing:0.55px;"
+                    f"  margin-bottom:4px;"
+                    f"}}"
+                    f".spot-indicator-grid{{"
+                    f"  display:flex;"
+                    f"  flex-wrap:wrap;"
+                    f"  justify-content:center;"
+                    f"  gap:4px 10px;"
+                    f"  align-items:center;"
+                    f"}}"
+                    f".spot-indicator-item{{"
+                    f"  text-align:center;"
+                    f"  padding:4px 2px;"
+                    f"  flex:0 1 118px;"
+                    f"}}"
+                    f".spot-indicator-name{{"
+                    f"  color:{TEXT_MUTED};"
+                    f"  font-size:0.68rem;"
+                    f"  text-transform:uppercase;"
+                    f"  letter-spacing:0.5px;"
+                    f"}}"
+                    f".spot-indicator-value{{"
+                    f"  font-size:0.95rem;"
+                    f"  font-weight:700;"
+                    f"  margin-top:2px;"
+                    f"}}"
+                    f"</style>"
+                    f"<div class='spot-indicator-sep'>Technical Regime Breakdown (closed-candle context)</div>"
+                    f"<div class='spot-indicator-wrap'>"
+                    f"<div class='spot-indicator-group'><div class='spot-indicator-group-title'>Trend Structure</div>"
+                    f"<div class='spot-indicator-grid'>{trend_cells}</div></div>"
+                    f"<div class='spot-indicator-group'><div class='spot-indicator-group-title'>Momentum Signals</div>"
+                    f"<div class='spot-indicator-grid'>{momentum_cells}</div></div>"
+                    f"<div class='spot-indicator-group'><div class='spot-indicator-group-title'>Volatility & Volume</div>"
+                    f"<div class='spot-indicator-grid'>{vol_cells}</div></div>"
+                    f"</div>",
                     unsafe_allow_html=True,
                 )
-
-                # Market regime warning (ADX < 20)
-                if not np.isnan(adx_val) and adx_val < 20:
-                    st.markdown(
-                        f"<div style='background:#2D1B00; border-left:4px solid {WARNING}; "
-                        f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
-                        f"<span style='color:{WARNING}; font-weight:600;'>Ranging (ADX {adx_val:.0f})</span>"
-                        f"<span style='color:{TEXT_MUTED};'> — Signals less reliable.</span></div>",
-                        unsafe_allow_html=True,
-                    )
 
                 # Risk alert for position
-                if direction == sig_direction and strength_score < 50:
+                pos_dir = direction_key(direction)
+                if pos_dir == signal_dir and strength_score < 50:
                     st.markdown(
                         f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
                         f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
@@ -338,30 +594,17 @@ def render(ctx: dict) -> None:
                         f"is only {strength_score:.0f}%. Consider tightening stop-loss.</span></div>",
                         unsafe_allow_html=True,
                     )
-                elif direction != sig_direction and sig_direction != "WAIT":
+                elif pos_dir != signal_dir and signal_dir != "NEUTRAL":
                     st.markdown(
                         f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
                         f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
                         f"<span style='color:{NEGATIVE}; font-weight:600;'>Direction Conflict</span>"
                         f"<span style='color:{TEXT_MUTED};'> — Your {direction_label(direction)} position conflicts with "
-                        f"the current {direction_label(sig_direction)} signal. Review position validity.</span></div>",
+                        f"the current {direction_label(signal_dir)} signal. Review position validity.</span></div>",
                         unsafe_allow_html=True,
                     )
 
-                df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
-                df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
-                df['ema9'] = ta.trend.ema_indicator(df['close'], window=9)
-                df['ema21'] = ta.trend.ema_indicator(df['close'], window=21)
-                macd_ind = ta.trend.MACD(df['close'])
-                df['macd'] = macd_ind.macd()
-                df['macd_signal'] = macd_ind.macd_signal()
-                df['macd_diff'] = macd_ind.macd_diff()
-                df['rsi6'] = ta.momentum.rsi(df['close'], window=6)
-                df['rsi14'] = ta.momentum.rsi(df['close'], window=14)
-                df['rsi24'] = ta.momentum.rsi(df['close'], window=24)
-                df['obv'] = ta.volume.on_balance_volume(df['close'], df['volume'])
-
-                recent_sr = df.tail(_sr_lookback(tf))
+                recent_sr = df_eval.tail(_sr_lookback(tf))
                 support_sr = recent_sr['low'].min()
                 resistance_sr = recent_sr['high'].max()
                 atr14_sr = float(ta.volatility.average_true_range(df_eval['high'], df_eval['low'], df_eval['close'], window=14).iloc[-1])
@@ -398,7 +641,7 @@ def render(ctx: dict) -> None:
 
                 health_pack = compute_health_decision(
                     direction=direction,
-                    signal_direction=sig_direction,
+                    signal_direction=signal_dir_legacy,
                     strength=float(strength_score),
                     conviction_label=conviction_lbl,
                     liq_distance_pct=liq_dist_pct,
@@ -408,9 +651,7 @@ def render(ctx: dict) -> None:
                 health_score = int(health_pack["score"])
                 health_label = str(health_pack["label"])
                 health_action = str(health_pack["action"])
-                health_notes = list(health_pack["notes"])
-
-                notes_txt = ", ".join(health_notes) if health_notes else "no major risk flags"
+                health_notes = [str(x) for x in list(health_pack.get("notes", []))]
                 report_rows.append(
                     {
                         "Timestamp (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -441,57 +682,50 @@ def render(ctx: dict) -> None:
                         "Health Action": health_action,
                     }
                 )
-                st.caption(
-                    f"{tf} decision model: {health_label} ({health_score}/100) — {health_action} "
-                    f"Drivers: {notes_txt}."
+                reason_map = {
+                    "signal conflict": "signal conflict",
+                    "no clear technical edge": "no clear edge",
+                    "low strength": "low strength",
+                    "medium strength": "medium strength",
+                    "AI conflict": "AI conflict",
+                    "low conviction": "weak alignment",
+                    "liquidation too close": "liquidation too close",
+                    "liquidation moderately close": "liquidation moderately close",
+                    "hard invalidation broken": "invalidation broken",
+                    "deep drawdown": "deep drawdown",
+                }
+                why_items = health_notes[:3] if health_notes else ["no major risk flag"]
+                why_text = ", ".join(reason_map.get(n, n) for n in why_items)
+                health_meaning_map = {
+                    "HOLD": "Meaning: structure is acceptable; hold with discipline.",
+                    "REDUCE": "Meaning: edge is weakened; reduce size and avoid adding.",
+                    "EXIT": "Meaning: risk breach is high; close or hedge immediately.",
+                }
+                health_meaning = health_meaning_map.get(health_label, "")
+                st.markdown(
+                    f"<div class='panel-box' style='padding:10px 12px;'>"
+                    f"<div style='font-size:0.92rem;'>"
+                    f"<span style='color:{TEXT_MUTED};'>{tf} Position Risk Status:</span> "
+                    f"<b style='color:{ACCENT};'>{health_label} ({health_score}/100)</b>"
+                    f"</div>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
+                    f"Why: {why_text}"
+                    f"</div>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:2px;'>"
+                    f"{health_meaning}"
+                    f"</div>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:2px;'>"
+                    f"Next: {health_action} Keep risk line at "
+                    f"<b style='color:{WARNING};'>{invalidation:,.4f}</b>."
+                    f"</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
                 )
 
                 # === Scalping Setup ===
                 df_scalp = df_eval.tail(120).copy()
                 
                 if df_scalp is not None and len(df_scalp) > 30:
-                
-                    # Technical calculations
-                    df_scalp['ema5'] = df_scalp['close'].ewm(span=5).mean()
-                    df_scalp['ema13'] = df_scalp['close'].ewm(span=13).mean()
-                    df_scalp['ema21'] = df_scalp['close'].ewm(span=21).mean()
-                    df_scalp['atr'] = ta.volatility.average_true_range(df_scalp['high'], df_scalp['low'], df_scalp['close'], window=14)
-                    df_scalp['rsi'] = ta.momentum.rsi(df_scalp['close'], window=14)
-                    _macd_scalp = ta.trend.MACD(df_scalp['close'])
-                    df_scalp['macd'] = _macd_scalp.macd()
-                    df_scalp['macd_signal'] = _macd_scalp.macd_signal()
-                    df_scalp['macd_diff'] = _macd_scalp.macd_diff()
-                    df_scalp['obv'] = ta.volume.on_balance_volume(df_scalp['close'], df_scalp['volume'])
-                
-                    latest = df_scalp.iloc[-1]
-                    close_price = latest['close']
-                    ema5_val = latest['ema5']
-                    ema13_val = latest['ema13']
-                    macd_hist_s = latest['macd_diff']
-                    rsi14_val = latest['rsi']
-                    _obv_back_scalp = min(5, len(df_scalp) - 1)
-                    obv5 = df_scalp['obv'].iloc[-_obv_back_scalp] if _obv_back_scalp > 0 else df_scalp['obv'].iloc[-1]
-                    obv_change_s = ((latest['obv'] - obv5) / abs(obv5) * 100) if obv5 != 0 else 0
-                    _sr_scalp = _sr_lookback(tf)
-                    support_s = df_scalp['low'].tail(_sr_scalp).min()
-                    resistance_s = df_scalp['high'].tail(_sr_scalp).max()
-                    support_dist_s = abs(close_price - support_s) / close_price * 100
-                    resistance_dist_s = abs(close_price - resistance_s) / close_price * 100
-                
-                    scalping_snapshot_html = f"""
-                    <div class='panel-box'>
-                      <b style='color:{ACCENT}; font-size:1.02rem;'>Technical Snapshot ({tf})</b><br>
-                      <div style='color:{TEXT_MUTED}; font-size:0.86rem; line-height:1.65; margin-top:6px;'>
-                        EMA 5/13: <b>${ema5_val:,.2f}</b> / <b>${ema13_val:,.2f}</b> {('🟢' if ema5_val > ema13_val else '🔴')}<br>
-                        MACD Hist: <b>{macd_hist_s:.2f}</b> {('🟢' if macd_hist_s > 0 else '🔴')} |
-                        RSI14: <b>{rsi14_val:.2f}</b> {('🟢' if rsi14_val > 50 else '🔴')} |
-                        OBV Δ: <b>{obv_change_s:+.2f}%</b> {('🟢' if obv_change_s > 0 else '🔴')}<br>
-                        S/R: <b>${support_s:,.4f}</b> ({support_dist_s:.2f}%) / <b>${resistance_s:,.4f}</b> ({resistance_dist_s:.2f}%)
-                      </div>
-                    </div>
-                    """
-                
-                
                     # === Scalping Strategy Call ===
                     scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note = get_scalping_entry_target(
                         df_scalp,
@@ -500,9 +734,10 @@ def render(ctx: dict) -> None:
                         ichimoku_trend,
                         vwap_label,
                     )
+                    gate_min_rr, gate_min_adx, gate_min_strength = scalp_gate_thresholds(tf)
                     scalp_ok, scalp_reason = scalp_quality_gate(
                         scalp_direction=scalp_direction,
-                        signal_direction=sig_direction,
+                        signal_direction=signal_dir,
                         rr_ratio=rr_ratio,
                         adx_val=adx_val,
                         strength=strength_score,
@@ -510,17 +745,19 @@ def render(ctx: dict) -> None:
                         entry=entry_s,
                         stop=stop_s,
                         target=target_s,
+                        min_rr=gate_min_rr,
+                        min_adx=gate_min_adx,
+                        min_strength=gate_min_strength,
                     )
                 
                     # === Display Scalping Result ===
                     if scalp_ok and scalp_direction:
                         color = POSITIVE if scalp_direction == "LONG" else NEGATIVE
-                        icon = "🟢" if scalp_direction == "LONG" else "🔴"
                         st.markdown(
                             f"""
                             <div class='panel-box' style='border-left:4px solid {color};'>
                               <div style='display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;'>
-                                <span style='color:{color}; font-weight:800;'>{icon} Scalping {direction_label(scalp_direction)}</span>
+                                <span style='color:{color}; font-weight:800;'>Scalping {direction_label(scalp_direction)}</span>
                                 <span style='color:{color}; font-weight:700;'>R:R {rr_ratio:.2f}</span>
                               </div>
                               <div style='color:{TEXT_MUTED}; font-size:0.88rem; margin-top:6px; line-height:1.65;'>
@@ -528,7 +765,7 @@ def render(ctx: dict) -> None:
                                 Model Entry <b style='color:{ACCENT};'>${entry_s:,.4f}</b><br>
                                 Stop <b style='color:{NEGATIVE};'>${stop_s:,.4f}</b> |
                                 Target <b style='color:{POSITIVE};'>${target_s:,.4f}</b><br>
-                                {'Good setup quality (R:R ≥ 1.5).' if rr_ratio >= 1.5 else 'R:R is below ideal threshold (1.5).'}
+                                {'Good setup quality (R:R gate passed).' if rr_ratio >= gate_min_rr else f'R:R is below gate ({gate_min_rr:.2f}).'}
                               </div>
                             </div>
                             """,
@@ -540,9 +777,9 @@ def render(ctx: dict) -> None:
                             "SIGNAL_DIRECTION_NEUTRAL": "Signal direction is neutral; scalp setup is blocked.",
                             "DIRECTION_MISMATCH": "Scalp side does not match direction; setup filtered.",
                             "CONFLICT": "Technical vs AI alignment is in conflict.",
-                            "RR_TOO_LOW": "R:R below required threshold (1.5).",
-                            "ADX_TOO_LOW": "ADX below required trend threshold (20).",
-                            "STRENGTH_TOO_LOW": "Strength below required threshold (55).",
+                            "RR_TOO_LOW": f"R:R below required threshold ({gate_min_rr:.2f}).",
+                            "ADX_TOO_LOW": f"ADX below required trend threshold ({gate_min_adx:.0f}).",
+                            "STRENGTH_TOO_LOW": f"Strength below required threshold ({gate_min_strength:.0f}).",
                             "INVALID_LEVELS": "Invalid Entry/Stop/Target levels.",
                         }
                         msg = breakout_note or reason_map.get(scalp_reason, "No valid scalping setup with current filters.")
@@ -555,70 +792,6 @@ def render(ctx: dict) -> None:
                             f"</div>",
                             unsafe_allow_html=True,
                         )
-                    with st.expander("Advanced Context"):
-                        ichi_meta_parts = []
-                        if a.ichimoku_tk_cross:
-                            ichi_meta_parts.append(
-                                f"TK Cross: {a.ichimoku_tk_cross.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
-                            )
-                        if a.ichimoku_future_bias:
-                            ichi_meta_parts.append(
-                                f"Future Cloud: {a.ichimoku_future_bias.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
-                            )
-                        if a.ichimoku_cloud_strength:
-                            ichi_meta_parts.append(
-                                f"Cloud Strength: {a.ichimoku_cloud_strength.replace('▲ ', '').replace('▼ ', '').replace('→ ', '')}"
-                            )
-                        ichimoku_hover = " | ".join(ichi_meta_parts)
-
-                        spike_label = ""
-                        spike_hover = ""
-                        if volume_spike:
-                            try:
-                                prev_vol_avg = float(df_eval["volume"].iloc[-21:-1].mean()) if len(df_eval) >= 21 else float("nan")
-                                last_vol = float(df_eval["volume"].iloc[-1]) if len(df_eval) >= 1 else float("nan")
-                                vol_ratio = (
-                                    last_vol / prev_vol_avg
-                                    if pd.notna(prev_vol_avg) and prev_vol_avg > 0 and pd.notna(last_vol)
-                                    else float("nan")
-                                )
-                            except Exception:
-                                vol_ratio = float("nan")
-                            try:
-                                o = float(df_eval["open"].iloc[-1])
-                                c = float(df_eval["close"].iloc[-1])
-                                candle_pct = ((c / o) - 1.0) * 100.0 if pd.notna(o) and pd.notna(c) and o > 0 else float("nan")
-                                if pd.notna(o) and pd.notna(c) and c > o:
-                                    spike_label = "▲ Up Spike"
-                                elif pd.notna(o) and pd.notna(c) and c < o:
-                                    spike_label = "▼ Down Spike"
-                                else:
-                                    spike_label = "→ Spike"
-                            except Exception:
-                                candle_pct = float("nan")
-                                spike_label = "→ Spike"
-                            parts = []
-                            if pd.notna(vol_ratio):
-                                parts.append(f"Vol Ratio: {vol_ratio:.2f}x")
-                            if pd.notna(candle_pct):
-                                parts.append(f"Candle: {candle_pct:+.2f}%")
-                            vwap_ctx = str(vwap_label or "").replace("🟢 ", "").replace("🔴 ", "").replace("→ ", "").strip()
-                            if vwap_ctx:
-                                parts.append(f"VWAP: {vwap_ctx}")
-                            spike_hover = " | ".join(parts)
-
-                        # -- Indicator grid (professional card layout) --
-                        _grid_html = _build_indicator_grid(
-                            supertrend_trend, ichimoku_trend, vwap_label, adx_val, bollinger_bias,
-                            stochrsi_k_val, psar_trend, williams_label, cci_label,
-                            volume_spike, atr_comment, candle_pattern,
-                            spike_label=spike_label, spike_hover=spike_hover,
-                            timeframe=tf,
-                            ichimoku_hover=ichimoku_hover,
-                        )
-                        if _grid_html:
-                            st.markdown(_grid_html, unsafe_allow_html=True)
-                        st.markdown(scalping_snapshot_html, unsafe_allow_html=True)
                 else:
                     st.markdown(
                         f"<div class='panel-box' style='border-left:4px solid {WARNING};'>"
@@ -668,7 +841,7 @@ def render(ctx: dict) -> None:
                 showlegend=True,
                 legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
             )
-            st.markdown(f"<h4 style='color:{ACCENT};'>📈 Candlestick Chart – {largest_tf}</h4>", unsafe_allow_html=True)
+            st.markdown(f"<h4 style='color:{ACCENT};'>Candlestick Chart – {largest_tf}</h4>", unsafe_allow_html=True)
             st.plotly_chart(fig_candle, width="stretch")
         else:
             st.warning(f"Not enough data to display candlestick chart for {largest_tf}.")

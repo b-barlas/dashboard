@@ -63,8 +63,9 @@ _TAB_DEPS = [
         [
             "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "CARD_BG", "PRIMARY_BG",
             "_tip", "_normalize_coin_input", "_validate_coin_symbol", "_symbol_variants", "EXCHANGE",
-            "fetch_ohlcv", "analyse", "signal_plain", "direction_label", "ml_ensemble_predict", "_calc_conviction",
-            "_build_indicator_grid", "_sr_lookback", "_wma", "_debug", "get_scalping_entry_target", "scalp_quality_gate",
+            "fetch_ohlcv", "analyse", "signal_plain", "direction_key", "direction_label", "ml_ensemble_predict", "_calc_conviction",
+            "format_delta", "format_stochrsi",
+            "_sr_lookback", "_wma", "_debug", "get_scalping_entry_target", "scalp_quality_gate",
             "sanitize_trading_terms",
         ],
     ),
