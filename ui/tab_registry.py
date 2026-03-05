@@ -102,7 +102,7 @@ _TAB_DEPS = [
     (
         render_fibonacci_tab_ui,
         [
-            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "NEON_BLUE", "GOLD", "PRIMARY_BG", "_tip",
+            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "GOLD", "PRIMARY_BG", "_tip",
             "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "calculate_fibonacci_levels",
             "detect_divergence", "calculate_volume_profile", "detect_market_regime",
         ],

@@ -7,6 +7,29 @@ import pandas as pd
 import ta
 
 
+def dedupe_divergences(divergences: list[dict]) -> list[dict]:
+    """Keep one strongest row per divergence type to avoid over-counting."""
+    if not divergences:
+        return []
+    strength_rank = {"STRONG": 3, "MODERATE": 2, "WEAK": 1}
+    picked: dict[str, dict] = {}
+    for row in divergences:
+        d_type = str((row or {}).get("type", "")).strip().upper()
+        if not d_type:
+            d_type = str((row or {}).get("description", "")).strip().upper() or "UNKNOWN"
+        strength = str((row or {}).get("strength", "MODERATE")).strip().upper()
+        rank = int(strength_rank.get(strength, 0))
+        prev = picked.get(d_type)
+        if prev is None or rank > int(prev.get("_rank", -1)):
+            out = dict(row or {})
+            out["_rank"] = rank
+            picked[d_type] = out
+    ordered = sorted(picked.values(), key=lambda x: (-int(x.get("_rank", 0)), str(x.get("type", ""))))
+    for row in ordered:
+        row.pop("_rank", None)
+    return ordered
+
+
 def calculate_fibonacci_levels(df: pd.DataFrame, lookback: int = 100) -> dict:
     if df is None or len(df) < 20:
         return {}
@@ -108,9 +131,7 @@ def monte_carlo_simulation(df: pd.DataFrame, num_simulations: int = 500, num_day
     }
 
 
-def detect_divergence(
-    df: pd.DataFrame, *, positive_color: str, negative_color: str, warning_color: str
-) -> list[dict]:
+def detect_divergence(df: pd.DataFrame) -> list[dict]:
     if df is None or len(df) < 30:
         return []
 
@@ -137,7 +158,6 @@ def detect_divergence(
                                 "type": "BULLISH RSI",
                                 "description": "Price making lower lows but RSI making higher lows",
                                 "strength": "STRONG",
-                                "color": positive_color,
                             }
                         )
                         break
@@ -152,7 +172,6 @@ def detect_divergence(
                                 "type": "BEARISH RSI",
                                 "description": "Price making higher highs but RSI making lower highs",
                                 "strength": "STRONG",
-                                "color": negative_color,
                             }
                         )
                         break
@@ -167,7 +186,6 @@ def detect_divergence(
                     "type": "BEARISH MACD",
                     "description": "Price rising but MACD declining — momentum weakening",
                     "strength": "MODERATE",
-                    "color": warning_color,
                 }
             )
         elif price_trend < 0 and macd_trend > 0:
@@ -176,10 +194,9 @@ def detect_divergence(
                     "type": "BULLISH MACD",
                     "description": "Price falling but MACD rising — selling pressure weakening",
                     "strength": "MODERATE",
-                    "color": warning_color,
                 }
             )
-    return divergences
+    return dedupe_divergences(divergences)
 
 
 def calculate_volume_profile(df: pd.DataFrame, num_bins: int = 30) -> dict:

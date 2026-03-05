@@ -233,12 +233,17 @@ Use it for:
         (
             "8) Fibonacci tab",
             """
-Structure and zone-mapping tab.
+Decision-oriented structure/zone map tab.
 Main outputs:
-- Retracement/extension levels
-- Divergence checks
-- Volume-profile context (including POC area)
-- Regime hints and action hints
+- Setup Quality score (Execution-level Distance + Regime + POC - Net Divergence)
+- Bands: STRONG >= 68, MODERATE 45-67, WEAK < 45
+- Retracement/extension execution levels (38.2/50/61.8 first, 100/161.8 as extension map)
+- Divergence warnings (deduplicated + direction-aware impact: conflict penalizes more than supportive)
+- Volume-profile context (POC distance)
+
+Important:
+- Uses closed-candle context for both calculations and chart (reduced live-candle noise)
+- Use this tab to validate structure quality before triggering execution in Spot/Position
             """,
             "core",
         ),

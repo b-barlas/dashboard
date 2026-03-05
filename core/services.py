@@ -534,12 +534,7 @@ def monte_carlo_simulation(df: pd.DataFrame, num_simulations: int = 500,
 
 
 def detect_divergence(df: pd.DataFrame) -> list[dict]:
-    return detect_divergence_core(
-        df,
-        positive_color=POSITIVE,
-        negative_color=NEGATIVE,
-        warning_color=WARNING,
-    )
+    return detect_divergence_core(df)
 
 
 def calculate_risk_metrics(df: pd.DataFrame, risk_free_rate: float = 0.02,
