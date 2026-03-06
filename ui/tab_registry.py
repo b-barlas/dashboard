@@ -13,6 +13,7 @@ from tabs.market_tab import render as render_market_tab_ui
 from tabs.ml_tab import render as render_ml_tab_ui
 from tabs.monte_carlo_tab import render as render_monte_carlo_tab_ui
 from tabs.multitf_tab import render as render_multitf_tab_ui
+from tabs.portfolio_scenario_tab import render as render_portfolio_scenario_tab_ui
 from tabs.position_tab import render as render_position_tab_ui
 from tabs.risk_tab import render as render_risk_analytics_tab_ui
 from tabs.scalp_backtest_tab import render as render_scalp_backtest_tab_ui
@@ -27,7 +28,7 @@ TAB_TITLES = [
     "Market", "Spot", "Position", "AI Workspace",
     "Heatmap", "Monte Carlo",
     "Fibonacci", "Risk Analytics", "Whale Tracker",
-    "Multi-TF", "Correlation",
+    "Multi-TF", "Correlation", "Portfolio Scenario",
     "Sessions", "Tools", "Model Lab", "Setup Backtest", "Scalp Backtest", "Analysis Guide",
 ]
 
@@ -124,6 +125,13 @@ _TAB_DEPS = [
     (
         render_correlation_tab_ui,
         ["ACCENT", "TEXT_MUTED", "_tip", "_normalize_coin_input", "fetch_ohlcv", "EXCHANGE"],
+    ),
+    (
+        render_portfolio_scenario_tab_ui,
+        [
+            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "_tip",
+            "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv",
+        ],
     ),
     (
         render_sessions_tab_ui,

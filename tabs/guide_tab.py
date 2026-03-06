@@ -319,7 +319,27 @@ Use it to:
             "info",
         ),
         (
-            "12) Sessions tab",
+            "12) Portfolio Scenario tab",
+            """
+Anchor-based basket scenario engine.
+Use it to:
+- enter the coins you already hold and their current dollar values
+- choose an anchor coin (for example BTC or ETH) plus a target price
+- see how the basket may react if that anchor reaches target
+
+It is a scenario projection layer, not a guarantee or prediction.
+The engine estimates a typical holding horizon from the anchor distance and the anchor's usual bar speed,
+then uses historical same-timeframe return relationships over that horizon as a linear scenario approximation.
+It still does not simulate the full path or exact timing of the move.
+Only the first 10 valid holdings are modeled.
+Duplicate rows are merged by symbol, and invalid or non-positive rows are ignored.
+If the estimated horizon is too long for stable modeling or longer than the available history,
+the engine caps that horizon and shows a warning in the tab.
+            """,
+            "info",
+        ),
+        (
+            "13) Sessions tab",
             """
 Execution timing filter across Asia / Europe / US windows.
 Shows:
@@ -332,7 +352,7 @@ Use it to decide when execution conditions look cleaner after a setup already ex
             "info",
         ),
         (
-            "13) Tools tab",
+            "14) Tools tab",
             """
 Beginner-friendly pre-trade calculator.
 Inputs:
@@ -347,7 +367,7 @@ Outputs:
             "risk",
         ),
         (
-            "14) Model Lab tab",
+            "15) Model Lab tab",
             """
 Signal-engine diagnostics backtest.
 Use it to calibrate:
@@ -360,7 +380,7 @@ This mode validates the raw Direction + Strength engine, not the full setup clas
             "risk",
         ),
         (
-            "15) Setup Backtest tab",
+            "16) Setup Backtest tab",
             """
 Setup outcome study for Setup Confirm:
 - TREND+AI
@@ -381,7 +401,7 @@ Outputs:
             "risk",
         ),
         (
-            "16) Scalp Backtest tab",
+            "17) Scalp Backtest tab",
             """
 Scalp outcome study for execution-ready scalp events.
 
@@ -400,7 +420,7 @@ Use this tab to validate scalp execution behavior before relying on scalp labels
             "risk",
         ),
         (
-            "17) Analysis Guide tab (this page)",
+            "18) Analysis Guide tab (this page)",
             """
 This guide mirrors the live dashboard behavior.
 Use it as:
@@ -458,13 +478,15 @@ If data looks stale:
             """
 Recommended daily flow:
 1. Market tab: check regime + scanner shortlist
-2. Spot: validate setup and read the Spot Execution Plan
-3. Position: if already in trade, follow Technical Invalidation + decision model first
-4. Fibonacci/Risk: validate structure and downside risk
-5. Tools: confirm R:R and liquidation distance
-6. Setup Backtest: validate Setup Confirm class edge before using new setup live
-7. Scalp Backtest: validate scalp gate behavior and TP/SL outcome profile
-8. Model Lab: tune raw signal threshold/holding parameters
+2. Correlation: check whether your planned basket is over-crowded
+3. Portfolio Scenario: stress-test how your basket may react if BTC/ETH or another anchor reaches target
+4. Spot: validate setup and read the Spot Execution Plan
+5. Position: if already in trade, follow Technical Invalidation + decision model first
+6. Fibonacci/Risk: validate structure and downside risk
+7. Tools: confirm R:R and liquidation distance
+8. Setup Backtest: validate Setup Confirm class edge before using new setup live
+9. Scalp Backtest: validate scalp gate behavior and TP/SL outcome profile
+10. Model Lab: tune raw signal threshold/holding parameters
 
 Quick rule:
 - If Direction/AI conflict and Health says REDUCE or EXIT, reduce risk first.
@@ -511,12 +533,17 @@ Use this 60-second checklist:
 - Model & Timeframe Matrix mode fills timeframe matrix with plan source fields
 - Debug expander shows AI vs non-AI plan levels
 
-5. **Fallback check**
+5. **Portfolio Scenario**
+- Basket editor accepts your holdings and anchor target
+- Current basket / projected basket / scenario table render in one run
+- Basket Insight card explains whether anchor response is concentrated, balanced, or loose
+
+6. **Fallback check**
 - If enrichment fails, Market shows **EXCHANGE-ONLY MODE** and core trade columns still render
 - If live endpoint fails, cached snapshot warning with UTC timestamp appears
 - Market should not reuse stale snapshot from a different timeframe/filter
 
-6. **Model Lab + Setup/Scalp Backtest**
+7. **Model Lab + Setup/Scalp Backtest**
 - Model Lab runs and returns trades/metrics for raw signal diagnostics
 - Setup Backtest returns setup-event count, forward-bar outcome table, and class breakdown
 - Scalp Backtest returns scalp-qualified event count, class outcome table, and TP/SL behavior

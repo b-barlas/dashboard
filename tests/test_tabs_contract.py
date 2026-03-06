@@ -21,6 +21,7 @@ TAB_MODULES = [
     "tabs.ml_tab",
     "tabs.monte_carlo_tab",
     "tabs.multitf_tab",
+    "tabs.portfolio_scenario_tab",
     "tabs.position_tab",
     "tabs.risk_tab",
     "tabs.sessions_tab",
