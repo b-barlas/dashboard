@@ -23,7 +23,6 @@ TAB_MODULES = [
     "tabs.multitf_tab",
     "tabs.position_tab",
     "tabs.risk_tab",
-    "tabs.screener_tab",
     "tabs.sessions_tab",
     "tabs.spot_tab",
     "tabs.setup_backtest_tab",

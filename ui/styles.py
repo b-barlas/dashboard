@@ -598,15 +598,6 @@ div[data-testid="stVerticalBlock"] > div {{
     border-left-color: {NEON_PURPLE};
 }}
 
-/* Advanced screener row highlight */
-.screener-match {{
-    background: rgba(0, 255, 136, 0.05);
-    border: 1px solid rgba(0, 255, 136, 0.2);
-    border-radius: 8px;
-    padding: 8px 12px;
-    margin: 4px 0;
-}}
-
 /* Tooltip question mark */
 .tt {{
     display: inline-flex;

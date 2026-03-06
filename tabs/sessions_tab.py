@@ -1,8 +1,113 @@
-from ui.ctx import get_ctx
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
+
+from ui.ctx import get_ctx
+from ui.snapshot_cache import live_or_snapshot
+
+
+SESSION_ORDER = ["Asian (00-08 UTC)", "European (08-16 UTC)", "US (16-00 UTC)"]
+SNAPSHOT_TTL_SEC = 1800
+DRIFT_BIAS_DEADBAND_PCT = 0.02
+
+
+def _format_volume_compact(value: float) -> str:
+    value = float(value)
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f}B"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.2f}K"
+    return f"{value:,.0f}"
+
+
+def _session_bucket(hour: int) -> str:
+    if 0 <= hour < 8:
+        return SESSION_ORDER[0]
+    if 8 <= hour < 16:
+        return SESSION_ORDER[1]
+    return SESSION_ORDER[2]
+
+
+def _relative_quality_label(score: float) -> str:
+    if score >= 68:
+        return "Leading"
+    if score >= 45:
+        return "Balanced"
+    return "Lagging"
+
+
+def _liquidity_label(norm: float) -> str:
+    if norm >= 0.66:
+        return "Deep"
+    if norm >= 0.33:
+        return "Average"
+    return "Thin"
+
+
+def _range_profile_label(fit: float) -> str:
+    if fit >= 0.66:
+        return "Controlled"
+    if fit >= 0.33:
+        return "Tradable"
+    return "Stretched"
+
+
+def _drift_bias_label(avg_return: float) -> str:
+    if avg_return > DRIFT_BIAS_DEADBAND_PCT:
+        return "Up Tilt"
+    if avg_return < -DRIFT_BIAS_DEADBAND_PCT:
+        return "Down Tilt"
+    return "Flat"
+
+
+def _compute_session_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    clean = df.copy()
+    clean["timestamp"] = pd.to_datetime(clean["timestamp"], utc=True, errors="coerce")
+    clean = clean.dropna(subset=["timestamp", "open", "high", "low", "close", "volume"]).sort_values("timestamp")
+    clean["hour"] = clean["timestamp"].dt.hour
+    clean["range_pct"] = ((clean["high"] - clean["low"]) / clean["close"].replace(0, np.nan)) * 100.0
+    clean["return_pct"] = ((clean["close"] - clean["open"]) / clean["open"].replace(0, np.nan)) * 100.0
+    clean["abs_return_pct"] = clean["return_pct"].abs()
+    clean["session"] = clean["hour"].apply(_session_bucket)
+
+    grouped = clean.groupby("session").agg(
+        avg_volume=("volume", "mean"),
+        total_volume=("volume", "sum"),
+        avg_range=("range_pct", "mean"),
+        avg_return=("return_pct", "mean"),
+        avg_abs_return=("abs_return_pct", "mean"),
+        candle_count=("close", "count"),
+    ).reindex(SESSION_ORDER)
+    grouped = grouped.fillna(0.0)
+
+    vol_min, vol_max = grouped["avg_volume"].min(), grouped["avg_volume"].max()
+    absret_min, absret_max = grouped["avg_abs_return"].min(), grouped["avg_abs_return"].max()
+    range_median = float(grouped["avg_range"].median()) if len(grouped) else 0.0
+
+    grouped["volume_norm"] = ((grouped["avg_volume"] - vol_min) / (vol_max - vol_min + 1e-9)).clip(0.0, 1.0)
+    grouped["absret_norm"] = (
+        (grouped["avg_abs_return"] - absret_min) / (absret_max - absret_min + 1e-9)
+    ).clip(0.0, 1.0)
+    grouped["range_fit"] = (
+        1.0 - (grouped["avg_range"] - range_median).abs() / (abs(range_median) + 1e-9)
+    ).clip(lower=0.0, upper=1.0)
+    grouped["relative_quality"] = (
+        100.0
+        * (
+            0.50 * grouped["volume_norm"]
+            + 0.30 * grouped["range_fit"]
+            + 0.20 * grouped["absret_norm"]
+        )
+    ).round(1)
+    grouped["relative_label"] = grouped["relative_quality"].apply(_relative_quality_label)
+    grouped["liquidity_label"] = grouped["volume_norm"].apply(_liquidity_label)
+    grouped["range_profile_label"] = grouped["range_fit"].apply(_range_profile_label)
+    grouped["drift_bias_label"] = grouped["avg_return"].apply(_drift_bias_label)
+    return grouped
 
 
 def render(ctx: dict) -> None:
@@ -16,9 +121,15 @@ def render(ctx: dict) -> None:
     _validate_coin_symbol = get_ctx(ctx, "_validate_coin_symbol")
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     EXCHANGE = get_ctx(ctx, "EXCHANGE")
-    readable_market_cap = get_ctx(ctx, "readable_market_cap")
     _tip = get_ctx(ctx, "_tip")
-    """Session-based analysis: Asian, European, US sessions."""
+
+    def _label_color(label: str) -> str:
+        if label in {"Leading", "Deep", "Controlled", "Up Tilt"}:
+            return POSITIVE
+        if label in {"Balanced", "Average", "Tradable", "Flat"}:
+            return WARNING
+        return NEGATIVE
+
     st.markdown(
         f"""
         <style>
@@ -42,15 +153,22 @@ def render(ctx: dict) -> None:
         }}
         .sess-kpi-value {{
             color:{ACCENT};
-            font-size:1.2rem;
+            font-size:1.15rem;
             font-weight:700;
             margin-top:4px;
         }}
-        .sess-badge {{
+        .sess-kpi-sub {{
+            color:{TEXT_MUTED};
+            font-size:0.80rem;
+            margin-top:4px;
+            line-height:1.45;
+        }}
+        .sess-chip {{
             display:inline-flex;
             align-items:center;
             gap:6px;
-            margin-top:7px;
+            margin-top:8px;
+            margin-right:6px;
             padding:2px 9px;
             border-radius:999px;
             font-size:0.72rem;
@@ -58,332 +176,324 @@ def render(ctx: dict) -> None:
             border:1px solid rgba(255,255,255,0.18);
             background:rgba(0,0,0,0.28);
         }}
+        div[data-testid="stFormSubmitButton"] > button {{
+            background: linear-gradient(135deg, #2ecbff 0%, #8d6bff 100%);
+            color: #ffffff;
+            border: 1px solid rgba(46, 203, 255, 0.35);
+            border-radius: 16px;
+            font-weight: 700;
+            box-shadow: 0 10px 28px rgba(46, 203, 255, 0.16);
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }}
+        div[data-testid="stFormSubmitButton"] > button:hover {{
+            transform: translateY(-1px);
+            box-shadow: 0 14px 34px rgba(141, 107, 255, 0.22);
+            border-color: rgba(141, 107, 255, 0.45);
+        }}
+        @media (max-width: 1100px) {{
+            .sess-kpi-grid {{
+                grid-template-columns:repeat(2,minmax(0,1fr));
+            }}
+        }}
+        @media (max-width: 720px) {{
+            .sess-kpi-grid {{
+                grid-template-columns:1fr;
+            }}
+        }}
         </style>
         """,
         unsafe_allow_html=True,
     )
+
     st.markdown(f"<h2 style='color:{ACCENT};'>Session Analysis</h2>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='panel-box'>"
         f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
         f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Compares market behavior across 3 UTC sessions using 1h candles: Asian (00-08), European (08-16), US (16-00). "
-        f"It measures {_tip('Liquidity', 'How much size is traded. Higher liquidity usually means tighter spreads and cleaner execution.')}, "
-        f"{_tip('Volatility', 'How wide candles are. Very high volatility can improve opportunity but increases risk and slippage.')}, "
-        f"and session drift to help you decide when conditions are most tradable."
+        f"Compares market behavior across 3 UTC sessions using 1h candles: Asian (00-08), European (08-16), and US (16-00). "
+        f"It is an <b>execution timing filter</b>, not a standalone entry signal. "
+        f"Use it to see which session is relatively {_tip('Deeper', 'Higher average volume means cleaner fills and usually tighter spreads.')}, "
+        f"{_tip('Controlled', 'A balanced range profile is easier to execute than a session that is completely dead or overstretched.')}, "
+        f"and directionally tilted. All labels here are <b>relative across these 3 sessions only</b>."
         f"</p></div>",
         unsafe_allow_html=True,
     )
-    c1, c2 = st.columns(2)
-    with c1:
-        coin_s = _normalize_coin_input(st.text_input("Coin (e.g. BTC, ETH, TAO)", value="BTC", key="session_coin_input"))
-    with c2:
-        lookback = st.selectbox("Lookback Candles (1h)", [240, 360, 500], index=2, key="session_lookback")
 
-    if st.button("Analyse Sessions", type="primary"):
-        _val_err = _validate_coin_symbol(coin_s)
-        if _val_err:
-            st.error(_val_err)
+    with st.form("sessions_analysis_form"):
+        c1, c2 = st.columns(2)
+        with c1:
+            coin_s = _normalize_coin_input(
+                st.text_input("Coin (e.g. BTC, ETH, TAO)", value="BTC", key="session_coin_input")
+            )
+        with c2:
+            lookback = st.selectbox("Lookback Candles (1h)", [240, 360, 500], index=2, key="session_lookback")
+        submitted = st.form_submit_button("Analyse Sessions", type="primary")
+
+    current_sig = (coin_s, int(lookback), "1h")
+    state_key = "sessions_analysis_result"
+
+    if submitted:
+        val_err = _validate_coin_symbol(coin_s)
+        if val_err:
+            st.error(val_err)
             return
+
         with st.spinner("Fetching hourly data for session analysis..."):
-            df = fetch_ohlcv(coin_s, "1h", limit=int(lookback))
-            if df is None:
+            live_df = fetch_ohlcv(coin_s, "1h", limit=int(lookback))
+            snapshot_key = f"sessions_ohlcv::{coin_s}::1h::{int(lookback)}"
+            df, used_cache, cache_ts = live_or_snapshot(
+                st,
+                snapshot_key,
+                live_df,
+                max_age_sec=SNAPSHOT_TTL_SEC,
+                current_sig=current_sig,
+            )
+            if df is None or len(df) == 0:
                 st.error(
-                    f"**{coin_s}** could not be found on **{EXCHANGE.id.title()}** or CoinGecko. "
-                    f"Please check the symbol and try again."
+                    f"Unable to fetch 1h candles for **{coin_s}** from **{EXCHANGE.id.title()}** and no fresh snapshot is available."
                 )
                 return
-            if len(df) < 48:
-                st.error(
-                    f"Only {len(df)} hourly candles available for **{coin_s}** (need at least 48). "
-                    f"This coin may have limited history."
-                )
-                return
-            if "timestamp" not in df.columns:
-                st.error("Data source returned candles without timestamp. Session analysis cannot run.")
+            grouped = _compute_session_metrics(df)
+            if int(grouped["candle_count"].sum()) < 48:
+                st.error("Not enough clean hourly candles after data cleanup (need at least 48).")
                 return
 
-            df = df.copy()
-            # Force UTC interpretation to keep session buckets consistent across user locales.
-            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
-            df = df.dropna(subset=["timestamp", "open", "high", "low", "close", "volume"]).sort_values("timestamp")
-            if len(df) < 48:
-                st.error("Not enough clean hourly candles after data cleanup.")
-                return
-            df["hour"] = df["timestamp"].dt.hour
-            df["range_pct"] = ((df["high"] - df["low"]) / df["close"].replace(0, np.nan)) * 100.0
-            df["return_pct"] = ((df["close"] - df["open"]) / df["open"].replace(0, np.nan)) * 100.0
-            df["abs_return_pct"] = df["return_pct"].abs()
+            st.session_state[state_key] = {
+                "sig": current_sig,
+                "grouped": grouped,
+                "used_cache": used_cache,
+                "cache_ts": cache_ts,
+                "coin": coin_s,
+            }
 
-            def _session(h: int) -> str:
-                if 0 <= h < 8:
-                    return "Asian (00-08 UTC)"
-                elif 8 <= h < 16:
-                    return "European (08-16 UTC)"
-                else:
-                    return "US (16-00 UTC)"
+    result = st.session_state.get(state_key)
+    if not result or result.get("sig") != current_sig:
+        return
 
-            df["session"] = df["hour"].apply(_session)
-            session_order = ["Asian (00-08 UTC)", "European (08-16 UTC)", "US (16-00 UTC)"]
+    grouped = result["grouped"]
+    used_cache = bool(result.get("used_cache"))
+    cache_ts = result.get("cache_ts")
 
-            grouped = df.groupby("session").agg(
-                avg_volume=("volume", "mean"),
-                total_volume=("volume", "sum"),
-                avg_range=("range_pct", "mean"),
-                avg_return=("return_pct", "mean"),
-                avg_abs_return=("abs_return_pct", "mean"),
-                candle_count=("close", "count"),
-            ).reindex(session_order)
-            grouped = grouped.fillna(0.0)
+    if used_cache and cache_ts:
+        st.warning(
+            f"Live session feed was unavailable. Showing cached 1h snapshot from **{cache_ts}** for **{coin_s}**."
+        )
 
-            vol_min, vol_max = grouped["avg_volume"].min(), grouped["avg_volume"].max()
-            absret_min, absret_max = grouped["avg_abs_return"].min(), grouped["avg_abs_return"].max()
-            range_median = float(grouped["avg_range"].median()) if len(grouped) else 0.0
-            grouped["volume_norm"] = (
-                (grouped["avg_volume"] - vol_min) / (vol_max - vol_min + 1e-9)
-            )
-            grouped["absret_norm"] = (
-                (grouped["avg_abs_return"] - absret_min) / (absret_max - absret_min + 1e-9)
-            )
-            grouped["range_fit"] = (
-                1.0 - (grouped["avg_range"] - range_median).abs() / (abs(range_median) + 1e-9)
-            ).clip(lower=0.0, upper=1.0)
-            # Tradeability score favors liquidity + directional movement with moderate volatility.
-            grouped["session_score"] = (
-                100.0 * (0.50 * grouped["volume_norm"] + 0.30 * grouped["range_fit"] + 0.20 * grouped["absret_norm"])
-            ).round(1)
-
-            def _score_status(score: float) -> tuple[str, str]:
-                if score >= 70:
-                    return "Healthy", POSITIVE
-                if score >= 50:
-                    return "Watch", WARNING
-                return "Risky", NEGATIVE
-
-            def _vol_status(vn: float) -> str:
-                if vn >= 0.66:
-                    return "● Healthy"
-                if vn >= 0.33:
-                    return "● Watch"
-                return "● Risky"
-
-            def _range_status(rf: float) -> str:
-                if rf >= 0.66:
-                    return "● Healthy"
-                if rf >= 0.33:
-                    return "● Watch"
-                return "● Risky"
-
-            # Session summary cards
-            session_colors = [WARNING, POSITIVE, NEGATIVE]
-            cols = st.columns(3)
-            for idx, (sess, row) in enumerate(grouped.iterrows()):
-                s_label, s_color = _score_status(float(row["session_score"]))
-                with cols[idx]:
-                    st.markdown(
-                        f"<div class='metric-card'>"
-                        f"<div class='metric-label'>{sess}</div>"
-                        f"<div class='metric-value' style='font-size:1.2rem;'>"
-                        f"Vol: {readable_market_cap(int(row['total_volume']))}</div>"
-                        f"<div style='color:{TEXT_MUTED};font-size:0.85rem;'>"
-                        f"Avg Range: {row['avg_range']:.3f}% | Avg Return: {row['avg_return']:+.3f}% | Score: {row['session_score']:.0f}"
-                        f"</div>"
-                        f"<span class='sess-badge' style='color:{s_color}; border-color:{s_color};'>"
-                        f"<span style='color:{s_color};'>&#9679;</span>{s_label}</span>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
-
-            best_score = grouped["session_score"].idxmax()
-            best_liquidity = grouped["avg_volume"].idxmax()
-            hottest = grouped["avg_range"].idxmax()
-            data_coverage = int(grouped["candle_count"].sum())
-            best_score_val = float(grouped.loc[best_score, "session_score"]) if best_score in grouped.index else 0.0
-            if best_score_val >= 70:
-                sess_profile = "Execution-Friendly"
-                sess_color = POSITIVE
-                sess_note = "Good liquidity/volatility balance for cleaner execution."
-            elif best_score_val >= 50:
-                sess_profile = "Selective"
-                sess_color = WARNING
-                sess_note = "Mixed conditions. Use tighter risk control."
-            else:
-                sess_profile = "Risky"
-                sess_color = NEGATIVE
-                sess_note = "Execution quality is weak. Consider standing aside."
+    session_colors = [WARNING, POSITIVE, NEGATIVE]
+    session_cols = st.columns(3)
+    for idx, (session_name, row) in enumerate(grouped.iterrows()):
+        rel_label = str(row["relative_label"])
+        rel_color = _label_color(rel_label)
+        drift_label = str(row["drift_bias_label"])
+        drift_color = _label_color(drift_label)
+        with session_cols[idx]:
             st.markdown(
-                f"<div class='sess-kpi-grid'>"
-                f"<div class='sess-kpi'><div class='sess-kpi-label'>Best Session (Score)</div><div class='sess-kpi-value'>{best_score}</div></div>"
-                f"<div class='sess-kpi'><div class='sess-kpi-label'>Top Liquidity</div><div class='sess-kpi-value'>{best_liquidity}</div></div>"
-                f"<div class='sess-kpi'><div class='sess-kpi-label'>Highest Volatility</div><div class='sess-kpi-value'>{hottest}</div></div>"
-                f"<div class='sess-kpi'><div class='sess-kpi-label'>Candle Coverage</div><div class='sess-kpi-value'>{data_coverage}</div></div>"
+                f"<div class='metric-card'>"
+                f"<div class='metric-label'>{session_name}</div>"
+                f"<div class='metric-value' style='font-size:1.2rem;'>Relative Quality {row['relative_quality']:.0f}</div>"
+                f"<div style='color:{TEXT_MUTED};font-size:0.84rem; line-height:1.55;'>"
+                f"Avg Vol: {_format_volume_compact(row['avg_volume'])} | "
+                f"Range: {row['avg_range']:.2f}% | "
+                f"Avg |Move|: {row['avg_abs_return']:.2f}%"
+                f"</div>"
+                f"<span class='sess-chip' style='color:{rel_color}; border-color:{rel_color};'>{rel_label}</span>"
+                f"<span class='sess-chip' style='color:{drift_color}; border-color:{drift_color};'>{drift_label}</span>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
-            st.markdown(
-                f"<div class='elite-card' style='margin:2px 0 10px 0; border-color:rgba(0,212,255,0.22);'>"
-                f"<div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>"
-                f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>Session Profile: "
-                f"<b style='color:{sess_color};'>{sess_profile}</b></span>"
-                f"<span style='color:{sess_color}; font-size:0.84rem; font-weight:700;'>{sess_note}</span>"
-                f"</div></div>",
-                unsafe_allow_html=True,
-            )
 
-            st.markdown(
-                f"<details style='margin-bottom:0.7rem;'>"
-                f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
-                f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-                f"<b>1.</b> Start from <b>Session Score</b>; it blends liquidity + manageable volatility + movement quality.<br>"
-                f"<b>2.</b> For execution quality, prioritize high <b>Avg Volume</b> sessions.<br>"
-                f"<b>3.</b> If <b>Avg Range</b> is extreme, reduce leverage and widen stop assumptions.<br>"
-                f"<b>4.</b> Use this as timing filter; entry direction still comes from Spot/Position tabs."
-                f"</div></details>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                f"<div class='panel-box' style='margin-bottom:0.7rem;'>"
-                f"<b style='color:{ACCENT};'>Metric Guide</b>"
-                f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:6px;'>"
-                f"<b>Avg Range (%)</b>: Average candle high-low width as percent of price. "
-                f"Higher = more intrabar volatility and larger stop distance needed.<br>"
-                f"<b>Avg Return (%)</b>: Average candle close-open drift. "
-                f"Positive means upward bias in that session, negative means downward bias.<br>"
-                f"<b>Avg |Return| (%)</b>: Average absolute candle move size. "
-                f"Higher means faster tape and more directional movement opportunity.<br>"
-                f"<b>Session Score (0-100)</b>: Composite tradeability score "
-                f"(liquidity 50% + volatility-fit 30% + movement-quality 20%). "
-                f"Higher generally means cleaner execution conditions."
-                f"</div></div>",
-                unsafe_allow_html=True,
-            )
+    best_score = grouped["relative_quality"].idxmax()
+    best_liquidity = grouped["avg_volume"].idxmax()
+    fastest_tape = grouped["avg_abs_return"].idxmax()
+    data_coverage = int(grouped["candle_count"].sum())
+    leader_label = str(grouped.loc[best_score, "relative_label"])
+    if leader_label == "Leading":
+        profile_title = "Leading Execution Window"
+        profile_color = POSITIVE
+        profile_note = "This session currently offers the cleanest relative mix of liquidity, movement and usable range."
+    elif leader_label == "Balanced":
+        profile_title = "Mixed Execution Window"
+        profile_color = WARNING
+        profile_note = "Conditions are usable, but the edge is only moderate relative to the other sessions."
+    else:
+        profile_title = "Weak Relative Window"
+        profile_color = NEGATIVE
+        profile_note = "All sessions look soft; the best one is only less weak than the others."
 
-            with st.expander("Advanced Session Charts"):
-                fig_vol = go.Figure()
-                for idx, sess in enumerate(session_order):
-                    if sess in grouped.index:
-                        fig_vol.add_trace(go.Bar(
-                            x=[sess], y=[grouped.loc[sess, "avg_volume"]],
-                            name=sess, marker_color=session_colors[idx],
-                        ))
-                fig_vol.update_layout(
-                    title="Average Hourly Volume by Session",
-                    height=300, template="plotly_dark",
-                    margin=dict(l=20, r=20, t=40, b=30),
-                    showlegend=False,
-                )
-                st.plotly_chart(fig_vol, width="stretch")
+    st.markdown(
+        f"<div class='sess-kpi-grid'>"
+        f"<div class='sess-kpi'>"
+        f"<div class='sess-kpi-label'>Relative Leader</div>"
+        f"<div class='sess-kpi-value'>{best_score}</div>"
+        f"<div class='sess-kpi-sub'>Quality {grouped.loc[best_score, 'relative_quality']:.1f} · {grouped.loc[best_score, 'relative_label']}</div>"
+        f"</div>"
+        f"<div class='sess-kpi'>"
+        f"<div class='sess-kpi-label'>Deepest Liquidity</div>"
+        f"<div class='sess-kpi-value'>{best_liquidity}</div>"
+        f"<div class='sess-kpi-sub'>Avg Vol {_format_volume_compact(grouped.loc[best_liquidity, 'avg_volume'])} · {grouped.loc[best_liquidity, 'liquidity_label']}</div>"
+        f"</div>"
+        f"<div class='sess-kpi'>"
+        f"<div class='sess-kpi-label'>Fastest Tape</div>"
+        f"<div class='sess-kpi-value'>{fastest_tape}</div>"
+        f"<div class='sess-kpi-sub'>Avg |Move| {grouped.loc[fastest_tape, 'avg_abs_return']:.2f}% · Drift {grouped.loc[fastest_tape, 'drift_bias_label']}</div>"
+        f"</div>"
+        f"<div class='sess-kpi'>"
+        f"<div class='sess-kpi-label'>Candle Coverage</div>"
+        f"<div class='sess-kpi-value'>{data_coverage}</div>"
+        f"<div class='sess-kpi-sub'>1h candles across all session buckets</div>"
+        f"</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='elite-card' style='margin:2px 0 10px 0; border-color:rgba(0,212,255,0.22);'>"
+        f"<div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>"
+        f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>Execution Timing Read: "
+        f"<b style='color:{profile_color};'>{profile_title}</b></span>"
+        f"<span style='color:{profile_color}; font-size:0.84rem; font-weight:700;'>{profile_note}</span>"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
 
-                fig_range_ret = go.Figure()
-                fig_range_ret.add_trace(
+    st.markdown(
+        f"<details style='margin-bottom:0.7rem;'>"
+        f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
+        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
+        f"<b>1.</b> Start with <b>Relative Leader</b>: this is the best session among Asia / Europe / US <b>for this sample only</b>.<br>"
+        f"<b>2.</b> Use <b>Deepest Liquidity</b> when your setup already exists and you want cleaner fills.<br>"
+        f"<b>3.</b> Use <b>Fastest Tape</b> when you want movement, but remember fast tape can also mean harder execution.<br>"
+        f"<b>4.</b> <b>Up Tilt / Down Tilt</b> is timing context, not a buy/sell signal by itself.<br>"
+        f"<b>5.</b> Use this tab to choose <b>when</b> to execute; use Market / Spot / Position to decide <b>what</b> to trade."
+        f"</div></details>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f"<div class='panel-box' style='margin-bottom:0.7rem;'>"
+        f"<b style='color:{ACCENT};'>Metric Guide</b>"
+        f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:6px;'>"
+        f"<b>Session</b>: The UTC block being evaluated (Asia / Europe / US).<br>"
+        f"<b>Relative Quality (0-100)</b>: A relative timing score across the 3 sessions only. "
+        f"It blends liquidity 50%, usable range 30%, and movement quality 20%. "
+        f"It does <b>not</b> mean a guaranteed edge by itself.<br>"
+        f"<b>Relative Read</b>: Quick label for the score band. Leading = best of the three right now, Balanced = usable, Lagging = weakest.<br>"
+        f"<b>Avg Volume</b>: Average hourly traded size inside that session. Higher usually means cleaner fills.<br>"
+        f"<b>Avg Range (%)</b>: Average candle high-low width. Higher means wider tape and usually bigger stop distance.<br>"
+        f"<b>Avg Return (%)</b>: Average hourly drift. Positive = mild upward tilt, negative = mild downward tilt.<br>"
+        f"<b>Avg |Move| (%)</b>: Average absolute candle move size. Higher means faster tape.<br>"
+        f"<b>Candles</b>: Number of hourly candles in the sample for that session bucket.<br>"
+        f"<b>Liquidity</b>: Deep / Average / Thin volume context <b>relative to the other 2 sessions in this sample</b>.<br>"
+        f"<b>Range Profile</b>: Controlled / Tradable / Stretched range balance for execution, also <b>relative across the 3 sessions</b>.<br>"
+        f"<b>Drift Bias</b>: Up Tilt / Down Tilt / Flat hourly drift context. "
+        f"Tiny drift inside +/-{DRIFT_BIAS_DEADBAND_PCT:.2f}% is treated as Flat to avoid noise."
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    with st.expander("Advanced Session Charts (optional diagnostics)"):
+        st.caption(
+            "Use these only as visual support: the first chart ranks liquidity by session; "
+            "the second shows whether movement is coming from usable range expansion or just noisy tape."
+        )
+        fig_vol = go.Figure()
+        for idx, session_name in enumerate(SESSION_ORDER):
+            if session_name in grouped.index:
+                fig_vol.add_trace(
                     go.Bar(
-                        x=session_order,
-                        y=[grouped.loc[s, "avg_range"] for s in session_order],
-                        name="Avg Range (%)",
-                        marker_color=[WARNING, POSITIVE, NEGATIVE],
+                        x=[session_name],
+                        y=[grouped.loc[session_name, "avg_volume"]],
+                        name=session_name,
+                        marker_color=session_colors[idx],
                     )
                 )
-                fig_range_ret.add_trace(
-                    go.Scatter(
-                        x=session_order,
-                        y=[grouped.loc[s, "avg_abs_return"] for s in session_order],
-                        name="Avg |Return| (%)",
-                        mode="lines+markers",
-                        line=dict(color=ACCENT, width=2),
-                    )
-                )
-                fig_range_ret.update_layout(
-                    title="Volatility Profile by Session",
-                    height=320, template="plotly_dark",
-                    margin=dict(l=20, r=20, t=40, b=30),
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-                )
-                st.plotly_chart(fig_range_ret, width="stretch")
+        fig_vol.update_layout(
+            title="Liquidity Depth by Session",
+            height=300,
+            template="plotly_dark",
+            margin=dict(l=20, r=20, t=40, b=30),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_vol, width="stretch")
 
-            summary_df = grouped.reset_index().rename(
-                columns={
-                    "session": "Session",
-                    "avg_volume": "Avg Volume",
-                    "total_volume": "Total Volume",
-                    "avg_range": "Avg Range (%)",
-                    "avg_return": "Avg Return (%)",
-                    "avg_abs_return": "Avg |Return| (%)",
-                    "candle_count": "Candles",
-                    "session_score": "Session Score",
-                }
+        fig_range_ret = go.Figure()
+        fig_range_ret.add_trace(
+            go.Bar(
+                x=SESSION_ORDER,
+                y=[grouped.loc[s, "avg_range"] for s in SESSION_ORDER],
+                name="Avg Range (%)",
+                marker_color=[WARNING, POSITIVE, NEGATIVE],
             )
-            summary_df["Volume Status"] = summary_df["volume_norm"].apply(_vol_status)
-            summary_df["Volatility Status"] = summary_df["range_fit"].apply(_range_status)
-            summary_df["Overall Status"] = summary_df["Session Score"].apply(
-                lambda x: "● Healthy" if x >= 70 else ("● Watch" if x >= 50 else "● Risky")
+        )
+        fig_range_ret.add_trace(
+            go.Scatter(
+                x=SESSION_ORDER,
+                y=[grouped.loc[s, "avg_abs_return"] for s in SESSION_ORDER],
+                name="Avg |Move| (%)",
+                mode="lines+markers",
+                line=dict(color=ACCENT, width=2),
             )
-            summary_df["Score Icon"] = summary_df["Session Score"].apply(
-                lambda x: "▲" if x >= 70 else ("■" if x >= 50 else "▼")
-            )
-            summary_df["Return Icon"] = summary_df["Avg Return (%)"].apply(
-                lambda x: "↗" if x > 0 else ("↘" if x < 0 else "→")
-            )
-            summary_df["Total Volume"] = summary_df["Total Volume"].apply(lambda x: readable_market_cap(int(x)))
-            st.markdown(
-                f"<div style='color:{TEXT_MUTED}; font-size:0.83rem; margin:2px 0 8px 0; line-height:1.6;'>"
-                f"<b style='color:{ACCENT};'>Status Legend:</b> "
-                f"<span style='color:{POSITIVE};'>&#9679; Healthy</span> "
-                f"<span style='color:{WARNING}; margin-left:10px;'>&#9679; Watch</span> "
-                f"<span style='color:{NEGATIVE}; margin-left:10px;'>&#9679; Risky</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(f"<b style='color:{ACCENT};'>Session Summary Table</b>", unsafe_allow_html=True)
+        )
+        fig_range_ret.update_layout(
+            title="Range Profile vs Tape Speed",
+            height=320,
+            template="plotly_dark",
+            margin=dict(l=20, r=20, t=40, b=30),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        )
+        st.plotly_chart(fig_range_ret, width="stretch")
 
-            def _style_status(v: str) -> str:
-                if "Healthy" in v:
-                    return f"color:{POSITIVE}; font-weight:700;"
-                if "Watch" in v:
-                    return f"color:{WARNING}; font-weight:700;"
-                if "Risky" in v:
-                    return f"color:{NEGATIVE}; font-weight:700;"
-                return ""
+    summary_df = grouped.reset_index().rename(
+        columns={
+            "session": "Session",
+            "avg_volume": "Avg Volume",
+            "avg_range": "Avg Range (%)",
+            "avg_return": "Avg Return (%)",
+            "avg_abs_return": "Avg |Move| (%)",
+            "candle_count": "Candles",
+            "relative_quality": "Relative Quality",
+            "relative_label": "Relative Read",
+            "liquidity_label": "Liquidity",
+            "range_profile_label": "Range Profile",
+            "drift_bias_label": "Drift Bias",
+        }
+    )
+    summary_df["Avg Volume"] = summary_df["Avg Volume"].apply(_format_volume_compact)
 
-            def _style_score_icon(v: str) -> str:
-                if v == "▲":
-                    return f"color:{POSITIVE}; font-weight:700;"
-                if v == "■":
-                    return f"color:{WARNING}; font-weight:700;"
-                return f"color:{NEGATIVE}; font-weight:700;"
+    def _style_label(value: str) -> str:
+        color = _label_color(str(value))
+        return f"color:{color}; font-weight:700;"
 
-            def _style_return_icon(v: str) -> str:
-                if v == "↗":
-                    return f"color:{POSITIVE}; font-weight:700;"
-                if v == "↘":
-                    return f"color:{NEGATIVE}; font-weight:700;"
-                return f"color:{WARNING}; font-weight:700;"
+    st.markdown(f"<b style='color:{ACCENT};'>Session Summary Table</b>", unsafe_allow_html=True)
+    st.dataframe(
+        summary_df[
+            [
+                "Session",
+                "Relative Quality",
+                "Relative Read",
+                "Avg Volume",
+                "Avg Range (%)",
+                "Avg Return (%)",
+                "Avg |Move| (%)",
+                "Candles",
+                "Liquidity",
+                "Range Profile",
+                "Drift Bias",
+            ]
+        ].style.format(
+            {
+                "Relative Quality": "{:.1f}",
+                "Avg Range (%)": "{:.3f}",
+                "Avg Return (%)": "{:+.3f}",
+                "Avg |Move| (%)": "{:.3f}",
+                "Candles": "{:.0f}",
+            }
+        ).map(_style_label, subset=["Relative Read", "Liquidity", "Range Profile", "Drift Bias"]),
+        width="stretch",
+        hide_index=True,
+    )
 
-            st.dataframe(
-                summary_df[
-                    [
-                        "Session", "Score Icon", "Session Score", "Avg Volume", "Total Volume",
-                        "Avg Range (%)", "Return Icon", "Avg Return (%)", "Avg |Return| (%)", "Candles",
-                        "Volume Status", "Volatility Status", "Overall Status",
-                    ]
-                ].style.format(
-                    {
-                        "Session Score": "{:.1f}",
-                        "Avg Volume": "{:,.2f}",
-                        "Avg Range (%)": "{:.3f}",
-                        "Avg Return (%)": "{:+.3f}",
-                        "Avg |Return| (%)": "{:.3f}",
-                    }
-                ).map(_style_status, subset=["Volume Status", "Volatility Status", "Overall Status"])
-                .map(_style_score_icon, subset=["Score Icon"])
-                .map(_style_return_icon, subset=["Return Icon"]),
-                width="stretch",
-                hide_index=True,
-            )
-
-            # Best session recommendation
-            st.info(
-                f"Best current window by composite score: **{best_score}**. "
-                f"Highest liquidity: **{best_liquidity}**. "
-                f"Most volatile: **{hottest}**. "
-                f"Use high-liquidity + controlled-volatility sessions for cleaner entries."
-            )
+    st.info(
+        f"Use **{best_score}** as the preferred execution window when your setup already exists. "
+        f"If you need clean fills, prioritize **{best_liquidity}**. "
+        f"If you need movement, monitor **{fastest_tape}**, but expect harder execution."
+    )

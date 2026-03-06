@@ -295,22 +295,7 @@ Use it to find attention shifts, then validate entries in Market/Spot/Position.
             "info",
         ),
         (
-            "10) Screener tab",
-            """
-Rule-based shortlist tab over liquid symbols.
-Typical filters:
-- Minimum strength
-- Direction type
-- ADX floor
-- RSI window
-- Optional spike-only mode
-
-Use Screener as pre-filter, then confirm execution context in Market/Spot/Position.
-            """,
-            "core",
-        ),
-        (
-            "11) Multi-TF tab",
+            "10) Multi-TF tab",
             """
 Cross-timeframe alignment view for a single coin.
 Shows:
@@ -323,7 +308,7 @@ Purpose: avoid taking a low-timeframe setup fully against higher-timeframe struc
             "core",
         ),
         (
-            "12) Correlation tab",
+            "11) Correlation tab",
             """
 Co-movement matrix for selected symbols.
 Use it to:
@@ -334,18 +319,20 @@ Use it to:
             "info",
         ),
         (
-            "13) Sessions tab",
+            "12) Sessions tab",
             """
-Session behavior split (Asia / Europe / US windows).
+Execution timing filter across Asia / Europe / US windows.
 Shows:
-- session-level return and volatility context
-- volume profile by session
-- quick quality cues
+- relative session quality (not an absolute signal)
+- liquidity depth by session
+- range profile and drift bias
+
+Use it to decide when execution conditions look cleaner after a setup already exists elsewhere.
             """,
             "info",
         ),
         (
-            "14) Tools tab",
+            "13) Tools tab",
             """
 Beginner-friendly pre-trade calculator.
 Inputs:
@@ -360,7 +347,7 @@ Outputs:
             "risk",
         ),
         (
-            "15) Model Lab tab",
+            "14) Model Lab tab",
             """
 Signal-engine diagnostics backtest.
 Use it to calibrate:
@@ -373,7 +360,7 @@ This mode validates the raw Direction + Strength engine, not the full setup clas
             "risk",
         ),
         (
-            "16) Setup Backtest tab",
+            "15) Setup Backtest tab",
             """
 Setup outcome study for Setup Confirm:
 - TREND+AI
@@ -394,7 +381,7 @@ Outputs:
             "risk",
         ),
         (
-            "17) Scalp Backtest tab",
+            "16) Scalp Backtest tab",
             """
 Scalp outcome study for execution-ready scalp events.
 
@@ -413,7 +400,7 @@ Use this tab to validate scalp execution behavior before relying on scalp labels
             "risk",
         ),
         (
-            "18) Analysis Guide tab (this page)",
+            "17) Analysis Guide tab (this page)",
             """
 This guide mirrors the live dashboard behavior.
 Use it as:
