@@ -283,7 +283,12 @@ Attention/liquidity proxy tab (not on-chain wallet tracking).
 Combines:
 - Trending coins feed
 - Top gainers / losers snapshots
-- Volume anomaly scanner with ratio + z-score logic
+- Volume anomaly scanner with adaptive ratio + z-score logic
+
+Scanner notes:
+- Uses closed candles (reduces partial-candle noise)
+- Trigger = Ratio OR Z-Score threshold; EXTREME = dual confirmation
+- Distinguishes no-data scan from no-anomaly scan
 
 Use it to find attention shifts, then validate entries in Market/Spot/Position.
             """,

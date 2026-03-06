@@ -78,6 +78,29 @@ def render(ctx: dict) -> None:
             font-weight:700;
             letter-spacing:0.3px;
         }}
+        @media (max-width: 1200px) {{
+            .whale-kpi-grid {{
+                grid-template-columns:repeat(2,minmax(0,1fr));
+            }}
+        }}
+        @media (max-width: 900px) {{
+            .whale-kpi-grid {{
+                grid-template-columns:1fr;
+            }}
+            .whale-trend-row {{
+                grid-template-columns:44px minmax(64px, 100px) 1fr;
+            }}
+            .whale-trend-row span:last-child {{
+                display:none;
+            }}
+        }}
+        @media (max-width: 640px) {{
+            .whale-momentum-row {{
+                flex-direction:column;
+                align-items:flex-start;
+                gap:4px;
+            }}
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -177,8 +200,8 @@ def render(ctx: dict) -> None:
     col_g, col_l = st.columns(2)
     with col_g:
         st.markdown(f"<b style='color:{POSITIVE};'>TOP GAINERS</b>", unsafe_allow_html=True)
-        if gainers:
-            for c in gainers[:12]:
+        if top_gainers:
+            for c in top_gainers:
                 change = _pct24(c)
                 symbol = (c.get('symbol', '') or '').upper()
                 price = c.get('current_price', 0)
@@ -192,8 +215,8 @@ def render(ctx: dict) -> None:
             st.info("Top gainers data temporarily unavailable.")
     with col_l:
         st.markdown(f"<b style='color:{NEGATIVE};'>TOP LOSERS</b>", unsafe_allow_html=True)
-        if losers:
-            for c in losers[:12]:
+        if top_losers:
+            for c in top_losers:
                 change = _pct24(c)
                 symbol = (c.get('symbol', '') or '').upper()
                 price = c.get('current_price', 0)
@@ -234,41 +257,89 @@ def render(ctx: dict) -> None:
         unsafe_allow_html=True,
     )
 
+    scan_sig = (scan_tf, int(universe_n), round(ratio_gate, 3), round(z_gate, 3))
+    state_key = "whale_scan_state"
+
+    def _ratio_status(v: float) -> str:
+        if v >= extreme_ratio_gate:
+            return "Extreme"
+        if v >= ratio_gate:
+            return "Elevated"
+        return "Supporting"
+
+    def _z_status(v: float) -> str:
+        if v >= extreme_z_gate:
+            return "Extreme"
+        if v >= z_gate:
+            return "Elevated"
+        return "Supporting"
+
+    def _pct_style(v: str) -> str:
+        s = str(v)
+        if s == "N/A":
+            return f"color:{TEXT_MUTED};"
+        return f"color:{POSITIVE}; font-weight:700;" if s.startswith("+") else f"color:{NEGATIVE}; font-weight:700;"
+
+    def _status_style(v: str) -> str:
+        s = str(v)
+        if "Extreme" in s:
+            return f"color:{WARNING}; font-weight:700;"
+        if "Elevated" in s:
+            return f"color:{ACCENT}; font-weight:700;"
+        if "Supporting" in s:
+            return f"color:{TEXT_MUTED}; font-weight:700;"
+        return f"color:{TEXT_MUTED}; font-weight:600;"
+
     if st.button("Run Volume Scan", key="whale_scan"):
         with st.spinner("Scanning..."):
             symbols, _raw = get_top_volume_usdt_symbols(max(universe_n, 30))
             symbols = symbols[:universe_n]
             if not symbols:
-                symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
-                           "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "DOT/USDT", "LINK/USDT"]
+                symbols = [
+                    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
+                    "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "DOT/USDT", "LINK/USDT",
+                ]
             surges = []
             lookback = 20
             bars_per_24h = {"5m": 288, "15m": 96, "1h": 24, "4h": 6}.get(scan_tf, 24)
+            diag = {
+                "symbols": len(symbols),
+                "with_data": 0,
+                "no_data": 0,
+                "errors": 0,
+                "gate_reject": 0,
+                "passed": 0,
+            }
             for sym in symbols:
                 try:
                     df_s = fetch_ohlcv(sym, scan_tf, limit=max(lookback + 5, bars_per_24h + 2, 80))
                     if df_s is None or len(df_s) <= lookback + 1:
+                        diag["no_data"] += 1
                         continue
                     # Evaluate anomalies on closed candles to avoid partial-candle volume noise.
                     df_eval = df_s.iloc[:-1].copy() if len(df_s) > (lookback + 2) else df_s.copy()
                     if df_eval is None or len(df_eval) <= lookback + 1:
+                        diag["no_data"] += 1
                         continue
+                    diag["with_data"] += 1
 
-                    vol_window = df_eval['volume'].iloc[-(lookback + 1):-1]
+                    vol_window = df_eval["volume"].iloc[-(lookback + 1):-1]
                     avg_vol = float(vol_window.mean())
                     std_vol = float(vol_window.std(ddof=0))
-                    last_vol = float(df_eval['volume'].iloc[-1])
+                    last_vol = float(df_eval["volume"].iloc[-1])
                     if avg_vol <= 0:
+                        diag["gate_reject"] += 1
                         continue
 
                     ratio = last_vol / avg_vol
                     z_score = (last_vol - avg_vol) / std_vol if std_vol > 1e-9 else 0.0
                     if ratio < ratio_gate and z_score < z_gate:
+                        diag["gate_reject"] += 1
                         continue
 
-                    ret_1 = ((df_eval['close'].iloc[-1] / df_eval['close'].iloc[-2]) - 1) * 100
+                    ret_1 = ((df_eval["close"].iloc[-1] / df_eval["close"].iloc[-2]) - 1) * 100
                     if len(df_eval) > bars_per_24h:
-                        ret_24h = ((df_eval['close'].iloc[-1] / df_eval['close'].iloc[-(bars_per_24h + 1)]) - 1) * 100
+                        ret_24h = ((df_eval["close"].iloc[-1] / df_eval["close"].iloc[-(bars_per_24h + 1)]) - 1) * 100
                     else:
                         ret_24h = np.nan
 
@@ -297,124 +368,147 @@ def render(ctx: dict) -> None:
                     else:
                         score = 0.35 + 0.20 * base_score
                     score = float(min(max(score, 0.0), 1.0))
-                    surges.append({
-                        "Symbol": sym.split('/')[0],
-                        "Level": level,
-                        "Vol Ratio": ratio,
-                        "Z-Score": z_score,
-                        "Last Vol": last_vol,
-                        "Avg20 Vol": avg_vol,
-                        "1-Candle %": ret_1,
-                        "24h %": ret_24h,
-                        "Score": score,
-                    })
-                except Exception:
-                    continue
-            if surges:
-                surges = sorted(surges, key=lambda x: x["Score"], reverse=True)
-                st.markdown(
-                    f"<details style='margin-bottom:0.5rem;'>"
-                    f"<summary style='color:{ACCENT}; cursor:pointer;'>Column Guide (?)</summary>"
-                    f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:0.5rem;'>"
-                    f"<b>Vol Ratio</b>: latest volume / prior 20-candle average.<br>"
-                    f"<b>Z-Score</b>: standardized volume shock size.<br>"
-                    f"<b>1-Candle %</b>: last candle return.<br>"
-                    f"<b>24h %</b>: rolling 24h return approximation by selected timeframe.<br>"
-                    f"<b>Score</b>: blended anomaly strength from ratio and z-score.</div></details>",
-                    unsafe_allow_html=True,
-                )
-                st.markdown(
-                    f"<div class='panel-box' style='padding:14px 16px; margin-top:8px;'>"
-                    f"<b style='color:{ACCENT};'>How to read this quickly</b>"
-                    f"<ul style='color:{TEXT_MUTED}; margin:8px 0 0 18px; line-height:1.7;'>"
-                    f"<li>Prioritize rows with <b>Level = EXTREME</b> and <b>Score >= 0.85</b> (dual-confirmed ratio + z-score).</li>"
-                    f"<li>Prefer anomalies where <b>1-Candle %</b> and <b>24h %</b> point the same direction.</li>"
-                    f"<li>If Ratio is high but Z-Score is weak, it may be noise from already-elevated baseline volume.</li>"
-                    f"<li>Use Spot/Position tabs for confirmation before acting.</li>"
-                    f"</ul></div>",
-                    unsafe_allow_html=True,
-                )
-
-                df_surges = pd.DataFrame(surges)
-                df_show = df_surges.copy()
-                df_show["Ratio Status"] = df_show["Vol Ratio"].apply(
-                    lambda x: "Extreme" if x >= 2.5 else ("Elevated" if x >= 1.8 else "Mild")
-                )
-                df_show["Z-Status"] = df_show["Z-Score"].apply(
-                    lambda x: "Extreme" if x >= 3.0 else ("Elevated" if x >= 2.0 else "Mild")
-                )
-                df_show["Vol Ratio"] = df_show["Vol Ratio"].map(lambda x: f"{x:.2f}x")
-                df_show["Z-Score"] = df_show["Z-Score"].map(lambda x: f"{x:.2f}")
-                df_show["Last Vol"] = df_show["Last Vol"].map(lambda x: f"{x:,.0f}")
-                df_show["Avg20 Vol"] = df_show["Avg20 Vol"].map(lambda x: f"{x:,.0f}")
-                df_show["1-Candle %"] = df_show["1-Candle %"].map(lambda x: f"{x:+.2f}%")
-                df_show["24h %"] = df_show["24h %"].map(lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A")
-                df_show["Score"] = df_show["Score"].map(lambda x: f"{x:.2f}")
-                def _pct_style(v: str) -> str:
-                    s = str(v)
-                    if s == "N/A":
-                        return f"color:{TEXT_MUTED};"
-                    return f"color:{POSITIVE}; font-weight:700;" if s.startswith("+") else f"color:{NEGATIVE}; font-weight:700;"
-
-                def _status_style(v: str) -> str:
-                    s = str(v)
-                    if "Extreme" in s:
-                        return f"color:{WARNING}; font-weight:700;"
-                    if "Elevated" in s:
-                        return f"color:{ACCENT}; font-weight:700;"
-                    if "Mild" in s:
-                        return f"color:{TEXT_MUTED}; font-weight:700;"
-                    return f"color:{TEXT_MUTED}; font-weight:600;"
-
-                st.markdown(
-                    f"<div style='color:{TEXT_MUTED}; font-size:0.83rem; margin:2px 0 8px 0; line-height:1.6;'>"
-                    f"<b style='color:{ACCENT};'>Table Legend:</b> "
-                    f"<span style='color:{WARNING};'>EXTREME = strongest attention event (dual-confirmed)</span> "
-                    f"<span style='color:{ACCENT}; margin-left:10px;'>HIGH = notable anomaly</span> "
-                    f"<span style='color:{TEXT_MUTED}; margin-left:10px;'>MODERATE = mild anomaly</span> "
-                    f"<span style='color:{WARNING}; margin-left:10px;'>Ratio/Z: Extreme</span> "
-                    f"<span style='color:{ACCENT}; margin-left:10px;'>Elevated</span> "
-                    f"<span style='color:{TEXT_MUTED}; margin-left:10px;'>Mild</span>"
-                    f"</div>",
-                    unsafe_allow_html=True,
-                )
-
-                df_view = df_show[
-                    [
-                        "Symbol", "Level", "Vol Ratio", "Ratio Status",
-                        "Z-Score", "Z-Status", "Score",
-                        "1-Candle %", "24h %", "Last Vol", "Avg20 Vol",
-                    ]
-                ].rename(
-                    columns={
-                        "Level": "Level (?)",
-                        "Vol Ratio": "Vol Ratio (?)",
-                        "Ratio Status": "Ratio Status (?)",
-                        "Z-Score": "Z-Score (?)",
-                        "Z-Status": "Z-Status (?)",
-                        "Score": "Score (?)",
-                        "1-Candle %": "1-Candle % (?)",
-                        "24h %": "24h % (?)",
-                    }
-                )
-
-                styled = (
-                    df_view.style
-                    .map(
-                        lambda v: (
-                            f"background:rgba(255,209,102,0.16); color:{WARNING}; font-weight:700; border-radius:8px;"
-                            if "EXTREME" in str(v)
-                            else (
-                                f"background:rgba(0,212,255,0.14); color:{ACCENT}; font-weight:700; border-radius:8px;"
-                                if "HIGH" in str(v)
-                                else f"background:rgba(255,255,255,0.06); color:{TEXT_MUTED}; font-weight:700; border-radius:8px;"
-                            )
-                        ),
-                        subset=["Level (?)"],
+                    diag["passed"] += 1
+                    surges.append(
+                        {
+                            "Symbol": sym.split("/")[0],
+                            "Level": level,
+                            "Vol Ratio": ratio,
+                            "Z-Score": z_score,
+                            "Last Vol": last_vol,
+                            "Avg20 Vol": avg_vol,
+                            "1-Candle %": ret_1,
+                            "24h %": ret_24h,
+                            "Score": score,
+                        }
                     )
-                    .map(_pct_style, subset=["1-Candle % (?)", "24h % (?)"])
-                    .map(_status_style, subset=["Ratio Status (?)", "Z-Status (?)"])
+                except Exception:
+                    diag["errors"] += 1
+                    continue
+
+            st.session_state[state_key] = {
+                "sig": scan_sig,
+                "surges": sorted(surges, key=lambda x: x["Score"], reverse=True),
+                "diag": diag,
+                "scan_ts": pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            }
+
+    state = st.session_state.get(state_key)
+    if not state:
+        st.info("Run Volume Scan to build the anomaly table.")
+        return
+    if state.get("sig") != scan_sig:
+        st.info("Settings changed. Run Volume Scan again to refresh anomaly results for the current configuration.")
+        return
+
+    surges = state.get("surges", [])
+    diag = state.get("diag", {})
+    scan_ts = state.get("scan_ts")
+    if scan_ts:
+        st.caption(f"Last scan: {scan_ts} | symbols={diag.get('symbols', 0)} | with data={diag.get('with_data', 0)}")
+
+    if not surges:
+        if diag.get("with_data", 0) == 0:
+            st.warning(
+                "No scan rows produced because market data could not be fetched for the selected universe/timeframe. "
+                "Try another timeframe or rerun shortly."
+            )
+        else:
+            st.info(
+                f"No significant volume anomalies detected for current thresholds. "
+                f"Evaluated={diag.get('with_data', 0)}, gate rejects={diag.get('gate_reject', 0)}."
+            )
+        return
+
+    st.markdown(
+        f"<details style='margin-bottom:0.5rem;'>"
+        f"<summary style='color:{ACCENT}; cursor:pointer;'>Column Guide (?)</summary>"
+        f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:0.5rem;'>"
+        f"<b>Vol Ratio</b>: latest volume / prior 20-candle average.<br>"
+        f"<b>Z-Score</b>: standardized volume shock size.<br>"
+        f"<b>1-Candle %</b>: last closed candle return.<br>"
+        f"<b>24h %</b>: rolling 24h return approximation by selected timeframe.<br>"
+        f"<b>Score</b>: blended anomaly strength from ratio and z-score.</div></details>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<div class='panel-box' style='padding:14px 16px; margin-top:8px;'>"
+        f"<b style='color:{ACCENT};'>How to read this quickly</b>"
+        f"<ul style='color:{TEXT_MUTED}; margin:8px 0 0 18px; line-height:1.7;'>"
+        f"<li>Prioritize rows with <b>Level = EXTREME</b> and <b>Score >= 0.85</b> (dual-confirmed ratio + z-score).</li>"
+        f"<li>Prefer anomalies where <b>1-Candle %</b> and <b>24h %</b> point the same direction.</li>"
+        f"<li>Rows with Ratio/Z status = <b>Supporting</b> passed mainly because the other metric carried the trigger.</li>"
+        f"<li>Use Spot/Position tabs for execution confirmation before acting.</li>"
+        f"</ul></div>",
+        unsafe_allow_html=True,
+    )
+
+    df_surges = pd.DataFrame(surges)
+    df_show = df_surges.copy()
+    df_show["Ratio Status"] = df_show["Vol Ratio"].apply(_ratio_status)
+    df_show["Z-Status"] = df_show["Z-Score"].apply(_z_status)
+    df_show["Vol Ratio"] = df_show["Vol Ratio"].map(lambda x: f"{x:.2f}x")
+    df_show["Z-Score"] = df_show["Z-Score"].map(lambda x: f"{x:.2f}")
+    df_show["Last Vol"] = df_show["Last Vol"].map(lambda x: f"{x:,.0f}")
+    df_show["Avg20 Vol"] = df_show["Avg20 Vol"].map(lambda x: f"{x:,.0f}")
+    df_show["1-Candle %"] = df_show["1-Candle %"].map(lambda x: f"{x:+.2f}%")
+    df_show["24h %"] = df_show["24h %"].map(lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A")
+    df_show["Score"] = df_show["Score"].map(lambda x: f"{x:.2f}")
+
+    st.markdown(
+        f"<div style='color:{TEXT_MUTED}; font-size:0.83rem; margin:2px 0 8px 0; line-height:1.6;'>"
+        f"<b style='color:{ACCENT};'>Table Legend:</b> "
+        f"<span style='color:{WARNING};'>EXTREME = strongest attention event (dual-confirmed)</span> "
+        f"<span style='color:{ACCENT}; margin-left:10px;'>HIGH = notable anomaly</span> "
+        f"<span style='color:{TEXT_MUTED}; margin-left:10px;'>MODERATE = mild anomaly</span> "
+        f"<span style='color:{WARNING}; margin-left:10px;'>Ratio/Z: Extreme</span> "
+        f"<span style='color:{ACCENT}; margin-left:10px;'>Elevated</span> "
+        f"<span style='color:{TEXT_MUTED}; margin-left:10px;'>Supporting</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f"<div style='color:{TEXT_MUTED}; font-size:0.83rem; margin:2px 0 8px 0; line-height:1.8;'>"
+        f"<b style='color:{ACCENT};'>Column Tips:</b> "
+        f"{_tip('Level', 'Anomaly class: MODERATE / HIGH / EXTREME. EXTREME requires dual confirmation.')} "
+        f"{_tip('Vol Ratio', 'Latest closed-candle volume divided by previous 20-candle average.')} "
+        f"{_tip('Z-Score', 'How far latest closed-candle volume is from recent mean in std units.')} "
+        f"{_tip('Score', 'Blended anomaly strength (0-1) from ratio + z-score.')} "
+        f"{_tip('1-Candle %', 'Latest closed candle return.')} "
+        f"{_tip('24h %', 'Approx rolling 24h return at selected timeframe.')}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    show_diag_cols = st.checkbox(
+        "Show diagnostic columns (Ratio/Z status, raw volumes)",
+        value=False,
+        key="whale_show_diag_cols",
+        help="Enable this if you need deeper diagnostics. Keep OFF for cleaner scanning view.",
+    )
+
+    base_cols = ["Symbol", "Level", "Vol Ratio", "Z-Score", "Score", "1-Candle %", "24h %"]
+    diag_cols = ["Ratio Status", "Z-Status", "Last Vol", "Avg20 Vol"]
+    selected_cols = base_cols + diag_cols if show_diag_cols else base_cols
+    df_view = df_show[selected_cols]
+
+    styled = (
+        df_view.style
+        .map(
+            lambda v: (
+                f"background:rgba(255,209,102,0.16); color:{WARNING}; font-weight:700; border-radius:8px;"
+                if "EXTREME" in str(v)
+                else (
+                    f"background:rgba(0,212,255,0.14); color:{ACCENT}; font-weight:700; border-radius:8px;"
+                    if "HIGH" in str(v)
+                    else f"background:rgba(255,255,255,0.06); color:{TEXT_MUTED}; font-weight:700; border-radius:8px;"
                 )
-                st.dataframe(styled, width="stretch")
-            else:
-                st.info("No significant volume anomalies detected for selected thresholds.")
+            ),
+            subset=["Level"],
+        )
+        .map(_pct_style, subset=["1-Candle %", "24h %"])
+    )
+    if show_diag_cols:
+        styled = styled.map(_status_style, subset=["Ratio Status", "Z-Status"])
+    st.dataframe(styled, width="stretch")
