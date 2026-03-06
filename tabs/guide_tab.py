@@ -297,13 +297,22 @@ Use it to find attention shifts, then validate entries in Market/Spot/Position.
         (
             "10) Multi-TF tab",
             """
-Cross-timeframe alignment view for a single coin.
-Shows:
-- Direction status by timeframe
-- Strength status by timeframe
-- ADX status by timeframe
+Single-coin timeframe alignment view across 5m / 15m / 1h / 4h / 1d.
+Use it to:
+- check whether short-term timing agrees with higher-timeframe structure
+- see which layer is leading (timing vs higher timeframe)
+- confirm the same read already seen in Market / Spot / Position
 
-Purpose: avoid taking a low-timeframe setup fully against higher-timeframe structure.
+Read order:
+- Higher-TF Bias first (1h / 4h / 1d)
+- Weighted Alignment second
+- Timing Layer third (5m / 15m)
+
+Higher timeframes carry more weight because they usually define the stronger structural regime.
+Neutral timeframes intentionally dilute the weighted score, so high alignment really means broad agreement.
+A directional bias only prints when weighted agreement is broad enough. Below 60%, the tab stays neutral on purpose.
+If coverage is partial, treat the read as lower-confidence even when the visible timeframes agree.
+This tab validates alignment; it is not a separate trade decision engine.
             """,
             "core",
         ),

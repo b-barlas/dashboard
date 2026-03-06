@@ -118,8 +118,8 @@ _TAB_DEPS = [
         render_multitf_tab_ui,
         [
             "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "CARD_BG", "_tip",
-            "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "analyse", "signal_plain",
-            "format_trend", "style_signal",
+            "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "analyse",
+            "direction_key", "direction_label",
         ],
     ),
     (

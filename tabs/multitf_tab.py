@@ -1,8 +1,7 @@
 from ui.ctx import get_ctx
 
-import numpy as np
 import pandas as pd
-import plotly.graph_objs as go
+from core.multitf import TF_SEQUENCE, TF_WEIGHTS, compute_multitf_alignment
 from core.signal_contract import strength_from_bias, strength_bucket
 from ui.snapshot_cache import live_or_snapshot
 
@@ -20,369 +19,395 @@ def render(ctx: dict) -> None:
     _validate_coin_symbol = get_ctx(ctx, "_validate_coin_symbol")
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     analyse = get_ctx(ctx, "analyse")
-    format_trend = get_ctx(ctx, "format_trend")
-    style_signal = get_ctx(ctx, "style_signal")
-    """Multi-timeframe confluence analysis."""
+    direction_key = get_ctx(ctx, "direction_key")
+    direction_label = get_ctx(ctx, "direction_label")
+
     st.markdown(
         f"""
         <style>
-        .mtf-kpi-grid {{
+        .mtf-grid {{
             display:grid;
             grid-template-columns:repeat(4,minmax(0,1fr));
-            gap:10px;
-            margin:8px 0 12px 0;
+            gap:12px;
+            margin:12px 0 14px 0;
         }}
-        .mtf-kpi {{
+        .mtf-card {{
             border:1px solid rgba(0,212,255,0.16);
-            border-radius:12px;
-            padding:12px 14px;
-            background:linear-gradient(140deg, rgba(0,0,0,0.72), rgba(10,18,30,0.88));
+            border-radius:14px;
+            padding:14px 16px;
+            background:linear-gradient(140deg, rgba(0,0,0,0.76), rgba(8,18,30,0.9));
         }}
-        .mtf-kpi-label {{
+        .mtf-label {{
             color:{TEXT_MUTED};
-            font-size:0.70rem;
+            font-size:0.72rem;
             text-transform:uppercase;
-            letter-spacing:0.8px;
+            letter-spacing:0.9px;
         }}
-        .mtf-kpi-value {{
-            color:{ACCENT};
-            font-size:1.2rem;
-            font-weight:700;
-            margin-top:4px;
+        .mtf-value {{
+            font-size:1.28rem;
+            font-weight:800;
+            margin-top:6px;
         }}
-        .mtf-badge {{
+        .mtf-sub {{
+            color:{TEXT_MUTED};
+            font-size:0.84rem;
+            margin-top:6px;
+            line-height:1.55;
+        }}
+        .mtf-pill {{
             display:inline-flex;
             align-items:center;
-            gap:6px;
-            margin-top:7px;
-            padding:2px 9px;
+            gap:7px;
+            padding:3px 10px;
             border-radius:999px;
-            font-size:0.72rem;
-            font-weight:700;
-            border:1px solid rgba(255,255,255,0.18);
+            border:1px solid rgba(255,255,255,0.16);
             background:rgba(0,0,0,0.28);
+            font-size:0.74rem;
+            font-weight:700;
+            margin-right:8px;
+        }}
+        @media (max-width: 1100px) {{
+            .mtf-grid {{
+                grid-template-columns:repeat(2,minmax(0,1fr));
+            }}
+        }}
+        @media (max-width: 720px) {{
+            .mtf-grid {{
+                grid-template-columns:minmax(0,1fr);
+            }}
         }}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    def _direction_from_signal(signal: str) -> str:
-        if signal in {"STRONG BUY", "BUY"}:
-            return "LONG"
-        if signal in {"STRONG SELL", "SELL"}:
-            return "SHORT"
-        return "WAIT"
-
     def _plain_trend_label(value: str) -> str:
-        t = str(value or "").strip().lower()
-        if t == "bullish":
+        trend = str(value or "").strip().lower()
+        if trend == "bullish":
             return "Bullish"
-        if t == "bearish":
+        if trend == "bearish":
             return "Bearish"
-        if t == "neutral":
+        if trend == "neutral":
             return "Neutral"
         return ""
 
-    def _status(v: float, good: float, watch: float, lower_better: bool = False) -> tuple[str, str]:
-        if lower_better:
-            if v <= good:
-                return "Healthy", POSITIVE
-            if v <= watch:
-                return "Watch", WARNING
-            return "Risky", NEGATIVE
-        if v >= good:
-            return "Healthy", POSITIVE
-        if v >= watch:
-            return "Watch", WARNING
-        return "Risky", NEGATIVE
+    def _plain_vwap_label(value: str) -> str:
+        label = str(value or "").strip().lower()
+        if label == "above":
+            return "Above"
+        if label == "below":
+            return "Below"
+        if label == "at":
+            return "At"
+        return "Neutral" if not label else str(value)
 
-    st.markdown(f"<h2 style='color:{ACCENT};'>Multi-Timeframe Confluence</h2>", unsafe_allow_html=True)
+    def _adx_label(adx: float) -> str:
+        try:
+            value = float(adx)
+        except Exception:
+            return ""
+        if value < 20:
+            return "Weak"
+        if value < 25:
+            return "Starting"
+        if value < 50:
+            return "Strong"
+        if value < 75:
+            return "Very Strong"
+        return "Extreme"
+
+    def _strength_label(value: float) -> str:
+        bucket = strength_bucket(float(value))
+        if bucket == "STRONG":
+            read = "Strong"
+        elif bucket == "GOOD":
+            read = "Good"
+        elif bucket == "MIXED":
+            read = "Mixed"
+        else:
+            read = "Weak"
+        return f"{float(value):.0f}% ({read.upper()})"
+
+    def _style_indicator(value: str) -> str:
+        text = str(value or "")
+        upper = text.upper()
+        if any(token in upper for token in {"UPSIDE", "BULLISH", "ABOVE", "STRONG", "VERY STRONG", "EXTREME"}):
+            return f"color:{POSITIVE}; font-weight:700;"
+        if any(token in upper for token in {"DOWNSIDE", "BEARISH", "BELOW", "WEAK"}):
+            return f"color:{NEGATIVE}; font-weight:700;"
+        return f"color:{WARNING}; font-weight:700;"
+
+    def _style_layer(value: str) -> str:
+        layer = str(value or "").strip().lower()
+        if layer == "structure":
+            return f"color:{ACCENT}; font-weight:700;"
+        if layer == "timing":
+            return f"color:{TEXT_MUTED}; font-weight:700;"
+        return ""
+
+    def _insight(metrics: dict) -> tuple[str, str, str]:
+        dominant = metrics["dominant_bias"]
+        higher = metrics["higher_tf_bias"]
+        tactical = metrics["tactical_bias"]
+        weighted = metrics["weighted_alignment_pct"]
+        if dominant == "NEUTRAL":
+            return (
+                "Alignment Insight · Neutral Structure",
+                "Higher and tactical timeframes are not producing a clean directional edge. Treat this as a structure check, not an execution prompt.",
+                WARNING,
+            )
+        if higher == dominant and tactical == dominant and weighted >= 65:
+            return (
+                f"Alignment Insight · Broad {direction_label(dominant)} Agreement",
+                f"Higher timeframes and timing layers are pointing {direction_label(dominant).lower()}. This supports the same-side read already seen in Market / Spot / Position.",
+                POSITIVE if dominant == "UPSIDE" else NEGATIVE,
+            )
+        if higher == dominant and tactical != dominant:
+            return (
+                f"Alignment Insight · Higher-TF {direction_label(dominant)} Lead",
+                f"The structural layer still leans {direction_label(dominant).lower()}, but 5m/15m timing is mixed. Wait for tactical alignment before trusting execution.",
+                WARNING,
+            )
+        return (
+            "Alignment Insight · Cross-TF Mismatch",
+            "Lower and higher timeframes are pulling in different directions. Treat the coin as tactically noisy until the structure simplifies.",
+            WARNING,
+        )
+
+    def _build_rows(coin: str) -> list[dict]:
+        rows: list[dict] = []
+        for timeframe in TF_SEQUENCE:
+            df = fetch_ohlcv(coin, timeframe, limit=200)
+            if df is None or len(df) < 55:
+                rows.append(
+                    {
+                        "timeframe": timeframe,
+                        "Timeframe": timeframe,
+                        "Layer": "Timing" if timeframe in {"5m", "15m"} else "Structure",
+                        "direction": "",
+                        "Direction": "No Data",
+                        "strength": 0.0,
+                        "Strength": "",
+                        "ADX": "",
+                        "SuperTrend": "",
+                        "Ichimoku": "",
+                        "VWAP": "",
+                        "Weight": TF_WEIGHTS.get(timeframe, 1.0),
+                    }
+                )
+                continue
+            # Multi-TF is a closed-candle diagnostic. Always drop the latest open candle when possible.
+            df_eval = df.iloc[:-1].copy() if len(df) > 1 else df.copy()
+            if df_eval is None or len(df_eval) < 55:
+                rows.append(
+                    {
+                        "timeframe": timeframe,
+                        "Timeframe": timeframe,
+                        "Layer": "Timing" if timeframe in {"5m", "15m"} else "Structure",
+                        "direction": "",
+                        "Direction": "No Data",
+                        "strength": 0.0,
+                        "Strength": "",
+                        "ADX": "",
+                        "SuperTrend": "",
+                        "Ichimoku": "",
+                        "VWAP": "",
+                        "Weight": TF_WEIGHTS.get(timeframe, 1.0),
+                    }
+                )
+                continue
+            analysis = analyse(df_eval)
+            direction = direction_key(analysis.signal)
+            strength = round(float(strength_from_bias(float(analysis.bias))), 1)
+            rows.append(
+                {
+                    "timeframe": timeframe,
+                    "Timeframe": timeframe,
+                    "Layer": "Timing" if timeframe in {"5m", "15m"} else "Structure",
+                    "direction": direction,
+                    "Direction": direction_label(direction),
+                    "strength": strength,
+                    "Strength": _strength_label(strength),
+                    "ADX": _adx_label(analysis.adx),
+                    "SuperTrend": _plain_trend_label(analysis.supertrend),
+                    "Ichimoku": _plain_trend_label(analysis.ichimoku),
+                    "VWAP": _plain_vwap_label(analysis.vwap),
+                    "Weight": TF_WEIGHTS.get(timeframe, 1.0),
+                }
+            )
+        return rows
+
+    st.markdown(f"<h2 style='color:{ACCENT};'>Multi-Timeframe Alignment</h2>", unsafe_allow_html=True)
     st.markdown(
         f"<div class='panel-box'>"
         f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Runs the full technical analysis across all 5 timeframes (5m, 15m, 1h, 4h, 1d) simultaneously. "
-        f"The {_tip('Confluence Score', 'Measures how many timeframes agree on the same direction. 100% = all 5 agree, 60% = 3 out of 5. Higher confluence = higher probability trade.')} "
-        f"tells you how many timeframes agree. When short-term and long-term signals align, "
-        f"the trade setup is much stronger.</p>"
-        f"</div>",
+        f"<p style='color:{TEXT_MUTED}; font-size:0.92rem; margin-top:6px; line-height:1.65;'>"
+        f"Single-coin timeframe alignment view across 5m, 15m, 1h, 4h, and 1d. "
+        f"Use it to check whether short-term timing is aligned with higher-timeframe structure. "
+        f"Higher timeframes carry more weight because they usually define the stronger structural regime. "
+        f"This tab does not create a separate trade decision; it validates the same read you already see in Market, Spot, and Position."
+        f"</p></div>",
         unsafe_allow_html=True,
     )
-    coin = _normalize_coin_input(st.text_input("Coin (e.g. BTC, ETH, TAO)", value="BTC", key="mtf_coin_input"))
-    if st.button("Run Multi-TF Analysis", type="primary"):
-        _val_err = _validate_coin_symbol(coin)
-        if _val_err:
-            st.error(_val_err)
-            return
-        timeframes = ["5m", "15m", "1h", "4h", "1d"]
-        tf_weights = {"5m": 1.0, "15m": 1.2, "1h": 1.6, "4h": 2.1, "1d": 2.6}
-        with st.spinner("Analysing across all timeframes..."):
-            rows = []
-            for tf in timeframes:
-                df = fetch_ohlcv(coin, tf, limit=200)
-                if df is None or len(df) < 55:
-                    rows.append({"Timeframe": tf, "Signal": "NO DATA", "Strength": 0.0,
-                                 "SuperTrend": "", "Ichimoku": "", "VWAP": "", "ADX": 0.0})
-                    continue
-                df_eval = df.iloc[:-1].copy() if len(df) > 60 else df.copy()
-                if df_eval is None or len(df_eval) < 55:
-                    rows.append({"Timeframe": tf, "Signal": "NO DATA", "Strength": 0.0,
-                                 "SuperTrend": "", "Ichimoku": "", "VWAP": "", "ADX": 0.0})
-                    continue
-                ar = analyse(df_eval)
-                direction = _direction_from_signal(ar.signal)
-                rows.append({
-                    "Timeframe": tf,
-                    "Signal": direction,
-                    "Strength": round(float(strength_from_bias(float(ar.bias))), 1),
-                    "SuperTrend": format_trend(ar.supertrend),
-                    "Ichimoku": _plain_trend_label(ar.ichimoku),
-                    "VWAP": ar.vwap,
-                    "ADX": round(ar.adx, 1),
-                    "Weight": tf_weights.get(tf, 1.0),
-                })
 
-            valid_live = [r for r in rows if r["Signal"] != "NO DATA"]
-            if len(valid_live) == 0:
+    coin = _normalize_coin_input(st.text_input("Coin (e.g. BTC, ETH, TAO)", value="BTC", key="mtf_coin_input"))
+    run = st.button("Run Alignment Check", type="primary")
+    state_key = "mtf_alignment_payload"
+
+    if run:
+        validation_error = _validate_coin_symbol(coin)
+        if validation_error:
+            st.error(validation_error)
+            return
+        with st.spinner("Checking alignment across all timeframes..."):
+            live_rows = _build_rows(coin)
+            valid_live = [row for row in live_rows if row["direction"] in {"UPSIDE", "DOWNSIDE", "NEUTRAL"}]
+            rows = live_rows
+            from_cache = False
+            cache_ts = None
+            if not valid_live:
                 rows, from_cache, cache_ts = live_or_snapshot(
                     st,
                     f"mtf_rows::{coin}",
-                    rows,
+                    live_rows,
                     max_age_sec=900,
                     current_sig=(coin,),
                 )
-                if from_cache:
-                    st.warning(f"Live multi-timeframe data unavailable. Showing cached snapshot from {cache_ts}.")
             else:
                 live_or_snapshot(
                     st,
                     f"mtf_rows::{coin}",
-                    rows,
+                    live_rows,
                     max_age_sec=900,
                     current_sig=(coin,),
                 )
+            metrics = compute_multitf_alignment(rows)
+            st.session_state[state_key] = {
+                "coin": coin,
+                "rows": rows,
+                "metrics": metrics,
+                "from_cache": from_cache,
+                "cache_ts": cache_ts,
+            }
 
-            # Confluence calculations
-            valid = [r for r in rows if r["Signal"] != "NO DATA"]
-            long_c = sum(1 for r in valid if r["Signal"] == "LONG")
-            short_c = sum(1 for r in valid if r["Signal"] == "SHORT")
-            total_valid = len(valid)
-            avg_conf = np.mean([r["Strength"] for r in valid]) if valid else 0.0
-            wait_c = sum(1 for r in valid if r["Signal"] == "WAIT")
+    payload = st.session_state.get(state_key)
+    if not payload:
+        return
 
-            if total_valid > 0:
-                confluence_pct = max(long_c, short_c) / total_valid * 100
-                dominant = "LONG" if long_c > short_c else ("SHORT" if short_c > long_c else "NEUTRAL")
-            else:
-                confluence_pct = 0
-                dominant = "NEUTRAL"
+    if payload.get("coin") != coin:
+        st.info(f"Showing latest alignment snapshot for {payload.get('coin')}. Press Run Alignment Check to refresh {coin}.")
 
-            weighted_long = sum(r["Weight"] for r in valid if r["Signal"] == "LONG")
-            weighted_short = sum(r["Weight"] for r in valid if r["Signal"] == "SHORT")
-            weighted_total = sum(r["Weight"] for r in valid if r["Signal"] in {"LONG", "SHORT"})
-            weighted_confluence = (max(weighted_long, weighted_short) / weighted_total * 100) if weighted_total > 0 else 0.0
-            weighted_dominant = (
-                "LONG" if weighted_long > weighted_short
-                else ("SHORT" if weighted_short > weighted_long else "NEUTRAL")
-            )
+    rows = payload["rows"]
+    metrics = payload["metrics"]
 
-            # Confluence gauge
-            conf_color = POSITIVE if dominant == "LONG" else (NEGATIVE if dominant == "SHORT" else WARNING)
-            fig_conf = go.Figure(go.Indicator(
-                mode="gauge+number",
-                value=round(weighted_confluence),
-                gauge={
-                    "axis": {"range": [0, 100], "tickwidth": 1},
-                    "bar": {"color": conf_color},
-                    "bgcolor": CARD_BG,
-                    "steps": [
-                        {"range": [0, 40], "color": NEGATIVE},
-                        {"range": [40, 60], "color": WARNING},
-                        {"range": [60, 100], "color": POSITIVE},
-                    ],
-                },
-                title={"text": f"Weighted Confluence ({weighted_dominant})", "font": {"size": 16, "color": ACCENT}},
-                number={"font": {"color": ACCENT, "size": 38}, "suffix": "%"},
-            ))
-            fig_conf.update_layout(
-                height=200, margin=dict(l=10, r=10, t=50, b=15),
-                plot_bgcolor="#000000", paper_bgcolor="#000000",
-            )
-            st.plotly_chart(fig_conf, width="stretch")
+    if payload.get("from_cache"):
+        st.warning(f"Live multi-timeframe data was unavailable. Showing cached snapshot from {payload.get('cache_ts')}.")
+    elif metrics["coverage_count"] < metrics["coverage_total"]:
+        st.warning(
+            f"Only {metrics['coverage_count']}/{metrics['coverage_total']} timeframes produced usable closed-candle analysis. "
+            f"Treat this as a partial alignment read."
+        )
+    title, body, title_color = _insight(metrics)
+    st.markdown(
+        f"<div class='panel-box' style='border-left:4px solid {title_color};'>"
+        f"<div style='color:{title_color}; font-weight:800; font-size:1.02rem;'>{title}</div>"
+        f"<div style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>{body}</div>"
+        f"<div style='color:{TEXT_MUTED}; font-size:0.82rem; margin-top:7px;'>Higher timeframes are weighted more heavily because they usually define the stronger structural regime.</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
-            # Summary cards
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.markdown(
-                    f"<div class='metric-card'><div class='metric-label'>Dominant Direction</div>"
-                    f"<div class='metric-value' style='color:{conf_color};'>{weighted_dominant}</div></div>",
-                    unsafe_allow_html=True,
-                )
-            with c2:
-                st.markdown(
-                    f"<div class='metric-card'><div class='metric-label'>TFs Agreeing</div>"
-                    f"<div class='metric-value'>{max(long_c, short_c)}/{total_valid}</div></div>",
-                    unsafe_allow_html=True,
-                )
-            with c3:
-                st.markdown(
-                    f"<div class='metric-card'><div class='metric-label'>Avg Strength</div>"
-                    f"<div class='metric-value'>{avg_conf:.1f}%</div></div>",
-                    unsafe_allow_html=True,
-                )
-            st.markdown(
-                f"<div class='mtf-kpi-grid'>"
-                f"<div class='mtf-kpi'><div class='mtf-kpi-label'>Raw Confluence</div><div class='mtf-kpi-value'>{confluence_pct:.0f}%</div>"
-                f"<span class='mtf-badge' style='color:{_status(confluence_pct, 70, 55)[1]}; border-color:{_status(confluence_pct, 70, 55)[1]};'><span style='color:{_status(confluence_pct, 70, 55)[1]};'>&#9679;</span>{_status(confluence_pct, 70, 55)[0]}</span></div>"
-                f"<div class='mtf-kpi'><div class='mtf-kpi-label'>Weighted Confluence</div><div class='mtf-kpi-value'>{weighted_confluence:.0f}%</div>"
-                f"<span class='mtf-badge' style='color:{_status(weighted_confluence, 72, 58)[1]}; border-color:{_status(weighted_confluence, 72, 58)[1]};'><span style='color:{_status(weighted_confluence, 72, 58)[1]};'>&#9679;</span>{_status(weighted_confluence, 72, 58)[0]}</span></div>"
-                f"<div class='mtf-kpi'><div class='mtf-kpi-label'>WAIT Count</div><div class='mtf-kpi-value'>{wait_c}</div>"
-                f"<span class='mtf-badge' style='color:{_status(wait_c, 1, 2, lower_better=True)[1]}; border-color:{_status(wait_c, 1, 2, lower_better=True)[1]};'><span style='color:{_status(wait_c, 1, 2, lower_better=True)[1]};'>&#9679;</span>{_status(wait_c, 1, 2, lower_better=True)[0]}</span></div>"
-                f"<div class='mtf-kpi'><div class='mtf-kpi-label'>Data Coverage</div><div class='mtf-kpi-value'>{total_valid}/5</div>"
-                f"<span class='mtf-badge' style='color:{_status(total_valid, 5, 4)[1]}; border-color:{_status(total_valid, 5, 4)[1]};'><span style='color:{_status(total_valid, 5, 4)[1]};'>&#9679;</span>{_status(total_valid, 5, 4)[0]}</span></div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+    dominant_color = POSITIVE if metrics["dominant_bias"] == "UPSIDE" else (NEGATIVE if metrics["dominant_bias"] == "DOWNSIDE" else WARNING)
+    higher_color = POSITIVE if metrics["higher_tf_bias"] == "UPSIDE" else (NEGATIVE if metrics["higher_tf_bias"] == "DOWNSIDE" else WARNING)
+    coverage_color = POSITIVE if metrics["coverage_count"] >= 5 else (WARNING if metrics["coverage_count"] >= 3 else NEGATIVE)
 
-            st.markdown(
-                f"<details style='margin-bottom:0.7rem;'>"
-                f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
-                f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-                f"<b>1.</b> Prioritize setups with <b>Weighted Confluence >= 70%</b>.<br>"
-                f"<b>2.</b> If 1h + 4h + 1d align, setup quality is usually higher.<br>"
-                f"<b>3.</b> High WAIT count means regime uncertainty; reduce risk or stand aside.<br>"
-                f"<b>4.</b> Use this tab for alignment only; confirm entries in Spot/Position tabs."
-                f"</div></details>",
-                unsafe_allow_html=True,
-            )
+    st.markdown(
+        f"<div class='mtf-grid'>"
+        f"<div class='mtf-card'><div class='mtf-label'>Dominant Bias</div>"
+        f"<div class='mtf-value' style='color:{dominant_color};'>{direction_label(metrics['dominant_bias'])}</div>"
+        f"<div class='mtf-sub'>Bias across all valid timeframes.</div></div>"
+        f"<div class='mtf-card'><div class='mtf-label'>Weighted Alignment</div>"
+        f"<div class='mtf-value' style='color:{dominant_color};'>{metrics['weighted_alignment_pct']:.0f}%</div>"
+        f"<div class='mtf-sub'>{metrics['alignment_read']} read after higher-TF weights are applied.</div></div>"
+        f"<div class='mtf-card'><div class='mtf-label'>Higher-TF Bias</div>"
+        f"<div class='mtf-value' style='color:{higher_color};'>{direction_label(metrics['higher_tf_bias'])}</div>"
+        f"<div class='mtf-sub'>{metrics['higher_tf_alignment_pct']:.0f}% alignment on 1h / 4h / 1d.</div></div>"
+        f"<div class='mtf-card'><div class='mtf-label'>Coverage</div>"
+        f"<div class='mtf-value' style='color:{coverage_color};'>{metrics['coverage_count']}/{metrics['coverage_total']}</div>"
+        f"<div class='mtf-sub'>{metrics['coverage_read']} data coverage across the five timeframes.</div></div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
-            # Entry quality badge (A/B/C) from weighted confluence, strength, and uncertainty.
-            if weighted_confluence >= 80 and avg_conf >= 70 and wait_c <= 1:
-                quality_grade = "A"
-                quality_color = POSITIVE
-                quality_text = "High-quality alignment: strong structure across higher timeframes."
-            elif weighted_confluence >= 65 and avg_conf >= 60 and wait_c <= 2:
-                quality_grade = "B"
-                quality_color = WARNING
-                quality_text = "Usable setup with moderate alignment. Keep tighter risk controls."
-            else:
-                quality_grade = "C"
-                quality_color = NEGATIVE
-                quality_text = "Weak/uncertain alignment. Prefer waiting for cleaner confirmation."
+    st.markdown(
+        f"<div class='panel-box' style='padding:12px 16px;'>"
+        f"<span class='mtf-pill' style='color:{higher_color}; border-color:{higher_color};'>Higher-TF · {direction_label(metrics['higher_tf_bias'])} · {metrics['higher_tf_read']}</span>"
+        f"<span class='mtf-pill' style='color:{dominant_color}; border-color:{dominant_color};'>Timing Layer · {direction_label(metrics['tactical_bias'])} · {metrics['tactical_read']}</span>"
+        f"<span class='mtf-pill' style='color:{ACCENT}; border-color:rgba(0,212,255,0.3);'>Avg Strength · {metrics['avg_strength']:.0f}%</span>"
+        f"<span class='mtf-pill' style='color:{WARNING}; border-color:{WARNING};'>Neutral TFs · {metrics['neutral_count']}</span>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
-            st.markdown(
-                f"<div class='panel-box' style='padding:14px 16px; margin-bottom:10px;'>"
-                f"<b style='color:{ACCENT};'>Entry Quality</b> "
-                f"<span style='display:inline-block; margin-left:8px; padding:2px 10px; border-radius:999px; "
-                f"background:rgba(0,0,0,0.35); border:1px solid {quality_color}; color:{quality_color}; "
-                f"font-weight:700;'>Grade {quality_grade}</span>"
-                f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:8px;'>{quality_text}</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+    st.markdown(
+        f"<details style='margin:8px 0 12px 0;'>"
+        f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
+        f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; line-height:1.72; margin-top:0.55rem;'>"
+        f"<b>1.</b> Start with <b>Higher-TF Bias</b>. That is the structural layer and usually matters most.<br>"
+        f"<b>2.</b> Then read <b>Weighted Alignment</b>. Neutral timeframes dilute this score on purpose, so high values really mean broad agreement.<br>"
+        f"<b>3.</b> A directional bias only prints when weighted agreement is broad enough. If alignment stays below 60%, the tab keeps the bias neutral on purpose.<br>"
+        f"<b>4.</b> Use the <b>Timing Layer</b> as confirmation. If 5m/15m disagree with 1h/4h/1d, the structure may still be valid but entry timing is noisy.<br>"
+        f"<b>5.</b> If coverage is partial, trust the result less. Missing timeframes reduce confidence even when the visible alignment looks clean.<br>"
+        f"<b>6.</b> Use this tab to confirm structure, not to replace Market / Spot / Position decisions."
+        f"</div></details>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f"<details style='margin:0 0 10px 0;'>"
+        f"<summary style='color:{ACCENT}; cursor:pointer;'>Column Guide (?)</summary>"
+        f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; line-height:1.72; margin-top:0.55rem;'>"
+        f"<b>Timeframe</b>: the candle interval being checked.<br>"
+        f"<b>Layer</b>: 5m/15m are timing; 1h/4h/1d are structural.<br>"
+        f"<b>Direction</b>: Upside / Downside / Neutral technical bias for that timeframe.<br>"
+        f"<b>Strength</b>: direction-agnostic signal power from the same analysis core used across the dashboard.<br>"
+        f"<b>ADX</b>: trend participation quality for that timeframe.<br>"
+        f"<b>SuperTrend / Ichimoku / VWAP</b>: supporting structure checks for that same candle context."
+        f"</div></details>",
+        unsafe_allow_html=True,
+    )
 
-            # Detail table
-            df_mtf = pd.DataFrame(rows).drop(columns=["Weight"])
-            df_mtf["Signal Icon"] = df_mtf["Signal"].map({
-                "LONG": "↗",
-                "SHORT": "↘",
-                "WAIT": "→",
-                "NO DATA": "•",
-            }).fillna("•")
+    export_rows = []
+    for row in rows:
+        export_rows.append(
+            {
+                "Timeframe": row["Timeframe"],
+                "Layer": row["Layer"],
+                "Direction": row["Direction"],
+                "Strength": row["Strength"],
+                "ADX": row["ADX"],
+                "SuperTrend": row["SuperTrend"],
+                "Ichimoku": row["Ichimoku"],
+                "VWAP": row["VWAP"],
+            }
+        )
+    df_rows = pd.DataFrame(export_rows)
+    styled = (
+        df_rows.style
+        .map(_style_indicator, subset=["Direction", "SuperTrend", "Ichimoku", "VWAP"])
+        .map(_style_indicator, subset=["Strength", "ADX"])
+        .map(_style_layer, subset=["Layer"])
+    )
+    st.dataframe(styled, width="stretch")
 
-            def _strength_status(row: pd.Series) -> str:
-                if row["Signal"] == "NO DATA":
-                    return "• N/A"
-                x = float(row["Strength"])
-                b = strength_bucket(x)
-                if b == "STRONG":
-                    return "▲ Strong"
-                if b in {"GOOD", "MIXED"}:
-                    return "■ Medium"
-                return "▼ Weak"
-
-            def _adx_status(row: pd.Series) -> str:
-                if row["Signal"] == "NO DATA":
-                    return "• N/A"
-                x = float(row["ADX"])
-                if x >= 25:
-                    return "▲ Strong Trend"
-                if x >= 18:
-                    return "■ Moderate"
-                return "▼ Weak Trend"
-
-            df_mtf["Strength Status"] = df_mtf.apply(_strength_status, axis=1)
-            df_mtf["ADX Status"] = df_mtf.apply(_adx_status, axis=1)
-            df_mtf["Signal Status"] = df_mtf["Signal"].map(
-                {"LONG": "▲ Bullish", "SHORT": "▼ Bearish", "WAIT": "■ Neutral", "NO DATA": "• N/A"}
-            ).fillna("• N/A")
-
-            def _style_status(v: str) -> str:
-                if "Strong" in v or "Bullish" in v:
-                    return f"color:{POSITIVE}; font-weight:700;"
-                if "Medium" in v or "Moderate" in v or "Neutral" in v:
-                    return f"color:{WARNING}; font-weight:700;"
-                if "N/A" in v:
-                    return f"color:{TEXT_MUTED}; font-weight:600;"
-                return f"color:{NEGATIVE}; font-weight:700;"
-
-            def _style_signal_icon(v: str) -> str:
-                if v == "↗":
-                    return f"color:{POSITIVE}; font-weight:700;"
-                if v == "↘":
-                    return f"color:{NEGATIVE}; font-weight:700;"
-                if v == "→":
-                    return f"color:{WARNING}; font-weight:700;"
-                return f"color:{TEXT_MUTED}; font-weight:700;"
-
-            st.markdown(
-                f"<div style='color:{TEXT_MUTED}; font-size:0.83rem; margin:2px 0 8px 0; line-height:1.6;'>"
-                f"<b style='color:{ACCENT};'>Table Legend:</b> "
-                f"<span style='color:{POSITIVE};'>▲ Strong/Bullish</span> "
-                f"<span style='color:{WARNING}; margin-left:10px;'>■ Medium/Neutral</span> "
-                f"<span style='color:{NEGATIVE}; margin-left:10px;'>▼ Weak/Bearish</span> "
-                f"<span style='color:{TEXT_MUTED}; margin-left:10px;'>• N/A</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            table_cols = [
-                "Timeframe", "Signal Icon", "Signal", "Signal Status",
-                "Strength", "Strength Status", "ADX", "ADX Status",
-                "SuperTrend", "Ichimoku", "VWAP",
-            ]
-
-            styled_mtf = (
-                df_mtf[table_cols].style
-                .map(style_signal, subset=["Signal"])
-                .map(_style_signal_icon, subset=["Signal Icon"])
-                .map(_style_status, subset=["Signal Status", "Strength Status", "ADX Status"])
-            )
-            st.dataframe(styled_mtf, width="stretch")
-
-            export_df = pd.DataFrame(rows).copy()
-            export_df["Raw Confluence %"] = round(confluence_pct, 2)
-            export_df["Weighted Confluence %"] = round(weighted_confluence, 2)
-            export_df["Dominant"] = weighted_dominant
-            export_df["Entry Grade"] = quality_grade
-            export_csv = export_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "Export Multi-TF Results (CSV)",
-                data=export_csv,
-                file_name=f"{coin.replace('/', '_')}_multitf_{timeframes[0]}_{timeframes[-1]}.csv",
-                mime="text/csv",
-            )
-
-            # Recommendation
-            if weighted_confluence >= 80 and weighted_dominant != "NEUTRAL":
-                st.success(
-                    f"Strong alignment: weighted confluence {int(weighted_confluence)}% on {weighted_dominant}. "
-                    f"Higher-timeframe agreement is supportive."
-                )
-            elif weighted_confluence >= 60 and weighted_dominant != "NEUTRAL":
-                st.info(
-                    f"Moderate alignment: weighted confluence {int(weighted_confluence)}% on {weighted_dominant}. "
-                    f"Use tighter risk control."
-                )
-            else:
-                st.warning("Weak alignment. Timeframes are mixed or uncertain — wait for cleaner structure.")
+    export_df = df_rows.copy()
+    export_df["Dominant Bias"] = direction_label(metrics["dominant_bias"])
+    export_df["Weighted Alignment %"] = round(metrics["weighted_alignment_pct"], 2)
+    export_df["Higher-TF Bias"] = direction_label(metrics["higher_tf_bias"])
+    export_df["Higher-TF Alignment %"] = round(metrics["higher_tf_alignment_pct"], 2)
+    export_csv = export_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Export Multi-TF Alignment (CSV)",
+        data=export_csv,
+        file_name=f"{payload['coin'].replace('/', '_')}_multitf_alignment.csv",
+        mime="text/csv",
+    )
