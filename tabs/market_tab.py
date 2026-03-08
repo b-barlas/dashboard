@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from ui.ctx import get_ctx
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
