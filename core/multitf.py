@@ -89,13 +89,57 @@ def _subset_metrics(rows: list[dict], allowed_timeframes: set[str] | None = None
     }
 
 
+def summarize_scope_bias(
+    rows: list[dict],
+    allowed_timeframes: set[str],
+    scope_name: str,
+    dominant_bias: str,
+) -> str:
+    scoped_rows = _normalize_rows(rows, allowed_timeframes)
+    usable_total = len(scoped_rows)
+    unavailable_count = max(len(allowed_timeframes) - usable_total, 0)
+    if usable_total <= 0:
+        return f"No usable {scope_name.lower()} data."
+
+    upside_count = sum(1 for row in scoped_rows if row["direction"] == "UPSIDE")
+    downside_count = sum(1 for row in scoped_rows if row["direction"] == "DOWNSIDE")
+    neutral_count = sum(1 for row in scoped_rows if row["direction"] == "NEUTRAL")
+    directional_count = upside_count + downside_count
+
+    total_weight = sum(row["weight"] for row in scoped_rows)
+    upside_weight = sum(row["weight"] for row in scoped_rows if row["direction"] == "UPSIDE")
+    downside_weight = sum(row["weight"] for row in scoped_rows if row["direction"] == "DOWNSIDE")
+    lead_side = "upside" if upside_weight > downside_weight else ("downside" if downside_weight > upside_weight else "split")
+    lead_weight = max(upside_weight, downside_weight)
+    lead_pct = (lead_weight / total_weight * 100.0) if total_weight > 0 else 0.0
+
+    counts = [f"{directional_count} directional", f"{neutral_count} neutral"]
+    if unavailable_count > 0:
+        counts.append(f"{unavailable_count} unavailable")
+    count_summary = ", ".join(counts) + "."
+
+    if directional_count <= 0:
+        return f"All usable {scope_name.lower()} are neutral; {count_summary}"
+
+    if dominant_bias == "UPSIDE":
+        return f"Weighted {scope_name.lower()} leans upside ({lead_pct:.0f}% weight); {count_summary}"
+    if dominant_bias == "DOWNSIDE":
+        return f"Weighted {scope_name.lower()} leans downside ({lead_pct:.0f}% weight); {count_summary}"
+    if lead_side == "split":
+        return f"Weighted {scope_name.lower()} are split; {count_summary}"
+    return (
+        f"Weighted {scope_name.lower()} are neutral; "
+        f"{lead_side} has the largest directional share ({lead_pct:.0f}% weight), but not enough for a directional bias; "
+        f"{count_summary}"
+    )
+
+
 def compute_multitf_alignment(rows: list[dict]) -> dict:
     total_slots = max(len(rows), len(TF_SEQUENCE))
     overall = _subset_metrics(rows)
     higher = _subset_metrics(rows, HIGHER_TFS)
     tactical = _subset_metrics(rows, TACTICAL_TFS)
     coverage_count = overall["count"]
-    coverage_pct = coverage_count / total_slots * 100.0 if total_slots else 0.0
     if coverage_count >= 5:
         coverage_read = "Full"
     elif coverage_count >= 3:
@@ -105,7 +149,6 @@ def compute_multitf_alignment(rows: list[dict]) -> dict:
     return {
         "coverage_count": coverage_count,
         "coverage_total": total_slots,
-        "coverage_pct": coverage_pct,
         "coverage_read": coverage_read,
         "dominant_bias": overall["dominant_bias"],
         "weighted_alignment_pct": overall["weighted_alignment_pct"],

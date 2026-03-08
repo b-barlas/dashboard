@@ -15,6 +15,7 @@ from core.backtest import (
 )
 from core.signal_contract import strength_bucket
 from ui.ctx import get_ctx
+from ui.primitives import render_help_details, render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -204,74 +205,17 @@ def render(ctx: dict) -> None:
             return ""
 
     def _render_kpi_cards(kpis: list[tuple[str, str, str]]) -> None:
-        cards_html = []
-        for label, value, tip in kpis:
-            cards_html.append(
-                "<div class='sb-kpi-card'>"
-                f"<div class='sb-kpi-label' title='{html.escape(tip, quote=True)}'>"
-                f"{html.escape(label)} <span class='sb-help'>?</span>"
-                "</div>"
-                f"<div class='sb-kpi-value'>{html.escape(value)}</div>"
-                "</div>"
-            )
-        st.markdown(
-            f"""
-            <style>
-              .sb-kpi-grid {{
-                display:grid;
-                grid-template-columns:repeat(5, minmax(150px, 1fr));
-                gap:10px;
-                width:100%;
-              }}
-              .sb-kpi-card {{
-                border:1px solid rgba(0,212,255,0.24);
-                border-radius:12px;
-                padding:10px 12px;
-                background:linear-gradient(180deg, rgba(8,14,24,0.94), rgba(5,10,18,0.94));
-              }}
-              .sb-kpi-label {{
-                color:{TEXT_MUTED};
-                font-size:0.77rem;
-                font-weight:700;
-                letter-spacing:0.04em;
-                text-transform:uppercase;
-                display:inline-flex;
-                align-items:center;
-                gap:6px;
-                cursor:help;
-              }}
-              .sb-help {{
-                display:inline-flex;
-                align-items:center;
-                justify-content:center;
-                width:14px;
-                height:14px;
-                border-radius:999px;
-                border:1px solid rgba(0,212,255,0.45);
-                color:{ACCENT};
-                font-size:0.64rem;
-                font-weight:800;
-                line-height:1;
-              }}
-              .sb-kpi-value {{
-                margin-top:8px;
-                color:#E5E7EB;
-                font-size:1.85rem;
-                font-weight:800;
-                line-height:1.15;
-                letter-spacing:-0.01em;
-              }}
-              @media (max-width: 980px) {{
-                .sb-kpi-grid {{
-                  grid-template-columns:repeat(2, minmax(140px, 1fr));
-                }}
-              }}
-            </style>
-            <div class='sb-kpi-grid'>
-              {''.join(cards_html)}
-            </div>
-            """,
-            unsafe_allow_html=True,
+        render_kpi_grid(
+            st,
+            columns=5,
+            items=[
+                {
+                    "label": label,
+                    "label_title": tip,
+                    "value": value,
+                }
+                for label, value, tip in kpis
+            ],
         )
 
     def _render_hover_table(
@@ -522,21 +466,27 @@ def render(ctx: dict) -> None:
             unsafe_allow_html=True,
         )
 
-    st.markdown(f"<h2 style='color:{ACCENT};'>Scalp Backtest</h2>", unsafe_allow_html=True)
-    with st.expander("How to read quickly (?)", expanded=True):
-        st.markdown(
-            f"""
-            <div style='color:{TEXT_MUTED}; font-size:0.90rem; line-height:1.7;'>
-            1. This tab validates <b>scalp setup behavior</b> using the same scalp engine as Market tab
-            (entry/stop/target + quality gate).<br>
-            2. If <b>Custom Coins</b> is empty, scan runs on the top-volume universe (controlled by Universe Size).<br>
-            3. If <b>Custom Coins</b> has symbols, scan runs <b>only</b> on those symbols (Universe Size is ignored).<br>
-            4. Each event is tracked for the next N bars and labeled as <b>TP-first</b>, <b>SL-first</b>, or <b>TIMEOUT</b>.<br>
-            5. Use Direction/Coin Scoreboards to decide which side or symbols are currently worth testing in live flow.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    render_page_header(
+        st,
+        title="Scalp Backtest",
+        intro_html=(
+            "Outcome study for the scalp engine used in Market tab. "
+            "It validates entry/stop/target behavior and the scalp quality gate over historical events, "
+            "so you can see how often setups hit TP first, SL first, or time out across a study window."
+        ),
+    )
+    render_help_details(
+        st,
+        summary="How to read quickly",
+        body_html=(
+            "1. This tab validates <b>scalp setup behavior</b> using the same scalp engine as Market tab "
+            "(entry/stop/target + quality gate).<br>"
+            "2. If <b>Custom Coins</b> is empty, scan runs on the top-volume universe (controlled by Universe Size).<br>"
+            "3. If <b>Custom Coins</b> has symbols, scan runs <b>only</b> on those symbols (Universe Size is ignored).<br>"
+            "4. Each event is tracked for the next N bars and labeled as <b>TP-first</b>, <b>SL-first</b>, or <b>TIMEOUT</b>.<br>"
+            "5. Use Direction/Coin Scoreboards to decide which side or symbols are currently worth testing in live flow."
+        ),
+    )
 
     c1, c2 = st.columns(2)
     with c1:

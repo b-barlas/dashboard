@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pandas as pd
@@ -9,6 +10,7 @@ import requests
 import streamlit as st
 
 from core.data import (
+    coingecko_coin_id as coingecko_coin_id_core,
     fetch_ohlcv as fetch_ohlcv_core,
     fetch_ohlcv_cached as fetch_ohlcv_cached_core,
     get_btc_eth_prices as get_btc_eth_prices_core,
@@ -30,6 +32,7 @@ from core.advanced_analysis import (
     monte_carlo_simulation as monte_carlo_simulation_core,
 )
 from core.market_data import (
+    fetch_market_cap_rows_for_symbols as fetch_market_cap_rows_for_symbols_core,
     fetch_top_gainers_losers as fetch_top_gainers_losers_core,
     fetch_trending_coins as fetch_trending_coins_core,
     get_top_volume_usdt_symbols as get_top_volume_usdt_symbols_core,
@@ -43,6 +46,7 @@ from core.scalping import (
     scalp_quality_gate as scalp_quality_gate_core,
 )
 from core.telemetry import record_event
+from core.symbols import canonical_base_symbol
 from core.signals import (
     AnalysisResult,
     analyse as analyse_core,
@@ -52,10 +56,41 @@ from core.signals import (
 )
 from ui.theme import NEGATIVE, NEON_BLUE, NEON_PURPLE, POSITIVE, TEXT_MUTED, WARNING
 
+type MarketIndicesPayload = tuple[float, float, int, int, float, float, float, float, float]
+
+_TOP_SNAPSHOT_KEY = "market_top_snapshot_v1"
+_TOP_SNAPSHOT_META_KEY = f"{_TOP_SNAPSHOT_KEY}__meta"
+_TOP_SNAPSHOT_FIELDS = [
+    "btc_price", "btc_change", "eth_price", "eth_change",
+    "btc_dom", "eth_dom", "total_mcap", "alt_mcap", "mcap_24h_pct",
+    "bnb_dom", "sol_dom", "ada_dom", "xrp_dom", "fg_value", "fg_label",
+]
+_TOP_SNAPSHOT_FIELD_MAX_AGE_SEC = {
+    "btc_price": 15 * 60,
+    "btc_change": 15 * 60,
+    "eth_price": 15 * 60,
+    "eth_change": 15 * 60,
+    "btc_dom": 30 * 60,
+    "eth_dom": 30 * 60,
+    "total_mcap": 30 * 60,
+    "alt_mcap": 30 * 60,
+    "mcap_24h_pct": 30 * 60,
+    "bnb_dom": 30 * 60,
+    "sol_dom": 30 * 60,
+    "ada_dom": 30 * 60,
+    "xrp_dom": 30 * 60,
+    "fg_value": 6 * 60 * 60,
+    "fg_label": 6 * 60 * 60,
+}
+
 
 def _debug(msg: str) -> None:
-    if st.session_state.get("debug_mode", False):
+    if not st.session_state.get("debug_mode", False):
+        return
+    if threading.current_thread() is threading.main_thread():
         st.sidebar.write(msg)
+        return
+    print(f"[debug] {msg}")
 
 
 def _safe_float(v) -> float | None:
@@ -138,9 +173,26 @@ def get_market_indices():
 
 
 # Fetch fear and greed index from alternative.me
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_fear_greed_cached() -> tuple[int | None, str]:
+    return get_fear_greed_core()
+
+
 def get_fear_greed():
     try:
-        return get_fear_greed_core()
+        fg_value, fg_label = _fetch_fear_greed_cached()
+        fg_value_f = _safe_float(fg_value)
+        fg_label_s = fg_label if _valid_top_metric_field("fg_label", fg_label) else _fg_label_from_value(fg_value_f)
+        if _valid_top_metric_field("fg_value", fg_value_f) or _valid_top_metric_field("fg_label", fg_label_s):
+            return fg_value_f, fg_label_s
+    except Exception as e:
+        _debug(f"get_fear_greed cached fetch error: {e}")
+
+    try:
+        fg_value, fg_label = get_fear_greed_core()
+        fg_value_f = _safe_float(fg_value)
+        fg_label_s = fg_label if _valid_top_metric_field("fg_label", fg_label) else _fg_label_from_value(fg_value_f)
+        return fg_value_f, fg_label_s
     except Exception as e:
         _debug(f"get_fear_greed error: {e}")
         return None, "Unavailable"
@@ -168,19 +220,38 @@ def _fetch_btc_eth_from_coingecko_with_change() -> dict[str, float | None]:
     }
 
 
-def _fetch_pair_price_change_from_exchange(symbol: str) -> tuple[float | None, float | None]:
+def _pair_price_change_from_ticker(ticker: object) -> tuple[float | None, float | None]:
+    if not isinstance(ticker, dict):
+        return None, None
+    price = _safe_float(ticker.get("last"))
+    if price is None:
+        price = _safe_float(ticker.get("close"))
+    change = _safe_float(ticker.get("percentage"))
+    if price is None:
+        return None, None
+    return price, change
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_pair_price_change_from_exchange_direct(symbol: str) -> tuple[float | None, float | None]:
     for variant in symbol_variants_core(symbol):
         try:
-            ticker = EXCHANGE.fetch_ticker(variant)
-            price = _safe_float(ticker.get("last"))
-            if price is None:
-                price = _safe_float(ticker.get("close"))
-            change = _safe_float(ticker.get("percentage"))
+            price, change = _pair_price_change_from_ticker(EXCHANGE.fetch_ticker(variant))
             if price is not None:
                 return price, change
         except Exception:
             continue
     return None, None
+
+
+def _fetch_pair_price_change_from_exchange(symbol: str) -> tuple[float | None, float | None]:
+    tickers = fetch_exchange_tickers_snapshot()
+    if tickers:
+        for variant in symbol_variants_core(symbol):
+            price, change = _pair_price_change_from_ticker(tickers.get(variant))
+            if price is not None:
+                return price, change
+    return _fetch_pair_price_change_from_exchange_direct(symbol)
 
 
 def _fg_label_from_value(value: float | None) -> str:
@@ -210,7 +281,8 @@ def _valid_top_metric_field(field: str, value) -> bool:
         f = _safe_float(value)
         return f is not None and 0 <= f <= 100
     if field == "fg_label":
-        return isinstance(value, str) and value.strip() != ""
+        label = str(value or "").strip()
+        return label not in {"", "Unavailable", "Unknown", "N/A"}
     return value is not None
 
 
@@ -225,8 +297,24 @@ def _indices_payload_ok(payload) -> bool:
         return False
 
 
+def _snapshot_field_is_fresh(field: str, value, meta: dict[str, object] | None, *, now_epoch: float) -> bool:
+    if not _valid_top_metric_field(field, value):
+        return False
+    if not isinstance(meta, dict):
+        return False
+    try:
+        field_epoch = float(meta.get(field))
+    except Exception:
+        return False
+    max_age = float(_TOP_SNAPSHOT_FIELD_MAX_AGE_SEC.get(field, 0))
+    if max_age <= 0:
+        return False
+    age = max(0.0, float(now_epoch) - field_epoch)
+    return age <= max_age
+
+
 @st.cache_data(ttl=300, show_spinner=False)
-def _fetch_market_indices_coinpaprika() -> tuple[float, float, int, int, float, float, float, float, float] | None:
+def _fetch_market_indices_coinpaprika() -> MarketIndicesPayload | None:
     """Fallback global metrics from CoinPaprika tickers endpoint.
 
     Derives total market cap, selected asset dominance and weighted 24h cap change.
@@ -291,11 +379,15 @@ def get_market_top_snapshot() -> dict[str, float | int | str | None]:
       Provider order: Exchange ticker -> CoinGecko simple price.
     - Market indices are fetched from CoinGecko global.
     - Fear & Greed is fetched from alternative.me.
-    - Any missing field falls back to the last valid snapshot in session state.
+    - Any missing field falls back to the last valid snapshot only while that
+      specific field remains inside its freshness window.
     """
-    key = "market_top_snapshot_v1"
+    key = _TOP_SNAPSHOT_KEY
+    meta_key = _TOP_SNAPSHOT_META_KEY
     previous = st.session_state.get(key, {})
+    previous_meta = st.session_state.get(meta_key, {})
     live: dict[str, float | int | str | None] = {}
+    now_epoch = time.time()
 
     # 1) BTC/ETH price+change: same-provider consistency
     ex_btc_price, ex_btc_change = _fetch_pair_price_change_from_exchange("BTC/USDT")
@@ -329,7 +421,7 @@ def get_market_top_snapshot() -> dict[str, float | int | str | None]:
 
     # 2) Market indices (CoinGecko global -> CoinPaprika fallback)
     try:
-        indices_payload = get_market_indices_core()
+        indices_payload: MarketIndicesPayload | None = get_market_indices()
         if not _indices_payload_ok(indices_payload):
             cp_payload = _fetch_market_indices_coinpaprika()
             if _indices_payload_ok(cp_payload):
@@ -367,7 +459,7 @@ def get_market_top_snapshot() -> dict[str, float | int | str | None]:
 
     # 3) Fear & Greed
     try:
-        fg_value, fg_label = get_fear_greed_core()
+        fg_value, fg_label = get_fear_greed()
         fg_value_f = _safe_float(fg_value)
         live["fg_value"] = fg_value_f
         live["fg_label"] = fg_label if _valid_top_metric_field("fg_label", fg_label) else _fg_label_from_value(fg_value_f)
@@ -375,31 +467,36 @@ def get_market_top_snapshot() -> dict[str, float | int | str | None]:
         _debug(f"get_market_top_snapshot fear_greed fallback: {e}")
 
     # 4) Merge with last-good snapshot field-by-field
-    fields = [
-        "btc_price", "btc_change", "eth_price", "eth_change",
-        "btc_dom", "eth_dom", "total_mcap", "alt_mcap", "mcap_24h_pct",
-        "bnb_dom", "sol_dom", "ada_dom", "xrp_dom", "fg_value", "fg_label",
-    ]
     merged: dict[str, float | int | str | None] = {}
     updated_snapshot = dict(previous) if isinstance(previous, dict) else {}
-    for field in fields:
+    updated_meta = dict(previous_meta) if isinstance(previous_meta, dict) else {}
+    for field in _TOP_SNAPSHOT_FIELDS:
         live_value = live.get(field)
         if _valid_top_metric_field(field, live_value):
             merged[field] = live_value
             updated_snapshot[field] = live_value
+            updated_meta[field] = now_epoch
         else:
             prev_value = previous.get(field) if isinstance(previous, dict) else None
-            if _valid_top_metric_field(field, prev_value):
+            if _snapshot_field_is_fresh(field, prev_value, previous_meta, now_epoch=now_epoch):
                 merged[field] = prev_value
+                updated_snapshot[field] = prev_value
             else:
                 merged[field] = None
+                updated_snapshot.pop(field, None)
+                updated_meta.pop(field, None)
 
     if not _valid_top_metric_field("fg_label", merged.get("fg_label")):
         merged["fg_label"] = _fg_label_from_value(_safe_float(merged.get("fg_value")))
 
-    # Persist only when we have at least one valid live field.
-    if any(_valid_top_metric_field(f, live.get(f)) for f in fields):
+    should_persist = (
+        any(_valid_top_metric_field(f, live.get(f)) for f in _TOP_SNAPSHOT_FIELDS)
+        or updated_snapshot != previous
+        or updated_meta != previous_meta
+    )
+    if should_persist:
         st.session_state[key] = updated_snapshot
+        st.session_state[meta_key] = updated_meta
 
     return merged
 
@@ -607,11 +704,83 @@ def fetch_top_gainers_losers(limit: int = 20) -> tuple[list, list]:
     return fetch_top_gainers_losers_core(_http_get_json, limit=limit)
 
 
+def _fetch_exchange_tickers_snapshot_uncached() -> dict:
+    try:
+        has = getattr(EXCHANGE, "has", {}) or {}
+        if not has.get("fetchTickers"):
+            return {}
+        data = EXCHANGE.fetch_tickers()
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        _debug(f"exchange ticker snapshot fallback unavailable: {e}")
+        return {}
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _fetch_exchange_tickers_snapshot_cached() -> dict:
+    return _fetch_exchange_tickers_snapshot_uncached()
+
+
+def fetch_exchange_tickers_snapshot() -> dict:
+    data = _fetch_exchange_tickers_snapshot_cached()
+    if data:
+        return data
+    # Avoid pinning an empty/error snapshot for the full TTL during provider wobble.
+    return _fetch_exchange_tickers_snapshot_uncached()
+
+
 def get_top_volume_usdt_symbols(top_n: int = 100, vs_currency: str = "usd"):
     return get_top_volume_usdt_symbols_core(
         _http_get_json,
         MARKETS,
         _debug,
         top_n=top_n,
+        vs_currency=vs_currency,
+        exchange_tickers_fetcher=fetch_exchange_tickers_snapshot,
+    )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_market_cap_rows_for_symbols_cached(
+    symbols: tuple[str, ...],
+    vs_currency: str = "usd",
+) -> list[dict]:
+    return fetch_market_cap_rows_for_symbols_core(
+        _http_get_json,
+        coingecko_coin_id_core,
+        list(symbols),
+        _debug,
+        vs_currency=vs_currency,
+    )
+
+
+def get_market_cap_rows_for_symbols(
+    symbols: list[str] | tuple[str, ...],
+    vs_currency: str = "usd",
+) -> list[dict]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_symbol in symbols:
+        raw = str(raw_symbol or "").strip()
+        base = raw.split("/", 1)[0] if "/" in raw else raw
+        symbol = canonical_base_symbol(base)
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        normalized.append(symbol)
+    if not normalized:
+        return []
+
+    cache_key = tuple(sorted(normalized))
+    rows = _fetch_market_cap_rows_for_symbols_cached(cache_key, vs_currency=vs_currency)
+    if rows:
+        return rows
+
+    _debug("get_market_cap_rows_for_symbols cache returned empty; retrying uncached fetch.")
+    return fetch_market_cap_rows_for_symbols_core(
+        _http_get_json,
+        coingecko_coin_id_core,
+        normalized,
+        _debug,
         vs_currency=vs_currency,
     )

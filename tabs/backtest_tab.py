@@ -6,6 +6,7 @@ import numpy as np
 import plotly.graph_objs as go
 from core.backtest import _normalize_direction_signal
 from core.signal_contract import strength_from_bias
+from ui.primitives import render_help_details, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -22,32 +23,32 @@ def render(ctx: dict) -> None:
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     run_backtest = get_ctx(ctx, "run_backtest")
 
-    st.markdown(f"<h2 style='color:{ACCENT};'>Model Lab</h2>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='panel-box' style='margin-bottom:1rem;'>"
-        f"<b style='color:{ACCENT};'>Signal-engine backtest (diagnostics mode):</b>"
-        f"<ul style='color:{TEXT_MUTED}; font-size:0.88rem; line-height:1.7; margin-top:0.5rem;'>"
-        "<li>The engine slides a window through historical candles and runs the <b>full technical analysis</b> "
-        "(EMA, RSI, MACD, SuperTrend, Ichimoku, Bollinger, ADX, etc.) at each step.</li>"
-        "<li>When the <b>Signal</b> is Upside or Downside <b>and</b> the <b>Strength Score</b> exceeds your threshold, "
-        "a simulated trade is opened at the <b>next candle open</b> "
-        "(with your slippage assumption applied).</li>"
-        "<li>The trade is automatically closed after <b>N candles</b> (your exit setting). "
-        "Commission is deducted on both entry and exit.</li>"
-        "<li>This tests the raw <b>Direction + Strength</b> engine quality. "
-        "Use this as diagnostics to calibrate threshold and hold duration.</li>"
-        "</ul></div>",
-        unsafe_allow_html=True,
+    render_page_header(
+        st,
+        title="Model Lab",
+        intro_html=(
+            "<b>Signal-engine backtest (diagnostics mode):</b>"
+            "<ul style='margin:0.5rem 0 0 1rem; padding:0; line-height:1.72;'>"
+            "<li>The engine slides a window through historical candles and runs the <b>full technical analysis</b> "
+            "(EMA, RSI, MACD, SuperTrend, Ichimoku, Bollinger, ADX, etc.) at each step.</li>"
+            "<li>When the <b>Signal</b> is Upside or Downside <b>and</b> the <b>Strength Score</b> exceeds your threshold, "
+            "a simulated trade is opened at the <b>next candle open</b> "
+            "(with your slippage assumption applied).</li>"
+            "<li>The trade is automatically closed after <b>N candles</b> (your exit setting). "
+            "Commission is deducted on both entry and exit.</li>"
+            "<li>This tests the raw <b>Direction + Strength</b> engine quality. "
+            "Use this as diagnostics to calibrate threshold and hold duration.</li>"
+            "</ul>"
+        ),
     )
-    st.markdown(
-        f"<details style='margin-bottom:0.7rem;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"<b>1.</b> Start with <b>Profit Factor</b>, <b>Max Drawdown</b>, and <b>Total Return</b> together.<br>"
-        f"<b>2.</b> A high win rate with weak profit factor is usually not robust.<br>"
-        f"<b>3.</b> Increase threshold until drawdown becomes acceptable without killing trade count."
-        f"</div></details>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="How to read quickly",
+        body_html=(
+            "<b>1.</b> Start with <b>Profit Factor</b>, <b>Max Drawdown</b>, and <b>Total Return</b> together.<br>"
+            "<b>2.</b> A high win rate with weak profit factor is usually not robust.<br>"
+            "<b>3.</b> Increase threshold until drawdown becomes acceptable without killing trade count."
+        ),
     )
 
     col1, col2 = st.columns(2)
@@ -91,7 +92,7 @@ def render(ctx: dict) -> None:
             / 100
         )
 
-    run_clicked = st.button("🚀 Run Backtest", type="primary", key="backtest_run_btn")
+    run_clicked = st.button("Run Backtest", type="primary", key="backtest_run_btn")
     force_run = bool(st.session_state.pop("backtest_force_run", False))
     if not (run_clicked or force_run):
         return
@@ -359,17 +360,16 @@ def render(ctx: dict) -> None:
         styled_df["Regime Score"] = styled_df["Regime Score"].apply(lambda x: f"{x:.1f}")
     if "Equity" in styled_df.columns:
         styled_df["Equity"] = styled_df["Equity"].apply(lambda x: f"${x:,.2f}")
-    st.markdown(
-        f"<details style='margin:0.35rem 0 0.45rem 0;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer;'>Trade History Column Guide (?)</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"{_tip('Signal', 'Direction opened by the model at that bar (Upside/Downside).')} | "
-        f"{_tip('Strength', 'Signal power score at entry (0-100).')} | "
-        f"{_tip('PnL (%)', 'Net trade return after commission and slippage assumptions.')} | "
-        f"{_tip('Regime', 'Market state around the trade (TREND/RANGE/MIXED).')} | "
-        f"{_tip('Regime Score', 'Numeric trend-quality context used by the engine at entry.')}"
-        f"</div></details>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="Trade History Column Guide (?)",
+        body_html=(
+            f"{_tip('Signal', 'Direction opened by the model at that bar (Upside/Downside).')} | "
+            f"{_tip('Strength', 'Signal power score at entry (0-100).')} | "
+            f"{_tip('PnL (%)', 'Net trade return after commission and slippage assumptions.')} | "
+            f"{_tip('Regime', 'Market state around the trade (TREND/RANGE/MIXED).')} | "
+            f"{_tip('Regime Score', 'Numeric trend-quality context used by the engine at entry.')}"
+        ),
     )
     st.dataframe(styled_df, width="stretch")
 

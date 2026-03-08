@@ -10,7 +10,6 @@ import plotly.graph_objs as go
 from core.market_decision import (
     ai_vote_metrics,
     action_decision_with_reason,
-    action_rank,
     action_reason_text,
     normalize_action_class,
     structure_state,
@@ -22,6 +21,753 @@ from core.metric_catalog import (
     AI_SHORT_THRESHOLD,
     direction_from_prob,
 )
+from core.symbols import canonical_base_symbol
+from ui.primitives import render_help_details, render_kpi_grid, render_page_header
+
+_LAST_GOOD_RESULTS_KEY = "market_scan_last_good_results"
+_LAST_GOOD_SIG_KEY = "market_scan_last_good_sig"
+_LAST_GOOD_TS_KEY = "market_scan_last_good_ts"
+_LAST_GOOD_MODE_KEY = "market_scan_last_good_mode"
+_LAST_GOOD_REGISTRY_KEY = "market_scan_last_good_by_sig"
+_LAST_HEALTHY_EMPTY_SIG_KEY = "market_scan_last_healthy_empty_sig"
+_LAST_SCAN_ATTEMPT_TS_KEY = "market_scan_last_attempt_ts"
+_HEALTHY_EMPTY_HISTORY_LIMIT = 32
+_LAST_GOOD_HISTORY_LIMIT = 32
+_SCAN_REFRESH_TTL_MINUTES = 3
+_RECOVERY_RETRY_BACKOFF_SECONDS = 30
+STABLE_BASES = {
+    "USDT", "USDC", "BUSD", "DAI", "TUSD", "USDE", "FDUSD", "PYUSD",
+    "RLUSD", "USDP", "GUSD", "EURS", "EURC",
+}
+_SETUP_CONFIRM_PRIORITY = {
+    "ENTER_TREND_AI": 5,
+    "ENTER_TREND_LED": 4,
+    "ENTER_AI_LED": 3,
+    "WATCH": 2,
+    "SKIP": 1,
+}
+_STRUCTURE_PRIORITY = {"FULL": 4, "TREND": 3, "EARLY": 2, "NONE": 1}
+_AI_FALLBACK_STATUS_TEXT = {
+    "insufficient_candles": "AI fallback active: not enough candles for reliable ML; neutral safety output is shown.",
+    "insufficient_features": "AI fallback active: indicators produced too few clean ML rows; neutral safety output is shown.",
+    "single_class_window": "AI fallback active: one-sided training window forced neutral safety output.",
+    "model_exception": "AI fallback active: model instability forced neutral safety output.",
+}
+
+
+def _canonical_pair_base(symbol: str) -> str:
+    raw = str(symbol or "").strip()
+    base = raw.split("/", 1)[0] if "/" in raw else raw
+    return canonical_base_symbol(base)
+
+
+def _setup_confirm_class_key(value: str) -> str:
+    s = str(value or "").strip().upper()
+    if "TREND+AI" in s:
+        return "ENTER_TREND_AI"
+    if s == "TREND" or s == "TREND-LED" or "TREND-LED" in s:
+        return "ENTER_TREND_LED"
+    if s == "AI" or s == "AI-LED" or "AI-LED" in s:
+        return "ENTER_AI_LED"
+    return normalize_action_class(s)
+
+
+def _setup_confirm_priority(value: str) -> int:
+    return int(_SETUP_CONFIRM_PRIORITY.get(_setup_confirm_class_key(value), 0))
+
+
+def _sortable_float(value: object) -> float:
+    try:
+        return float(value or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _market_result_priority_key(row: dict) -> tuple[float, float, float, float, str]:
+    return (
+        -float(_setup_confirm_priority(str(row.get("__action_raw", row.get("Setup Confirm", ""))))),
+        -float(_STRUCTURE_PRIORITY.get(str(row.get("__structure_state")), 0)),
+        -_sortable_float(row.get("__strength_val", 0.0)),
+        -_sortable_float(row.get("__mcap_val", 0)),
+        str(row.get("Coin", "")),
+    )
+
+
+def _ai_fallback_note(ai_details: dict | None) -> str:
+    if not isinstance(ai_details, dict):
+        return ""
+    status = str(ai_details.get("status") or "").strip()
+    if not status:
+        return ""
+    note = _AI_FALLBACK_STATUS_TEXT.get(status, "")
+    if not note:
+        return ""
+    err_detail = str(ai_details.get("error") or "").strip()
+    if err_detail and status == "model_exception":
+        return f"{note} Reason: {err_detail}"
+    return note
+
+
+def _setup_status_summary(
+    *,
+    enter_count: int,
+    watch_count: int,
+    skip_count: int,
+    source_label: str | None,
+) -> tuple[str, str, str]:
+    source = str(source_label or "").strip().upper()
+    label = "Setup Status"
+    if source.startswith("CACHED"):
+        head = "CACHED SETUPS" if int(enter_count) > 0 else "NO LIVE SETUP"
+        sub = f"CACHED ENTER: {enter_count} • WATCH: {watch_count} • SKIP: {skip_count}"
+        return label, head, sub
+    if "DEGRADED" in source:
+        head = "DEGRADED SETUPS" if int(enter_count) > 0 else "NO CLEAN SETUP"
+        sub = f"DEGRADED ENTER: {enter_count} • WATCH: {watch_count} • SKIP: {skip_count}"
+        return label, head, sub
+    head = "SETUPS READY" if int(enter_count) > 0 else "NO SETUP READY"
+    sub = f"READY: {enter_count} • WATCH: {watch_count} • SKIP: {skip_count}"
+    return label, head, sub
+
+
+def _valid_market_bases(market_rows: list[dict]) -> set[str]:
+    out: set[str] = set()
+    for row in market_rows:
+        base = canonical_base_symbol((row or {}).get("symbol") or "")
+        if base:
+            out.add(base)
+    return out
+
+
+def _filter_scan_symbols(usdt_symbols: list[str], market_rows: list[dict]) -> list[str]:
+    valid_bases = _valid_market_bases(market_rows)
+    if not valid_bases:
+        return list(usdt_symbols)
+    return [pair for pair in usdt_symbols if _canonical_pair_base(pair) in valid_bases]
+
+
+def _build_market_cap_map(market_rows: list[dict]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for coin in market_rows:
+        symbol = canonical_base_symbol((coin or {}).get("symbol") or "")
+        raw_mcap = (coin or {}).get("market_cap")
+        try:
+            if isinstance(raw_mcap, str):
+                raw_mcap = raw_mcap.replace(",", "").strip()
+            mcap_f = float(raw_mcap) if raw_mcap is not None and pd.notna(raw_mcap) else 0.0
+            mcap = int(mcap_f) if pd.notna(mcap_f) and mcap_f > 0 else 0
+        except Exception:
+            mcap = 0
+        if symbol and (symbol not in out or mcap > out[symbol]):
+            out[symbol] = mcap
+    return out
+
+
+def _prepare_closed_frame(df: pd.DataFrame | None, *, min_rows: int = 55) -> pd.DataFrame | None:
+    if df is None:
+        return None
+    if len(df) <= int(min_rows):
+        return None
+    df_eval = df.iloc[:-1].copy()
+    if len(df_eval) < int(min_rows):
+        return None
+    return df_eval
+
+
+def _is_stable_base(base: str) -> bool:
+    b = str(base or "").upper().strip()
+    return bool(b and b in STABLE_BASES)
+
+
+def _cache_is_fresh(cache_ts: str | None, ttl_minutes: int) -> bool:
+    ts_parsed = pd.to_datetime(cache_ts, utc=True, errors="coerce")
+    if pd.isna(ts_parsed):
+        return False
+    try:
+        age_minutes = (pd.Timestamp.now(tz="UTC") - ts_parsed).total_seconds() / 60.0
+    except Exception:
+        return False
+    return age_minutes <= float(ttl_minutes)
+
+
+def _scan_attempt_is_stale(scan_ts: str | None, ttl_minutes: int) -> bool:
+    if not scan_ts:
+        return True
+    return not _cache_is_fresh(scan_ts, ttl_minutes)
+
+
+def _scan_sig_key(scan_sig) -> tuple:
+    if isinstance(scan_sig, tuple):
+        return scan_sig
+    if isinstance(scan_sig, list):
+        return tuple(scan_sig)
+    return (scan_sig,)
+
+
+def _last_good_registry(
+    raw,
+    *,
+    legacy_sig=None,
+    legacy_results: list[dict] | None = None,
+    legacy_ts: str | None = None,
+    legacy_mode: str | None = None,
+) -> dict[tuple, dict[str, object]]:
+    out: dict[tuple, dict[str, object]] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if not isinstance(value, dict):
+                continue
+            results = value.get("results")
+            if not isinstance(results, list) or not results:
+                continue
+            out[_scan_sig_key(key)] = {
+                "results": list(results),
+                "ts": str(value.get("ts") or ""),
+                "mode": str(value.get("mode") or ""),
+            }
+
+    if legacy_sig and isinstance(legacy_results, list) and legacy_results:
+        sig_key = _scan_sig_key(legacy_sig)
+        if sig_key not in out:
+            out[sig_key] = {
+                "results": list(legacy_results),
+                "ts": str(legacy_ts or ""),
+                "mode": str(legacy_mode or ""),
+            }
+    return out
+
+
+def _last_good_snapshot_for_sig(registry: dict[tuple, dict[str, object]], scan_sig):
+    return registry.get(_scan_sig_key(scan_sig))
+
+
+def _remember_last_good_snapshot(
+    registry: dict[tuple, dict[str, object]],
+    scan_sig,
+    results: list[dict],
+    ts: str,
+    mode: str,
+) -> dict[tuple, dict[str, object]]:
+    out = dict(registry) if isinstance(registry, dict) else {}
+    key = _scan_sig_key(scan_sig)
+    out.pop(key, None)
+    out[key] = {
+        "results": list(results),
+        "ts": str(ts or ""),
+        "mode": str(mode or ""),
+    }
+    while len(out) > _LAST_GOOD_HISTORY_LIMIT:
+        oldest_key = next(iter(out))
+        out.pop(oldest_key, None)
+    return out
+
+
+def _healthy_empty_registry(raw) -> dict[tuple, str]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[tuple, str] = {}
+    for key, value in raw.items():
+        out[_scan_sig_key(key)] = str(value)
+    return out
+
+
+def _healthy_empty_seen_for_sig(registry: dict[tuple, str], scan_sig) -> bool:
+    return _scan_sig_key(scan_sig) in registry
+
+
+def _remember_healthy_empty_sig(registry: dict[tuple, str], scan_sig) -> dict[tuple, str]:
+    out = dict(registry) if isinstance(registry, dict) else {}
+    key = _scan_sig_key(scan_sig)
+    if key in out:
+        out.pop(key, None)
+    out[key] = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    while len(out) > _HEALTHY_EMPTY_HISTORY_LIMIT:
+        oldest_key = next(iter(out))
+        out.pop(oldest_key, None)
+    return out
+
+
+def _clear_healthy_empty_sig(registry: dict[tuple, str], scan_sig) -> dict[tuple, str]:
+    out = dict(registry) if isinstance(registry, dict) else {}
+    out.pop(_scan_sig_key(scan_sig), None)
+    return out
+
+
+def _normalize_custom_bases(custom_bases: list[str] | tuple[str, ...], *, sort_output: bool = False) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw_symbol in custom_bases:
+        raw = str(raw_symbol or "").strip().upper()
+        if not raw:
+            continue
+        base = raw.split("/", 1)[0].strip() if "/" in raw else raw
+        symbol = canonical_base_symbol(base)
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        out.append(symbol)
+    if sort_output:
+        out = sorted(out)
+    return out
+
+
+def _market_scan_signature(
+    *,
+    timeframe: str,
+    direction_filter: str,
+    top_n: int,
+    exclude_stables: bool,
+    custom_bases_applied: list[str],
+) -> tuple:
+    custom_tuple = tuple(_normalize_custom_bases(custom_bases_applied, sort_output=True))
+    effective_top_n = 0 if custom_tuple else int(top_n)
+    return (
+        timeframe,
+        direction_filter,
+        effective_top_n,
+        bool(exclude_stables),
+        custom_tuple,
+    )
+
+
+def _source_requires_immediate_retry(source_label: str | None) -> bool:
+    source = str(source_label or "").strip().upper()
+    if not source:
+        return False
+    return source.startswith("CACHED") or "DEGRADED" in source
+
+
+def _recovery_retry_ttl_minutes(source_label: str | None) -> float | None:
+    if not _source_requires_immediate_retry(source_label):
+        return None
+    return float(_RECOVERY_RETRY_BACKOFF_SECONDS) / 60.0
+
+
+def _should_rescan_market(
+    *,
+    run_scan: bool,
+    last_sig,
+    scan_sig,
+    has_results_state: bool,
+    last_attempt_ts: str | None,
+    refresh_ttl_minutes: int,
+    current_source_label: str | None = None,
+) -> bool:
+    if run_scan:
+        return True
+    if not has_results_state:
+        return True
+    if _scan_sig_key(last_sig) != _scan_sig_key(scan_sig):
+        return True
+    recovery_ttl = _recovery_retry_ttl_minutes(current_source_label)
+    if recovery_ttl is not None:
+        return _scan_attempt_is_stale(last_attempt_ts, recovery_ttl)
+    return _scan_attempt_is_stale(last_attempt_ts, refresh_ttl_minutes)
+
+
+def _should_use_cached_scan(
+    *,
+    prev_results: list[dict],
+    cache_sig,
+    scan_sig,
+    cache_ts: str | None,
+    ttl_minutes: int,
+    scan_degraded: bool,
+    healthy_empty_seen: bool = False,
+) -> bool:
+    if not scan_degraded:
+        return False
+    if not prev_results:
+        return False
+    if healthy_empty_seen:
+        return False
+    if not cache_sig or tuple(cache_sig) != tuple(scan_sig):
+        return False
+    return _cache_is_fresh(cache_ts, ttl_minutes)
+
+
+def _should_use_major_fallback(
+    *,
+    working_symbols: list[str],
+    custom_mode_active: bool,
+    source_pair_count: int,
+    market_row_count: int,
+) -> bool:
+    if custom_mode_active:
+        return False
+    if working_symbols:
+        return False
+    return int(source_pair_count) == 0 and int(market_row_count) == 0
+
+
+def _pair_provenance_label(requested_symbol: str, actual_symbol: str | None, provider: str | None) -> str:
+    label = str(actual_symbol or requested_symbol or "").strip()
+    if not label:
+        label = str(requested_symbol or "").strip()
+    if str(provider or "").strip().lower() == "coingecko":
+        return f"{label} (CoinGecko fallback)"
+    return label
+
+
+def _custom_watchlist_enrichment_coverage(
+    working_symbols: list[str],
+    mcap_map: dict[str, int],
+) -> tuple[int, int]:
+    working_bases: list[str] = []
+    seen: set[str] = set()
+    for symbol in working_symbols:
+        base = _canonical_pair_base(symbol)
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        working_bases.append(base)
+    total = len(working_bases)
+    enriched = sum(1 for base in working_bases if int(mcap_map.get(base) or 0) > 0)
+    return enriched, total
+
+
+def _market_data_mode(
+    *,
+    has_market_rows: bool,
+    used_major_fallback: bool,
+    custom_mode_active: bool = False,
+    custom_watchlist_enriched_count: int = 0,
+    custom_watchlist_total_count: int = 0,
+) -> str:
+    if custom_mode_active:
+        if custom_watchlist_total_count > 0:
+            if custom_watchlist_enriched_count <= 0:
+                return "CUSTOM WATCHLIST MODE (EXCHANGE-ONLY)"
+            if custom_watchlist_enriched_count < custom_watchlist_total_count:
+                return "CUSTOM WATCHLIST MODE (PARTIAL ENRICHMENT)"
+        return "CUSTOM WATCHLIST MODE" if has_market_rows else "CUSTOM WATCHLIST MODE (EXCHANGE-ONLY)"
+    if used_major_fallback:
+        return "MAJOR FALLBACK MODE"
+    return "FULL MARKET MODE" if has_market_rows else "EXCHANGE-ONLY MODE"
+
+
+def _underfilled_universe_message(
+    *,
+    custom_mode_active: bool,
+    used_major_fallback: bool,
+    has_market_rows: bool,
+    working_count: int,
+    requested_n: int,
+) -> str:
+    if custom_mode_active:
+        return f"Custom mode active: scanning {working_count} / {requested_n} requested symbols."
+    if used_major_fallback:
+        return (
+            f"Hardcoded major fallback universe currently returned {working_count} eligible symbols "
+            f"(requested {requested_n}). This is not a full live top-volume market sweep."
+        )
+    if has_market_rows:
+        return (
+            f"Liquidity universe currently returned {working_count} eligible symbols "
+            f"(requested {requested_n}). Scanner remains strict to top-volume matched pairs."
+        )
+    return (
+        f"Exchange-only universe currently returned {working_count} eligible symbols "
+        f"(requested {requested_n}). Scanner is using exchange-ranked pairs because provider enrichment is unavailable."
+    )
+
+
+def _scan_universe_notice(
+    *,
+    candidate_count: int,
+    requested_n: int,
+    custom_mode_active: bool,
+    used_major_fallback: bool,
+    has_market_rows: bool,
+    source_pair_count: int = 0,
+    market_row_count: int = 0,
+    top_n: int = 0,
+) -> tuple[str, str] | None:
+    if int(candidate_count) > 0:
+        if int(candidate_count) < int(requested_n):
+            return (
+                "info",
+                _underfilled_universe_message(
+                    custom_mode_active=custom_mode_active,
+                    used_major_fallback=used_major_fallback,
+                    has_market_rows=has_market_rows,
+                    working_count=int(candidate_count),
+                    requested_n=requested_n,
+                ),
+            )
+        return None
+    if custom_mode_active:
+        return (
+            "warning",
+            "Custom watchlist did not produce eligible symbols after normalization/filtering. "
+            "Check symbol spelling (e.g., BTC, ETH, SOL) or disable stablecoin exclusion.",
+        )
+    if int(market_row_count) > 0 and int(source_pair_count) == 0:
+        return (
+            "warning",
+            "Provider liquidity universe was available, but strict exchange pair ranking could not resolve "
+            "usable USD/USDT feeds. Hardcoded major fallback was intentionally not used.",
+        )
+    return (
+        "info",
+        "Liquidity universe was available, but current filters left no eligible scanner symbols. "
+        "Hardcoded major fallback was intentionally not used. "
+        f"Source pairs: {int(source_pair_count)}, market rows: {int(market_row_count)}, "
+        f"requested top_n: {int(top_n)}.",
+    )
+
+
+def _dedupe_market_rows(market_data: list[dict]) -> list[dict]:
+    seen_symbols: set[str] = set()
+    unique_market_data: list[dict] = []
+    for coin in market_data:
+        coin_id = (coin.get("id") or "").lower()
+        symbol = (coin.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        if "wrapped" in coin_id:
+            continue
+        if symbol in seen_symbols:
+            continue
+        seen_symbols.add(symbol)
+        unique_market_data.append(coin)
+    return unique_market_data
+
+
+def _prepare_scan_market_enrichment(market_data: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    unique_market_data = _dedupe_market_rows(market_data)
+    mcap_map = _build_market_cap_map(market_data)
+    return unique_market_data, mcap_map
+
+
+def _sync_market_cap_cells(
+    rows: list[dict],
+    mcap_map: dict[str, int],
+    readable_market_cap,
+) -> list[dict]:
+    synced_rows: list[dict] = []
+    for row in rows:
+        out = dict(row)
+        base = canonical_base_symbol(str(out.get("Coin") or ""))
+        mcap_val = int(mcap_map.get(base) or 0) if base else 0
+        out["Market Cap ($)"] = readable_market_cap(mcap_val) if mcap_val else "—"
+        out["__mcap_val"] = mcap_val
+        synced_rows.append(out)
+    return synced_rows
+
+
+def _merge_market_cap_maps(
+    current: dict[str, int],
+    incoming: dict[str, int],
+) -> dict[str, int]:
+    merged = dict(current) if isinstance(current, dict) else {}
+    for base, raw_value in (incoming or {}).items():
+        try:
+            value = int(raw_value or 0)
+        except Exception:
+            value = 0
+        if value <= 0:
+            continue
+        if value > int(merged.get(base) or 0):
+            merged[base] = value
+    return merged
+
+
+def _remember_display_scan_state(
+    state: dict[str, object] | None,
+    *,
+    batch_results: list[dict],
+    candidate_count: int,
+    mcap_map: dict[str, int],
+    has_market_rows: bool,
+    source_pair_count: int,
+    market_row_count: int,
+) -> dict[str, object]:
+    out = dict(state) if isinstance(state, dict) else {
+        "candidate_count": 0,
+        "mcap_map": {},
+        "has_market_rows": False,
+        "source_pair_count": 0,
+        "market_row_count": 0,
+    }
+    if not batch_results:
+        return out
+    out["candidate_count"] = max(int(out.get("candidate_count") or 0), int(candidate_count))
+    out["mcap_map"] = _merge_market_cap_maps(
+        out.get("mcap_map") if isinstance(out.get("mcap_map"), dict) else {},
+        mcap_map,
+    )
+    out["has_market_rows"] = bool(out.get("has_market_rows")) or bool(has_market_rows)
+    out["source_pair_count"] = max(int(out.get("source_pair_count") or 0), int(source_pair_count))
+    out["market_row_count"] = max(int(out.get("market_row_count") or 0), int(market_row_count))
+    return out
+
+
+def _resolve_display_scan_state(
+    *,
+    fresh_results: list[dict],
+    current_candidate_count: int,
+    current_mcap_map: dict[str, int],
+    current_has_market_rows: bool,
+    current_source_pair_count: int,
+    current_market_row_count: int,
+    display_state: dict[str, object] | None,
+) -> dict[str, object]:
+    if fresh_results and isinstance(display_state, dict) and int(display_state.get("candidate_count") or 0) > 0:
+        return {
+            "candidate_count": int(display_state.get("candidate_count") or 0),
+            "mcap_map": dict(display_state.get("mcap_map") or {}),
+            "has_market_rows": bool(display_state.get("has_market_rows")),
+            "source_pair_count": int(display_state.get("source_pair_count") or 0),
+            "market_row_count": int(display_state.get("market_row_count") or 0),
+        }
+    return {
+        "candidate_count": int(current_candidate_count),
+        "mcap_map": dict(current_mcap_map or {}),
+        "has_market_rows": bool(current_has_market_rows),
+        "source_pair_count": int(current_source_pair_count),
+        "market_row_count": int(current_market_row_count),
+    }
+
+
+def _resolve_notice_scan_state(
+    *,
+    current_candidate_count: int,
+    current_has_market_rows: bool,
+    current_source_pair_count: int,
+    current_market_row_count: int,
+    display_state: dict[str, object] | None,
+) -> dict[str, object]:
+    out = {
+        "candidate_count": int(current_candidate_count),
+        "has_market_rows": bool(current_has_market_rows),
+        "source_pair_count": int(current_source_pair_count),
+        "market_row_count": int(current_market_row_count),
+    }
+    if not isinstance(display_state, dict):
+        return out
+    out["candidate_count"] = max(int(out["candidate_count"]), int(display_state.get("candidate_count") or 0))
+    out["has_market_rows"] = bool(out["has_market_rows"]) or bool(display_state.get("has_market_rows"))
+    out["source_pair_count"] = max(int(out["source_pair_count"]), int(display_state.get("source_pair_count") or 0))
+    out["market_row_count"] = max(int(out["market_row_count"]), int(display_state.get("market_row_count") or 0))
+    return out
+
+
+def _candidate_scan_symbols(
+    *,
+    usdt_symbols: list[str],
+    market_rows: list[dict],
+    exclude_stables: bool,
+    custom_bases_applied: list[str],
+) -> list[str]:
+    if custom_bases_applied:
+        candidates = [f"{b}/USDT" for b in custom_bases_applied]
+    else:
+        candidates = _filter_scan_symbols(usdt_symbols, market_rows)
+    if exclude_stables:
+        candidates = [s for s in candidates if "/" in s and not _is_stable_base(s.split("/")[0].upper())]
+    return candidates
+
+
+def _next_universe_fetch_n(
+    current_fetch_n: int,
+    *,
+    custom_mode_active: bool,
+    eligible_count: int,
+    requested_n: int,
+    max_fetch_n: int = 250,
+) -> int:
+    if custom_mode_active:
+        return int(current_fetch_n)
+    if int(eligible_count) >= int(requested_n):
+        return int(current_fetch_n)
+    if int(current_fetch_n) >= int(max_fetch_n):
+        return int(current_fetch_n)
+    next_fetch_n = max(
+        int(current_fetch_n * 1.5),
+        int(current_fetch_n) + max(int(requested_n), 25),
+    )
+    return min(int(max_fetch_n), int(next_fetch_n))
+
+
+def _scan_candidate_pool_size(
+    requested_n: int,
+    *,
+    custom_mode_active: bool,
+    max_pool_n: int = 250,
+) -> int:
+    requested = max(1, int(requested_n))
+    if custom_mode_active:
+        return requested
+    extra = min(25, max(10, requested // 2))
+    return min(int(max_pool_n), requested + extra)
+
+
+def _next_scan_pool_target(
+    current_pool_n: int,
+    *,
+    requested_n: int,
+    produced_n: int,
+    custom_mode_active: bool,
+    used_major_fallback: bool,
+    max_pool_n: int = 250,
+) -> int:
+    if custom_mode_active or used_major_fallback:
+        return int(current_pool_n)
+    if int(produced_n) >= int(requested_n):
+        return int(current_pool_n)
+    if int(current_pool_n) >= int(max_pool_n):
+        return int(current_pool_n)
+    shortfall = max(1, int(requested_n) - int(produced_n))
+    next_pool_n = max(
+        int(current_pool_n * 1.5),
+        int(current_pool_n) + max(shortfall, 25),
+    )
+    return min(int(max_pool_n), int(next_pool_n))
+
+
+def _next_refill_candidate_batch(
+    *,
+    candidate_pool: list[str],
+    attempted_symbols: set[str],
+    requested_n: int,
+    produced_n: int,
+    custom_mode_active: bool,
+    used_major_fallback: bool,
+) -> list[str]:
+    if custom_mode_active or used_major_fallback:
+        return []
+    if int(produced_n) >= int(requested_n):
+        return []
+    remaining = [symbol for symbol in candidate_pool if symbol not in attempted_symbols]
+    if not remaining:
+        return []
+    refill_target = _scan_candidate_pool_size(
+        max(1, int(requested_n) - int(produced_n)),
+        custom_mode_active=False,
+    )
+    return remaining[:refill_target]
+
+
+def _delta_fallback_symbol(
+    requested_symbol: str,
+    actual_symbol: str | None,
+    source_provider: str | None,
+) -> str | None:
+    if str(source_provider or "").strip().lower() != "exchange":
+        return None
+    symbol = str(actual_symbol or requested_symbol or "").strip()
+    return symbol or None
+
+
+def _fetch_ticker_delta_once(get_price_change, fallback_symbol: str | None, fetch_lock: Lock | None = None):
+    symbol = str(fallback_symbol or "").strip()
+    if not symbol:
+        return None
+    if fetch_lock is None:
+        return get_price_change(symbol)
+    with fetch_lock:
+        return get_price_change(symbol)
 
 
 def render(ctx: dict) -> None:
@@ -38,6 +784,7 @@ def render(ctx: dict) -> None:
     get_major_ohlcv_bundle = get_ctx(ctx, "get_major_ohlcv_bundle")
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     get_top_volume_usdt_symbols = get_ctx(ctx, "get_top_volume_usdt_symbols")
+    get_market_cap_rows_for_symbols = get_ctx(ctx, "get_market_cap_rows_for_symbols")
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     analyse = get_ctx(ctx, "analyse")
     get_scalping_entry_target = get_ctx(ctx, "get_scalping_entry_target")
@@ -122,18 +869,16 @@ def render(ctx: dict) -> None:
     btc_change = top_snapshot.get("btc_change")
     eth_change = top_snapshot.get("eth_change")
 
-    # Display headline and subtitle
-    st.markdown("<h1 class='title'>Crypto Market Intelligence Hub</h1>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='panel-box'>"
-        f"<b class='market-intro-title' style='color:{ACCENT};'>What does this tab show?</b>"
-        f"<p class='market-intro-body' style='color:{TEXT_MUTED};'>"
-        f"Your market overview dashboard. Shows live BTC/ETH prices, total market cap, "
-        f"{_tip('Fear & Greed Index', 'A 0-100 score measuring market sentiment. 0 = Extreme Fear (potential accumulation zone), 100 = Extreme Greed (potential distribution zone). Based on volatility, volume, social media, and surveys.')} "
-        f"and {_tip('BTC Dominance', 'Percentage of total crypto market cap that belongs to Bitcoin. Rising dominance = money flowing into BTC (risk-off). Falling = altcoin season.')}. "
-        f"Top coins are dynamically selected by 24h volume from CoinGecko and scored with real-time technical signals.</p>"
-        f"</div>",
-        unsafe_allow_html=True,
+    render_page_header(
+        st,
+        title="Crypto Market Intelligence Hub",
+        hero=True,
+        intro_html=(
+            f"Your market overview dashboard. Shows live BTC/ETH prices, total market cap, "
+            f"{_tip('Fear & Greed Index', 'A 0-100 score measuring market sentiment. 0 = Extreme Fear (potential accumulation zone), 100 = Extreme Greed (potential distribution zone). Based on volatility, volume, social media, and surveys.')} "
+            f"and {_tip('BTC Dominance', 'Percentage of total crypto market cap that belongs to Bitcoin. Rising dominance = money flowing into BTC (risk-off). Falling = altcoin season.')}. "
+            f"The scanner runs either on the live top-liquidity universe or on your custom watchlist, then scores symbols with real-time technical signals."
+        ),
     )
 
     # Determine which timeframe to use for market bias gauges. We rely on
@@ -242,18 +987,24 @@ def render(ctx: dict) -> None:
         # Initialise probabilities at a neutral value of 0.5.  If data
         # retrieval or training fails for an asset, the neutral prior will
         # prevent it from skewing the combined outlook.
-        if btc_df_behav is not None and not btc_df_behav.empty:
-            btc_prob, _, _ = ml_ensemble_predict(btc_df_behav)
-        if eth_df_behav is not None and not eth_df_behav.empty:
-            eth_prob, _, _ = ml_ensemble_predict(eth_df_behav)
-        if bnb_df_behav is not None and not bnb_df_behav.empty:
-            bnb_prob, _, _ = ml_ensemble_predict(bnb_df_behav)
-        if sol_df_behav is not None and not sol_df_behav.empty:
-            sol_prob, _, _ = ml_ensemble_predict(sol_df_behav)
-        if ada_df_behav is not None and not ada_df_behav.empty:
-            ada_prob, _, _ = ml_ensemble_predict(ada_df_behav)
-        if xrp_df_behav is not None and not xrp_df_behav.empty:
-            xrp_prob, _, _ = ml_ensemble_predict(xrp_df_behav)
+        btc_eval = _prepare_closed_frame(btc_df_behav, min_rows=60)
+        eth_eval = _prepare_closed_frame(eth_df_behav, min_rows=60)
+        bnb_eval = _prepare_closed_frame(bnb_df_behav, min_rows=60)
+        sol_eval = _prepare_closed_frame(sol_df_behav, min_rows=60)
+        ada_eval = _prepare_closed_frame(ada_df_behav, min_rows=60)
+        xrp_eval = _prepare_closed_frame(xrp_df_behav, min_rows=60)
+        if btc_eval is not None:
+            btc_prob, _, _ = ml_ensemble_predict(btc_eval)
+        if eth_eval is not None:
+            eth_prob, _, _ = ml_ensemble_predict(eth_eval)
+        if bnb_eval is not None:
+            bnb_prob, _, _ = ml_ensemble_predict(bnb_eval)
+        if sol_eval is not None:
+            sol_prob, _, _ = ml_ensemble_predict(sol_eval)
+        if ada_eval is not None:
+            ada_prob, _, _ = ml_ensemble_predict(ada_eval)
+        if xrp_eval is not None:
+            xrp_prob, _, _ = ml_ensemble_predict(xrp_eval)
         # Compute a weighted probability across all assets.  Prefer market-cap
         # dominance weights; if dominance enrichment is unavailable, fall back
         # to equal weights so the score remains usable in exchange-only mode.
@@ -626,15 +1377,16 @@ def render(ctx: dict) -> None:
             t = re.sub(r"[^A-Z0-9]", "", t)
             if len(t) < 2 or len(t) > 15:
                 continue
-            if t in seen:
+            canonical = canonical_base_symbol(t)
+            if not canonical or canonical in seen:
                 continue
-            seen.add(t)
-            out.append(t)
+            seen.add(canonical)
+            out.append(canonical)
             if len(out) >= int(limit):
                 break
         return out
 
-    custom_bases_applied = list(st.session_state.get("market_custom_bases_applied", []))
+    custom_bases_applied = _normalize_custom_bases(list(st.session_state.get("market_custom_bases_applied", [])))
     custom_mode_active = bool(custom_bases_applied)
 
     controls = st.columns([1.08, 1.18, 0.90, 1.52, 0.92], gap="medium")
@@ -674,7 +1426,7 @@ def render(ctx: dict) -> None:
             help="Optional watchlist mode. Enter up to 10 symbols separated by comma.",
         )
     with controls[4]:
-        run_scan = st.button("Run Scan", width="stretch")
+        run_scan = st.button("Run Scan", type="primary", width="stretch")
         clear_custom = st.button(
             "Clear Custom",
             width="stretch",
@@ -714,15 +1466,6 @@ def render(ctx: dict) -> None:
     )
     CACHE_TTL_MINUTES = 15
     gate_min_rr, gate_min_adx, gate_min_strength = scalp_gate_thresholds(timeframe)
-
-    STABLE_BASES = {
-        "USDT", "USDC", "BUSD", "DAI", "TUSD", "USDE", "FDUSD", "PYUSD",
-        "RLUSD", "USDP", "GUSD", "EURS", "EURC",
-    }
-
-    def _is_stable_base(base: str) -> bool:
-        b = str(base or "").upper().strip()
-        return bool(b and b in STABLE_BASES)
 
     def _fmt_price(v: float) -> str:
         try:
@@ -815,24 +1558,10 @@ def render(ctx: dict) -> None:
             return "SKIP"
         return str(raw_action or "").strip()
     def _setup_confirm_class(value: str) -> str:
-        s = str(value or "").strip().upper()
-        if "TREND+AI" in s:
-            return "ENTER_TREND_AI"
-        if s == "TREND" or s == "TREND-LED" or "TREND-LED" in s:
-            return "ENTER_TREND_LED"
-        if s == "AI" or s == "AI-LED" or "AI-LED" in s:
-            return "ENTER_AI_LED"
-        return normalize_action_class(s)
+        return _setup_confirm_class_key(value)
 
     def _setup_confirm_rank(value: str) -> int:
-        cls = _setup_confirm_class(value)
-        if cls.startswith("ENTER_"):
-            return 3
-        if cls == "WATCH":
-            return 2
-        if cls == "SKIP":
-            return 1
-        return 0
+        return _setup_confirm_priority(value)
 
     def _tone_for_text(text: str, *, neutral_tone: str = "muted") -> str:
         s = str(text).strip().upper()
@@ -1435,18 +2164,28 @@ def render(ctx: dict) -> None:
             unsafe_allow_html=True,
         )
 
-    scan_sig = (
-        timeframe,
-        direction_filter,
-        int(top_n),
-        bool(exclude_stables),
-        tuple(custom_bases_applied),
+    scan_sig = _market_scan_signature(
+        timeframe=timeframe,
+        direction_filter=direction_filter,
+        top_n=int(top_n),
+        exclude_stables=bool(exclude_stables),
+        custom_bases_applied=custom_bases_applied,
     )
     last_sig = st.session_state.get("market_scan_sig")
-    should_scan = run_scan or (last_sig != scan_sig) or ("market_scan_results" not in st.session_state)
+    last_attempt_ts = str(st.session_state.get(_LAST_SCAN_ATTEMPT_TS_KEY) or "")
+    current_source_label = str(st.session_state.get("market_scan_source", "LIVE") or "LIVE")
+    should_scan = _should_rescan_market(
+        run_scan=bool(run_scan),
+        last_sig=last_sig,
+        scan_sig=scan_sig,
+        has_results_state=("market_scan_results" in st.session_state),
+        last_attempt_ts=last_attempt_ts,
+        refresh_ttl_minutes=_SCAN_REFRESH_TTL_MINUTES,
+        current_source_label=current_source_label,
+    )
 
     results: list[dict] = st.session_state.get("market_scan_results", [])
-    source_label = st.session_state.get("market_scan_source", "LIVE")
+    source_label = current_source_label
     data_mode = st.session_state.get("market_data_mode", "FULL MARKET MODE")
 
     # Fetch top coins
@@ -1457,94 +2196,87 @@ def render(ctx: dict) -> None:
             else f"Scanning {top_n} coins ({direction_filter}) [{timeframe}] ..."
         )
         with st.spinner(spinner_label):
-            universe_fetch_n = max(top_n, 200) if custom_mode_active else max(top_n, 50)
-            usdt_symbols, market_data = get_top_volume_usdt_symbols(universe_fetch_n)
-
-            # skip "wrapped"
-            seen_symbols = set()
-            unique_market_data = []
-            for coin in market_data:
-                coin_id = (coin.get("id") or "").lower()
-                symbol = (coin.get("symbol") or "").upper()
-                if not symbol:
-                    continue
-                if "wrapped" in coin_id:
-                    continue
-                if symbol in seen_symbols:
-                    continue
-                seen_symbols.add(symbol)
-                unique_market_data.append(coin)
-
-            # Market cap map
-            mcap_map = {}
-            for coin in unique_market_data:
-                symbol = (coin.get("symbol") or "").upper()
-                raw_mcap = coin.get("market_cap")
-                try:
-                    if isinstance(raw_mcap, str):
-                        raw_mcap = raw_mcap.replace(",", "").strip()
-                    mcap_f = float(raw_mcap) if raw_mcap is not None and pd.notna(raw_mcap) else 0.0
-                    mcap = int(mcap_f) if pd.notna(mcap_f) and mcap_f > 0 else 0
-                except Exception:
-                    mcap = 0
-                if symbol and (symbol not in mcap_map or mcap > mcap_map[symbol]):
-                    mcap_map[symbol] = mcap
-            is_exchange_only_mode = len(unique_market_data) == 0
-
             requested_n = len(custom_bases_applied) if custom_mode_active else int(top_n)
+            scan_pool_n = _scan_candidate_pool_size(
+                requested_n,
+                custom_mode_active=custom_mode_active,
+            )
+            unique_market_data: list[dict] = []
+            mcap_map: dict[str, int] = {}
+            candidate_symbol_pool: list[str] = []
+            working_symbols: list[str] = []
+            usdt_symbols: list[str] = []
+            provider_fetch_n: int | None = None
 
-            if custom_mode_active:
-                working_symbols = [f"{b}/USDT" for b in custom_bases_applied]
-            else:
-                # USDT match
-                if unique_market_data:
-                    valid_bases = {(c.get("symbol") or "").upper() for c in unique_market_data}
-                    working_symbols = [s for s in usdt_symbols if s.split("/")[0].upper() in valid_bases]
-                else:
-                    # If market rows are empty (e.g. CoinGecko rate-limit), keep scan alive
-                    # using exchange pairs directly.
-                    working_symbols = list(usdt_symbols)
-
-            if exclude_stables:
-                working_symbols = [s for s in working_symbols if not _is_stable_base(s.split("/")[0].upper())]
-
-            if custom_mode_active:
-                working_symbols = working_symbols[:len(custom_bases_applied)]
-            else:
-                working_symbols = working_symbols[:top_n]
-
-            if not working_symbols and not custom_mode_active:
-                # Hard fallback universe for temporary upstream outages.
-                working_symbols = major_fallback_symbols[: min(top_n, len(major_fallback_symbols))]
-                if working_symbols:
-                    st.info(
-                        "Primary market feed is temporarily unavailable. "
-                        "Scanner switched to major fallback universe."
+            def _load_noncustom_scan_universe(
+                target_pool_n: int,
+                *,
+                current_fetch_n: int | None = None,
+            ) -> tuple[int, list[str], list[dict], dict[str, int], list[str]]:
+                provider_fetch_n_local = min(250, max(int(top_n), 50))
+                if current_fetch_n is not None:
+                    provider_fetch_n_local = max(provider_fetch_n_local, int(current_fetch_n))
+                while True:
+                    usdt_symbols_local, market_data_local = get_top_volume_usdt_symbols(provider_fetch_n_local)
+                    unique_market_data_local, mcap_map_local = _prepare_scan_market_enrichment(market_data_local)
+                    eligible_symbols_local = _candidate_scan_symbols(
+                        usdt_symbols=usdt_symbols_local,
+                        market_rows=unique_market_data_local,
+                        exclude_stables=bool(exclude_stables),
+                        custom_bases_applied=custom_bases_applied,
                     )
-            data_mode = "EXCHANGE-ONLY MODE" if is_exchange_only_mode else "FULL MARKET MODE"
-            st.session_state["market_data_mode"] = data_mode
-
-            if not working_symbols:
-                if custom_mode_active:
-                    st.warning(
-                        "Custom watchlist did not produce eligible symbols after normalization/filtering. "
-                        "Check symbol spelling (e.g., BTC, ETH, SOL) or disable stablecoin exclusion."
+                    next_fetch_n_local = _next_universe_fetch_n(
+                        provider_fetch_n_local,
+                        custom_mode_active=False,
+                        eligible_count=len(eligible_symbols_local),
+                        requested_n=target_pool_n,
                     )
-                else:
-                    st.warning(
-                        "No scanner symbols matched current market filters. "
-                        f"Source pairs: {len(usdt_symbols)}, market rows: {len(unique_market_data)}, "
-                        f"requested top_n: {top_n}."
+                    candidate_symbol_pool_local = eligible_symbols_local[:target_pool_n]
+                    if next_fetch_n_local == provider_fetch_n_local:
+                        return (
+                            provider_fetch_n_local,
+                            usdt_symbols_local,
+                            unique_market_data_local,
+                            mcap_map_local,
+                            candidate_symbol_pool_local,
                         )
-            elif len(working_symbols) < requested_n:
-                if custom_mode_active:
-                    st.info(
-                        f"Custom mode active: scanning {len(working_symbols)} / {requested_n} requested symbols."
-                    )
-                else:
-                    st.info(
-                        f"Liquidity universe currently returned {len(working_symbols)} eligible symbols "
-                        f"(requested {top_n}). Scanner remains strict to top-volume matched pairs."
+                    provider_fetch_n_local = next_fetch_n_local
+
+            if custom_mode_active:
+                unique_market_data, mcap_map = _prepare_scan_market_enrichment(
+                    get_market_cap_rows_for_symbols(tuple(custom_bases_applied), vs_currency="usd")
+                )
+                usdt_symbols = [f"{base}/USDT" for base in custom_bases_applied]
+                candidate_symbol_pool = _candidate_scan_symbols(
+                    usdt_symbols=usdt_symbols,
+                    market_rows=[],
+                    exclude_stables=bool(exclude_stables),
+                    custom_bases_applied=custom_bases_applied,
+                )[:scan_pool_n]
+                working_symbols = candidate_symbol_pool[:requested_n]
+            else:
+                provider_fetch_n, usdt_symbols, unique_market_data, mcap_map, candidate_symbol_pool = (
+                    _load_noncustom_scan_universe(scan_pool_n)
+                )
+                working_symbols = candidate_symbol_pool[:requested_n]
+
+            has_market_rows = bool(unique_market_data)
+            used_major_fallback = False
+
+            if _should_use_major_fallback(
+                working_symbols=working_symbols,
+                custom_mode_active=custom_mode_active,
+                source_pair_count=len(usdt_symbols),
+                market_row_count=len(unique_market_data),
+            ):
+                # Hard fallback universe for temporary upstream outages.
+                used_major_fallback = True
+                candidate_symbol_pool = major_fallback_symbols[: min(top_n, len(major_fallback_symbols))]
+                working_symbols = list(candidate_symbol_pool)
+                if working_symbols:
+                    st.warning(
+                        "Primary liquidity universe could not produce usable symbols. "
+                        "Scanner switched to a hardcoded major fallback universe."
                     )
 
             # Two-phase scan:
@@ -1556,18 +2288,13 @@ def render(ctx: dict) -> None:
                 with fetch_lock:
                     return fetch_ohlcv(sym, timeframe, limit=500)
 
-            fetched_frames: list[tuple[str, pd.DataFrame]] = []
-            for sym in working_symbols:
-                df = _fetch_ohlcv_thread_safe(sym)
-                if df is None or len(df) <= 60:
-                    continue
-                # Align analysis and scalp planning on same closed-candle context.
-                df_eval = df.iloc[:-1].copy()
-                if df_eval is None or len(df_eval) <= 55:
-                    continue
-                fetched_frames.append((sym, df_eval))
-
-            def _scan_one(sym: str, df_eval: pd.DataFrame) -> dict | None:
+            def _scan_one(
+                sym: str,
+                df_eval: pd.DataFrame,
+                pair_label: str,
+                actual_symbol: str,
+                source_provider: str,
+            ) -> dict | None:
                 """Analyse a single symbol for the scanner. Returns a row dict or None."""
 
                 _ai_prob, ai_direction, ai_details = ml_ensemble_predict(df_eval)
@@ -1577,7 +2304,7 @@ def render(ctx: dict) -> None:
                 model_votes = list(ai_details.get("model_votes", [])) if isinstance(ai_details, dict) else []
                 latest_closed = df_eval.iloc[-1]
 
-                base = sym.split('/')[0].upper()
+                base = _canonical_pair_base(sym)
                 mcap_val = mcap_map.get(base)
                 # Keep price semantics aligned with all decision metrics (closed-candle context).
                 price = float(latest_closed["close"])
@@ -1594,16 +2321,27 @@ def render(ctx: dict) -> None:
                     _debug(f"Delta candle fallback for {sym} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
                     price_change = None
                 # Safety fallback (rare): if candle delta is unavailable, use ticker percentage.
+                fallback_delta_symbol = _delta_fallback_symbol(sym, actual_symbol, source_provider)
                 if price_change is None:
-                    try:
-                        # Protect shared exchange ticker fallback under the same lock.
-                        with fetch_lock:
-                            price_change = get_price_change(sym)
-                        if price_change is not None:
-                            delta_note = "Fallback source: ticker percentage (closed-candle delta unavailable)."
-                    except Exception as e:
-                        _debug(f"Ticker delta fallback failed for {sym} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
-                        price_change = None
+                    if fallback_delta_symbol:
+                        try:
+                            # Protect shared exchange ticker fallback under the same lock.
+                            price_change = _fetch_ticker_delta_once(
+                                get_price_change,
+                                fallback_delta_symbol,
+                                fetch_lock,
+                            )
+                            if price_change is not None:
+                                delta_note = (
+                                    f"Fallback source: exchange ticker percentage ({fallback_delta_symbol}) "
+                                    "(closed-candle delta unavailable)."
+                                )
+                        except Exception as e:
+                            _debug(
+                                f"Ticker delta fallback failed for {fallback_delta_symbol} ({timeframe}): "
+                                f"{e.__class__.__name__}: {str(e).strip()}"
+                            )
+                            price_change = None
 
                 a = analyse(df_eval)
                 signal, volume_spike = a.signal, a.volume_spike
@@ -1670,7 +2408,10 @@ def render(ctx: dict) -> None:
                     float(directional_agreement),
                     float(consensus_agreement),
                 )
+                ai_fallback_note = _ai_fallback_note(ai_details if isinstance(ai_details, dict) else None)
                 ai_display = f"{ai_display} ({consensus_votes}/3)"
+                if ai_fallback_note:
+                    ai_display += " *"
                 ai_note = (
                     f"AI direction: {direction_label(ai_direction)} | "
                     f"Displayed votes: {consensus_votes}/3 | "
@@ -1680,6 +2421,8 @@ def render(ctx: dict) -> None:
                 if model_votes:
                     vote_labels = [direction_label(str(v)) for v in model_votes]
                     ai_note += f" | Model votes: {', '.join(vote_labels)}"
+                if ai_fallback_note:
+                    ai_note += f" | {ai_fallback_note}"
 
                 _emoji_map = {"HIGH": "🟢", "MEDIUM": "🟡", "TREND": "🟡", "WEAK": "⚪", "CONFLICT": "🔴"}
                 strength_val = float(strength_from_bias(float(bias_score_v)))
@@ -1790,7 +2533,7 @@ def render(ctx: dict) -> None:
 
                 return {
                     'Coin': base,
-                    '__pair': sym,
+                    '__pair': pair_label,
                     'Price ($)': _fmt_price(price),
                     'Δ (%)': format_delta(price_change) if price_change is not None else '',
                     '__delta_note': delta_note if price_change is not None else "",
@@ -1838,108 +2581,316 @@ def render(ctx: dict) -> None:
                     '__strength_val': strength_val,
                 }
 
-            # Parallel analysis pass over fetched frames
-            fresh_results: list[dict] = []
-            scan_errors: list[tuple[str, str]] = []
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                futures = {executor.submit(_scan_one, sym, df_eval): sym for sym, df_eval in fetched_frames}
-                for future in as_completed(futures):
-                    try:
-                        row = future.result()
-                        if row is not None:
-                            fresh_results.append(row)
-                    except Exception as e:
-                        sym = futures[future]
-                        err = f"{e.__class__.__name__}: {str(e).strip()}".strip(": ")
-                        scan_errors.append((sym, err))
-                        _debug(f"Scanner error for {sym}: {err}")
+            def _scan_candidate_batch(symbol_batch: list[str]) -> tuple[list[dict], list[tuple[str, str]], int]:
+                fetched_frames: list[tuple[str, pd.DataFrame, str, str, str]] = []
+                fetch_failures: list[tuple[str, str]] = []
+                for sym in symbol_batch:
+                    df = _fetch_ohlcv_thread_safe(sym)
+                    if df is None:
+                        fetch_failures.append((sym, "no OHLCV data"))
+                        continue
+                    actual_symbol = str(df.attrs.get("source_symbol") or "").strip() or sym
+                    source_provider = str(df.attrs.get("source_provider") or "").strip() or "exchange"
+                    pair_label = _pair_provenance_label(
+                        sym,
+                        actual_symbol,
+                        source_provider,
+                    )
+                    if len(df) <= 60:
+                        fetch_failures.append((pair_label, f"insufficient candles ({len(df)})"))
+                        continue
+                    # Align analysis and scalp planning on same closed-candle context.
+                    df_eval = _prepare_closed_frame(df, min_rows=56)
+                    if df_eval is None:
+                        fetch_failures.append((pair_label, "insufficient closed-candle history"))
+                        continue
+                    fetched_frames.append((sym, df_eval, pair_label, actual_symbol, source_provider))
 
-            if scan_errors:
-                st.session_state["market_scan_error_count"] = len(scan_errors)
-                sample = ", ".join(f"{sym} ({err})" for sym, err in scan_errors[:3])
-                more = "" if len(scan_errors) <= 3 else f" +{len(scan_errors) - 3} more"
+                batch_results: list[dict] = []
+                scan_errors: list[tuple[str, str]] = []
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    futures = {
+                        executor.submit(_scan_one, sym, df_eval, pair_label, actual_symbol, source_provider): pair_label
+                        for sym, df_eval, pair_label, actual_symbol, source_provider in fetched_frames
+                    }
+                    for future in as_completed(futures):
+                        try:
+                            row = future.result()
+                            if row is not None:
+                                batch_results.append(row)
+                        except Exception as e:
+                            pair_label = futures[future]
+                            err = f"{e.__class__.__name__}: {str(e).strip()}".strip(": ")
+                            scan_errors.append((pair_label, err))
+                            _debug(f"Scanner error for {pair_label}: {err}")
+                return batch_results, [*fetch_failures, *scan_errors], len(fetched_frames)
+
+            fresh_results: list[dict] = []
+            skipped_symbols: list[tuple[str, str]] = []
+            total_fetched_frame_count = 0
+            attempted_symbols: set[str] = set()
+            display_scan_state: dict[str, object] | None = None
+            scan_pool_target_n = int(scan_pool_n)
+            pending_batch = list(working_symbols)
+            while True:
+                if pending_batch:
+                    batch_results, batch_skipped, batch_fetched = _scan_candidate_batch(pending_batch)
+                    fresh_results.extend(batch_results)
+                    skipped_symbols.extend(batch_skipped)
+                    total_fetched_frame_count += batch_fetched
+                    attempted_symbols.update(pending_batch)
+                    display_scan_state = _remember_display_scan_state(
+                        display_scan_state,
+                        batch_results=batch_results,
+                        candidate_count=len(candidate_symbol_pool),
+                        mcap_map=mcap_map,
+                        has_market_rows=bool(unique_market_data),
+                        source_pair_count=len(usdt_symbols),
+                        market_row_count=len(unique_market_data),
+                    )
+
+                if len(fresh_results) >= requested_n:
+                    break
+
+                pending_batch = _next_refill_candidate_batch(
+                    candidate_pool=candidate_symbol_pool,
+                    attempted_symbols=attempted_symbols,
+                    requested_n=requested_n,
+                    produced_n=len(fresh_results),
+                    custom_mode_active=custom_mode_active,
+                    used_major_fallback=used_major_fallback,
+                )
+                if pending_batch:
+                    continue
+
+                next_pool_target_n = _next_scan_pool_target(
+                    scan_pool_target_n,
+                    requested_n=requested_n,
+                    produced_n=len(fresh_results),
+                    custom_mode_active=custom_mode_active,
+                    used_major_fallback=used_major_fallback,
+                )
+                if next_pool_target_n <= scan_pool_target_n:
+                    break
+                scan_pool_target_n = next_pool_target_n
+
+                provider_fetch_n, usdt_symbols, unique_market_data, mcap_map, candidate_symbol_pool = (
+                    _load_noncustom_scan_universe(
+                        scan_pool_target_n,
+                        current_fetch_n=provider_fetch_n,
+                    )
+                )
+                pending_batch = _next_refill_candidate_batch(
+                    candidate_pool=candidate_symbol_pool,
+                    attempted_symbols=attempted_symbols,
+                    requested_n=requested_n,
+                    produced_n=len(fresh_results),
+                    custom_mode_active=custom_mode_active,
+                    used_major_fallback=used_major_fallback,
+                )
+                if not pending_batch and scan_pool_target_n >= 250:
+                    break
+
+            display_state = _resolve_display_scan_state(
+                fresh_results=fresh_results,
+                current_candidate_count=len(candidate_symbol_pool),
+                current_mcap_map=mcap_map,
+                current_has_market_rows=bool(unique_market_data),
+                current_source_pair_count=len(usdt_symbols),
+                current_market_row_count=len(unique_market_data),
+                display_state=display_scan_state,
+            )
+            notice_state = _resolve_notice_scan_state(
+                current_candidate_count=len(candidate_symbol_pool),
+                current_has_market_rows=bool(unique_market_data),
+                current_source_pair_count=len(usdt_symbols),
+                current_market_row_count=len(unique_market_data),
+                display_state=display_scan_state,
+            )
+            display_mcap_map = dict(display_state.get("mcap_map") or {})
+            has_market_rows = bool(display_state.get("has_market_rows"))
+            custom_enriched_count, custom_total_count = _custom_watchlist_enrichment_coverage(
+                candidate_symbol_pool,
+                display_mcap_map,
+            ) if custom_mode_active else (0, 0)
+            data_mode = _market_data_mode(
+                has_market_rows=has_market_rows,
+                used_major_fallback=used_major_fallback,
+                custom_mode_active=custom_mode_active,
+                custom_watchlist_enriched_count=custom_enriched_count,
+                custom_watchlist_total_count=custom_total_count,
+            )
+            st.session_state["market_data_mode"] = data_mode
+
+            universe_notice = _scan_universe_notice(
+                candidate_count=int(notice_state.get("candidate_count") or 0),
+                requested_n=requested_n,
+                custom_mode_active=custom_mode_active,
+                used_major_fallback=used_major_fallback,
+                has_market_rows=bool(notice_state.get("has_market_rows")),
+                source_pair_count=int(notice_state.get("source_pair_count") or 0),
+                market_row_count=int(notice_state.get("market_row_count") or 0),
+                top_n=int(top_n),
+            )
+            if universe_notice is not None:
+                level, message = universe_notice
+                if level == "warning":
+                    st.warning(message)
+                else:
+                    st.info(message)
+
+            if skipped_symbols:
+                st.session_state["market_scan_error_count"] = len(skipped_symbols)
+                sample = ", ".join(f"{sym} ({err})" for sym, err in skipped_symbols[:3])
+                more = "" if len(skipped_symbols) <= 3 else f" +{len(skipped_symbols) - 3} more"
                 st.warning(
-                    "Some symbols were skipped due to temporary fetch/analysis errors. "
-                    f"Skipped: {len(scan_errors)} | Sample: {sample}{more}."
+                    "Live scan ran in degraded mode and skipped some symbols. "
+                    f"Skipped: {len(skipped_symbols)} / {len(attempted_symbols)} | Sample: {sample}{more}."
                 )
             else:
                 st.session_state["market_scan_error_count"] = 0
 
-            prev_results = st.session_state.get("market_scan_results", [])
-            # Sort by execution priority: Setup Confirm > Structure > Strength
-            setup_rank = {"FULL": 4, "TREND": 3, "EARLY": 2, "NONE": 1}
+            scan_degraded = bool(skipped_symbols) or (bool(attempted_symbols) and total_fetched_frame_count == 0)
+
+            last_good_registry = _last_good_registry(
+                st.session_state.get(_LAST_GOOD_REGISTRY_KEY),
+                legacy_sig=st.session_state.get(_LAST_GOOD_SIG_KEY),
+                legacy_results=st.session_state.get(_LAST_GOOD_RESULTS_KEY),
+                legacy_ts=st.session_state.get(_LAST_GOOD_TS_KEY),
+                legacy_mode=st.session_state.get(_LAST_GOOD_MODE_KEY),
+            )
+            if last_good_registry:
+                st.session_state[_LAST_GOOD_REGISTRY_KEY] = last_good_registry
+            else:
+                st.session_state.pop(_LAST_GOOD_REGISTRY_KEY, None)
+            last_good_snapshot = _last_good_snapshot_for_sig(last_good_registry, scan_sig)
+            last_good_results = (
+                list(last_good_snapshot.get("results", []))
+                if isinstance(last_good_snapshot, dict)
+                else []
+            )
             limit_n = len(custom_bases_applied) if custom_mode_active else int(top_n)
-            fresh_results = sorted(
-                fresh_results,
-                key=lambda x: (
-                    -action_rank(str(x.get("__action_raw", x.get("Setup Confirm", "")))),
-                    -setup_rank.get(str(x.get("__structure_state")), 0),
-                    -float(x.get("__strength_val", 0.0)),
-                    -float(x.get("__mcap_val", 0)),
-                    str(x.get("Coin", "")),
-                ),
-            )[:limit_n]
+            fresh_results = _sync_market_cap_cells(fresh_results, display_mcap_map, readable_market_cap)
+            # Sort by setup priority: TREND+AI > TREND-led > AI-led > WATCH > SKIP,
+            # then structure, strength and market-cap tie-breakers.
+            fresh_results = sorted(fresh_results, key=_market_result_priority_key)[:limit_n]
             if fresh_results:
                 st.session_state["market_scan_results"] = fresh_results
                 st.session_state["market_scan_sig"] = scan_sig
-                st.session_state["market_scan_cache_ts"] = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-                st.session_state["market_scan_cache_sig"] = scan_sig
-                st.session_state["market_scan_source"] = "LIVE"
+                current_source = "LIVE (DEGRADED)" if scan_degraded else "LIVE"
+                st.session_state["market_scan_source"] = current_source
                 st.session_state["market_data_mode"] = data_mode
-                source_label = "LIVE"
+                source_label = current_source
                 results = fresh_results
+                if not scan_degraded:
+                    ts_now = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+                    last_good_registry = _remember_last_good_snapshot(
+                        last_good_registry,
+                        scan_sig,
+                        fresh_results,
+                        ts_now,
+                        data_mode,
+                    )
+                    st.session_state[_LAST_GOOD_REGISTRY_KEY] = last_good_registry
+                    st.session_state[_LAST_GOOD_RESULTS_KEY] = fresh_results
+                    st.session_state[_LAST_GOOD_SIG_KEY] = scan_sig
+                    st.session_state[_LAST_GOOD_TS_KEY] = ts_now
+                    st.session_state[_LAST_GOOD_MODE_KEY] = data_mode
+                    healthy_empty_registry = _clear_healthy_empty_sig(
+                        _healthy_empty_registry(st.session_state.get(_LAST_HEALTHY_EMPTY_SIG_KEY)),
+                        scan_sig,
+                    )
+                    if healthy_empty_registry:
+                        st.session_state[_LAST_HEALTHY_EMPTY_SIG_KEY] = healthy_empty_registry
+                    else:
+                        st.session_state.pop(_LAST_HEALTHY_EMPTY_SIG_KEY, None)
             else:
                 st.session_state["market_scan_sig"] = scan_sig
-                cache_sig = st.session_state.get("market_scan_cache_sig")
-                same_sig_cache = bool(cache_sig and tuple(cache_sig) == tuple(scan_sig))
-                if prev_results and same_sig_cache:
-                    # Only fallback to cache for the exact same scan signature.
-                    ts = st.session_state.get("market_scan_cache_ts", "unknown time")
-                    ts_parsed = pd.to_datetime(ts, utc=True, errors="coerce")
-                    is_fresh_cache = False
-                    if pd.notna(ts_parsed):
-                        try:
-                            age_minutes = (
-                                pd.Timestamp.now(tz="UTC") - ts_parsed
-                            ).total_seconds() / 60.0
-                            is_fresh_cache = age_minutes <= float(CACHE_TTL_MINUTES)
-                        except Exception:
-                            is_fresh_cache = False
-                    if is_fresh_cache:
-                        results = prev_results
-                        source_label = f"CACHED ({ts})"
-                        st.session_state["market_scan_source"] = source_label
-                        st.session_state["market_data_mode"] = data_mode
-                        st.warning(
-                            f"Live scan returned no rows. Showing last successful snapshot from {ts} "
-                            f"for the same timeframe/filter. Do not execute directly from cache-only view."
-                        )
-                    else:
-                        results = []
-                        source_label = "LIVE"
-                        st.session_state["market_scan_source"] = source_label
-                        st.session_state["market_data_mode"] = data_mode
-                        st.warning(
-                            f"Live scan returned no rows and cache is older than {CACHE_TTL_MINUTES} minutes. "
-                            "Stale snapshot was not used."
-                        )
-                else:
-                    # Do not leak stale cache across timeframe/filter changes.
-                    results = []
-                    source_label = "LIVE"
+                cache_sig = scan_sig if last_good_results else None
+                ts = str(last_good_snapshot.get("ts") or "unknown time") if isinstance(last_good_snapshot, dict) else "unknown time"
+                last_good_mode = (
+                    str(last_good_snapshot.get("mode") or data_mode)
+                    if isinstance(last_good_snapshot, dict)
+                    else data_mode
+                )
+                healthy_empty_registry = _healthy_empty_registry(st.session_state.get(_LAST_HEALTHY_EMPTY_SIG_KEY))
+                healthy_empty_seen = _healthy_empty_seen_for_sig(healthy_empty_registry, scan_sig)
+                if _should_use_cached_scan(
+                    prev_results=last_good_results,
+                    cache_sig=cache_sig,
+                    scan_sig=scan_sig,
+                    cache_ts=ts,
+                    ttl_minutes=CACHE_TTL_MINUTES,
+                    scan_degraded=scan_degraded,
+                    healthy_empty_seen=healthy_empty_seen,
+                ):
+                    results = last_good_results
+                    st.session_state["market_scan_results"] = results
+                    data_mode = last_good_mode
+                    source_label = f"CACHED ({ts})"
                     st.session_state["market_scan_source"] = source_label
                     st.session_state["market_data_mode"] = data_mode
-                    if cache_sig and tuple(cache_sig) != tuple(scan_sig):
+                    st.warning(
+                        f"Live scan returned no rows. Showing last successful snapshot from {ts} "
+                        f"for the same timeframe/filter. Do not execute directly from cache-only view."
+                    )
+                else:
+                    results = []
+                    st.session_state["market_scan_results"] = []
+                    source_label = "LIVE (DEGRADED)" if scan_degraded else "LIVE"
+                    st.session_state["market_scan_source"] = source_label
+                    st.session_state["market_data_mode"] = data_mode
+                    has_other_cached_snapshot = bool(last_good_registry) and not bool(last_good_results)
+                    if has_other_cached_snapshot:
                         st.warning(
                             "Live scan returned no rows for current timeframe/filter. "
                             "Stale cache from another setting was intentionally not used."
                         )
+                    elif healthy_empty_seen:
+                        st.info(
+                            "Latest healthy live scan for this timeframe/filter had no candidates. "
+                            "Older cached setups were intentionally suppressed."
+                        )
+                    elif scan_degraded and last_good_results:
+                        st.warning(
+                            f"Live scan returned no rows and cache is older than {CACHE_TTL_MINUTES} minutes. "
+                            "Stale snapshot was not used."
+                        )
+                    elif scan_degraded:
+                        st.warning(
+                            "Live scan degraded and produced no usable candidates. "
+                            "No last-good snapshot was available for this timeframe/filter."
+                        )
+                    else:
+                        st.info(
+                            "Live scan completed successfully but found no current candidates for this timeframe/filter."
+                        )
+                    if not scan_degraded:
+                        st.session_state[_LAST_HEALTHY_EMPTY_SIG_KEY] = _remember_healthy_empty_sig(
+                            healthy_empty_registry,
+                            scan_sig,
+                        )
+            st.session_state[_LAST_SCAN_ATTEMPT_TS_KEY] = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
     # Prepare DataFrame for display
     if results:
-        source_color = POSITIVE if source_label.startswith("LIVE") else WARNING
-        source_chip = "LIVE FEED" if source_label.startswith("LIVE") else "CACHED SNAPSHOT"
-        mode_color = ACCENT if data_mode.startswith("FULL") else WARNING
+        source_is_degraded = "DEGRADED" in source_label.upper()
+        source_color = WARNING if (source_is_degraded or source_label.startswith("CACHED")) else POSITIVE
+        source_chip = (
+            "LIVE DEGRADED"
+            if source_is_degraded
+            else ("LIVE FEED" if source_label.startswith("LIVE") else "CACHED SNAPSHOT")
+        )
+        mode_color = ACCENT if data_mode in {"FULL MARKET MODE", "CUSTOM WATCHLIST MODE"} else WARNING
+        if source_is_degraded:
+            st.markdown(
+                f"<div class='market-note-box' style='border:1px solid rgba(255,209,102,0.4); border-left:4px solid {WARNING}; "
+                f"background:rgba(255,209,102,0.08); color:{TEXT_MUTED};'>"
+                f"<b style='color:{WARNING};'>Degraded Live Scan:</b> The current table reflects a partial live universe. "
+                f"Some symbols were skipped during fetch/analysis, so this is not a complete market sweep."
+                f"</div>",
+                unsafe_allow_html=True,
+            )
         if source_label.startswith("CACHED"):
             st.markdown(
                 f"<div class='market-note-box' style='border:1px solid rgba(255,209,102,0.4); border-left:4px solid {WARNING}; "
@@ -1949,66 +2900,82 @@ def render(ctx: dict) -> None:
                 f"</div>",
                 unsafe_allow_html=True,
             )
-        if data_mode.startswith("EXCHANGE-ONLY"):
+        if "PARTIAL ENRICHMENT" in data_mode:
             st.markdown(
                 f"<div class='market-note-box' style='border:1px solid rgba(255,209,102,0.34); border-left:4px solid {WARNING}; "
                 f"background:rgba(255,209,102,0.06); color:{TEXT_MUTED};'>"
-                f"<b style='color:{WARNING};'>Data Mode:</b> Exchange-only feed is active. "
+                f"<b style='color:{WARNING};'>Data Mode:</b> Custom watchlist is active, but market-cap enrichment is only available "
+                f"for some requested symbols. Trade metrics remain live from exchange candles."
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        if "EXCHANGE-ONLY" in data_mode:
+            st.markdown(
+                f"<div class='market-note-box' style='border:1px solid rgba(255,209,102,0.34); border-left:4px solid {WARNING}; "
+                f"background:rgba(255,209,102,0.06); color:{TEXT_MUTED};'>"
+                f"<b style='color:{WARNING};'>Data Mode:</b> "
+                f"{'Custom watchlist is active, but enrichment is currently unavailable. ' if data_mode.startswith('CUSTOM WATCHLIST') else 'Exchange-only feed is active. '}"
                 f"Trade metrics are live from exchange candles; enrichment fields like market cap may show as —."
                 f"</div>",
                 unsafe_allow_html=True,
             )
-        st.markdown(
-            f"<details class='market-details' style='margin-bottom:0.6rem;'>"
-            f"<summary style='color:{ACCENT};'>"
-            f"How to read quickly (?)</summary>"
-            f"<div class='market-details-body' style='color:{TEXT_MUTED};'>"
-            f"<b>Decision sequence:</b> <b>Setup Confirm</b> → <b>Direction + Strength</b> → "
-            f"<b>AI Ensemble + Tech vs AI Alignment</b>.<br><br>"
-            f"<b>Setup Confirm classes:</b> TREND+AI (strongest), TREND-led, AI-led, WATCH, SKIP.<br>"
-            f"<b>AI Ensemble:</b> direction + 3-dot agreement meter (more filled dots = stronger model agreement).<br>"
-            f"<b>Scalp Opportunity:</b> separate execution gate; shown only when direction/levels/quality thresholds all pass.<br><br>"
-            f"<b>Scan mode:</b> default Top N market scan. Custom Coins (max 10) scans only your watchlist until cleared."
-            f"</div></details>",
-            unsafe_allow_html=True,
+        if data_mode.startswith("MAJOR FALLBACK"):
+            st.markdown(
+                f"<div class='market-note-box' style='border:1px solid rgba(255,209,102,0.34); border-left:4px solid {WARNING}; "
+                f"background:rgba(255,209,102,0.06); color:{TEXT_MUTED};'>"
+                f"<b style='color:{WARNING};'>Universe Fallback:</b> The liquidity universe failed, so the scanner is running on a hardcoded majors list. "
+                f"This is not a true live top-volume market sweep."
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        render_help_details(
+            st,
+            summary="How to read quickly (?)",
+            body_html=(
+                "<b>Decision sequence:</b> <b>Setup Confirm</b> -> <b>Direction + Strength</b> -> "
+                "<b>AI Ensemble + Tech vs AI Alignment</b>.<br><br>"
+                "<b>Setup Confirm classes:</b> TREND+AI (strongest), TREND-led, AI-led, WATCH, SKIP.<br>"
+                "<b>AI Ensemble:</b> direction + 3-dot agreement meter (more filled dots = stronger model agreement).<br>"
+                "<b>Scalp Opportunity:</b> separate execution gate; shown only when direction/levels/quality thresholds all pass.<br><br>"
+                "<b>Scan mode:</b> default Top N market scan. Custom Coins (max 10) scans only your watchlist until cleared."
+            ),
         )
-        st.markdown(
-            f"<details class='market-details' style='margin-bottom:0.8rem;'>"
-            f"<summary style='color:{ACCENT};'>"
-            f"ℹ️ Column Guide (click to expand)</summary>"
-            f"<div class='market-details-body' style='color:{TEXT_MUTED}; padding:0.5rem;'>"
-            "<b>Coin</b>: asset ticker (hover shows exchange pair).<br>"
-            "<b>Price ($)</b>: latest closed-candle price from active feed.<br>"
-            "<b>Δ (%)</b>: change from previous closed candle to latest closed candle on selected timeframe (fallback: ticker % if candle delta unavailable).<br><br>"
-            "<b>Setup Confirm</b>: final scanner confirmation class (not a direct execution order). "
-            "Calculated from Direction + Strength + AI Ensemble + Alignment + ADX regime checks.<br>"
-            "<b>Direction</b>: side from technical signal mapping (Upside / Downside / Neutral).<br>"
-            "<b>Strength</b>: technical signal power (0-100), derived from bias distance to neutral midpoint (50).<br>"
-            "<b>AI Ensemble</b>: side label plus 3-dot model-agreement meter (filled dots = stronger agreement).<br>"
-            "<b>Tech vs AI Alignment</b>: confirmation quality between technical side and AI side (HIGH/MEDIUM/TREND/WEAK/CONFLICT).<br>"
-            "<b>R:R</b>: reward-to-risk ratio from target distance vs stop distance.<br>"
-            "<b>Entry Price</b>: model entry level (close/EMA5 with ATR buffer).<br>"
-            "<b>Stop Loss</b>: risk invalidation level (support/resistance with ATR clamps).<br>"
-            "<b>Target Price</b>: first take-profit level (structure level with minimum ATR extension).<br>"
-            "<b>R:R marker (*)</b>: conditional plan; target may require breakout.<br>"
-            "<b>Scalp Opportunity</b>: shown only when the single execution gate passes "
-            "(Direction match + no CONFLICT + valid levels + timeframe-adaptive R:R/ADX/Strength thresholds).<br>"
-            "<b>Market Cap ($)</b>: size/liquidity context.<br><br>"
-            "<b>Advanced columns (what they mean + short calc):</b><br>"
-            "<b>ADX</b>: trend strength (14-period directional movement strength; not side).<br>"
-            "<b>SuperTrend</b>: trend state from ATR-based trailing bands (Bullish/Bearish/Neutral).<br>"
-            "<b>Ichimoku</b>: cloud trend state from conversion/base/cloud structure.<br>"
-            "<b>VWAP</b>: price position vs Volume-Weighted Average Price (Above/Below/Near).<br>"
-            "<b>Spike Alert</b>: abnormal volume event (volume ratio vs recent average + spike candle direction).<br>"
-            "<b>Bollinger</b>: price location vs 20-period volatility bands (Overbought/Oversold/Neutral).<br>"
-            "<b>Stochastic RSI</b>: momentum position of RSI in its recent range (Low/High/Neutral).<br>"
-            "<b>Volatility</b>: ATR-based volatility regime label.<br>"
-            "<b>PSAR</b>: Parabolic SAR trend side (Bullish/Bearish).<br>"
-            "<b>Williams %R</b>: momentum oscillator showing near-top / near-bottom conditions.<br>"
-            "<b>CCI</b>: deviation of typical price from its moving average (trend pressure/mean-reversion context).<br>"
-            "<b>Candle Pattern</b>: candlestick pattern classifier with directional label (bullish/bearish/neutral)."
-            "</div></details>",
-            unsafe_allow_html=True,
+        render_help_details(
+            st,
+            summary="Column Guide (click to expand)",
+            body_html=(
+                "<b>Coin</b>: asset ticker (hover shows actual candle feed pair or fallback provider).<br>"
+                "<b>Price ($)</b>: latest closed-candle price from active feed.<br>"
+                "<b>Δ (%)</b>: change from previous closed candle to latest closed candle on selected timeframe (fallback: ticker % if candle delta unavailable).<br><br>"
+                "<b>Setup Confirm</b>: final scanner confirmation class (not a direct execution order). "
+                "Calculated from Direction + Strength + AI Ensemble + Alignment + ADX regime checks.<br>"
+                "<b>Direction</b>: side from technical signal mapping (Upside / Downside / Neutral).<br>"
+                "<b>Strength</b>: technical signal power (0-100), derived from bias distance to neutral midpoint (50).<br>"
+                "<b>AI Ensemble</b>: side label plus 3-dot model-agreement meter (filled dots = stronger agreement). "
+                "* means AI is showing a neutral safety fallback because reliable ML output was unavailable for that row.<br>"
+                "<b>Tech vs AI Alignment</b>: confirmation quality between technical side and AI side (HIGH/MEDIUM/TREND/WEAK/CONFLICT).<br>"
+                "<b>R:R</b>: reward-to-risk ratio from target distance vs stop distance.<br>"
+                "<b>Entry Price</b>: model entry level (close/EMA5 with ATR buffer).<br>"
+                "<b>Stop Loss</b>: risk invalidation level (support/resistance with ATR clamps).<br>"
+                "<b>Target Price</b>: first take-profit level (structure level with minimum ATR extension).<br>"
+                "<b>R:R marker (*)</b>: conditional plan; target may require breakout.<br>"
+                "<b>Scalp Opportunity</b>: shown only when the single execution gate passes "
+                "(Direction match + no CONFLICT + valid levels + timeframe-adaptive R:R/ADX/Strength thresholds).<br>"
+                "<b>Market Cap ($)</b>: size/liquidity context.<br><br>"
+                "<b>Advanced columns (what they mean + short calc):</b><br>"
+                "<b>ADX</b>: trend strength (14-period directional movement strength; not side).<br>"
+                "<b>SuperTrend</b>: trend state from ATR-based trailing bands (Bullish/Bearish/Neutral).<br>"
+                "<b>Ichimoku</b>: cloud trend state from conversion/base/cloud structure.<br>"
+                "<b>VWAP</b>: price position vs Volume-Weighted Average Price (Above/Below/Near).<br>"
+                "<b>Spike Alert</b>: abnormal volume event (volume ratio vs recent average + spike candle direction).<br>"
+                "<b>Bollinger</b>: price location vs 20-period volatility bands (Overbought/Oversold/Neutral).<br>"
+                "<b>Stochastic RSI</b>: momentum position of RSI in its recent range (Low/High/Neutral).<br>"
+                "<b>Volatility</b>: ATR-based volatility regime label.<br>"
+                "<b>PSAR</b>: Parabolic SAR trend side (Bullish/Bearish).<br>"
+                "<b>Williams %R</b>: momentum oscillator showing near-top / near-bottom conditions.<br>"
+                "<b>CCI</b>: deviation of typical price from its moving average (trend pressure/mean-reversion context).<br>"
+                "<b>Candle Pattern</b>: candlestick pattern classifier with directional label (bullish/bearish/neutral)."
+            ),
         )
         st.caption("Signals and plan levels are computed on closed candles; Price ($) shows the latest candle close.")
         controls_col, chips_col = st.columns([1.2, 2.8], gap="small")
@@ -2093,52 +3060,45 @@ def render(ctx: dict) -> None:
                 )
         strength_head = strength_coin if strength_val_head is None else f"{strength_coin} ({strength_val_head:.0f}%)"
 
-        q1, q2, q3, q4 = st.columns(4, gap="small")
-        with q1:
-            status_head = "SETUP READY" if enter_count > 0 else "NO SETUP READY"
-            status_sub = f"READY: {enter_count} • WATCH: {watch_count} • SKIP: {skip_count}"
-            st.markdown(
-                "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                "<div class='elite-label'>Execution Status</div>"
-                f"<div class='scan-kpi-value'>{status_head}</div>"
-                f"<div class='scan-kpi-sub'>{status_sub}</div>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-        with q2:
-            enter_mix_head = "NO READY CLASS" if enter_count == 0 else "CLASS BREAKDOWN"
-            enter_mix_sub = (
-                f"Trend+AI: {trend_ai_enter_count} • "
-                f"Trend-led: {trend_led_enter_count} • "
-                f"AI-led: {ai_led_enter_count}"
-            )
-            st.markdown(
-                "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                "<div class='elite-label'>Setup Class Mix</div>"
-                f"<div class='scan-kpi-value'>{enter_mix_head}</div>"
-                f"<div class='scan-kpi-sub'>{enter_mix_sub}</div>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-        with q3:
-            st.markdown(
-                "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                "<div class='elite-label'>Best Scalp Opportunity</div>"
-                f"<div class='elite-value'>{best_scalp_coin}</div>"
-                f"<div class='elite-sub' title='{best_scalp_sub}' "
-                f"style='white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>{best_scalp_sub}</div>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
-        with q4:
-            st.markdown(
-                "<div class='elite-card' style='min-height:164px; display:flex; flex-direction:column; justify-content:space-between;'>"
-                "<div class='elite-label'>Strength Leader</div>"
-                f"<div class='elite-value'>{strength_head}</div>"
-                f"<div class='elite-sub'>{strength_sub}</div>"
-                "</div>",
-                unsafe_allow_html=True,
-            )
+        status_label, status_head, status_sub = _setup_status_summary(
+            enter_count=enter_count,
+            watch_count=watch_count,
+            skip_count=skip_count,
+            source_label=source_label,
+        )
+        enter_mix_head = "NO READY CLASS" if enter_count == 0 else "CLASS BREAKDOWN"
+        enter_mix_sub = (
+            f"Trend+AI: {trend_ai_enter_count} • "
+            f"Trend-led: {trend_led_enter_count} • "
+            f"AI-led: {ai_led_enter_count}"
+        )
+        render_kpi_grid(
+            st,
+            items=[
+                {
+                    "label": status_label,
+                    "value": status_head,
+                    "subtext": status_sub,
+                },
+                {
+                    "label": "Setup Class Mix",
+                    "value": enter_mix_head,
+                    "subtext": enter_mix_sub,
+                },
+                {
+                    "label": "Best Scalp Opportunity",
+                    "value": best_scalp_coin,
+                    "subtext": best_scalp_sub,
+                    "label_title": best_scalp_sub,
+                },
+                {
+                    "label": "Strength Leader",
+                    "value": strength_head,
+                    "subtext": strength_sub,
+                },
+            ],
+            columns=4,
+        )
         st.markdown("<div style='height:0.7rem;'></div>", unsafe_allow_html=True)
 
         # indicator visual formatting
@@ -2296,4 +3256,9 @@ def render(ctx: dict) -> None:
             mime="text/csv"
         )
     else:
-        st.info("No coins matched the criteria.")
+        if "DEGRADED" in str(source_label).upper():
+            st.warning(
+                "No coins were shown because the latest live scan was degraded and did not produce a usable complete result."
+            )
+        else:
+            st.info("No coins matched the criteria.")

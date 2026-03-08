@@ -22,6 +22,7 @@ from core.position_metrics import (
     compute_position_pnl,
     estimate_liquidation,
 )
+from ui.primitives import render_help_details, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -52,32 +53,26 @@ def render(ctx: dict) -> None:
     _debug = get_ctx(ctx, "_debug")
     get_scalping_entry_target = get_ctx(ctx, "get_scalping_entry_target")
     scalp_quality_gate = get_ctx(ctx, "scalp_quality_gate")
-    st.markdown(
-        f"<h2 style='color:{ACCENT};margin-bottom:0.5rem;'>Position Analyser</h2>",
-        unsafe_allow_html=True,
+    render_page_header(
+        st,
+        title="Position Analyser",
+        intro_html=(
+            f"Track and manage open positions. Enter your entry price, leverage, and direction to see "
+            f"{_tip('PnL', 'Profit and Loss — your current gain or loss percentage based on entry price vs current price, multiplied by leverage.')} in real-time, "
+            f"{_tip('Stop-Loss / Take-Profit', 'Automatically calculated based on ATR (Average True Range). Stop-loss protects against excessive loss, take-profit locks in gains.')} levels, "
+            f"and {_tip('liquidation distance', 'How far the price needs to move against you before your position is liquidated at the selected position settings.')}. "
+            f"Also shows updated technical signals for the coin while your position is open."
+        ),
     )
-    st.markdown(
-        f"<div class='panel-box'>"
-        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Track and manage open positions. Enter your entry price, leverage, and direction to see "
-        f"{_tip('PnL', 'Profit and Loss — your current gain or loss percentage based on entry price vs current price, multiplied by leverage.')} in real-time, "
-        f"{_tip('Stop-Loss / Take-Profit', 'Automatically calculated based on ATR (Average True Range). Stop-loss protects against excessive loss, take-profit locks in gains.')} levels, "
-        f"and {_tip('liquidation distance', 'How far the price needs to move against you before your position is liquidated at the selected position settings.')}. "
-        f"Also shows updated technical signals for the coin while your position is open.</p>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f"<details style='margin:0.15rem 0 0.7rem 0;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer; font-size:0.9rem;'>How to read quickly</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.65; margin-top:0.4rem;'>"
-        f"1) Confirm <b>PnL + Liquidation Distance</b> first. "
-        f"2) Check <b>Direction / Strength / AI / Alignment</b>. "
-        f"3) Respect <b>Technical Invalidation</b> as hard risk line. "
-        f"4) Follow the <b>Decision Model</b> action (HOLD / REDUCE / EXIT style)."
-        f"</div></details>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="How to read quickly",
+        body_html=(
+            "1) Confirm <b>PnL + Liquidation Distance</b> first. "
+            "2) Check <b>Direction / Strength / AI / Alignment</b>. "
+            "3) Respect <b>Technical Invalidation</b> as hard risk line. "
+            "4) Follow the <b>Decision Model</b> action (HOLD / REDUCE / EXIT style)."
+        ),
     )
 
     def _adx_bucket_only(adx_value: float) -> str:

@@ -1,4 +1,5 @@
 from ui.ctx import get_ctx
+from ui.primitives import render_help_details, render_insight_card, render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
 import numpy as np
@@ -20,48 +21,39 @@ def render(ctx: dict) -> None:
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     get_top_volume_usdt_symbols = get_ctx(ctx, "get_top_volume_usdt_symbols")
     """Whale tracking and momentum signals."""
+    render_page_header(
+        st,
+        title="Whale Tracker",
+        intro_html=(
+            "Tracks market attention and liquidity anomalies using public market data. "
+            "This tab is a <b>whale proxy</b> (not on-chain whale wallet tracking). "
+            "It combines search trends, 24h movers, and abnormal volume detection."
+            "<br><br><b>1. Trending Coins</b> — CoinGecko search trend leaders.<br>"
+            "<b>2. Top Gainers / Losers</b> — 24h momentum leaders/laggards from CoinGecko markets feed.<br>"
+            "<b>3. Volume Anomaly Scanner</b> — dynamic high-volume universe from exchange-available pairs.<br>"
+            "Scanner uses two checks: "
+            f"{_tip('Volume Ratio', 'Latest candle volume divided by previous 20-candle average.')} and "
+            f"{_tip('Volume Z-Score', 'How many standard deviations the latest volume is above recent mean.')} "
+            "to reduce false positives from simple ratio-only spikes."
+        ),
+    )
     st.markdown(
-        f"""
+        """
         <style>
-        .whale-kpi-grid {{
-            display:grid;
-            grid-template-columns:repeat(4,minmax(0,1fr));
-            gap:10px;
-            margin:8px 0 18px 0;
-        }}
-        .whale-kpi {{
-            background:linear-gradient(145deg, rgba(0,0,0,0.72), rgba(10,18,30,0.92));
-            border:1px solid rgba(0,212,255,0.18);
-            border-radius:12px;
-            padding:12px 14px;
-            box-shadow:0 8px 24px rgba(0,0,0,0.22);
-        }}
-        .whale-kpi-label {{
-            color:{TEXT_MUTED};
-            text-transform:uppercase;
-            font-size:0.70rem;
-            letter-spacing:0.7px;
-        }}
-        .whale-kpi-value {{
-            color:{ACCENT};
-            font-size:1.25rem;
-            font-weight:700;
-            margin-top:4px;
-        }}
-        .whale-list-card {{
+        .whale-list-card {
             border:1px solid rgba(0,212,255,0.14);
             border-radius:12px;
             padding:8px 10px;
             margin:4px 0;
             background:linear-gradient(120deg, rgba(255,255,255,0.01), rgba(0,212,255,0.03));
-        }}
-        .whale-trend-row {{
+        }
+        .whale-trend-row {
             display:grid;
             grid-template-columns:56px minmax(80px, 120px) 1fr minmax(90px, 120px);
             align-items:center;
             column-gap:10px;
-        }}
-        .whale-momentum-row {{
+        }
+        .whale-momentum-row {
             display:flex;
             align-items:center;
             justify-content:space-between;
@@ -69,63 +61,32 @@ def render(ctx: dict) -> None:
             padding:5px 9px;
             border-radius:8px;
             margin:3px 0;
-        }}
-        .whale-badge {{
+        }
+        .whale-badge {
             display:inline-block;
             padding:2px 8px;
             border-radius:999px;
             font-size:0.72rem;
             font-weight:700;
             letter-spacing:0.3px;
-        }}
-        @media (max-width: 1200px) {{
-            .whale-kpi-grid {{
-                grid-template-columns:repeat(2,minmax(0,1fr));
-            }}
-        }}
-        @media (max-width: 900px) {{
-            .whale-kpi-grid {{
-                grid-template-columns:1fr;
-            }}
-            .whale-trend-row {{
+        }
+        @media (max-width: 900px) {
+            .whale-trend-row {
                 grid-template-columns:44px minmax(64px, 100px) 1fr;
-            }}
-            .whale-trend-row span:last-child {{
+            }
+            .whale-trend-row span:last-child {
                 display:none;
-            }}
-        }}
-        @media (max-width: 640px) {{
-            .whale-momentum-row {{
+            }
+        }
+        @media (max-width: 640px) {
+            .whale-momentum-row {
                 flex-direction:column;
                 align-items:flex-start;
                 gap:4px;
-            }}
-        }}
+            }
+        }
         </style>
         """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        f"<h2 style='color:{ACCENT};'>Whale Tracker</h2>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f"<div class='panel-box'>"
-        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Tracks market attention and liquidity anomalies using public market data. "
-        f"This tab is a <b>whale proxy</b> (not on-chain whale wallet tracking). "
-        f"It combines search trends, 24h movers, and abnormal volume detection.</p>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
-        f"<b>1. Trending Coins</b> — CoinGecko search trend leaders.<br>"
-        f"<b>2. Top Gainers / Losers</b> — 24h momentum leaders/laggards from CoinGecko markets feed.<br>"
-        f"<b>3. Volume Anomaly Scanner</b> — dynamic high-volume universe from exchange-available pairs.<br>"
-        f"Scanner uses two checks: "
-        f"{_tip('Volume Ratio', 'Latest candle volume divided by previous 20-candle average.')} and "
-        f"{_tip('Volume Z-Score', 'How many standard deviations the latest volume is above recent mean.')} "
-        f"to reduce false positives from simple ratio-only spikes.</p>"
-        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -158,16 +119,14 @@ def render(ctx: dict) -> None:
     avg_l = np.mean([_pct24(c) for c in top_losers]) if top_losers else 0.0
     avg_g_text = f"{avg_g:+.2f}%"
     avg_l_text = f"{avg_l:+.2f}%"
-    st.markdown(
-        f"""
-        <div class='whale-kpi-grid'>
-          <div class='whale-kpi'><div class='whale-kpi-label'>Trending Count</div><div class='whale-kpi-value'>{len(trending or [])}</div></div>
-          <div class='whale-kpi'><div class='whale-kpi-label'>Top Gainer Avg (24h)</div><div class='whale-kpi-value' style='color:{POSITIVE};'>{avg_g_text}</div></div>
-          <div class='whale-kpi'><div class='whale-kpi-label'>Top Loser Avg (24h)</div><div class='whale-kpi-value' style='color:{NEGATIVE};'>{avg_l_text}</div></div>
-          <div class='whale-kpi'><div class='whale-kpi-label'>Data Source</div><div class='whale-kpi-value' style='font-size:0.95rem;'>CoinGecko + Exchange OHLCV</div></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    render_kpi_grid(
+        st,
+        items=[
+            {"label": "Trending Count", "value": len(trending or [])},
+            {"label": "Top Gainer Avg (24h)", "value": avg_g_text, "value_color": POSITIVE},
+            {"label": "Top Loser Avg (24h)", "value": avg_l_text, "value_color": NEGATIVE},
+            {"label": "Data Source", "value": "CoinGecko + Exchange OHLCV"},
+        ],
     )
 
     # Trending coins
@@ -290,7 +249,7 @@ def render(ctx: dict) -> None:
             return f"color:{TEXT_MUTED}; font-weight:700;"
         return f"color:{TEXT_MUTED}; font-weight:600;"
 
-    if st.button("Run Volume Scan", key="whale_scan"):
+    if st.button("Run Volume Scan", type="primary", key="whale_scan"):
         with st.spinner("Scanning..."):
             symbols, _raw = get_top_volume_usdt_symbols(max(universe_n, 30))
             symbols = symbols[:universe_n]
@@ -420,27 +379,29 @@ def render(ctx: dict) -> None:
             )
         return
 
-    st.markdown(
-        f"<details style='margin-bottom:0.5rem;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer;'>Column Guide (?)</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"<b>Vol Ratio</b>: latest volume / prior 20-candle average.<br>"
-        f"<b>Z-Score</b>: standardized volume shock size.<br>"
-        f"<b>1-Candle %</b>: last closed candle return.<br>"
-        f"<b>24h %</b>: rolling 24h return approximation by selected timeframe.<br>"
-        f"<b>Score</b>: blended anomaly strength from ratio and z-score.</div></details>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="Column Guide (?)",
+        body_html=(
+            "<b>Vol Ratio</b>: latest volume / prior 20-candle average.<br>"
+            "<b>Z-Score</b>: standardized volume shock size.<br>"
+            "<b>1-Candle %</b>: last closed candle return.<br>"
+            "<b>24h %</b>: rolling 24h return approximation by selected timeframe.<br>"
+            "<b>Score</b>: blended anomaly strength from ratio and z-score."
+        ),
     )
-    st.markdown(
-        f"<div class='panel-box' style='padding:14px 16px; margin-top:8px;'>"
-        f"<b style='color:{ACCENT};'>How to read this quickly</b>"
-        f"<ul style='color:{TEXT_MUTED}; margin:8px 0 0 18px; line-height:1.7;'>"
-        f"<li>Prioritize rows with <b>Level = EXTREME</b> and <b>Score >= 0.85</b> (dual-confirmed ratio + z-score).</li>"
-        f"<li>Prefer anomalies where <b>1-Candle %</b> and <b>24h %</b> point the same direction.</li>"
-        f"<li>Rows with Ratio/Z status = <b>Supporting</b> passed mainly because the other metric carried the trigger.</li>"
-        f"<li>Use Spot/Position tabs for execution confirmation before acting.</li>"
-        f"</ul></div>",
-        unsafe_allow_html=True,
+    render_insight_card(
+        st,
+        title="How to read this quickly",
+        body_html=(
+            "<ul style='margin:8px 0 0 18px; line-height:1.7;'>"
+            "<li>Prioritize rows with <b>Level = EXTREME</b> and <b>Score >= 0.85</b> (dual-confirmed ratio + z-score).</li>"
+            "<li>Prefer anomalies where <b>1-Candle %</b> and <b>24h %</b> point the same direction.</li>"
+            "<li>Rows with Ratio/Z status = <b>Supporting</b> passed mainly because the other metric carried the trigger.</li>"
+            "<li>Use Spot/Position tabs for execution confirmation before acting.</li>"
+            "</ul>"
+        ),
+        tone="accent",
     )
 
     df_surges = pd.DataFrame(surges)

@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objs as go
 
 from ui.ctx import get_ctx
+from ui.primitives import render_help_details, render_insight_card, render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -148,108 +149,23 @@ def _basket_insight_payload(
 def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
-    TEXT_MUTED = get_ctx(ctx, "TEXT_MUTED")
     _tip = get_ctx(ctx, "_tip")
     _normalize_coin_input = get_ctx(ctx, "_normalize_coin_input")
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     EXCHANGE = get_ctx(ctx, "EXCHANGE")
 
-    st.markdown(
-        f"""
-        <style>
-        .corr-kpi-grid {{
-            display:grid;
-            grid-template-columns:repeat(4,minmax(0,1fr));
-            gap:10px;
-            margin:10px 0 12px 0;
-        }}
-        .corr-kpi {{
-            border:1px solid rgba(0,212,255,0.16);
-            border-radius:12px;
-            padding:12px 14px;
-            background:linear-gradient(140deg, rgba(0,0,0,0.72), rgba(10,18,30,0.88));
-        }}
-        .corr-kpi-label {{
-            color:{TEXT_MUTED};
-            font-size:0.70rem;
-            text-transform:uppercase;
-            letter-spacing:0.8px;
-        }}
-        .corr-kpi-value {{
-            color:{ACCENT};
-            font-size:1.2rem;
-            font-weight:700;
-            margin-top:4px;
-        }}
-        .corr-kpi-sub {{
-            color:{TEXT_MUTED};
-            font-size:0.80rem;
-            margin-top:4px;
-            line-height:1.45;
-        }}
-        .corr-insight {{
-            border:1px solid rgba(0,212,255,0.20);
-            border-left:4px solid {ACCENT};
-            border-radius:12px;
-            padding:14px 16px;
-            background:linear-gradient(140deg, rgba(0,0,0,0.76), rgba(8,18,32,0.92));
-            margin:10px 0 14px 0;
-        }}
-        .corr-insight-title {{
-            color:{ACCENT};
-            font-size:1rem;
-            font-weight:700;
-            margin-bottom:6px;
-        }}
-        .corr-insight-body {{
-            color:{TEXT_MUTED};
-            font-size:0.87rem;
-            line-height:1.6;
-            margin-bottom:8px;
-        }}
-        .corr-insight-badges {{
-            display:flex;
-            flex-wrap:wrap;
-            gap:8px;
-        }}
-        .corr-insight-badge {{
-            border:1px solid rgba(255,255,255,0.14);
-            border-radius:999px;
-            padding:5px 10px;
-            color:{TEXT_MUTED};
-            font-size:0.78rem;
-            background:rgba(255,255,255,0.03);
-        }}
-        @media (max-width: 1100px) {{
-            .corr-kpi-grid {{
-                grid-template-columns:repeat(2,minmax(0,1fr));
-            }}
-        }}
-        @media (max-width: 720px) {{
-            .corr-kpi-grid {{
-                grid-template-columns:1fr;
-            }}
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
+    render_page_header(
+        st,
+        title="Correlation Matrix",
+        intro_html=(
+            f"Builds a return-based {_tip('correlation matrix', 'A grid showing how closely two assets move together. +1.0 = perfectly correlated, -1.0 = inverse, 0 = unrelated.')} "
+            "for the basket you actually hold or plan to hold. Returns are time-aligned by candle timestamp before correlation is computed, "
+            "which avoids false relationships from misaligned series. Use this for "
+            f"{_tip('portfolio diversification', 'Combining lower-correlation assets reduces concentration risk when one coin dumps.')} "
+            "and to spot over-crowded exposure. This tab is most useful when you enter your own basket, "
+            "not when you just load default majors."
+        ),
     )
-
-    st.markdown(f"<h2 style='color:{ACCENT};'>Correlation Matrix</h2>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='panel-box'>"
-        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Builds a return-based {_tip('correlation matrix', 'A grid showing how closely two assets move together. +1.0 = perfectly correlated, -1.0 = inverse, 0 = unrelated.')} "
-        f"for the basket you actually hold or plan to hold. Returns are time-aligned by candle timestamp before correlation is computed, "
-        f"which avoids false relationships from misaligned series. Use this for "
-        f"{_tip('portfolio diversification', 'Combining lower-correlation assets reduces concentration risk when one coin dumps.')} "
-        f"and to spot over-crowded exposure. This tab is most useful when you enter your own basket, "
-        f"not when you just load default majors."
-        f"</p></div>",
-        unsafe_allow_html=True,
-    )
-
     if "corr_custom_coin" not in st.session_state:
         st.session_state["corr_custom_coin"] = ""
 
@@ -481,53 +397,61 @@ def render(ctx: dict) -> None:
     )
     st.plotly_chart(fig_corr, width="stretch")
 
-    st.markdown(
-        f"<div class='corr-kpi-grid'>"
-        f"<div class='corr-kpi'><div class='corr-kpi-label'>Method</div><div class='corr-kpi-value'>{corr_method.title()}</div></div>"
-        f"<div class='corr-kpi'><div class='corr-kpi-label'>Matched Samples</div><div class='corr-kpi-value'>{matched_samples}</div><div class='corr-kpi-sub'>Shared return bars after timestamp alignment</div></div>"
-        f"<div class='corr-kpi'><div class='corr-kpi-label'>Pair Count</div><div class='corr-kpi-value'>{pair_count}</div><div class='corr-kpi-sub'>Valid relationships inside the current basket</div></div>"
-        f"<div class='corr-kpi'><div class='corr-kpi-label'>Avg |Corr|</div><div class='corr-kpi-value'>{avg_abs_corr:.2f}</div><div class='corr-kpi-sub'>Lower = cleaner diversification</div></div>"
-        f"</div>",
-        unsafe_allow_html=True,
+    render_kpi_grid(
+        st,
+        items=[
+            {"label": "Method", "value": corr_method.title()},
+            {
+                "label": "Matched Samples",
+                "value": matched_samples,
+                "subtext": "Shared return bars after timestamp alignment",
+            },
+            {
+                "label": "Pair Count",
+                "value": pair_count,
+                "subtext": "Valid relationships inside the current basket",
+            },
+            {
+                "label": "Avg |Corr|",
+                "value": f"{avg_abs_corr:.2f}",
+                "subtext": "Lower = cleaner diversification",
+            },
+        ],
     )
 
-    st.markdown(
-        "<div class='corr-insight'>"
-        f"<div class='corr-insight-title'>Basket Insight · {corr_profile}</div>"
-        f"<div class='corr-insight-body'>{corr_action} {insight_body}</div>"
-        "<div class='corr-insight-badges'>"
-        + "".join(f"<span class='corr-insight-badge'>{badge}</span>" for badge in insight_badges)
-        + "</div></div>",
-        unsafe_allow_html=True,
+    render_insight_card(
+        st,
+        title=f"Basket Insight · {corr_profile}",
+        body_html=f"{corr_action} {insight_body}",
+        badges=insight_badges,
+        tone="accent",
     )
 
-    st.markdown(
-        f"<details style='margin-bottom:0.7rem;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"<b>1.</b> Start with <b>Avg |Corr|</b>: lower value means better diversification across the basket.<br>"
-        f"<b>2.</b> Avoid stacking names already <b>> 0.80</b> correlated with your core holding unless you intentionally want concentrated exposure.<br>"
-        f"<b>Method check:</b> "
-        f"{_tip('Pearson (main method)', 'Use this first. It tells you how directly two coins move together bar by bar.')} | "
-        f"{_tip('Spearman (cross-check)', 'Use this as a second look. It checks whether the ranking or general relationship stays similar even if price moves are noisy or uneven.')}<br>"
-        f"<b>3.</b> Use the <b>Best Diversifier vs {base}</b> row to find the cleanest non-crowded add-on.<br>"
-        f"<b>4.</b> Re-check on 4h/1d before swing decisions; lower timeframes are noisier and more temporary."
-        f"</div></details>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="How to read quickly (?)",
+        body_html=(
+            "<b>1.</b> Start with <b>Avg |Corr|</b>: lower value means better diversification across the basket.<br>"
+            "<b>2.</b> Avoid stacking names already <b>> 0.80</b> correlated with your core holding unless you intentionally want concentrated exposure.<br>"
+            "<b>Method check:</b> "
+            f"{_tip('Pearson (main method)', 'Use this first. It tells you how directly two coins move together bar by bar.')} | "
+            f"{_tip('Spearman (cross-check)', 'Use this as a second look. It checks whether the ranking or general relationship stays similar even if price moves are noisy or uneven.')}<br>"
+            f"<b>3.</b> Use the <b>Best Diversifier vs {base}</b> row to find the cleanest non-crowded add-on.<br>"
+            "<b>4.</b> Re-check on 4h/1d before swing decisions; lower timeframes are noisier and more temporary."
+        ),
     )
 
     st.dataframe(summary_df, width="stretch", hide_index=True)
 
-    st.markdown(
-        f"<details style='margin-bottom:0.45rem;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer;'>Column Guide (?)</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"<b>Correlation</b>: signed co-movement between pair returns (-1 to +1).<br>"
-        f"<b>AbsCorr</b>: strength only (ignores direction). Higher = stronger linkage.<br>"
-        f"<b>Pair Read</b>: quick interpretation of pair behavior (Tight, Linked, Mild, Hedge, Inverse).<br>"
-        f"<b>Regime</b>: portfolio interpretation of the pair relation."
-        f"</div></details>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="Column Guide (?)",
+        body_html=(
+            "<b>Correlation</b>: signed co-movement between pair returns (-1 to +1).<br>"
+            "<b>AbsCorr</b>: strength only (ignores direction). Higher = stronger linkage.<br>"
+            "<b>Pair Read</b>: quick interpretation of pair behavior (Tight, Linked, Mild, Hedge, Inverse).<br>"
+            "<b>Regime</b>: portfolio interpretation of the pair relation."
+        ),
     )
     st.markdown(f"<b style='color:{ACCENT};'>Pair Table</b>", unsafe_allow_html=True)
     st.dataframe(

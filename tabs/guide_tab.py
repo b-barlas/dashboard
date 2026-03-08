@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from ui.ctx import get_ctx
+from ui.primitives import render_page_header
 
 
 SECTION_STYLE = {
@@ -36,9 +37,12 @@ def _render_sections(st, sections: Iterable[tuple[str, str, str]]) -> None:
 def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
 
-    st.markdown("## Analysis Guide")
-    st.caption(
-        "Full user manual in dashboard tab order: what each tab does, how core calculations work, and how to read outputs clearly."
+    render_page_header(
+        st,
+        title="Analysis Guide",
+        intro_html=(
+            "Full user manual in dashboard tab order: what each tab does, how core calculations work, and how to read outputs clearly."
+        ),
     )
 
     sections = [
@@ -93,6 +97,7 @@ Scanner input modes:
 - Default mode: Top N liquidity scan (market-wide)
 - Custom mode: enter up to 10 symbols in Custom Coins, click Run Scan, and scanner analyzes only that watchlist
 - Top N control is disabled while custom mode is active
+- Custom watchlist mode does not depend on the live top-volume provider universe; it scans requested symbols directly
 - Selected timeframe controls candle context used for Direction/Strength, levels, and Delta
 
 Setup Confirm classes (final confirmation class):
@@ -120,6 +125,9 @@ Important consistency rule:
 
 Mode badges:
 - FULL MARKET MODE: exchange + enrichment providers active
+- CUSTOM WATCHLIST MODE: scanner is running the requested watchlist directly
+- CUSTOM WATCHLIST MODE (PARTIAL ENRICHMENT): watchlist scan is live, but market-cap enrichment is only available for some symbols
+- CUSTOM WATCHLIST MODE (EXCHANGE-ONLY): watchlist scan is live from exchange candles, but enrichment is unavailable
 - EXCHANGE-ONLY MODE: enrichment unavailable, core trade fields still active
             """,
             "core",

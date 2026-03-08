@@ -4,8 +4,10 @@ A Streamlit-based cryptocurrency analytics dashboard with modular architecture (
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.12.x or 3.13.x for local development
 - Internet access for market data APIs
+
+The deployed runtime is pinned in [runtime.txt](/Users/burakbarlas/Documents/Claude/Web_ready_2002/runtime.txt) (`python-3.12.8`).
 
 ## Setup
 

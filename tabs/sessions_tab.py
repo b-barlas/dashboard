@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objs as go
 
 from ui.ctx import get_ctx
+from ui.primitives import render_help_details, render_insight_card, render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -130,95 +131,17 @@ def render(ctx: dict) -> None:
             return WARNING
         return NEGATIVE
 
-    st.markdown(
-        f"""
-        <style>
-        .sess-kpi-grid {{
-            display:grid;
-            grid-template-columns:repeat(4,minmax(0,1fr));
-            gap:10px;
-            margin:10px 0 12px 0;
-        }}
-        .sess-kpi {{
-            border:1px solid rgba(0,212,255,0.16);
-            border-radius:12px;
-            padding:12px 14px;
-            background:linear-gradient(140deg, rgba(0,0,0,0.72), rgba(10,18,30,0.88));
-        }}
-        .sess-kpi-label {{
-            color:{TEXT_MUTED};
-            font-size:0.70rem;
-            text-transform:uppercase;
-            letter-spacing:0.8px;
-        }}
-        .sess-kpi-value {{
-            color:{ACCENT};
-            font-size:1.15rem;
-            font-weight:700;
-            margin-top:4px;
-        }}
-        .sess-kpi-sub {{
-            color:{TEXT_MUTED};
-            font-size:0.80rem;
-            margin-top:4px;
-            line-height:1.45;
-        }}
-        .sess-chip {{
-            display:inline-flex;
-            align-items:center;
-            gap:6px;
-            margin-top:8px;
-            margin-right:6px;
-            padding:2px 9px;
-            border-radius:999px;
-            font-size:0.72rem;
-            font-weight:700;
-            border:1px solid rgba(255,255,255,0.18);
-            background:rgba(0,0,0,0.28);
-        }}
-        div[data-testid="stFormSubmitButton"] > button {{
-            background: linear-gradient(135deg, #2ecbff 0%, #8d6bff 100%);
-            color: #ffffff;
-            border: 1px solid rgba(46, 203, 255, 0.35);
-            border-radius: 16px;
-            font-weight: 700;
-            box-shadow: 0 10px 28px rgba(46, 203, 255, 0.16);
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
-        }}
-        div[data-testid="stFormSubmitButton"] > button:hover {{
-            transform: translateY(-1px);
-            box-shadow: 0 14px 34px rgba(141, 107, 255, 0.22);
-            border-color: rgba(141, 107, 255, 0.45);
-        }}
-        @media (max-width: 1100px) {{
-            .sess-kpi-grid {{
-                grid-template-columns:repeat(2,minmax(0,1fr));
-            }}
-        }}
-        @media (max-width: 720px) {{
-            .sess-kpi-grid {{
-                grid-template-columns:1fr;
-            }}
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
+    render_page_header(
+        st,
+        title="Session Analysis",
+        intro_html=(
+            "Compares market behavior across 3 UTC sessions using 1h candles: Asian (00-08), European (08-16), and US (16-00). "
+            "It is an <b>execution timing filter</b>, not a standalone entry signal. "
+            f"Use it to see which session is relatively {_tip('Deeper', 'Higher average volume means cleaner fills and usually tighter spreads.')}, "
+            f"{_tip('Controlled', 'A balanced range profile is easier to execute than a session that is completely dead or overstretched.')}, "
+            "and directionally tilted. All labels here are <b>relative across these 3 sessions only</b>."
+        ),
     )
-
-    st.markdown(f"<h2 style='color:{ACCENT};'>Session Analysis</h2>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='panel-box'>"
-        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Compares market behavior across 3 UTC sessions using 1h candles: Asian (00-08), European (08-16), and US (16-00). "
-        f"It is an <b>execution timing filter</b>, not a standalone entry signal. "
-        f"Use it to see which session is relatively {_tip('Deeper', 'Higher average volume means cleaner fills and usually tighter spreads.')}, "
-        f"{_tip('Controlled', 'A balanced range profile is easier to execute than a session that is completely dead or overstretched.')}, "
-        f"and directionally tilted. All labels here are <b>relative across these 3 sessions only</b>."
-        f"</p></div>",
-        unsafe_allow_html=True,
-    )
-
     with st.form("sessions_analysis_form"):
         c1, c2 = st.columns(2)
         with c1:
@@ -296,8 +219,8 @@ def render(ctx: dict) -> None:
                 f"Range: {row['avg_range']:.2f}% | "
                 f"Avg |Move|: {row['avg_abs_return']:.2f}%"
                 f"</div>"
-                f"<span class='sess-chip' style='color:{rel_color}; border-color:{rel_color};'>{rel_label}</span>"
-                f"<span class='sess-chip' style='color:{drift_color}; border-color:{drift_color};'>{drift_label}</span>"
+                f"<span class='app-chip' style='color:{rel_color}; border-color:{rel_color}; background:rgba(0,0,0,0.28); margin-top:8px; margin-right:6px;'>{rel_label}</span>"
+                f"<span class='app-chip' style='color:{drift_color}; border-color:{drift_color}; background:rgba(0,0,0,0.28); margin-top:8px; margin-right:6px;'>{drift_label}</span>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -320,74 +243,81 @@ def render(ctx: dict) -> None:
         profile_color = NEGATIVE
         profile_note = "All sessions look soft; the best one is only less weak than the others."
 
-    st.markdown(
-        f"<div class='sess-kpi-grid'>"
-        f"<div class='sess-kpi'>"
-        f"<div class='sess-kpi-label'>Relative Leader</div>"
-        f"<div class='sess-kpi-value'>{best_score}</div>"
-        f"<div class='sess-kpi-sub'>Quality {grouped.loc[best_score, 'relative_quality']:.1f} · {grouped.loc[best_score, 'relative_label']}</div>"
-        f"</div>"
-        f"<div class='sess-kpi'>"
-        f"<div class='sess-kpi-label'>Deepest Liquidity</div>"
-        f"<div class='sess-kpi-value'>{best_liquidity}</div>"
-        f"<div class='sess-kpi-sub'>Avg Vol {_format_volume_compact(grouped.loc[best_liquidity, 'avg_volume'])} · {grouped.loc[best_liquidity, 'liquidity_label']}</div>"
-        f"</div>"
-        f"<div class='sess-kpi'>"
-        f"<div class='sess-kpi-label'>Fastest Tape</div>"
-        f"<div class='sess-kpi-value'>{fastest_tape}</div>"
-        f"<div class='sess-kpi-sub'>Avg |Move| {grouped.loc[fastest_tape, 'avg_abs_return']:.2f}% · Drift {grouped.loc[fastest_tape, 'drift_bias_label']}</div>"
-        f"</div>"
-        f"<div class='sess-kpi'>"
-        f"<div class='sess-kpi-label'>Candle Coverage</div>"
-        f"<div class='sess-kpi-value'>{data_coverage}</div>"
-        f"<div class='sess-kpi-sub'>1h candles across all session buckets</div>"
-        f"</div>"
-        f"</div>",
-        unsafe_allow_html=True,
+    render_kpi_grid(
+        st,
+        items=[
+            {
+                "label": "Relative Leader",
+                "value": best_score,
+                "subtext": (
+                    f"Quality {grouped.loc[best_score, 'relative_quality']:.1f} · "
+                    f"{grouped.loc[best_score, 'relative_label']}"
+                ),
+            },
+            {
+                "label": "Deepest Liquidity",
+                "value": best_liquidity,
+                "subtext": (
+                    f"Avg Vol {_format_volume_compact(grouped.loc[best_liquidity, 'avg_volume'])} · "
+                    f"{grouped.loc[best_liquidity, 'liquidity_label']}"
+                ),
+            },
+            {
+                "label": "Fastest Tape",
+                "value": fastest_tape,
+                "subtext": (
+                    f"Avg |Move| {grouped.loc[fastest_tape, 'avg_abs_return']:.2f}% · "
+                    f"Drift {grouped.loc[fastest_tape, 'drift_bias_label']}"
+                ),
+            },
+            {
+                "label": "Candle Coverage",
+                "value": data_coverage,
+                "subtext": "1h candles across all session buckets",
+            },
+        ],
     )
-    st.markdown(
-        f"<div class='elite-card' style='margin:2px 0 10px 0; border-color:rgba(0,212,255,0.22);'>"
-        f"<div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>"
-        f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>Execution Timing Read: "
-        f"<b style='color:{profile_color};'>{profile_title}</b></span>"
-        f"<span style='color:{profile_color}; font-size:0.84rem; font-weight:700;'>{profile_note}</span>"
-        f"</div></div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        f"<details style='margin-bottom:0.7rem;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"<b>1.</b> Start with <b>Relative Leader</b>: this is the best session among Asia / Europe / US <b>for this sample only</b>.<br>"
-        f"<b>2.</b> Use <b>Deepest Liquidity</b> when your setup already exists and you want cleaner fills.<br>"
-        f"<b>3.</b> Use <b>Fastest Tape</b> when you want movement, but remember fast tape can also mean harder execution.<br>"
-        f"<b>4.</b> <b>Up Tilt / Down Tilt</b> is timing context, not a buy/sell signal by itself.<br>"
-        f"<b>5.</b> Use this tab to choose <b>when</b> to execute; use Market / Spot / Position to decide <b>what</b> to trade."
-        f"</div></details>",
-        unsafe_allow_html=True,
+    render_insight_card(
+        st,
+        title=f"Execution Timing Read · {profile_title}",
+        body_html=f"<span style='color:{profile_color}; font-weight:700;'>{profile_note}</span>",
+        tone=(
+            "positive"
+            if profile_color == POSITIVE
+            else ("negative" if profile_color == NEGATIVE else "warning")
+        ),
     )
 
-    st.markdown(
-        f"<div class='panel-box' style='margin-bottom:0.7rem;'>"
-        f"<b style='color:{ACCENT};'>Metric Guide</b>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:6px;'>"
-        f"<b>Session</b>: The UTC block being evaluated (Asia / Europe / US).<br>"
-        f"<b>Relative Quality (0-100)</b>: A relative timing score across the 3 sessions only. "
-        f"It blends liquidity 50%, usable range 30%, and movement quality 20%. "
-        f"It does <b>not</b> mean a guaranteed edge by itself.<br>"
-        f"<b>Relative Read</b>: Quick label for the score band. Leading = best of the three right now, Balanced = usable, Lagging = weakest.<br>"
-        f"<b>Avg Volume</b>: Average hourly traded size inside that session. Higher usually means cleaner fills.<br>"
-        f"<b>Avg Range (%)</b>: Average candle high-low width. Higher means wider tape and usually bigger stop distance.<br>"
-        f"<b>Avg Return (%)</b>: Average hourly drift. Positive = mild upward tilt, negative = mild downward tilt.<br>"
-        f"<b>Avg |Move| (%)</b>: Average absolute candle move size. Higher means faster tape.<br>"
-        f"<b>Candles</b>: Number of hourly candles in the sample for that session bucket.<br>"
-        f"<b>Liquidity</b>: Deep / Average / Thin volume context <b>relative to the other 2 sessions in this sample</b>.<br>"
-        f"<b>Range Profile</b>: Controlled / Tradable / Stretched range balance for execution, also <b>relative across the 3 sessions</b>.<br>"
-        f"<b>Drift Bias</b>: Up Tilt / Down Tilt / Flat hourly drift context. "
-        f"Tiny drift inside +/-{DRIFT_BIAS_DEADBAND_PCT:.2f}% is treated as Flat to avoid noise."
-        f"</div></div>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="How to read quickly (?)",
+        body_html=(
+            "<b>1.</b> Start with <b>Relative Leader</b>: this is the best session among Asia / Europe / US <b>for this sample only</b>.<br>"
+            "<b>2.</b> Use <b>Deepest Liquidity</b> when your setup already exists and you want cleaner fills.<br>"
+            "<b>3.</b> Use <b>Fastest Tape</b> when you want movement, but remember fast tape can also mean harder execution.<br>"
+            "<b>4.</b> <b>Up Tilt / Down Tilt</b> is timing context, not a buy/sell signal by itself.<br>"
+            "<b>5.</b> Use this tab to choose <b>when</b> to execute; use Market / Spot / Position to decide <b>what</b> to trade."
+        ),
+    )
+
+    render_help_details(
+        st,
+        summary="Metric Guide",
+        body_html=(
+            "<b>Session</b>: The UTC block being evaluated (Asia / Europe / US).<br>"
+            "<b>Relative Quality (0-100)</b>: A relative timing score across the 3 sessions only. "
+            "It blends liquidity 50%, usable range 30%, and movement quality 20%. "
+            "It does <b>not</b> mean a guaranteed edge by itself.<br>"
+            "<b>Relative Read</b>: Quick label for the score band. Leading = best of the three right now, Balanced = usable, Lagging = weakest.<br>"
+            "<b>Avg Volume</b>: Average hourly traded size inside that session. Higher usually means cleaner fills.<br>"
+            "<b>Avg Range (%)</b>: Average candle high-low width. Higher means wider tape and usually bigger stop distance.<br>"
+            "<b>Avg Return (%)</b>: Average hourly drift. Positive = mild upward tilt, negative = mild downward tilt.<br>"
+            "<b>Avg |Move| (%)</b>: Average absolute candle move size. Higher means faster tape.<br>"
+            "<b>Candles</b>: Number of hourly candles in the sample for that session bucket.<br>"
+            "<b>Liquidity</b>: Deep / Average / Thin volume context <b>relative to the other 2 sessions in this sample</b>.<br>"
+            "<b>Range Profile</b>: Controlled / Tradable / Stretched range balance for execution, also <b>relative across the 3 sessions</b>.<br>"
+            f"<b>Drift Bias</b>: Up Tilt / Down Tilt / Flat hourly drift context. Tiny drift inside +/-{DRIFT_BIAS_DEADBAND_PCT:.2f}% is treated as Flat to avoid noise."
+        ),
     )
 
     with st.expander("Advanced Session Charts (optional diagnostics)"):

@@ -1,6 +1,6 @@
 import unittest
 
-from core.multitf import compute_multitf_alignment
+from core.multitf import HIGHER_TFS, compute_multitf_alignment, summarize_scope_bias
 
 
 class MultiTFLogicTests(unittest.TestCase):
@@ -47,6 +47,28 @@ class MultiTFLogicTests(unittest.TestCase):
         metrics = compute_multitf_alignment(rows)
         self.assertEqual(metrics["dominant_bias"], "NEUTRAL")
         self.assertEqual(metrics["weighted_alignment_pct"], 50.0)
+
+    def test_scope_summary_excludes_no_data_slots(self):
+        rows = [
+            {"timeframe": "1h", "direction": "UPSIDE", "strength": 58, "weight": 1.6},
+            {"timeframe": "4h", "direction": "", "strength": 0, "weight": 2.1},
+            {"timeframe": "1d", "direction": "", "strength": 0, "weight": 2.6},
+        ]
+        summary = summarize_scope_bias(rows, HIGHER_TFS, "higher timeframes", "UPSIDE")
+        self.assertIn("1 directional", summary)
+        self.assertIn("2 unavailable", summary)
+        self.assertNotIn("All 3", summary)
+
+    def test_scope_summary_explains_weight_neutral_case(self):
+        rows = [
+            {"timeframe": "1h", "direction": "DOWNSIDE", "strength": 58, "weight": 1.6},
+            {"timeframe": "4h", "direction": "NEUTRAL", "strength": 40, "weight": 2.1},
+            {"timeframe": "1d", "direction": "UPSIDE", "strength": 67, "weight": 2.6},
+        ]
+        summary = summarize_scope_bias(rows, HIGHER_TFS, "higher timeframes", "NEUTRAL")
+        self.assertIn("neutral", summary.lower())
+        self.assertIn("largest directional share", summary.lower())
+        self.assertIn("directional", summary.lower())
 
 
 if __name__ == "__main__":

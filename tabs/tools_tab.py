@@ -1,4 +1,5 @@
 from ui.ctx import get_ctx
+from ui.primitives import render_page_header
 
 import pandas as pd
 import plotly.graph_objs as go
@@ -14,21 +15,19 @@ def render(ctx: dict) -> None:
     _tip = get_ctx(ctx, "_tip")
     """Simple beginner-friendly position planner."""
 
-    st.markdown(f"<h2 style='color:{ACCENT};'>Trading Tools</h2>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='panel-box'>"
-        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Simple position planner. Enter "
-        f"{_tip('Entry', 'Price where you open the trade.')}, "
-        f"{_tip('Stop Loss', 'Price where you exit on loss.')}, "
-        f"{_tip('Take Profit', 'Price where you exit on profit.')}, "
-        f"{_tip('Margin Used', 'Cash allocated to this position.')}, and "
-        f"{_tip('Leverage', 'Position multiplier. Notional = margin x leverage.')}. "
-        f"PnL includes optional {_tip('Funding Rate (%)', 'Positive funding: Upside side pays Downside side. Negative funding: Downside side pays Upside side.')}. "
-        f"Trading fees are not included in this simplified model."
-        f"</p></div>",
-        unsafe_allow_html=True,
+    render_page_header(
+        st,
+        title="Trading Tools",
+        intro_html=(
+            "Simple position planner. Enter "
+            f"{_tip('Entry', 'Price where you open the trade.')}, "
+            f"{_tip('Stop Loss', 'Price where you exit on loss.')}, "
+            f"{_tip('Take Profit', 'Price where you exit on profit.')}, "
+            f"{_tip('Margin Used', 'Cash allocated to this position.')}, and "
+            f"{_tip('Leverage', 'Position multiplier. Notional = margin x leverage.')}. "
+            f"PnL includes optional {_tip('Funding Rate (%)', 'Positive funding: Upside side pays Downside side. Negative funding: Downside side pays Upside side.')}. "
+            "Trading fees are not included in this simplified model."
+        ),
     )
 
     c1, c2, c3 = st.columns(3)

@@ -118,6 +118,270 @@ div[data-testid="stCaptionContainer"] {{
     letter-spacing: 0.15px;
 }}
 
+/* Shared page primitives */
+.app-page-header {{
+    margin-bottom: 1rem;
+}}
+.app-page-title {{
+    color: {ACCENT};
+    margin: 0 0 0.35rem 0;
+}}
+.app-page-title--hero {{
+    font-size: 2.8rem !important;
+    font-weight: 800 !important;
+    background: linear-gradient(135deg, {ACCENT}, {NEON_BLUE}, {NEON_PURPLE});
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    letter-spacing: -0.5px;
+}}
+.app-page-subtitle {{
+    color: {TEXT_MUTED};
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 1rem;
+    line-height: 1.6;
+    margin: 0 0 0.8rem 0;
+}}
+.app-intro-card {{
+    background: linear-gradient(140deg, rgba(0, 0, 0, 0.76), rgba(8, 18, 30, 0.9));
+    border: 1px solid rgba(0, 212, 255, 0.12);
+    border-radius: 18px;
+    padding: 18px 20px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}}
+.app-intro-title {{
+    color: {ACCENT};
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+}}
+.app-intro-body {{
+    color: {TEXT_MUTED};
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.9rem;
+    line-height: 1.65;
+    margin-top: 6px;
+}}
+.app-help-details {{
+    margin: 0.15rem 0 0.75rem 0;
+}}
+.app-help-details summary {{
+    color: {ACCENT};
+    cursor: pointer;
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 0.94rem;
+    font-weight: 600;
+}}
+.app-help-body {{
+    color: {TEXT_MUTED};
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.85rem;
+    line-height: 1.7;
+    margin-top: 0.45rem;
+}}
+.app-sidebar-title-wrap {{
+    text-align: center;
+    margin: 8px 0 10px 0;
+}}
+.app-sidebar-title {{
+    color: {ACCENT};
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 1.08rem;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+}}
+.app-sidebar-panel {{
+    border-radius: 12px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    line-height: 1.58;
+    background: linear-gradient(140deg, rgba(6, 10, 18, 0.94), rgba(4, 8, 14, 0.94));
+}}
+.app-sidebar-panel--accent {{
+    border: 1px solid rgba(0, 212, 255, 0.24);
+}}
+.app-sidebar-panel--neutral {{
+    border: 1px solid rgba(255, 255, 255, 0.12);
+}}
+.app-sidebar-panel--positive {{
+    border: 1px solid rgba(0, 255, 136, 0.2);
+}}
+.app-sidebar-panel--warning {{
+    border: 1px solid rgba(255, 209, 102, 0.22);
+}}
+.app-sidebar-panel-title {{
+    color: {NEON_BLUE};
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 0.84rem;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    margin-bottom: 4px;
+}}
+.app-sidebar-panel-body {{
+    color: {TEXT_MUTED};
+    font-size: 0.78rem;
+}}
+.app-status-pill {{
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 2.25rem;
+    border-radius: 999px;
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    margin-top: 0.2rem;
+}}
+.app-status-pill--positive {{
+    color: {POSITIVE};
+}}
+.app-status-pill--warning {{
+    color: {WARNING};
+}}
+.app-status-pill--neutral {{
+    color: {TEXT_MUTED};
+}}
+.app-kpi-grid {{
+    display: grid;
+    grid-template-columns: repeat(var(--app-kpi-columns, 4), minmax(0, 1fr));
+    gap: 10px;
+    margin: 8px 0 12px 0;
+}}
+.app-kpi-grid--center-last {{
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+}}
+.app-kpi-grid--center-last > .app-kpi-card {{
+    width: calc((100% - (var(--app-kpi-columns, 4) - 1) * 10px) / var(--app-kpi-columns, 4));
+    max-width: calc((100% - (var(--app-kpi-columns, 4) - 1) * 10px) / var(--app-kpi-columns, 4));
+    flex: 0 0 calc((100% - (var(--app-kpi-columns, 4) - 1) * 10px) / var(--app-kpi-columns, 4));
+}}
+.app-kpi-card {{
+    border: 1px solid rgba(0, 212, 255, 0.16);
+    border-radius: 12px;
+    padding: 12px 14px;
+    background: linear-gradient(140deg, rgba(0, 0, 0, 0.72), rgba(10, 18, 30, 0.88));
+    min-height: var(--app-kpi-card-min-height, auto);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    text-align: var(--app-kpi-align, left);
+}}
+.app-kpi-label {{
+    color: {TEXT_MUTED};
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    font-weight: 600;
+}}
+.app-kpi-value {{
+    color: {ACCENT};
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 1.2rem;
+    font-weight: 700;
+    margin-top: 4px;
+}}
+.app-kpi-sub {{
+    color: {TEXT_MUTED};
+    font-size: 0.8rem;
+    line-height: 1.45;
+    margin-top: 4px;
+}}
+.app-badge-row {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 2px 0 10px 0;
+}}
+.app-chip {{
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.15px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    background: rgba(255, 255, 255, 0.03);
+    color: {TEXT_MUTED};
+}}
+.app-chip-dot {{
+    line-height: 1;
+}}
+.app-chip--accent {{
+    color: {ACCENT};
+    border-color: rgba(0, 212, 255, 0.28);
+    background: rgba(0, 212, 255, 0.06);
+}}
+.app-chip--positive {{
+    color: {POSITIVE};
+    border-color: rgba(0, 255, 136, 0.35);
+    background: rgba(0, 255, 136, 0.08);
+}}
+.app-chip--warning {{
+    color: {WARNING};
+    border-color: rgba(255, 209, 102, 0.35);
+    background: rgba(255, 209, 102, 0.08);
+}}
+.app-chip--negative {{
+    color: {NEGATIVE};
+    border-color: rgba(255, 51, 102, 0.35);
+    background: rgba(255, 51, 102, 0.08);
+}}
+.app-chip--neutral {{
+    color: {TEXT_MUTED};
+    border-color: rgba(255, 255, 255, 0.15);
+    background: rgba(255, 255, 255, 0.03);
+}}
+.app-insight-card {{
+    border: 1px solid rgba(0, 212, 255, 0.2);
+    border-left: 4px solid {ACCENT};
+    border-radius: 12px;
+    padding: 14px 16px;
+    background: linear-gradient(140deg, rgba(0, 0, 0, 0.76), rgba(8, 18, 32, 0.92));
+    margin: 10px 0 14px 0;
+}}
+.app-insight-card--accent {{
+    border-left-color: {ACCENT};
+}}
+.app-insight-card--positive {{
+    border-left-color: {POSITIVE};
+}}
+.app-insight-card--warning {{
+    border-left-color: {WARNING};
+}}
+.app-insight-card--negative {{
+    border-left-color: {NEGATIVE};
+}}
+.app-insight-card--neutral {{
+    border-left-color: rgba(255, 255, 255, 0.24);
+}}
+.app-insight-title {{
+    color: {ACCENT};
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 1rem;
+    font-weight: 700;
+    margin-bottom: 6px;
+}}
+.app-insight-body {{
+    color: {TEXT_MUTED};
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.87rem;
+    line-height: 1.6;
+}}
+.app-insight-badges {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}}
+
 /* Global heading scale */
 h1, .stMarkdown h1 {{
     font-size: 2.35rem !important;
@@ -345,9 +609,13 @@ table.dataframe tbody tr:hover {{
     background: linear-gradient(135deg, rgba(0, 212, 255, 0.2), rgba(178, 75, 243, 0.2));
     border: 1px solid rgba(0, 212, 255, 0.3);
     color: {ACCENT};
-    border-radius: 10px;
+    border-radius: 14px;
+    min-height: 2.95rem;
+    padding: 0.7rem 1.05rem;
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 0.95rem;
     font-weight: 600;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.2px;
     transition: all 0.3s ease;
 }}
 .stButton > button:hover {{
@@ -380,7 +648,8 @@ section[data-testid="stSidebar"] {{
     background-color: rgba(0, 0, 0, 0.9) !important;
     border-color: rgba(0, 212, 255, 0.2) !important;
     color: {TEXT_LIGHT} !important;
-    border-radius: 8px !important;
+    border-radius: 12px !important;
+    font-family: 'Manrope', 'Segoe UI', sans-serif !important;
 }}
 
 /* Fix dark blue backgrounds on Streamlit widgets */
@@ -645,6 +914,10 @@ div[data-testid="stVerticalBlock"] > div {{
 
 /* Mobile-first polish */
 @media (max-width: 900px) {{
+    .app-page-title--hero {{
+        font-size: 2rem !important;
+        line-height: 1.15;
+    }}
     h1.title {{
         font-size: 2rem;
         line-height: 1.15;
@@ -679,6 +952,9 @@ div[data-testid="stVerticalBlock"] > div {{
         font-size: 0.72rem;
         padding: 4px 7px;
     }}
+    .app-kpi-grid {{
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }}
 }}
 
 @media (max-width: 640px) {{
@@ -687,6 +963,10 @@ div[data-testid="stVerticalBlock"] > div {{
     }}
     .stButton > button {{
         font-size: 0.82rem;
+        min-height: 2.7rem;
+    }}
+    .app-kpi-grid {{
+        grid-template-columns: 1fr;
     }}
 }}
 </style>

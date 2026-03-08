@@ -13,7 +13,8 @@ class MarketCoinColumnContractTests(unittest.TestCase):
 
     def test_coin_cell_uses_pair_tooltip_metadata(self):
         self.assertIn("pair = str(row.get(\"__pair\", \"\")).strip()", self.text)
-        self.assertIn("'__pair': sym", self.text)
+        self.assertIn("'__pair': pair_label", self.text)
+        self.assertIn("def _pair_provenance_label(", self.text)
         self.assertRegex(
             self.text,
             r"(?s)hidden_meta_cols\s*=\s*\[.*?\"__pair\"",
@@ -24,13 +25,14 @@ class MarketCoinColumnContractTests(unittest.TestCase):
         self.assertIn("tuple(custom_bases_applied)", self.text)
         self.assertIn("if exclude_stables:", self.text)
         self.assertIn(
-            "working_symbols = [s for s in working_symbols if not _is_stable_base(s.split(\"/\")[0].upper())]",
+            "candidates = [s for s in candidates if \"/\" in s and not _is_stable_base(s.split(\"/\")[0].upper())]",
             self.text,
         )
 
     def test_sorting_has_deterministic_tie_breakers(self):
-        self.assertIn('-float(x.get("__mcap_val", 0))', self.text)
-        self.assertIn('str(x.get("Coin", ""))', self.text)
+        self.assertIn('def _market_result_priority_key(row: dict)', self.text)
+        self.assertIn('-_sortable_float(row.get("__mcap_val", 0))', self.text)
+        self.assertIn('str(row.get("Coin", ""))', self.text)
 
     def test_csv_export_drops_internal_coin_metadata(self):
         self.assertIn(

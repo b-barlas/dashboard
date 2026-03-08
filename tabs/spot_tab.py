@@ -13,7 +13,93 @@ from core.market_decision import (
     structure_state,
 )
 from core.signal_contract import strength_from_bias, strength_bucket
+from ui.primitives import render_help_details, render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
+
+
+def format_spot_price(v: float) -> str:
+    try:
+        p = float(v)
+    except Exception:
+        return ""
+    if p >= 1000:
+        return f"${p:,.2f}"
+    if p >= 1:
+        return f"${p:,.4f}"
+    if p >= 0.01:
+        return f"${p:,.6f}"
+    if p >= 0.0001:
+        return f"${p:,.8f}"
+    return f"${p:,.10f}"
+
+
+def _spot_ai_fallback_note(details: dict | None) -> str:
+    status = str((details or {}).get("status") or "").strip().lower()
+    if status == "insufficient_candles":
+        return "AI fallback active: not enough candles for a reliable model vote."
+    if status == "insufficient_features":
+        return "AI fallback active: not enough clean indicator data after warm-up."
+    if status == "single_class_window":
+        return "AI fallback active: recent training window had only one class."
+    if status == "model_exception":
+        return "AI fallback active: ensemble model output was unavailable."
+    return ""
+
+
+def _spot_ai_display_value(direction_fn, ai_dir_key: str, ai_votes: int, fallback_note: str) -> str:
+    base = f"{direction_fn(ai_dir_key)} ({ai_votes}/3)"
+    if fallback_note:
+        return f"{direction_fn(ai_dir_key)}* ({ai_votes}/3)"
+    return base
+
+
+def _spot_execution_map_copy(signal_dir: str) -> dict[str, str]:
+    key = str(signal_dir or "").strip().upper()
+    if key == "DOWNSIDE":
+        return {
+            "section_title": "Reclaim Map (Defensive)",
+            "left_path": "Support Watch",
+            "right_path": "Reclaim Path",
+            "left_zone": "Watch Zone",
+            "right_trigger": "Reclaim Trigger",
+            "left_tp": "Recovery TP",
+            "right_tp": "Recovery TP",
+        }
+    if key == "NEUTRAL":
+        return {
+            "section_title": "Decision Map",
+            "left_path": "Support Watch",
+            "right_path": "Breakout Watch",
+            "left_zone": "Watch Zone",
+            "right_trigger": "Breakout Trigger",
+            "left_tp": "TP Zone",
+            "right_tp": "TP Zone",
+        }
+    return {
+        "section_title": "Execution Map",
+        "left_path": "Buy Zone Path",
+        "right_path": "Breakout Path",
+        "left_zone": "Buy Zone",
+        "right_trigger": "Breakout Trigger",
+        "left_tp": "TP Zone",
+        "right_tp": "TP Zone",
+    }
+
+
+def _spot_axis_tickformat(reference_price: float) -> str:
+    try:
+        p = float(reference_price)
+    except Exception:
+        return ",.2f"
+    if p >= 1000:
+        return ",.2f"
+    if p >= 1:
+        return ",.4f"
+    if p >= 0.01:
+        return ",.6f"
+    if p >= 0.0001:
+        return ",.8f"
+    return ",.10f"
 
 
 def render(ctx: dict) -> None:
@@ -70,50 +156,31 @@ def render(ctx: dict) -> None:
             "1d": 3600,
         }.get(str(tf or "").strip(), 900)
 
-    def _fmt_price(v: float) -> str:
-        try:
-            p = float(v)
-        except Exception:
-            return ""
-        if p >= 1000:
-            return f"${p:,.2f}"
-        if p >= 1:
-            return f"${p:,.4f}"
-        if p >= 0.01:
-            return f"${p:,.6f}"
-        if p >= 0.0001:
-            return f"${p:,.8f}"
-        return f"${p:,.10f}"
-    st.markdown(
-        f"<h2 style='color:{ACCENT};margin-bottom:0.5rem;'>Spot Trading</h2>",
-        unsafe_allow_html=True,
+    _fmt_price = format_spot_price
+    render_page_header(
+        st,
+        title="Spot Trading",
+        intro_html=(
+            f"Spot-focused decision workspace for a single coin/timeframe. Uses the same core signal engine as Market tab, then maps it into "
+            f"<b>Setup Confirm</b> classes (TREND+AI / TREND-led / AI-led / WATCH / SKIP) for non-leverage execution. Combines "
+            f"{_tip('Trend', 'EMA crossovers, SuperTrend, Ichimoku Cloud, Parabolic SAR, and ADX indicators.')} (40%), "
+            f"{_tip('Momentum', 'RSI, MACD, Stochastic RSI, Williams %R, and CCI indicators.')} (30%), "
+            f"{_tip('Volume', 'OBV direction, volume spikes, and VWAP positioning.')} (20%), and "
+            f"{_tip('Volatility', 'Bollinger Band width, ATR level, and Keltner Channel breakouts.')} (10%) "
+            f"into <b>Direction</b> (Upside / Downside / Neutral) and a direction-agnostic <b>Strength</b> score (0-100). "
+            f"All setup/level outputs are based on closed candles."
+        ),
     )
-    st.markdown(
-        f"<div class='panel-box'>"
-        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Spot-focused decision workspace for a single coin/timeframe. Uses the same core signal engine as Market tab, then maps it into "
-        f"<b>Setup Confirm</b> classes (TREND+AI / TREND-led / AI-led / WATCH / SKIP) for non-leverage execution. Combines "
-        f"{_tip('Trend', 'EMA crossovers, SuperTrend, Ichimoku Cloud, Parabolic SAR, and ADX indicators.')} (40%), "
-        f"{_tip('Momentum', 'RSI, MACD, Stochastic RSI, Williams %R, and CCI indicators.')} (30%), "
-        f"{_tip('Volume', 'OBV direction, volume spikes, and VWAP positioning.')} (20%), and "
-        f"{_tip('Volatility', 'Bollinger Band width, ATR level, and Keltner Channel breakouts.')} (10%) "
-        f"into <b>Direction</b> (Upside / Downside / Neutral) and a direction-agnostic <b>Strength</b> score (0-100). "
-        f"All setup/level outputs are based on closed candles.</p>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        f"<details style='margin-bottom:0.7rem;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.45rem;'>"
-        f"<b>1.</b> Start with <b>Setup Snapshot</b>: Δ (%) + Setup Confirm + Direction + Strength.<br>"
-        f"<b>2.</b> Read <b>Setup Confirm</b> first: TREND+AI strongest, TREND-led/AI-led conditional, WATCH monitor, SKIP no-trade.<br>"
-        f"<b>3.</b> Validate with <b>AI Ensemble</b> + <b>Tech vs AI Alignment</b>.<br>"
-        f"<b>4.</b> Use <b>Technical Regime Breakdown</b> only as confirmation context (not standalone trigger).<br>"
-        f"<b>5.</b> In <b>Execution Levels</b>, choose one path (Buy Zone or Breakout), define matching stop first, then TP zone."
-        f"</div></details>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="How to read quickly",
+        body_html=(
+            "<b>1.</b> Start with <b>Setup Snapshot</b>: Δ (%) + Setup Confirm + Direction + Strength.<br>"
+            "<b>2.</b> Read <b>Setup Confirm</b> first: TREND+AI strongest, TREND-led/AI-led conditional, WATCH monitor, SKIP no-trade.<br>"
+            "<b>3.</b> Validate with <b>AI Ensemble</b> + <b>Tech vs AI Alignment</b>. A <b>*</b> after AI Ensemble means the model fell back to neutral because the current frame did not have reliable ML context.<br>"
+            "<b>4.</b> Use <b>Technical Regime Breakdown</b> only as confirmation context (not standalone trigger).<br>"
+            "<b>5.</b> In <b>Execution Levels</b>, choose one path (support path or trigger path), define the matching stop first, then the matching TP zone."
+        ),
     )
     coin = _normalize_coin_input(st.text_input(
         "Coin (e.g. BTC, ETH, TAO)",
@@ -201,10 +268,12 @@ def render(ctx: dict) -> None:
                 directional_agree,
                 consensus_agree,
             )
+            ai_fallback_note = _spot_ai_fallback_note(_ai_details_s)
         except Exception:
             ai_dir_key = "NEUTRAL"
             ai_votes = 0
             decision_agreement = 0.0
+            ai_fallback_note = "AI fallback active: ensemble model output was unavailable."
 
         sig_dir_s = signal_dir if signal_dir in {"UPSIDE", "DOWNSIDE"} else "WAIT"
         conv_lbl_s, _conv_c_s = _calc_conviction(sig_dir_s, ai_dir_key, strength_score, decision_agreement)
@@ -307,14 +376,26 @@ def render(ctx: dict) -> None:
             f"<div class='spot-summary-item' title='Direction-agnostic signal power from the technical stack (0-100).'>"
             f"<div class='spot-summary-label'>Strength</div>"
             f"<div class='spot-summary-value' style='color:{conf_c_s};'>{strength_display}</div></div>"
-            f"<div class='spot-summary-item' title='Model vote direction and vote count out of 3 models.'>"
+            f"<div class='spot-summary-item' title='{html.escape(ai_fallback_note or 'Model vote direction and vote count out of 3 models.', quote=True)}'>"
             f"<div class='spot-summary-label'>AI Ensemble</div>"
-            f"<div class='spot-summary-value' style='color:{ai_c_s};'>{direction_label(ai_dir_key)} ({ai_votes}/3)</div></div>"
+            f"<div class='spot-summary-value' style='color:{ai_c_s};'>{_spot_ai_display_value(direction_label, ai_dir_key, ai_votes, ai_fallback_note)}</div></div>"
             f"<div class='spot-summary-item' title='How well technical direction and AI direction agree.'>"
             f"<div class='spot-summary-label'>Tech vs AI Alignment</div>"
             f"<div class='spot-summary-value' style='color:{conv_c_s};'>{conv_lbl_s}</div></div>"
             f"</div></div>",
             unsafe_allow_html=True,
+        )
+        render_help_details(
+            st,
+            summary="Setup Snapshot Guide",
+            body_html=(
+                "<b>Δ (%)</b> = last closed-candle move on this timeframe.<br>"
+                "<b>Setup Confirm</b> = setup quality class, not a standalone buy command.<br>"
+                "<b>Direction</b> = technical direction from closed candles only.<br>"
+                "<b>Strength</b> = direction-agnostic signal power from the technical stack.<br>"
+                "<b>AI Ensemble</b> = 3-model vote summary. A <b>*</b> means the model fell back to neutral because ML context was not reliable.<br>"
+                "<b>Tech vs AI Alignment</b> = how well technical direction and AI direction agree."
+            ),
         )
 
         ichi_meta_parts = []
@@ -503,6 +584,18 @@ def render(ctx: dict) -> None:
                 f"</div>",
                 unsafe_allow_html=True,
             )
+            render_help_details(
+                st,
+                summary="Indicator Guide",
+                body_html=(
+                    "<b>Trend Structure</b><br>"
+                    "SuperTrend = ATR-based trend line bias. Ichimoku = cloud trend context. VWAP = price relative to average traded price. ADX = trend strength only. PSAR = trailing trend state.<br><br>"
+                    "<b>Momentum Signals</b><br>"
+                    "StochRSI = short-term momentum pressure. Williams %R = range-position momentum. CCI = mean-reversion pressure. Pattern = latest candle pattern context.<br><br>"
+                    "<b>Volatility & Volume</b><br>"
+                    "Bollinger = band location (extension or pullback), Volatility = ATR/band-width regime, Volume = abnormal volume spike context."
+                ),
+            )
 
         # Execution levels (spot-only): separate pullback and breakout paths.
         try:
@@ -533,105 +626,406 @@ def render(ctx: dict) -> None:
         pullback_zone_text = f"{_fmt_price(pullback_low)}-{_fmt_price(pullback_high)}"
         pullback_tp_text = f"{_fmt_price(pullback_tp_low)}-{_fmt_price(pullback_tp_high)}"
         breakout_tp_text = f"{_fmt_price(breakout_tp_low)}-{_fmt_price(breakout_tp_high)}"
+        map_copy = _spot_execution_map_copy(signal_dir)
+        left_path_label = str(map_copy.get("left_path") or "Buy Zone Path")
+        left_zone_label = str(map_copy.get("left_zone") or "Buy Zone")
+        trigger_label = str(map_copy.get("right_trigger") or "Breakout Trigger")
+        right_path_label = str(map_copy.get("right_path") or "Breakout Path")
+        left_tp_label = str(map_copy.get("left_tp") or "TP Zone")
+        right_tp_label = str(map_copy.get("right_tp") or "TP Zone")
+        left_stop_context = left_zone_label
+        right_stop_context = trigger_label.replace(" Trigger", "").strip() or "Breakout"
+        trigger_guide = (
+            "upper trigger if a candle closes above this level."
+            if trigger_label == "Breakout Trigger"
+            else "confirmation level that price must reclaim before a fresh spot buy is considered."
+        )
 
         st.markdown(
-            f"<style>"
-            f".spot-kpi-panel {{"
-            f"  background:linear-gradient(140deg, rgba(4, 10, 18, 0.96), rgba(2, 5, 11, 0.96));"
-            f"  border:1px solid rgba(0, 212, 255, 0.16);"
-            f"  border-radius:14px;"
-            f"  padding:10px 12px;"
-            f"  box-shadow:0 10px 30px rgba(0, 0, 0, 0.35);"
-            f"  margin:0.25rem 0 0.5rem 0;"
-            f"}}"
-            f".spot-kpi-grid {{"
-            f"  display:flex;"
-            f"  flex-wrap:wrap;"
-            f"  justify-content:center;"
-            f"  gap:0.55rem 0.9rem;"
-            f"}}"
-            f".spot-kpi-item {{"
-            f"  flex:0 1 clamp(220px, 22vw, 290px);"
-            f"  min-width:200px;"
-            f"  text-align:center;"
-            f"  padding:4px 6px;"
-            f"}}"
-            f".spot-kpi-label {{"
-            f"  color:{TEXT_MUTED};"
-            f"  font-size:0.62rem;"
-            f"  letter-spacing:0.7px;"
-            f"  text-transform:uppercase;"
-            f"  font-weight:650;"
-            f"  white-space:nowrap;"
-            f"  overflow:hidden;"
-            f"  text-overflow:ellipsis;"
-            f"}}"
-            f".spot-kpi-value {{"
-            f"  color:{ACCENT};"
-            f"  font-family:'Space Grotesk','Manrope',sans-serif;"
-            f"  font-size:1.08rem;"
-            f"  font-weight:700;"
-            f"  margin-top:5px;"
-            f"  line-height:1.24;"
-            f"  white-space:normal;"
-            f"  overflow-wrap:anywhere;"
-            f"  font-variant-numeric:tabular-nums;"
-            f"}}"
-            f".spot-kpi-guide {{"
-            f"  border:1px solid rgba(0, 212, 255, 0.28);"
-            f"  border-left:4px solid {ACCENT};"
-            f"  background:rgba(0, 0, 0, 0.62);"
-            f"  border-radius:12px;"
-            f"  padding:10px 12px;"
-            f"  margin:0 0 0.7rem 0;"
-            f"  color:{TEXT_MUTED};"
-            f"  font-family:'Manrope','Segoe UI',sans-serif;"
-            f"  font-size:0.86rem;"
-            f"  font-weight:500;"
-            f"  line-height:1.7;"
-            f"}}"
-            f".spot-kpi-guide b {{ color:inherit; font-weight:700; }}"
-            f".spot-kpi-guide ul {{ margin:0.2rem 0 0.25rem 1.1rem; padding:0; }}"
-            f".spot-kpi-guide li {{ margin:0.15rem 0; }}"
-            f".spot-kpi-guide ul, .spot-kpi-guide li, .spot-kpi-guide span {{"
-            f"  font-family:'Manrope','Segoe UI',sans-serif;"
-            f"  font-size:0.86rem;"
-            f"  font-weight:500;"
-            f"  line-height:1.7;"
-            f"}}"
-            f".spot-kpi-section-title {{"
-            f"  margin:0.30rem 0 0.34rem 0;"
-            f"  text-align:center;"
-            f"  color:{TEXT_MUTED};"
-            f"  font-size:0.78rem;"
-            f"  text-transform:uppercase;"
-            f"  letter-spacing:0.45px;"
-            f"}}"
-            f"</style>"
-            f"<div class='spot-kpi-section-title'>Execution Levels (spot-only)</div>"
-            f"<div class='spot-kpi-panel'><div class='spot-kpi-grid'>"
-            f"<div class='spot-kpi-item' title='Latest close of selected timeframe (not live tick).'>"
-            f"<div class='spot-kpi-label'>Reference Price</div><div class='spot-kpi-value'>{_fmt_price(current_price)}</div></div>"
-            f"<div class='spot-kpi-item'><div class='spot-kpi-label'>Buy Zone</div><div class='spot-kpi-value'>{pullback_zone_text}</div></div>"
-            f"<div class='spot-kpi-item'><div class='spot-kpi-label'>Buy Above (Breakout)</div><div class='spot-kpi-value'>{_fmt_price(breakout_trigger)}</div></div>"
-            f"<div class='spot-kpi-item'><div class='spot-kpi-label'>Stop (Buy Zone)</div><div class='spot-kpi-value'>{_fmt_price(pullback_invalidation)}</div></div>"
-            f"<div class='spot-kpi-item'><div class='spot-kpi-label'>Stop (Breakout)</div><div class='spot-kpi-value'>{_fmt_price(breakout_invalidation)}</div></div>"
-            f"<div class='spot-kpi-item'><div class='spot-kpi-label'>Take-Profit (Buy Zone)</div><div class='spot-kpi-value'>{pullback_tp_text}</div></div>"
-            f"<div class='spot-kpi-item'><div class='spot-kpi-label'>Take-Profit (Breakout)</div><div class='spot-kpi-value'>{breakout_tp_text}</div></div>"
-            f"</div></div>"
-            f"<div class='spot-kpi-guide'>"
-            f"<b style='font-size:1rem;'>Info | KPI Quick Guide:</b>"
-            f"<ul>"
-            f"<li><b>Reference Price</b>: latest closed candle for this timeframe.</li>"
-            f"<li><b>Buy Zone</b>: first accumulation area if price reacts and holds.</li>"
-            f"<li><b>Buy Above (Breakout)</b>: second trigger if a candle closes above this level.</li>"
-            f"<li><b>Stop levels</b>: if price breaks stop, that specific path is invalid.</li>"
-            f"<li><b>Take-Profit zones</b>: scale out in the matching zone (buy-zone path vs breakout path).</li>"
-            f"</ul>"
-            f"<span style='font-size:0.86rem;'>Workflow: choose one path, define stop first, then execute the matching take-profit zone.</span>"
-            f"</div>",
+            f"<div style='margin:0.3rem 0 0.45rem 0; text-align:center; color:{TEXT_MUTED}; font-size:0.78rem; text-transform:uppercase; letter-spacing:0.45px;'>"
+            "Execution Levels (spot-only)"
+            "</div>",
             unsafe_allow_html=True,
         )
+        render_kpi_grid(
+            st,
+            items=[
+                {
+                    "label": "Reference Price",
+                    "label_title": "Latest close of selected timeframe (not live tick).",
+                    "value": _fmt_price(current_price),
+                },
+                {
+                    "label": left_zone_label,
+                    "value": pullback_zone_text,
+                    "subtext": f"raw support: {_fmt_price(plan_support)}",
+                },
+                {
+                    "label": trigger_label,
+                    "value": _fmt_price(breakout_trigger),
+                    "subtext": f"raw resistance: {_fmt_price(plan_resistance)}",
+                },
+                {"label": f"Stop ({left_stop_context})", "value": _fmt_price(pullback_invalidation)},
+                {"label": f"Stop ({right_stop_context})", "value": _fmt_price(breakout_invalidation)},
+                {"label": f"{left_tp_label} ({left_zone_label})", "value": pullback_tp_text},
+                {"label": f"{right_tp_label} ({right_stop_context})", "value": breakout_tp_text},
+            ],
+            columns=4,
+            align="center",
+            card_min_height="132px",
+            center_last_row=True,
+        )
+        render_help_details(
+            st,
+            summary="Info | KPI Quick Guide",
+            body_html=(
+                "<ul>"
+                "<li><b>Reference Price</b>: latest closed candle for this timeframe.</li>"
+                f"<li><b>{html.escape(left_zone_label)}</b>: primary reaction area for the {html.escape(left_path_label.lower())}.</li>"
+                f"<li><b>{html.escape(trigger_label)}</b>: {html.escape(trigger_guide)}</li>"
+                "<li><b>Stop levels</b>: if price breaks stop, that specific path is invalid.</li>"
+                f"<li><b>{html.escape(left_tp_label)}</b> / <b>{html.escape(right_tp_label)}</b>: scale out in the matching path.</li>"
+                "</ul>"
+                f"<span>Workflow: choose one path ({html.escape(left_path_label)} or {html.escape(right_path_label)}), define the matching stop first, then use the matching take-profit zone.</span>"
+            ),
+        )
+        st.markdown(
+            f"<div style='margin:0.15rem 0 0.45rem 0; text-align:center; color:{TEXT_MUTED}; font-size:0.78rem; text-transform:uppercase; letter-spacing:0.45px;'>"
+            f"{_spot_execution_map_copy(signal_dir).get('section_title', 'Execution Map')}"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        map_levels = [
+            pullback_invalidation,
+            breakout_invalidation,
+            pullback_low,
+            pullback_high,
+            plan_support,
+            current_price,
+            plan_resistance,
+            breakout_trigger,
+            pullback_tp_low,
+            pullback_tp_high,
+            breakout_tp_low,
+            breakout_tp_high,
+        ]
+        map_min = min(map_levels)
+        map_max = max(map_levels)
+        map_span = max(map_max - map_min, current_price * 0.01)
+        map_pad = max(map_span * 0.14, current_price * 0.0025)
+        map_y0 = max(0.0, map_min - map_pad)
+        map_y1 = map_max + map_pad
+        left_x0, left_x1 = 10, 44
+        right_x0, right_x1 = 56, 90
+        left_path_color = POSITIVE if signal_dir == "UPSIDE" else WARNING
+        right_path_color = ACCENT if signal_dir == "UPSIDE" else WARNING
+        left_fill_color = "rgba(0, 255, 136, 0.18)" if signal_dir == "UPSIDE" else "rgba(255, 209, 102, 0.14)"
+        left_tp_fill = "rgba(0, 255, 136, 0.12)" if signal_dir == "UPSIDE" else "rgba(255, 209, 102, 0.08)"
+        right_tp_fill = "rgba(34, 211, 238, 0.12)" if signal_dir == "UPSIDE" else "rgba(255, 209, 102, 0.08)"
+        trigger_color = ACCENT if signal_dir == "UPSIDE" else WARNING
+        left_label_color = "#E8FFF7" if signal_dir == "UPSIDE" else "#FFF3D0"
+        right_label_color = "#D8F9FF" if signal_dir == "UPSIDE" else "#FFF3D0"
+
+        exec_fig = go.Figure()
+
+        exec_fig.update_layout(
+            height=360,
+            template="plotly_dark",
+            margin=dict(l=24, r=24, t=18, b=18),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(3,8,15,0.96)",
+            xaxis=dict(
+                range=[0, 100],
+                showgrid=False,
+                zeroline=False,
+                showticklabels=False,
+                fixedrange=True,
+            ),
+            yaxis=dict(
+                range=[map_y0, map_y1],
+                showgrid=True,
+                gridcolor="rgba(255,255,255,0.06)",
+                zeroline=False,
+                tickfont=dict(color=TEXT_MUTED, size=11),
+                tickprefix="$",
+                tickformat=_spot_axis_tickformat(current_price),
+                fixedrange=True,
+            ),
+            showlegend=False,
+            shapes=[
+                dict(
+                    type="rect",
+                    xref="x",
+                    yref="paper",
+                    x0=left_x0 - 2,
+                    x1=left_x1 + 2,
+                    y0=0.04,
+                    y1=0.96,
+                    fillcolor="rgba(0, 212, 255, 0.035)",
+                    line=dict(color="rgba(0, 212, 255, 0.10)", width=1),
+                    layer="below",
+                ),
+                dict(
+                    type="rect",
+                    xref="x",
+                    yref="paper",
+                    x0=right_x0 - 2,
+                    x1=right_x1 + 2,
+                    y0=0.04,
+                    y1=0.96,
+                    fillcolor="rgba(124, 58, 237, 0.04)",
+                    line=dict(color="rgba(124, 58, 237, 0.12)", width=1),
+                    layer="below",
+                ),
+                dict(
+                    type="rect",
+                    xref="x",
+                    yref="y",
+                    x0=left_x0,
+                    x1=left_x1,
+                    y0=pullback_low,
+                    y1=pullback_high,
+                    fillcolor=left_fill_color,
+                    line=dict(color=left_path_color, width=1.6),
+                    layer="below",
+                ),
+                dict(
+                    type="rect",
+                    xref="x",
+                    yref="y",
+                    x0=left_x0,
+                    x1=left_x1,
+                    y0=pullback_tp_low,
+                    y1=pullback_tp_high,
+                    fillcolor=left_tp_fill,
+                    line=dict(color=left_path_color, width=1.2, dash="dot"),
+                    layer="below",
+                ),
+                dict(
+                    type="rect",
+                    xref="x",
+                    yref="y",
+                    x0=right_x0,
+                    x1=right_x1,
+                    y0=breakout_tp_low,
+                    y1=breakout_tp_high,
+                    fillcolor=right_tp_fill,
+                    line=dict(color=right_path_color, width=1.2, dash="dot"),
+                    layer="below",
+                ),
+                dict(
+                    type="line",
+                    xref="x",
+                    yref="y",
+                    x0=left_x0,
+                    x1=left_x1,
+                    y0=pullback_invalidation,
+                    y1=pullback_invalidation,
+                    line=dict(color=NEGATIVE, width=2.2),
+                    layer="below",
+                ),
+                dict(
+                    type="line",
+                    xref="x",
+                    yref="y",
+                    x0=right_x0,
+                    x1=right_x1,
+                    y0=breakout_trigger,
+                    y1=breakout_trigger,
+                    line=dict(color=trigger_color, width=2.2),
+                    layer="below",
+                ),
+                dict(
+                    type="line",
+                    xref="x",
+                    yref="y",
+                    x0=right_x0,
+                    x1=right_x1,
+                    y0=breakout_invalidation,
+                    y1=breakout_invalidation,
+                    line=dict(color=NEGATIVE, width=2.2),
+                    layer="below",
+                ),
+                dict(
+                    type="line",
+                    xref="x",
+                    yref="y",
+                    x0=6,
+                    x1=94,
+                    y0=plan_support,
+                    y1=plan_support,
+                    line=dict(color="rgba(0, 212, 255, 0.45)", width=1.2, dash="dot"),
+                    layer="below",
+                ),
+                dict(
+                    type="line",
+                    xref="x",
+                    yref="y",
+                    x0=6,
+                    x1=94,
+                    y0=plan_resistance,
+                    y1=plan_resistance,
+                    line=dict(color="rgba(0, 212, 255, 0.45)", width=1.2, dash="dot"),
+                    layer="below",
+                ),
+                dict(
+                    type="line",
+                    xref="x",
+                    yref="y",
+                    x0=6,
+                    x1=94,
+                    y0=current_price,
+                    y1=current_price,
+                    line=dict(color="rgba(255, 255, 255, 0.72)", width=1.6, dash="dash"),
+                    layer="below",
+                ),
+            ],
+            annotations=[
+                dict(
+                    x=(left_x0 + left_x1) / 2,
+                    y=1.02,
+                    xref="x",
+                    yref="paper",
+                    text=map_copy["left_path"],
+                    showarrow=False,
+                    font=dict(color=left_path_color, size=12, family="Space Grotesk, Manrope, sans-serif"),
+                ),
+                dict(
+                    x=(right_x0 + right_x1) / 2,
+                    y=1.02,
+                    xref="x",
+                    yref="paper",
+                    text=map_copy["right_path"],
+                    showarrow=False,
+                    font=dict(color=right_path_color, size=12, family="Space Grotesk, Manrope, sans-serif"),
+                ),
+                dict(
+                    x=(left_x0 + left_x1) / 2,
+                    y=(pullback_low + pullback_high) / 2,
+                    xref="x",
+                    yref="y",
+                    text=f"<b>{map_copy['left_zone']}</b><br><span style='font-size:11px'>{pullback_zone_text}</span>",
+                    showarrow=False,
+                    align="center",
+                    font=dict(color=left_label_color, size=12, family="Manrope, Segoe UI, sans-serif"),
+                    bgcolor="rgba(8, 14, 24, 0.70)",
+                    bordercolor="rgba(255,255,255,0.08)",
+                    borderpad=5,
+                ),
+                dict(
+                    x=(left_x0 + left_x1) / 2,
+                    y=(pullback_tp_low + pullback_tp_high) / 2,
+                    xref="x",
+                    yref="y",
+                    text=f"<b>{map_copy['left_tp']}</b><br><span style='font-size:11px'>{pullback_tp_text}</span>",
+                    showarrow=False,
+                    align="center",
+                    font=dict(color=left_label_color, size=12, family="Manrope, Segoe UI, sans-serif"),
+                    bgcolor="rgba(8, 14, 24, 0.70)",
+                    bordercolor="rgba(255,255,255,0.08)",
+                    borderpad=5,
+                ),
+                dict(
+                    x=right_x1 - 2,
+                    y=breakout_trigger,
+                    xref="x",
+                    yref="y",
+                    text=f"<b>{map_copy['right_trigger']}</b><br><span style='font-size:11px'>{_fmt_price(breakout_trigger)}</span>",
+                    showarrow=False,
+                    xanchor="right",
+                    yshift=18,
+                    align="center",
+                    font=dict(color=right_label_color, size=12, family="Manrope, Segoe UI, sans-serif"),
+                    bgcolor="rgba(8, 14, 24, 0.76)",
+                    bordercolor="rgba(255,255,255,0.08)",
+                    borderpad=5,
+                ),
+                dict(
+                    x=(right_x0 + right_x1) / 2,
+                    y=(breakout_tp_low + breakout_tp_high) / 2,
+                    xref="x",
+                    yref="y",
+                    text=f"<b>{map_copy['right_tp']}</b><br><span style='font-size:11px'>{breakout_tp_text}</span>",
+                    showarrow=False,
+                    align="center",
+                    font=dict(color=right_label_color, size=12, family="Manrope, Segoe UI, sans-serif"),
+                    bgcolor="rgba(8, 14, 24, 0.82)",
+                    bordercolor="rgba(255,255,255,0.10)",
+                    borderpad=5,
+                ),
+                dict(
+                    x=left_x0 + 2,
+                    y=pullback_invalidation,
+                    xref="x",
+                    yref="y",
+                    text=f"<b>Stop</b><br><span style='font-size:11px'>{_fmt_price(pullback_invalidation)}</span>",
+                    showarrow=False,
+                    xanchor="left",
+                    yshift=-18,
+                    font=dict(color="#FFD6DF", size=11, family="Manrope, Segoe UI, sans-serif"),
+                    bgcolor="rgba(8, 14, 24, 0.74)",
+                    bordercolor="rgba(255,255,255,0.08)",
+                    borderpad=5,
+                ),
+                dict(
+                    x=right_x1 - 2,
+                    y=breakout_invalidation,
+                    xref="x",
+                    yref="y",
+                    text=f"<b>Stop</b><br><span style='font-size:11px'>{_fmt_price(breakout_invalidation)}</span>",
+                    showarrow=False,
+                    xanchor="right",
+                    yshift=-18,
+                    font=dict(color="#FFD6DF", size=11, family="Manrope, Segoe UI, sans-serif"),
+                    bgcolor="rgba(8, 14, 24, 0.74)",
+                    bordercolor="rgba(255,255,255,0.08)",
+                    borderpad=5,
+                ),
+                dict(
+                    x=left_x0 - 1,
+                    y=plan_support,
+                    xref="x",
+                    yref="y",
+                    text=f"Raw Support {_fmt_price(plan_support)}",
+                    showarrow=False,
+                    xanchor="left",
+                    yshift=12,
+                    font=dict(color=TEXT_MUTED, size=10, family="Manrope, Segoe UI, sans-serif"),
+                    bgcolor="rgba(8, 14, 24, 0.62)",
+                    bordercolor="rgba(255,255,255,0.06)",
+                    borderpad=4,
+                ),
+                dict(
+                    x=right_x1 + 1,
+                    y=plan_resistance,
+                    xref="x",
+                    yref="y",
+                    text=f"Raw Resistance {_fmt_price(plan_resistance)}",
+                    showarrow=False,
+                    xanchor="right",
+                    yshift=12,
+                    font=dict(color=TEXT_MUTED, size=10, family="Manrope, Segoe UI, sans-serif"),
+                    bgcolor="rgba(8, 14, 24, 0.62)",
+                    bordercolor="rgba(255,255,255,0.06)",
+                    borderpad=4,
+                ),
+                dict(
+                    x=50,
+                    y=current_price,
+                    xref="x",
+                    yref="y",
+                    text=f"Reference {_fmt_price(current_price)}",
+                    showarrow=False,
+                    xanchor="center",
+                    yshift=18,
+                    font=dict(color="#E6EDF7", size=10, family="Manrope, Segoe UI, sans-serif"),
+                    bgcolor="rgba(8, 14, 24, 0.66)",
+                    bordercolor="rgba(255,255,255,0.07)",
+                    borderpad=4,
+                ),
+            ],
+        )
+        st.plotly_chart(exec_fig, width="stretch")
 
         setup_cls = normalize_action_class(action_raw)
         setup_label = setup_confirm
@@ -641,9 +1035,9 @@ def render(ctx: dict) -> None:
             plan_lines = (
                 f"1) <b>Setup Confirm is SKIP:</b> do not open a new spot position on this structure.<br>"
                 f"2) <b>Wait for regime improvement:</b> setup should move to WATCH or a confirmed class (TREND+AI / TREND-led / AI-led) before re-evaluation.<br>"
-                f"3) <b>If already holding:</b> reduce risk and keep stop (Buy Zone) at {_fmt_price(pullback_invalidation)}.<br>"
-                f"4) <b>Keep both paths prepared:</b> Buy Zone ({pullback_zone_text}) and Buy Above trigger ({_fmt_price(breakout_trigger)}).<br>"
-                f"5) <b>Take-profit maps:</b> Buy Zone TP ({pullback_tp_text}) / Breakout TP ({breakout_tp_text})."
+                f"3) <b>If already holding:</b> reduce risk and keep stop ({left_stop_context}) at {_fmt_price(pullback_invalidation)}.<br>"
+                f"4) <b>Keep both paths prepared:</b> {left_zone_label} ({pullback_zone_text}) and {trigger_label} ({_fmt_price(breakout_trigger)}).<br>"
+                f"5) <b>Take-profit maps:</b> {left_tp_label} ({pullback_tp_text}) / {right_tp_label} ({breakout_tp_text})."
             )
         elif setup_cls == "WATCH":
             plan_status = "Watch"
@@ -651,33 +1045,33 @@ def render(ctx: dict) -> None:
             if signal_dir == "UPSIDE":
                 plan_lines = (
                     f"1) <b>Setup Confirm is WATCH:</b> confirmation is partial; monitor, do not force entry.<br>"
-                    f"2) <b>Primary trigger path:</b> reaction quality in Buy Zone ({pullback_zone_text}).<br>"
-                    f"3) <b>Momentum trigger path:</b> candle close above Buy Above trigger ({_fmt_price(breakout_trigger)}).<br>"
-                    f"4) <b>Risk discipline:</b> stop (Buy Zone) {_fmt_price(pullback_invalidation)}, stop (Breakout) {_fmt_price(breakout_invalidation)}.<br>"
-                    f"5) <b>Take-profit discipline:</b> Buy Zone TP ({pullback_tp_text}) / Breakout TP ({breakout_tp_text})."
+                    f"2) <b>Primary trigger path:</b> reaction quality in {left_zone_label} ({pullback_zone_text}).<br>"
+                    f"3) <b>Momentum trigger path:</b> candle close above the {trigger_label} ({_fmt_price(breakout_trigger)}).<br>"
+                    f"4) <b>Risk discipline:</b> stop ({left_stop_context}) {_fmt_price(pullback_invalidation)}, stop ({right_stop_context}) {_fmt_price(breakout_invalidation)}.<br>"
+                    f"5) <b>Take-profit discipline:</b> {left_tp_label} ({pullback_tp_text}) / {right_tp_label} ({breakout_tp_text})."
                 )
             elif signal_dir == "DOWNSIDE":
                 plan_lines = (
                     f"1) <b>Setup Confirm is WATCH with Downside direction:</b> avoid fresh spot buys until reclaim confirmation.<br>"
-                    f"2) <b>Reclaim trigger:</b> wait for a close back above Buy Above trigger ({_fmt_price(breakout_trigger)}).<br>"
-                    f"3) <b>If already holding:</b> reduce risk and protect with stop (Buy Zone) {_fmt_price(pullback_invalidation)}.<br>"
-                    f"4) <b>If reclaim confirms:</b> use stop (Breakout) {_fmt_price(breakout_invalidation)} and breakout TP ({breakout_tp_text})."
+                    f"2) <b>{trigger_label}:</b> wait for a close back above the {trigger_label} ({_fmt_price(breakout_trigger)}).<br>"
+                    f"3) <b>If already holding:</b> reduce risk and protect with stop ({left_stop_context}) {_fmt_price(pullback_invalidation)}.<br>"
+                    f"4) <b>If reclaim confirms:</b> use stop ({right_stop_context}) {_fmt_price(breakout_invalidation)} and {right_tp_label} ({breakout_tp_text})."
                 )
             else:
                 plan_lines = (
                     f"1) <b>Setup Confirm is WATCH with Neutral direction:</b> no-force zone until a side confirms.<br>"
-                    f"2) <b>Range decision levels:</b> monitor Buy Zone ({pullback_zone_text}) and Buy Above trigger ({_fmt_price(breakout_trigger)}).<br>"
-                    f"3) <b>Execution only after side confirmation:</b> map risk to stop (Buy Zone / Breakout).<br>"
-                    f"4) <b>Keep exits pre-defined:</b> Buy Zone TP ({pullback_tp_text}) and Breakout TP ({breakout_tp_text})."
+                    f"2) <b>Range decision levels:</b> monitor {left_zone_label} ({pullback_zone_text}) and the {trigger_label} ({_fmt_price(breakout_trigger)}).<br>"
+                    f"3) <b>Execution only after side confirmation:</b> map risk to stop ({left_stop_context} / {right_stop_context}).<br>"
+                    f"4) <b>Keep exits pre-defined:</b> {left_tp_label} ({pullback_tp_text}) and {right_tp_label} ({breakout_tp_text})."
                 )
         elif signal_dir == "UPSIDE":
             plan_status = "Bullish Confirmed"
             plan_color = POSITIVE
             plan_lines = (
                 f"1) <b>Setup Confirm is {setup_label}:</b> execution-ready upside context.<br>"
-                f"2) <b>Buy Zone path:</b> accumulate in {pullback_zone_text}, stop at {_fmt_price(pullback_invalidation)}.<br>"
-                f"3) <b>Breakout path:</b> execute on close above {_fmt_price(breakout_trigger)}, stop at {_fmt_price(breakout_invalidation)}.<br>"
-                f"4) <b>Take-profit map:</b> Buy Zone TP ({pullback_tp_text}), Breakout TP ({breakout_tp_text}).<br>"
+                f"2) <b>{left_path_label}:</b> accumulate in {pullback_zone_text}, stop at {_fmt_price(pullback_invalidation)}.<br>"
+                f"3) <b>{right_path_label}:</b> execute on close above the {trigger_label} ({_fmt_price(breakout_trigger)}), stop at {_fmt_price(breakout_invalidation)}.<br>"
+                f"4) <b>Take-profit map:</b> {left_tp_label} ({pullback_tp_text}), {right_tp_label} ({breakout_tp_text}).<br>"
                 f"5) <b>Risk management:</b> take partials at TP-low, trail remainder only while structure stays intact."
             )
         else:
@@ -685,9 +1079,9 @@ def render(ctx: dict) -> None:
             plan_color = NEGATIVE
             plan_lines = (
                 f"1) <b>Setup Confirm is {setup_label}, but direction is Downside:</b> spot mode stays defensive.<br>"
-                f"2) <b>No fresh spot buy</b> until direction recovers and closes above Buy Above trigger ({_fmt_price(breakout_trigger)}).<br>"
-                f"3) <b>If already holding:</b> de-risk into rallies and protect downside with stop (Buy Zone) {_fmt_price(pullback_invalidation)}.<br>"
-                f"4) <b>Only after reclaim confirmation:</b> use stop (Breakout) {_fmt_price(breakout_invalidation)} and breakout TP ({breakout_tp_text})."
+                f"2) <b>No fresh spot buy</b> until direction recovers and closes above the {trigger_label} ({_fmt_price(breakout_trigger)}).<br>"
+                f"3) <b>If already holding:</b> de-risk into rallies and protect downside with stop ({left_stop_context}) {_fmt_price(pullback_invalidation)}.<br>"
+                f"4) <b>Only after reclaim confirmation:</b> use stop ({right_stop_context}) {_fmt_price(breakout_invalidation)} and {right_tp_label} ({breakout_tp_text})."
             )
 
         st.markdown(
@@ -808,42 +1202,3 @@ def render(ctx: dict) -> None:
                 legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0)
             )
             st.plotly_chart(volume_fig, width="stretch")
-
-            # Technical snapshot
-            snap_df = df_eval.copy()
-            snap_df['ema9'] = ta.trend.ema_indicator(snap_df['close'], window=9)
-            snap_df['ema21'] = ta.trend.ema_indicator(snap_df['close'], window=21)
-            snap_df['rsi14'] = ta.momentum.rsi(snap_df['close'], window=14)
-            snap_macd = ta.trend.MACD(snap_df['close'])
-            snap_df['macd'] = snap_macd.macd()
-            snap_df['obv'] = ta.volume.on_balance_volume(snap_df['close'], snap_df['volume'])
-            latest = snap_df.iloc[-1]
-            ema9 = latest['ema9']
-            ema21 = latest['ema21']
-            macd_val = snap_df['macd'].iloc[-1]
-            rsi_val = latest['rsi14']
-            _obv_back_pos = min(5, len(snap_df) - 1)
-            obv_change = ((snap_df['obv'].iloc[-1] - snap_df['obv'].iloc[-_obv_back_pos]) / abs(snap_df['obv'].iloc[-_obv_back_pos]) * 100) if (_obv_back_pos > 0 and snap_df['obv'].iloc[-_obv_back_pos] != 0) else 0
-            recent = snap_df.tail(_sr_lookback(timeframe))
-            support = recent['low'].min()
-            resistance = recent['high'].max()
-            snapshot_price = latest['close']
-            if np.isfinite(snapshot_price) and snapshot_price > 0:
-                support_dist = abs(snapshot_price - support) / snapshot_price * 100
-                resistance_dist = abs(snapshot_price - resistance) / snapshot_price * 100
-            else:
-                support_dist = 0.0
-                resistance_dist = 0.0
-            snapshot_html = f"""
-            <div class='panel-box'>
-              <b style='color:{ACCENT}; font-size:1.05rem;'>📊 Technical Snapshot</b><br>
-              <ul style='color:{TEXT_MUTED}; font-size:0.9rem; line-height:1.5; list-style-position:inside; margin-top:6px;'>
-                <li>EMA Trend (9 vs 21): <b>{ema9:.2f}</b> vs <b>{ema21:.2f}</b> {('🟢' if ema9 > ema21 else '🔴')} — When EMA9 is above EMA21 the near-term trend is bullish; otherwise bearish.</li>
-                <li>MACD: <b>{macd_val:.2f}</b> {('🟢' if macd_val > 0 else '🔴')} — Positive MACD indicates upward momentum; negative values suggest downward pressure.</li>
-                <li>RSI (14): <b>{rsi_val:.2f}</b> {('🟢' if rsi_val > 55 else ('🟠' if 45 <= rsi_val <= 55 else '🔴'))} — Above 70 may signal overbought, below 30 oversold. Values above 50 favour bulls.</li>
-                <li>OBV change (last 5 candles): <b>{obv_change:+.2f}%</b> {('🟢' if obv_change > 0 else '🔴')} — Rising OBV supports the price move; falling OBV warns against continuation.</li>
-                <li>Support / Resistance: support at <b>${support:,.2f}</b> ({support_dist:.2f}% away), resistance at <b>${resistance:,.2f}</b> ({resistance_dist:.2f}% away).</li>
-              </ul>
-            </div>
-            """
-            st.markdown(snapshot_html, unsafe_allow_html=True)

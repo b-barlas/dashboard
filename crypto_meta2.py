@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import threading
 from core.backtest import run_backtest as run_backtest_core
 from core.services import (
     EXCHANGE,
@@ -15,6 +16,7 @@ from core.services import (
     detect_divergence,
     detect_market_regime,
     fetch_ohlcv,
+    get_market_cap_rows_for_symbols,
     fetch_top_gainers_losers,
     fetch_trending_coins,
     get_btc_eth_prices,
@@ -177,8 +179,12 @@ with st.sidebar:
 
 def _debug(msg: str) -> None:
     """Emit a debug message only when Debug mode is enabled."""
-    if st.session_state.get('debug_mode', False):
+    if not st.session_state.get('debug_mode', False):
+        return
+    if threading.current_thread() is threading.main_thread():
         st.sidebar.write(msg)
+        return
+    print(f"[debug] {msg}")
 
 
 

@@ -7,6 +7,7 @@ import pandas as pd
 import plotly.express as px
 import requests
 from ui.ctx import get_ctx
+from ui.primitives import render_badge_row, render_help_details, render_insight_card, render_kpi_grid, render_page_header
 
 STABLE_SYMBOLS = {
     "USDT",
@@ -212,73 +213,16 @@ def render(ctx: dict) -> None:
     NEON_BLUE = get_ctx(ctx, "NEON_BLUE")
     _tip = get_ctx(ctx, "_tip")
 
-    st.markdown(
-        f"""
-        <style>
-        .hm-kpi-grid {{
-            display:grid;
-            grid-template-columns:repeat(4,minmax(0,1fr));
-            gap:10px;
-            margin:8px 0 14px 0;
-        }}
-        .hm-kpi {{
-            border:1px solid rgba(0,212,255,0.16);
-            border-radius:12px;
-            padding:12px 14px;
-            background:linear-gradient(140deg, rgba(0,0,0,0.72), rgba(10,18,30,0.88));
-        }}
-        .hm-kpi-label {{
-            color:{TEXT_MUTED};
-            font-size:0.70rem;
-            text-transform:uppercase;
-            letter-spacing:0.8px;
-        }}
-        .hm-kpi-value {{
-            color:{ACCENT};
-            font-size:1.2rem;
-            font-weight:700;
-            margin-top:4px;
-        }}
-        .hm-badge {{
-            display:inline-flex;
-            align-items:center;
-            gap:6px;
-            margin-top:7px;
-            padding:2px 9px;
-            border-radius:999px;
-            font-size:0.72rem;
-            font-weight:700;
-            border:1px solid rgba(255,255,255,0.18);
-            background:rgba(0,0,0,0.28);
-        }}
-        @media (max-width: 1200px) {{
-            .hm-kpi-grid {{
-                grid-template-columns:repeat(2,minmax(0,1fr));
-            }}
-        }}
-        @media (max-width: 680px) {{
-            .hm-kpi-grid {{
-                grid-template-columns:1fr;
-            }}
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
+    render_page_header(
+        st,
+        title="Market Heatmap",
+        intro_html=(
+            "Top market-cap coins in one map. "
+            f"{_tip('Tile Size', 'Bigger tile means larger market cap.')} "
+            f"{_tip('Tile Color', 'Green = positive 24h return, red = negative. Intensity shows move strength.')} "
+            "Use this tab to read breadth and leadership quickly."
+        ),
     )
-
-    st.markdown(f"<h2 style='color:{ACCENT};'>Market Heatmap</h2>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='panel-box'>"
-        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Top market-cap coins in one map. "
-        f"{_tip('Tile Size', 'Bigger tile means larger market cap.')} "
-        f"{_tip('Tile Color', 'Green = positive 24h return, red = negative. Intensity shows move strength.')} "
-        f"Use this tab to read breadth and leadership quickly."
-        f"</p></div>",
-        unsafe_allow_html=True,
-    )
-
     with st.spinner("Loading market data for heatmap..."):
         rows, source, feed_mode, asof_utc = _load_heatmap_rows(st, limit=180, live_ttl_sec=90)
 
@@ -293,14 +237,20 @@ def render(ctx: dict) -> None:
     )
 
     feed_color = POSITIVE if feed_mode == "LIVE" else WARNING
-    st.markdown(
-        f"<div style='display:flex; gap:8px; flex-wrap:wrap; margin:2px 0 10px 0;'>"
-        f"<span class='status-badge' style='color:{feed_color}; border-color:{feed_color};'>{feed_mode} FEED</span>"
-        f"<span class='status-badge'>SOURCE: {source}</span>"
-        f"<span class='status-badge'>AS OF: {asof_utc or 'N/A'}</span>"
-        f"<span class='status-badge'>{'EXCLUDE STABLECOINS' if exclude_stablecoins else 'INCLUDE STABLECOINS'}</span>"
-        f"</div>",
-        unsafe_allow_html=True,
+    render_badge_row(
+        st,
+        badges=[
+            {"text": f"{feed_mode} FEED", "color": feed_color},
+            {"text": f"SOURCE: {source}"},
+            {"text": f"AS OF: {asof_utc or 'N/A'}"},
+            {
+                "text": (
+                    "EXCLUDE STABLECOINS"
+                    if exclude_stablecoins
+                    else "INCLUDE STABLECOINS"
+                )
+            },
+        ],
     )
     if feed_mode == "CACHED":
         st.warning(
@@ -368,40 +318,66 @@ def render(ctx: dict) -> None:
     )
     divergence_color = WARNING if divergence else POSITIVE
 
-    st.markdown(
-        f"<div class='hm-kpi-grid'>"
-        f"<div class='hm-kpi'><div class='hm-kpi-label'>Breadth (Advancers)</div><div class='hm-kpi-value'>{breadth:.1f}%</div>"
-        f"<span class='hm-badge' style='color:{breadth_status[1]}; border-color:{breadth_status[1]};'><span>&#9679;</span>{breadth_status[0]}</span></div>"
-        f"<div class='hm-kpi'><div class='hm-kpi-label'>A/D Ratio</div><div class='hm-kpi-value'>{ad_ratio:.2f}</div>"
-        f"<span class='hm-badge' style='color:{adr_status[1]}; border-color:{adr_status[1]};'><span>&#9679;</span>{adr_status[0]}</span></div>"
-        f"<div class='hm-kpi'><div class='hm-kpi-label'>Avg 24h Change</div><div class='hm-kpi-value'>{avg_chg:+.2f}%</div>"
-        f"<span class='hm-badge' style='color:{avg_status[1]}; border-color:{avg_status[1]};'><span>&#9679;</span>{avg_status[0]}</span></div>"
-        f"<div class='hm-kpi'><div class='hm-kpi-label'>Cap-Weighted Change</div><div class='hm-kpi-value'>{cap_weighted:+.2f}%</div>"
-        f"<span class='hm-badge' style='color:{cap_status[1]}; border-color:{cap_status[1]};'><span>&#9679;</span>{cap_status[0]}</span></div>"
-        f"</div>",
-        unsafe_allow_html=True,
+    render_kpi_grid(
+        st,
+        items=[
+            {
+                "label": "Breadth (Advancers)",
+                "value": f"{breadth:.1f}%",
+                "badge_text": breadth_status[0],
+                "badge_color": breadth_status[1],
+                "badge_dot": True,
+            },
+            {
+                "label": "A/D Ratio",
+                "value": f"{ad_ratio:.2f}",
+                "badge_text": adr_status[0],
+                "badge_color": adr_status[1],
+                "badge_dot": True,
+            },
+            {
+                "label": "Avg 24h Change",
+                "value": f"{avg_chg:+.2f}%",
+                "badge_text": avg_status[0],
+                "badge_color": avg_status[1],
+                "badge_dot": True,
+            },
+            {
+                "label": "Cap-Weighted Change",
+                "value": f"{cap_weighted:+.2f}%",
+                "badge_text": cap_status[0],
+                "badge_color": cap_status[1],
+                "badge_dot": True,
+            },
+        ],
     )
-    st.markdown(
-        f"<div class='elite-card' style='margin:2px 0 10px 0; border-color:rgba(0,212,255,0.22);'>"
-        f"<div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>"
-        f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>Market Regime: "
-        f"<b style='color:{regime_color};'>{market_regime}</b></span>"
-        f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>Interpretation: "
-        f"<b style='color:{divergence_color};'>{divergence_text}</b></span>"
-        f"</div></div>",
-        unsafe_allow_html=True,
+    render_insight_card(
+        st,
+        title=f"Market Regime · {market_regime}",
+        body_html=(
+            "Interpretation: "
+            f"<span style='color:{divergence_color}; font-weight:700;'>{divergence_text}</span>"
+        ),
+        badges=[
+            {"text": market_regime, "color": regime_color},
+            {"text": divergence_text, "color": divergence_color},
+        ],
+        tone=(
+            "positive"
+            if regime_color == POSITIVE
+            else ("negative" if regime_color == NEGATIVE else "warning")
+        ),
     )
 
-    st.markdown(
-        f"<details style='margin-bottom:0.7rem;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"<b>1.</b> Start with Breadth and A/D Ratio for market participation quality.<br>"
-        f"<b>2.</b> Compare Cap-weighted move vs Breadth; conflict means large caps and broad market diverge.<br>"
-        f"<b>3.</b> Toggle stablecoin exclusion depending on your read (risk view vs pure crypto beta view).<br>"
-        f"<b>4.</b> Use Top Movers to find leadership, then confirm execution quality in Market/Spot/Position."
-        f"</div></details>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="How to read quickly (?)",
+        body_html=(
+            "<b>1.</b> Start with Breadth and A/D Ratio for market participation quality.<br>"
+            "<b>2.</b> Compare Cap-weighted move vs Breadth; conflict means large caps and broad market diverge.<br>"
+            "<b>3.</b> Toggle stablecoin exclusion depending on your read (risk view vs pure crypto beta view).<br>"
+            "<b>4.</b> Use Top Movers to find leadership, then confirm execution quality in Market/Spot/Position."
+        ),
     )
     st.markdown(
         f"<div style='color:{TEXT_MUTED}; font-size:0.83rem; margin:2px 0 8px 0; line-height:1.6;'>"

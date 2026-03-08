@@ -14,6 +14,7 @@ from core.backtest import (
 )
 from core.signal_contract import strength_bucket
 from ui.ctx import get_ctx
+from ui.primitives import render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -373,74 +374,17 @@ def render(ctx: dict) -> None:
         )
 
     def _render_kpi_cards(kpis: list[tuple[str, str, str]]) -> None:
-        cards_html = []
-        for label, value, tip in kpis:
-            cards_html.append(
-                "<div class='sob-kpi-card'>"
-                f"<div class='sob-kpi-label' title='{html.escape(tip, quote=True)}'>"
-                f"{html.escape(label)} <span class='sob-help'>?</span>"
-                "</div>"
-                f"<div class='sob-kpi-value'>{html.escape(value)}</div>"
-                "</div>"
-            )
-        st.markdown(
-            f"""
-            <style>
-              .sob-kpi-grid {{
-                display:grid;
-                grid-template-columns:repeat(5, minmax(150px, 1fr));
-                gap:10px;
-                width:100%;
-              }}
-              .sob-kpi-card {{
-                border:1px solid rgba(0,212,255,0.24);
-                border-radius:12px;
-                padding:10px 12px;
-                background:linear-gradient(180deg, rgba(8,14,24,0.94), rgba(5,10,18,0.94));
-              }}
-              .sob-kpi-label {{
-                color:{TEXT_MUTED};
-                font-size:0.77rem;
-                font-weight:700;
-                letter-spacing:0.04em;
-                text-transform:uppercase;
-                display:inline-flex;
-                align-items:center;
-                gap:6px;
-                cursor:help;
-              }}
-              .sob-help {{
-                display:inline-flex;
-                align-items:center;
-                justify-content:center;
-                width:14px;
-                height:14px;
-                border-radius:999px;
-                border:1px solid rgba(0,212,255,0.45);
-                color:{ACCENT};
-                font-size:0.64rem;
-                font-weight:800;
-                line-height:1;
-              }}
-              .sob-kpi-value {{
-                margin-top:8px;
-                color:#E5E7EB;
-                font-size:1.85rem;
-                font-weight:800;
-                line-height:1.15;
-                letter-spacing:-0.01em;
-              }}
-              @media (max-width: 980px) {{
-                .sob-kpi-grid {{
-                  grid-template-columns:repeat(2, minmax(140px, 1fr));
-                }}
-              }}
-            </style>
-            <div class='sob-kpi-grid'>
-              {''.join(cards_html)}
-            </div>
-            """,
-            unsafe_allow_html=True,
+        render_kpi_grid(
+            st,
+            columns=5,
+            items=[
+                {
+                    "label": label,
+                    "label_title": tip,
+                    "value": value,
+                }
+                for label, value, tip in kpis
+            ],
         )
 
     def _render_hover_table(
@@ -522,17 +466,14 @@ def render(ctx: dict) -> None:
             unsafe_allow_html=True,
         )
 
-    st.markdown(f"<h2 style='color:{ACCENT};'>Setup Backtest</h2>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='panel-box' style='margin-bottom:1rem;'>"
-        f"<b style='color:{ACCENT};'>Setup Outcome Study</b>"
-        f"<ul style='color:{TEXT_MUTED}; font-size:0.88rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"<li>Select a Setup Confirm class (TREND+AI / TREND-led / AI-led / ALL).</li>"
-        f"<li>The engine scans each closed candle and records every matching setup event.</li>"
-        f"<li>For each event, it stores event price and forward path for the next N bars.</li>"
-        f"<li>Use this to measure setup quality by occurrence frequency and forward outcome behavior.</li>"
-        f"</ul></div>",
-        unsafe_allow_html=True,
+    render_page_header(
+        st,
+        title="Setup Backtest",
+        intro_html=(
+            "Forward-outcome study for setup classes. "
+            "The engine scans each closed candle, records every matching setup event, and measures how that setup behaves over the next N bars. "
+            "Use it to compare occurrence frequency, forward returns, and class-level quality between TREND+AI, TREND-led, AI-led, or the full setup mix."
+        ),
     )
 
     c1, c2 = st.columns(2)

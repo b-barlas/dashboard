@@ -11,6 +11,7 @@ from core.market_decision import (
 )
 from core.metric_catalog import AI_LONG_THRESHOLD, AI_SHORT_THRESHOLD, direction_from_prob
 from core.signal_contract import strength_bucket, strength_from_bias
+from ui.primitives import render_help_details, render_intro_card, render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -159,52 +160,15 @@ def render(ctx: dict) -> None:
             return f"▼ {abs(delta):.2f}%"
         return "→ 0.00%"
 
-    st.markdown(
-        f"""
-        <style>
-        .ailab-kpi-grid {{
-            display:grid;
-            grid-template-columns:repeat(4,minmax(0,1fr));
-            gap:10px;
-            margin:8px 0 12px 0;
-        }}
-        .ailab-kpi {{
-            border:1px solid rgba(0,212,255,0.16);
-            border-radius:12px;
-            padding:12px 14px;
-            background:linear-gradient(140deg, rgba(0,0,0,0.72), rgba(10,18,30,0.88));
-        }}
-        .ailab-kpi-label {{
-            color:{TEXT_MUTED};
-            font-size:0.70rem;
-            text-transform:uppercase;
-            letter-spacing:0.8px;
-        }}
-        .ailab-kpi-value {{
-            color:{ACCENT};
-            font-size:1.2rem;
-            font-weight:700;
-            margin-top:4px;
-        }}
-        @media (max-width: 1100px) {{
-            .ailab-kpi-grid {{
-                grid-template-columns:repeat(2,minmax(0,1fr));
-            }}
-        }}
-        @media (max-width: 640px) {{
-            .ailab-kpi-grid {{
-                grid-template-columns:1fr;
-            }}
-            .ailab-kpi-value {{
-                font-size:1.05rem;
-            }}
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
+    render_page_header(
+        st,
+        title="AI Workspace",
+        intro_html=(
+            "AI-focused diagnostics workspace with two modes. "
+            "<b>Quick Prediction</b> gives a one-shot ensemble read for a single coin and timeframe. "
+            "<b>Model & Timeframe Matrix</b> compares agreement, probability, and plan context across selected frames."
+        ),
     )
-
-    st.markdown(f"<h2 style='color:{ACCENT};'>AI Workspace</h2>", unsafe_allow_html=True)
     mode = st.radio(
         "Mode",
         ["Quick Prediction", "Model & Timeframe Matrix"],
@@ -213,20 +177,16 @@ def render(ctx: dict) -> None:
     )
 
     if mode == "Quick Prediction":
-        st.markdown(
-            f"<div class='panel-box'>"
-            f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
-            f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-            f"Fast one-shot ensemble read for a single coin/timeframe. "
-            f"Use this mode to see immediate AI direction, probability, and model agreement."
-            f"</p>"
-            f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
-            f"{_tip('Direction', 'Mapped to Upside / Downside / Neutral from ensemble probability thresholds.')} | "
-            f"{_tip('Agreement', 'Effective agreement: directional agreement for Upside/Downside, consensus agreement for Neutral.')} | "
-            f"{_tip('Signal Certainty', 'Quick confidence class from probability distance to neutral band.')}"
-            f"</p>"
-            f"</div>",
-            unsafe_allow_html=True,
+        render_intro_card(
+            st,
+            title="Quick Prediction Mode",
+            body_html=(
+                "Fast one-shot ensemble read for a single coin/timeframe. "
+                "Use this mode to see immediate AI direction, probability, and model agreement."
+                f"<br><br>{_tip('Direction', 'Mapped to Upside / Downside / Neutral from ensemble probability thresholds.')} | "
+                f"{_tip('Agreement', 'Effective agreement: directional agreement for Upside/Downside, consensus agreement for Neutral.')} | "
+                f"{_tip('Signal Certainty', 'Quick confidence class from probability distance to neutral band.')}"
+            ),
         )
         qc1, qc2 = st.columns(2)
         with qc1:
@@ -287,18 +247,18 @@ def render(ctx: dict) -> None:
             if prob >= 0.7 or prob <= 0.3
             else ("Medium" if prob >= 0.58 or prob <= 0.42 else "Low")
         )
-        st.markdown(
-            f"<div class='ailab-kpi-grid'>"
-            f"<div class='ailab-kpi'><div class='ailab-kpi-label'>Direction</div>"
-            f"<div class='ailab-kpi-value' style='color:{dir_color};'>{direction_label}</div></div>"
-            f"<div class='ailab-kpi'><div class='ailab-kpi-label'>Probability</div>"
-            f"<div class='ailab-kpi-value'>{prob * 100:.1f}%</div></div>"
-            f"<div class='ailab-kpi'><div class='ailab-kpi-label'>Agreement (Effective)</div>"
-            f"<div class='ailab-kpi-value' style='color:{agreement_color};'>{agreement_votes}/3</div></div>"
-            f"<div class='ailab-kpi'><div class='ailab-kpi-label'>Signal Certainty</div>"
-            f"<div class='ailab-kpi-value'>{certainty}</div></div>"
-            f"</div>",
-            unsafe_allow_html=True,
+        render_kpi_grid(
+            st,
+            items=[
+                {"label": "Direction", "value": direction_label, "value_color": dir_color},
+                {"label": "Probability", "value": f"{prob * 100:.1f}%"},
+                {
+                    "label": "Agreement (Effective)",
+                    "value": f"{agreement_votes}/3",
+                    "value_color": agreement_color,
+                },
+                {"label": "Signal Certainty", "value": certainty},
+            ],
         )
 
         m1, m2, m3 = st.columns(3)
@@ -312,30 +272,30 @@ def render(ctx: dict) -> None:
                 mdl_key = _dir_color_key(direction_from_prob(float(pv)))
                 mdl_label = _dir_label(mdl_key)
                 mdl_color = POSITIVE if mdl_key == "LONG" else (NEGATIVE if mdl_key == "SHORT" else WARNING)
-                st.markdown(
-                    f"<div class='ailab-kpi'>"
-                    f"<div class='ailab-kpi-label'>{name} ({weight})</div>"
-                    f"<div class='ailab-kpi-value' style='color:{mdl_color};'>{mdl_label}</div>"
-                    f"<div style='color:{ACCENT}; font-size:0.95rem; font-weight:700; margin-top:4px;'>{pv * 100:.1f}%</div>"
-                    f"</div>",
-                    unsafe_allow_html=True,
+                render_kpi_grid(
+                    st,
+                    columns=1,
+                    items=[
+                        {
+                            "label": f"{name} ({weight})",
+                            "value": mdl_label,
+                            "value_color": mdl_color,
+                            "subtext": f"{pv * 100:.1f}%",
+                        }
+                    ],
                 )
         return
 
-    st.markdown(
-        f"<div class='panel-box'>"
-        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Multi-timeframe model diagnostics for one coin. Compare direction consistency, probability, "
-        f"agreement quality, and plan source across selected frames."
-        f"</p>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
-        f"{_tip('Selected Model Prob', 'Upward probability from selected model. Higher implies Upside bias; lower implies Downside bias.')} | "
-        f"{_tip('Agreement', 'Effective agreement: directional agreement for Upside/Downside, consensus agreement for Neutral.')} | "
-        f"{_tip('AI Direction Bias', 'Market-wide AI bias: dominance-weighted ensemble probability over major coins for same timeframe.')}"
-        f"</p>"
-        f"</div>",
-        unsafe_allow_html=True,
+    render_intro_card(
+        st,
+        title="Model & Timeframe Matrix",
+        body_html=(
+            "Multi-timeframe model diagnostics for one coin. Compare direction consistency, probability, "
+            "agreement quality, and plan source across selected frames."
+            f"<br><br>{_tip('Selected Model Prob', 'Upward probability from selected model. Higher implies Upside bias; lower implies Downside bias.')} | "
+            f"{_tip('Agreement', 'Effective agreement: directional agreement for Upside/Downside, consensus agreement for Neutral.')} | "
+            f"{_tip('AI Direction Bias', 'Market-wide AI bias: dominance-weighted ensemble probability over major coins for same timeframe.')}"
+        ),
     )
 
     c1, c2, c3 = st.columns(3)
@@ -357,15 +317,14 @@ def render(ctx: dict) -> None:
             key="ai_tfs",
         )
 
-    st.markdown(
-        f"<details style='margin-bottom:0.7rem;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"<b>1.</b> Prefer setups where direction is consistent across timeframes.<br>"
-        f"<b>2.</b> If Upward Probability is near the middle band and Agreement is low, treat as fragile signal.<br>"
-        f"<b>3.</b> Use plan levels only as drafts; always validate in Spot/Position tabs."
-        f"</div></details>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="How to read quickly",
+        body_html=(
+            "<b>1.</b> Prefer setups where direction is consistent across timeframes.<br>"
+            "<b>2.</b> If Upward Probability is near the middle band and Agreement is low, treat as fragile signal.<br>"
+            "<b>3.</b> Use plan levels only as drafts; always validate in Spot/Position tabs."
+        ),
     )
     st.markdown(
         f"<div style='margin:-2px 0 10px 0; color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.6;'>"
@@ -620,14 +579,22 @@ def render(ctx: dict) -> None:
     consistency_label = "TF Consistency (same-direction share)"
     consistency_value = f"{consistency:.0f}%" if tf_valid_count > 1 else "Single TF"
     consistency_color = ACCENT if tf_valid_count > 1 else TEXT_MUTED
-    st.markdown(
-        f"<div class='ailab-kpi-grid'>"
-        f"<div class='ailab-kpi'><div class='ailab-kpi-label'>{dir_kpi_label}</div><div class='ailab-kpi-value' style='color:{dom_color};'>{dominant_label}</div></div>"
-        f"<div class='ailab-kpi'><div class='ailab-kpi-label'>{prob_kpi_label}</div><div class='ailab-kpi-value'>{avg_prob:.1f}%</div></div>"
-        f"<div class='ailab-kpi'><div class='ailab-kpi-label'>{agree_kpi_label}</div><div class='ailab-kpi-value'>{avg_agree:.1f}%</div></div>"
-        f"<div class='ailab-kpi'><div class='ailab-kpi-label'>{consistency_label}</div><div class='ailab-kpi-value' style='color:{consistency_color};'>{consistency_value}</div></div>"
-        f"</div>",
-        unsafe_allow_html=True,
+    render_kpi_grid(
+        st,
+        items=[
+            {
+                "label": dir_kpi_label,
+                "value": dominant_label,
+                "value_color": dom_color,
+            },
+            {"label": prob_kpi_label, "value": f"{avg_prob:.1f}%"},
+            {"label": agree_kpi_label, "value": f"{avg_agree:.1f}%"},
+            {
+                "label": consistency_label,
+                "value": consistency_value,
+                "value_color": consistency_color,
+            },
+        ],
     )
 
     def _dir_style(v: str) -> str:
@@ -673,18 +640,17 @@ def render(ctx: dict) -> None:
         return f"color:{TEXT_MUTED};"
 
     st.markdown(f"<b style='color:{ACCENT};'>AI Workspace Timeframe Matrix</b>", unsafe_allow_html=True)
-    st.markdown(
-        f"<details style='margin:0.35rem 0 0.65rem 0;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer;'>Column Guide</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.7; margin-top:0.45rem;'>"
-        f"<b>Direction</b>: selected model direction for this timeframe (Upside / Downside / Neutral).<br>"
-        f"<b>Selected Model Prob %</b>: upward probability from selected model; lower values imply Downside bias.<br>"
-        f"<b>Ensemble Agree</b>: effective ensemble agreement (x/3): directional for Upside/Downside, consensus for Neutral.<br>"
-        f"<b>AI Direction Bias</b>: same market-wide bias logic as Market tab (dominance-weighted Ensemble), shown as direction + percent.<br>"
-        f"<b>Plan Entry/Plan Target</b>: primary plan to watch.<br>"
-        f"<b>Plan Source</b>: AI-Filtered or Technical Fallback."
-        f"</div></details>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="Column Guide",
+        body_html=(
+            "<b>Direction</b>: selected model direction for this timeframe (Upside / Downside / Neutral).<br>"
+            "<b>Selected Model Prob %</b>: upward probability from selected model; lower values imply Downside bias.<br>"
+            "<b>Ensemble Agree</b>: effective ensemble agreement (x/3): directional for Upside/Downside, consensus for Neutral.<br>"
+            "<b>AI Direction Bias</b>: same market-wide bias logic as Market tab (dominance-weighted Ensemble), shown as direction + percent.<br>"
+            "<b>Plan Entry/Plan Target</b>: primary plan to watch.<br>"
+            "<b>Plan Source</b>: AI-Filtered or Technical Fallback."
+        ),
     )
     st.dataframe(
         df_out[

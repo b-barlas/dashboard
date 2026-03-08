@@ -1,4 +1,5 @@
 from ui.ctx import get_ctx
+from ui.primitives import render_help_details, render_page_header
 
 import pandas as pd
 import plotly.graph_objs as go
@@ -105,29 +106,26 @@ def render(ctx: dict) -> None:
         net_penalty = max(0, min(28, conflict_penalty - supportive_bonus))
         return net_penalty, conflict_count, supportive_count
 
-    st.markdown(f"<h2 style='color:{ACCENT};'>Fibonacci Analysis</h2>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='panel-box'>"
-        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Builds a decision-oriented Fib map from "
-        f"{_tip('Context', 'Trend + regime + POC distance to detect when structure supports continuation.')}, "
-        f"{_tip('Execution Levels', 'Most relevant Fib pullback/extension levels and distance to current price.')}, "
-        f"and {_tip('Warnings', 'Divergence alerts that reduce setup quality.')}. "
-        f"All calculations use closed candles to avoid live-candle noise."
-        f"</p></div>",
-        unsafe_allow_html=True,
+    render_page_header(
+        st,
+        title="Fibonacci Analysis",
+        intro_html=(
+            "Builds a decision-oriented Fib map from "
+            f"{_tip('Context', 'Trend + regime + POC distance to detect when structure supports continuation.')}, "
+            f"{_tip('Execution Levels', 'Most relevant Fib pullback/extension levels and distance to current price.')}, "
+            f"and {_tip('Warnings', 'Divergence alerts that reduce setup quality.')}. "
+            "All calculations use closed candles to avoid live-candle noise."
+        ),
     )
-    st.markdown(
-        f"<details style='margin-bottom:0.7rem;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"<b>1.</b> Start with Setup Quality and nearest key Fib.<br>"
-        f"<b>2.</b> Check Context (Regime + POC Distance + Divergence Alerts).<br>"
-        f"<b>3.</b> Use Execution Levels (38.2/50/61.8 first, 100/161.8 as extension map).<br>"
-        f"<b>4.</b> Divergence is direction-aware: conflict alerts reduce quality more than supportive alerts."
-        f"</div></details>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="How to read quickly",
+        body_html=(
+            "<b>1.</b> Start with Setup Quality and nearest key Fib.<br>"
+            "<b>2.</b> Check Context (Regime + POC Distance + Divergence Alerts).<br>"
+            "<b>3.</b> Use Execution Levels (38.2/50/61.8 first, 100/161.8 as extension map).<br>"
+            "<b>4.</b> Divergence is direction-aware: conflict alerts reduce quality more than supportive alerts."
+        ),
     )
 
     c1, c2, c3 = st.columns(3)

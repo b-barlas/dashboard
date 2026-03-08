@@ -327,10 +327,26 @@ def detect_candle_pattern(df: pd.DataFrame) -> str:
     return ""
 
 
+def _has_trusted_volume(df: pd.DataFrame) -> bool:
+    if df is None or "volume" not in df.columns:
+        return False
+    attrs = getattr(df, "attrs", {}) or {}
+    if "volume_is_24h_aggregate" in attrs:
+        return not bool(attrs.get("volume_is_24h_aggregate"))
+    if "volume_is_24h_aggregate" not in df.columns:
+        return True
+    try:
+        return not bool(df["volume_is_24h_aggregate"].fillna(False).astype(bool).any())
+    except Exception:
+        return False
+
+
 def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> AnalysisResult:
     if df is None or len(df) < 55:
         return AnalysisResult(comment="Insufficient data")
+    original_attrs = dict(getattr(df, "attrs", {}) or {})
     df = df.copy()
+    df.attrs.update(original_attrs)
     debug = debug_fn or (lambda _msg: None)
 
     _inferred_tf = None
@@ -380,12 +396,19 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
     df["macd"] = macd_ind.macd()
     df["macd_signal"] = macd_ind.macd_signal()
     df["macd_diff"] = macd_ind.macd_diff()
-    df["obv"] = ta.volume.on_balance_volume(df["close"], df["volume"])
+    trusted_volume = _has_trusted_volume(df)
+    if trusted_volume:
+        df["obv"] = ta.volume.on_balance_volume(df["close"], df["volume"])
+    else:
+        df["obv"] = np.nan
     df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14)
 
     df["typical_price"] = (df["high"] + df["low"] + df["close"]) / 3
-    _vwap_den = df["volume"].cumsum().replace(0, np.nan)
-    df["vwap"] = (df["typical_price"] * df["volume"]).cumsum() / _vwap_den
+    if trusted_volume:
+        _vwap_den = df["volume"].cumsum().replace(0, np.nan)
+        df["vwap"] = (df["typical_price"] * df["volume"]).cumsum() / _vwap_den
+    else:
+        df["vwap"] = np.nan
 
     try:
         psar_ind = ta.trend.PSARIndicator(high=df["high"], low=df["low"], close=df["close"])
@@ -422,7 +445,7 @@ def analyse(df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None) -> 
         except Exception:
             return float("nan")
 
-    volume_spike = detect_volume_spike(closed_df)
+    volume_spike = detect_volume_spike(closed_df) if trusted_volume else False
     candle_pattern = detect_candle_pattern(closed_df)
 
     close_latest = _safe_num(latest["close"])

@@ -52,7 +52,7 @@ class MarketTablePriceDeltaContractTests(unittest.TestCase):
             msg="Delta flow must keep an explicit fallback guard.",
         )
         self.assertIn(
-            "price_change = get_price_change(sym)",
+            "price_change = _fetch_ticker_delta_once(",
             self.text,
             msg="Delta fallback must use ticker percentage only when candle delta is unavailable.",
         )

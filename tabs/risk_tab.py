@@ -5,6 +5,7 @@ from ui.ctx import get_ctx
 import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
+from ui.primitives import render_help_details, render_insight_card, render_kpi_grid, render_page_header
 
 
 def render(ctx: dict) -> None:
@@ -23,80 +24,20 @@ def render(ctx: dict) -> None:
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     calculate_risk_metrics = get_ctx(ctx, "calculate_risk_metrics")
 
-    st.markdown(
-        f"""
-        <style>
-        .risk-kpi-grid {{
-            display:grid;
-            grid-template-columns:repeat(4,minmax(0,1fr));
-            gap:10px;
-            margin:8px 0 12px 0;
-        }}
-        .risk-kpi {{
-            border:1px solid rgba(0,212,255,0.16);
-            border-radius:12px;
-            padding:12px 14px;
-            background:linear-gradient(140deg, rgba(0,0,0,0.72), rgba(10,18,30,0.88));
-        }}
-        .risk-kpi-label {{
-            color:{TEXT_MUTED};
-            font-size:0.70rem;
-            text-transform:uppercase;
-            letter-spacing:0.8px;
-        }}
-        .risk-kpi-value {{
-            color:{ACCENT};
-            font-size:1.2rem;
-            font-weight:700;
-            margin-top:4px;
-        }}
-        .risk-badge {{
-            display:inline-flex;
-            align-items:center;
-            gap:6px;
-            margin-top:7px;
-            padding:2px 9px;
-            border-radius:999px;
-            font-size:0.72rem;
-            font-weight:700;
-            border:1px solid rgba(255,255,255,0.18);
-            background:rgba(0,0,0,0.28);
-        }}
-        @media (max-width: 1200px) {{
-            .risk-kpi-grid {{
-                grid-template-columns:repeat(2,minmax(0,1fr));
-            }}
-        }}
-        @media (max-width: 680px) {{
-            .risk-kpi-grid {{
-                grid-template-columns:1fr;
-            }}
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
+    render_page_header(
+        st,
+        title="Risk Analytics",
+        intro_html=(
+            "Measures downside risk, volatility, and risk-adjusted performance from historical candles. "
+            "Use this tab to answer: <i>Is this coin worth the risk on this timeframe?</i>"
+            f"<br><br>{_tip('Sharpe', 'Risk-adjusted return using total volatility. Higher is better.')} | "
+            f"{_tip('Sortino', 'Risk-adjusted return using only downside volatility. Higher is better.')} | "
+            f"{_tip('Max Drawdown', 'Worst peak-to-trough historical loss in %. Lower is safer.')} | "
+            f"{_tip('VaR 95%', '5th percentile return. Typical bad-day threshold; more negative means higher tail risk.')} | "
+            f"{_tip('CVaR 95%', 'Average loss on the worst 5% of returns. Captures crash severity better than VaR.')} | "
+            f"{_tip('Calmar', 'Annual return divided by max drawdown. Higher means better reward per drawdown risk.')}"
+        ),
     )
-
-    st.markdown(f"<h2 style='color:{ACCENT};'>Risk Analytics</h2>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='panel-box'>"
-        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Measures downside risk, volatility, and risk-adjusted performance from historical candles. "
-        f"Use this tab to answer: <i>Is this coin worth the risk on this timeframe?</i>"
-        f"</p>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
-        f"{_tip('Sharpe', 'Risk-adjusted return using total volatility. Higher is better.')} | "
-        f"{_tip('Sortino', 'Risk-adjusted return using only downside volatility. Higher is better.')} | "
-        f"{_tip('Max Drawdown', 'Worst peak-to-trough historical loss in %. Lower is safer.')} | "
-        f"{_tip('VaR 95%', '5th percentile return. Typical bad-day threshold; more negative means higher tail risk.')} | "
-        f"{_tip('CVaR 95%', 'Average loss on the worst 5% of returns. Captures crash severity better than VaR.')} | "
-        f"{_tip('Calmar', 'Annual return divided by max drawdown. Higher means better reward per drawdown risk.')}"
-        f"</p>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
     c1, c2, c3 = st.columns(3)
     with c1:
         risk_coin = _normalize_coin_input(st.text_input("Coin", value="BTC", key="risk_coin"))
@@ -256,26 +197,49 @@ def render(ctx: dict) -> None:
         profile_text = "Mixed profile: keep position size controlled."
         profile_color = WARNING
 
-    st.markdown(
-        f"<div class='risk-kpi-grid'>"
-        f"<div class='risk-kpi'><div class='risk-kpi-label'>Risk Regime</div><div class='risk-kpi-value' style='color:{regime_color};'>{regime}</div>"
-        f"<span class='risk-badge' style='color:{regime_color}; border-color:{regime_color};'><span style='color:{regime_color};'>&#9679;</span>{regime}</span></div>"
-        f"<div class='risk-kpi'><div class='risk-kpi-label'>Sharpe</div><div class='risk-kpi-value'>{sharpe:.2f}</div>"
-        f"<span class='risk-badge' style='color:{sharpe_c}; border-color:{sharpe_c};'><span style='color:{sharpe_c};'>&#9679;</span>{sharpe_s}</span></div>"
-        f"<div class='risk-kpi'><div class='risk-kpi-label'>Max Drawdown</div><div class='risk-kpi-value'>{metrics['max_drawdown']:.2f}%</div>"
-        f"<span class='risk-badge' style='color:{dd_c}; border-color:{dd_c};'><span style='color:{dd_c};'>&#9679;</span>{dd_s}</span></div>"
-        f"<div class='risk-kpi'><div class='risk-kpi-label'>VaR 95%</div><div class='risk-kpi-value'>{var95:.2f}%</div>"
-        f"<span class='risk-badge' style='color:{var_c}; border-color:{var_c};'><span style='color:{var_c};'>&#9679;</span>{var_s}</span></div>"
-        f"</div>",
-        unsafe_allow_html=True,
+    render_kpi_grid(
+        st,
+        items=[
+            {
+                "label": "Risk Regime",
+                "value": regime,
+                "value_color": regime_color,
+                "badge_text": regime,
+                "badge_color": regime_color,
+                "badge_dot": True,
+            },
+            {
+                "label": "Sharpe",
+                "value": f"{sharpe:.2f}",
+                "badge_text": sharpe_s,
+                "badge_color": sharpe_c,
+                "badge_dot": True,
+            },
+            {
+                "label": "Max Drawdown",
+                "value": f"{metrics['max_drawdown']:.2f}%",
+                "badge_text": dd_s,
+                "badge_color": dd_c,
+                "badge_dot": True,
+            },
+            {
+                "label": "VaR 95%",
+                "value": f"{var95:.2f}%",
+                "badge_text": var_s,
+                "badge_color": var_c,
+                "badge_dot": True,
+            },
+        ],
     )
-    st.markdown(
-        f"<div class='elite-card' style='margin:2px 0 10px 0; border-color:rgba(0,212,255,0.22);'>"
-        f"<div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>"
-        f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>Decision Profile:</span>"
-        f"<span style='color:{profile_color}; font-size:0.84rem; font-weight:700;'>{profile_text}</span>"
-        f"</div></div>",
-        unsafe_allow_html=True,
+    render_insight_card(
+        st,
+        title="Decision Profile",
+        body_html=f"<span style='color:{profile_color}; font-weight:700;'>{profile_text}</span>",
+        tone=(
+            "positive"
+            if profile_color == POSITIVE
+            else ("negative" if profile_color == NEGATIVE else "warning")
+        ),
     )
     st.markdown(
         f"<div style='color:{TEXT_MUTED}; font-size:0.80rem; margin:0 0 8px 0;'>"
@@ -284,31 +248,50 @@ def render(ctx: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    st.markdown(
-        f"<details style='margin-bottom:0.7rem;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"<b>1.</b> Start with <b>Risk Regime</b> and <b>Max Drawdown</b> to estimate downside stress.<br>"
-        f"<b>2.</b> Check <b>VaR/CVaR</b> for tail risk: more negative values mean deeper bad-day losses.<br>"
-        f"<b>3.</b> Use <b>Sharpe/Sortino/Calmar</b> to judge if returns justify risk taken.<br>"
-        f"<b>4.</b> Confirm if volatility is expanding using the rolling-vol chart before sizing up.<br>"
-        f"<b>5.</b> Metrics run on <b>closed candles</b> to avoid live-candle noise."
-        f"</div></details>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="How to read quickly (?)",
+        body_html=(
+            "<b>1.</b> Start with <b>Risk Regime</b> and <b>Max Drawdown</b> to estimate downside stress.<br>"
+            "<b>2.</b> Check <b>VaR/CVaR</b> for tail risk: more negative values mean deeper bad-day losses.<br>"
+            "<b>3.</b> Use <b>Sharpe/Sortino/Calmar</b> to judge if returns justify risk taken.<br>"
+            "<b>4.</b> Confirm if volatility is expanding using the rolling-vol chart before sizing up.<br>"
+            "<b>5.</b> Metrics run on <b>closed candles</b> to avoid live-candle noise."
+        ),
     )
 
-    st.markdown(
-        f"<div class='risk-kpi-grid'>"
-        f"<div class='risk-kpi'><div class='risk-kpi-label'>Sortino</div><div class='risk-kpi-value'>{sortino:.2f}</div>"
-        f"<span class='risk-badge' style='color:{sortino_c}; border-color:{sortino_c};'><span style='color:{sortino_c};'>&#9679;</span>{sortino_s}</span></div>"
-        f"<div class='risk-kpi'><div class='risk-kpi-label'>Calmar</div><div class='risk-kpi-value'>{calmar:.2f}</div>"
-        f"<span class='risk-badge' style='color:{cal_c}; border-color:{cal_c};'><span style='color:{cal_c};'>&#9679;</span>{cal_s}</span></div>"
-        f"<div class='risk-kpi'><div class='risk-kpi-label'>CVaR 95%</div><div class='risk-kpi-value'>{cvar95:.2f}%</div>"
-        f"<span class='risk-badge' style='color:{cvar_c}; border-color:{cvar_c};'><span style='color:{cvar_c};'>&#9679;</span>{cvar_s}</span></div>"
-        f"<div class='risk-kpi'><div class='risk-kpi-label'>Annualized Volatility</div><div class='risk-kpi-value'>{ann_vol:.1f}%</div>"
-        f"<span class='risk-badge' style='color:{vol_c}; border-color:{vol_c};'><span style='color:{vol_c};'>&#9679;</span>{vol_s}</span></div>"
-        f"</div>",
-        unsafe_allow_html=True,
+    render_kpi_grid(
+        st,
+        items=[
+            {
+                "label": "Sortino",
+                "value": f"{sortino:.2f}",
+                "badge_text": sortino_s,
+                "badge_color": sortino_c,
+                "badge_dot": True,
+            },
+            {
+                "label": "Calmar",
+                "value": f"{calmar:.2f}",
+                "badge_text": cal_s,
+                "badge_color": cal_c,
+                "badge_dot": True,
+            },
+            {
+                "label": "CVaR 95%",
+                "value": f"{cvar95:.2f}%",
+                "badge_text": cvar_s,
+                "badge_color": cvar_c,
+                "badge_dot": True,
+            },
+            {
+                "label": "Annualized Volatility",
+                "value": f"{ann_vol:.1f}%",
+                "badge_text": vol_s,
+                "badge_color": vol_c,
+                "badge_dot": True,
+            },
+        ],
     )
 
     best_period = float(metrics.get("best_period", metrics.get("best_day", 0.0)))

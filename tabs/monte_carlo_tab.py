@@ -8,6 +8,7 @@ import pandas as pd
 import plotly.graph_objs as go
 
 from ui.ctx import get_ctx
+from ui.primitives import render_help_details, render_insight_card, render_kpi_grid, render_page_header
 
 
 def _mc_thresholds(days: int) -> dict[str, float]:
@@ -58,7 +59,6 @@ def _history_limit(horizon_steps: int) -> int:
 def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
-    TEXT_MUTED = get_ctx(ctx, "TEXT_MUTED")
     POSITIVE = get_ctx(ctx, "POSITIVE")
     NEGATIVE = get_ctx(ctx, "NEGATIVE")
     WARNING = get_ctx(ctx, "WARNING")
@@ -71,75 +71,19 @@ def render(ctx: dict) -> None:
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     monte_carlo_simulation = get_ctx(ctx, "monte_carlo_simulation")
 
-    st.markdown(
-        f"""
-        <style>
-        .mc-kpi-grid {{
-            display:grid;
-            grid-template-columns:repeat(4,minmax(0,1fr));
-            gap:10px;
-            margin:8px 0 12px 0;
-        }}
-        .mc-kpi {{
-            border:1px solid rgba(0,212,255,0.16);
-            border-radius:12px;
-            padding:12px 14px;
-            background:linear-gradient(140deg, rgba(0,0,0,0.72), rgba(10,18,30,0.88));
-        }}
-        .mc-kpi-label {{
-            color:{TEXT_MUTED};
-            font-size:0.70rem;
-            text-transform:uppercase;
-            letter-spacing:0.8px;
-        }}
-        .mc-kpi-value {{
-            color:{ACCENT};
-            font-size:1.2rem;
-            font-weight:700;
-            margin-top:4px;
-        }}
-        .mc-badge {{
-            display:inline-flex;
-            align-items:center;
-            gap:6px;
-            margin-top:7px;
-            padding:2px 9px;
-            border-radius:999px;
-            font-size:0.72rem;
-            font-weight:700;
-            border:1px solid rgba(255,255,255,0.18);
-            background:rgba(0,0,0,0.28);
-        }}
-        @media (max-width: 1100px) {{
-            .mc-kpi-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); }}
-        }}
-        @media (max-width: 640px) {{
-            .mc-kpi-grid {{ grid-template-columns:1fr; }}
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
+    render_page_header(
+        st,
+        title="Monte Carlo Scenario Engine",
+        intro_html=(
+            "Projects many possible future paths from historical return behavior. "
+            "Use this tab for probability-aware risk planning, not direct entry timing."
+            f"<br><br>{_tip('Profit Probability', 'Share of simulations ending above current price at the selected horizon.')} | "
+            f"{_tip('Expected Return', 'Average terminal return across all simulations at horizon.')} | "
+            f"{_tip('VaR 95%', '5th percentile terminal return; downside line in bad scenarios.')} | "
+            f"{_tip('CVaR 95%', 'Average terminal return in worst 5% paths; deeper tail-risk gauge.')} | "
+            f"{_tip('Median Target', 'Middle terminal price; robust planning anchor less sensitive to outliers.')}"
+        ),
     )
-
-    st.markdown(f"<h2 style='color:{ACCENT};'>Monte Carlo Scenario Engine</h2>", unsafe_allow_html=True)
-    st.markdown(
-        f"<div class='panel-box'>"
-        f"<b style='color:{ACCENT}; font-size:1rem;'>What does this tab show?</b>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px; line-height:1.6;'>"
-        f"Projects many possible future paths from historical return behavior. "
-        f"Use this tab for probability-aware risk planning, not direct entry timing."
-        f"</p>"
-        f"<p style='color:{TEXT_MUTED}; font-size:0.85rem; margin-top:6px; line-height:1.6;'>"
-        f"{_tip('Profit Probability', 'Share of simulations ending above current price at the selected horizon.')} | "
-        f"{_tip('Expected Return', 'Average terminal return across all simulations at horizon.')} | "
-        f"{_tip('VaR 95%', '5th percentile terminal return; downside line in bad scenarios.')} | "
-        f"{_tip('CVaR 95%', 'Average terminal return in worst 5% paths; deeper tail-risk gauge.')} | "
-        f"{_tip('Median Target', 'Middle terminal price; robust planning anchor less sensitive to outliers.')}"
-        f"</p>"
-        f"</div>",
-        unsafe_allow_html=True,
-    )
-
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         mc_coin = _normalize_coin_input(st.text_input("Coin", value="BTC", key="mc_coin"))
@@ -251,49 +195,79 @@ def render(ctx: dict) -> None:
         decision_color = WARNING
         decision_note = "Mixed profile. Keep sizing disciplined and require stronger confluence."
 
-    st.markdown(
-        f"<div class='mc-kpi-grid'>"
-        f"<div class='mc-kpi'><div class='mc-kpi-label'>Profit Probability</div><div class='mc-kpi-value'>{prob:.1f}%</div>"
-        f"<span class='mc-badge' style='color:{prob_status[1]}; border-color:{prob_status[1]};'><span>&#9679;</span>{prob_status[0]}</span></div>"
-        f"<div class='mc-kpi'><div class='mc-kpi-label'>Expected Return</div><div class='mc-kpi-value'>{exp_ret:+.2f}%</div>"
-        f"<span class='mc-badge' style='color:{ret_status[1]}; border-color:{ret_status[1]};'><span>&#9679;</span>{ret_status[0]}</span></div>"
-        f"<div class='mc-kpi'><div class='mc-kpi-label'>VaR 95%</div><div class='mc-kpi-value'>{var95:.2f}%</div>"
-        f"<span class='mc-badge' style='color:{var_status[1]}; border-color:{var_status[1]};'><span>&#9679;</span>{var_status[0]}</span></div>"
-        f"<div class='mc-kpi'><div class='mc-kpi-label'>CVaR 95%</div><div class='mc-kpi-value'>{cvar95:.2f}%</div>"
-        f"<span class='mc-badge' style='color:{cvar_status[1]}; border-color:{cvar_status[1]};'><span>&#9679;</span>{cvar_status[0]}</span></div>"
-        f"</div>",
-        unsafe_allow_html=True,
+    render_kpi_grid(
+        st,
+        items=[
+            {
+                "label": "Profit Probability",
+                "value": f"{prob:.1f}%",
+                "badge_text": prob_status[0],
+                "badge_color": prob_status[1],
+                "badge_dot": True,
+            },
+            {
+                "label": "Expected Return",
+                "value": f"{exp_ret:+.2f}%",
+                "badge_text": ret_status[0],
+                "badge_color": ret_status[1],
+                "badge_dot": True,
+            },
+            {
+                "label": "VaR 95%",
+                "value": f"{var95:.2f}%",
+                "badge_text": var_status[0],
+                "badge_color": var_status[1],
+                "badge_dot": True,
+            },
+            {
+                "label": "CVaR 95%",
+                "value": f"{cvar95:.2f}%",
+                "badge_text": cvar_status[0],
+                "badge_color": cvar_status[1],
+                "badge_dot": True,
+            },
+        ],
     )
-    st.markdown(
-        f"<div class='elite-card' style='margin:2px 0 10px 0; border-color:rgba(0,212,255,0.22);'>"
-        f"<div style='display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;'>"
-        f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>Risk/Reward Profile: "
-        f"<b style='color:{decision_color};'>{decision_tone}</b></span>"
-        f"<span style='color:{TEXT_MUTED}; font-size:0.82rem;'>"
-        f"<b style='color:{decision_color};'>{decision_note}</b></span>"
-        f"</div></div>",
-        unsafe_allow_html=True,
+    render_insight_card(
+        st,
+        title=f"Risk/Reward Profile · {decision_tone}",
+        body_html=f"<span style='color:{decision_color}; font-weight:700;'>{decision_note}</span>",
+        tone=(
+            "positive"
+            if decision_color == POSITIVE
+            else ("negative" if decision_color == NEGATIVE else "warning")
+        ),
     )
-    st.markdown(
-        f"<div class='mc-kpi-grid' style='grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:-2px;'>"
-        f"<div class='mc-kpi'><div class='mc-kpi-label'>Median Target</div><div class='mc-kpi-value'>${median_price:,.2f}</div>"
-        f"<span class='mc-badge' style='color:{med_status[1]}; border-color:{med_status[1]};'><span>&#9679;</span>{med_status[0]}</span></div>"
-        f"<div class='mc-kpi'><div class='mc-kpi-label'>Current Price</div><div class='mc-kpi-value'>${last_price:,.2f}</div>"
-        f"<span class='mc-badge' style='color:{TEXT_MUTED}; border-color:{TEXT_MUTED};'><span>&#9679;</span>Reference</span></div>"
-        f"</div>",
-        unsafe_allow_html=True,
+    render_kpi_grid(
+        st,
+        columns=2,
+        items=[
+            {
+                "label": "Median Target",
+                "value": f"${median_price:,.2f}",
+                "badge_text": med_status[0],
+                "badge_color": med_status[1],
+                "badge_dot": True,
+            },
+            {
+                "label": "Current Price",
+                "value": f"${last_price:,.2f}",
+                "badge_text": "Reference",
+                "badge_tone": "neutral",
+                "badge_dot": True,
+            },
+        ],
     )
 
-    st.markdown(
-        f"<details style='margin-bottom:0.7rem;'>"
-        f"<summary style='color:{ACCENT}; cursor:pointer;'>How to read quickly (?)</summary>"
-        f"<div style='color:{TEXT_MUTED}; font-size:0.85rem; line-height:1.7; margin-top:0.5rem;'>"
-        f"<b>1.</b> Prioritize Prob + VaR + CVaR together before reading expected return.<br>"
-        f"<b>2.</b> If expected return is positive but CVaR is Risky, treat it as fragile edge.<br>"
-        f"<b>3.</b> Median target is usually a better planning anchor than best-case tails.<br>"
-        f"<b>4.</b> Threshold bands are horizon-aware: longer windows require wider risk tolerance."
-        f"</div></details>",
-        unsafe_allow_html=True,
+    render_help_details(
+        st,
+        summary="How to read quickly (?)",
+        body_html=(
+            "<b>1.</b> Prioritize Prob + VaR + CVaR together before reading expected return.<br>"
+            "<b>2.</b> If expected return is positive but CVaR is Risky, treat it as fragile edge.<br>"
+            "<b>3.</b> Median target is usually a better planning anchor than best-case tails.<br>"
+            "<b>4.</b> Threshold bands are horizon-aware: longer windows require wider risk tolerance."
+        ),
     )
     st.caption(
         f"Horizon scaling: {mc_days} days x {steps_per_day} steps/day ({mc_tf}) = {horizon_steps} steps. "

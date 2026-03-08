@@ -40,6 +40,7 @@ _TAB_DEPS = [
             "ACCENT", "TEXT_MUTED", "CARD_BG", "POSITIVE", "NEGATIVE", "WARNING",
             "get_market_top_snapshot", "get_price_change",
             "_tip", "get_major_ohlcv_bundle", "ml_ensemble_predict", "get_top_volume_usdt_symbols",
+            "get_market_cap_rows_for_symbols",
             "fetch_ohlcv", "analyse", "get_scalping_entry_target", "scalp_quality_gate", "_calc_conviction",
             "signal_plain", "direction_key", "direction_label", "bias_score_badge", "readable_market_cap", "leverage_badge",
             "format_delta", "format_trend", "format_adx", "format_stochrsi",
@@ -117,9 +118,10 @@ _TAB_DEPS = [
     (
         render_multitf_tab_ui,
         [
-            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "CARD_BG", "_tip",
+            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING",
             "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "analyse",
-            "direction_key", "direction_label",
+            "direction_key", "direction_label", "format_delta", "format_stochrsi",
+            "ml_ensemble_predict", "_calc_conviction",
         ],
     ),
     (

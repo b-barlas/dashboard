@@ -11,6 +11,20 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 
+def _has_trusted_volume(df: pd.DataFrame) -> bool:
+    if df is None or "volume" not in df.columns:
+        return False
+    attrs = getattr(df, "attrs", {}) or {}
+    if "volume_is_24h_aggregate" in attrs:
+        return not bool(attrs.get("volume_is_24h_aggregate"))
+    if "volume_is_24h_aggregate" not in df.columns:
+        return True
+    try:
+        return not bool(df["volume_is_24h_aggregate"].fillna(False).astype(bool).any())
+    except Exception:
+        return False
+
+
 def ml_predict_direction(
     df: pd.DataFrame, debug_fn: Callable[[str], None] | None = None
 ) -> tuple[float, str]:
@@ -19,7 +33,9 @@ def ml_predict_direction(
         return 0.5, "NEUTRAL"
 
     debug = debug_fn or (lambda _msg: None)
+    original_attrs = dict(getattr(df, "attrs", {}) or {})
     df = df.copy().reset_index(drop=True)
+    df.attrs.update(original_attrs)
 
     df["ema5"] = ta.trend.ema_indicator(df["close"], window=5)
     df["ema9"] = ta.trend.ema_indicator(df["close"], window=9)
@@ -29,10 +45,15 @@ def ml_predict_direction(
     df["macd"] = macd_ind.macd()
     df["macd_signal"] = macd_ind.macd_signal()
     df["macd_diff"] = macd_ind.macd_diff()
-    df["obv"] = ta.volume.on_balance_volume(df["close"], df["volume"])
+    trusted_volume = _has_trusted_volume(df)
+    if trusted_volume:
+        df["obv"] = ta.volume.on_balance_volume(df["close"], df["volume"])
+        df["volume_ratio"] = df["volume"] / df["volume"].rolling(20).mean()
+    else:
+        df["obv"] = 0.0
+        df["volume_ratio"] = 1.0
     df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14)
     df["returns"] = df["close"].pct_change()
-    df["volume_ratio"] = df["volume"] / df["volume"].rolling(20).mean()
     bb = ta.volatility.BollingerBands(df["close"])
     df["bb_width"] = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg()
     df["target"] = (df["close"].shift(-1) > df["close"]).astype(int)
@@ -114,7 +135,9 @@ def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
             "error": "Need at least 60 candles.",
         }
 
+    original_attrs = dict(getattr(df, "attrs", {}) or {})
     df = df.copy().reset_index(drop=True)
+    df.attrs.update(original_attrs)
     df["ema5"] = ta.trend.ema_indicator(df["close"], window=5)
     df["ema9"] = ta.trend.ema_indicator(df["close"], window=9)
     df["ema21"] = ta.trend.ema_indicator(df["close"], window=21)
@@ -123,15 +146,21 @@ def ml_ensemble_predict(df: pd.DataFrame) -> tuple[float, str, dict]:
     df["macd"] = macd_ind.macd()
     df["macd_signal"] = macd_ind.macd_signal()
     df["macd_diff"] = macd_ind.macd_diff()
-    df["obv"] = ta.volume.on_balance_volume(df["close"], df["volume"])
+    trusted_volume = _has_trusted_volume(df)
+    if trusted_volume:
+        df["obv"] = ta.volume.on_balance_volume(df["close"], df["volume"])
+        df["volume_ratio"] = df["volume"] / df["volume"].rolling(20).mean()
+        df["vol_trend"] = df["volume"].rolling(5).mean() / df["volume"].rolling(20).mean()
+    else:
+        df["obv"] = 0.0
+        df["volume_ratio"] = 1.0
+        df["vol_trend"] = 1.0
     df["atr"] = ta.volatility.average_true_range(df["high"], df["low"], df["close"], window=14)
     df["returns"] = df["close"].pct_change()
-    df["volume_ratio"] = df["volume"] / df["volume"].rolling(20).mean()
     bb = ta.volatility.BollingerBands(df["close"])
     df["bb_width"] = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg()
     df["ema_spread"] = (df["ema5"] - df["ema21"]) / df["close"]
     df["rsi_slope"] = df["rsi"].diff(3)
-    df["vol_trend"] = df["volume"].rolling(5).mean() / df["volume"].rolling(20).mean()
     df["target"] = (df["close"].shift(-1) > df["close"]).astype(int)
 
     feature_cols = [
