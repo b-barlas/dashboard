@@ -97,6 +97,372 @@ div[data-testid="stCaptionContainer"] {{
     font-size: 0.83rem;
     line-height: 1.55;
 }}
+.market-header-card {{
+    background:
+        linear-gradient(180deg, rgba(0, 212, 255, 0.06), transparent 18%),
+        linear-gradient(160deg, rgba(3, 8, 15, 0.98), rgba(1, 4, 9, 0.99));
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 24px;
+    padding: 14px 18px 10px;
+    min-height: 150px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 18px 40px rgba(0,0,0,0.26);
+    overflow: hidden;
+    position: relative;
+    margin-bottom: 16px;
+}}
+.market-header-card::before {{
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.12), transparent);
+    opacity: 0.9;
+}}
+.market-header-card::after {{
+    content: "";
+    position: absolute;
+    top: 18px;
+    right: -28px;
+    width: 140px;
+    height: 140px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(0, 212, 255, 0.05), transparent 68%);
+    opacity: 0.18;
+    pointer-events: none;
+}}
+.market-header-card--muted {{
+    --header-accent: rgba(148, 163, 184, 0.9);
+}}
+.market-header-card--sentiment {{
+    background:
+        linear-gradient(180deg, rgba(255, 209, 102, 0.06), transparent 18%),
+        linear-gradient(160deg, rgba(8, 9, 14, 0.98), rgba(5, 5, 8, 0.99));
+}}
+.market-header-title,
+.market-header-main,
+.market-header-band,
+.market-header-band-guides,
+.market-header-note,
+.market-header-sentiment-scale {{
+    position: relative;
+    z-index: 1;
+}}
+.market-header-title {{
+    color: #D7E4F2;
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.72px;
+    text-transform: uppercase;
+}}
+.market-header-info {{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 0.92rem;
+    height: 0.92rem;
+    margin-left: 0.28rem;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.16);
+    color: {TEXT_MUTED};
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.62rem;
+    font-weight: 700;
+    line-height: 1;
+    vertical-align: middle;
+}}
+.market-header-main {{
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 10px;
+}}
+.market-header-main--sentiment {{
+    align-items: center;
+}}
+.market-header-value {{
+    color: #F8FAFC;
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 2rem;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: -0.6px;
+}}
+.market-header-pill {{
+    display: inline-flex;
+    align-items: center;
+    align-self: center;
+    border-radius: 999px;
+    padding: 5px 11px;
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.08px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.08);
+    flex-shrink: 0;
+}}
+.market-header-pill--muted {{
+    color: {TEXT_MUTED};
+    border-color: rgba(255,255,255,0.08);
+}}
+.market-header-band,
+.market-header-sentiment-scale {{
+    position: relative;
+    margin-top: 10px;
+    height: 8px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: rgba(255,255,255,0.035);
+    border: 1px solid rgba(255,255,255,0.08);
+}}
+.market-header-band-seg,
+.market-header-sentiment-seg {{
+    position: absolute;
+    top: 0;
+    bottom: 0;
+}}
+.market-header-band-seg--neg {{
+    left: 0;
+    width: 44%;
+    background: linear-gradient(90deg, rgba(255, 51, 102, 0.98), rgba(255, 85, 128, 0.88));
+}}
+.market-header-band-seg--neutral {{
+    left: 44%;
+    width: 12%;
+    background: rgba(255, 209, 102, 0.88);
+}}
+.market-header-band-seg--pos {{
+    right: 0;
+    width: 44%;
+    background: linear-gradient(90deg, rgba(36, 238, 141, 0.88), rgba(0, 255, 136, 0.98));
+}}
+.market-header-sentiment-seg--fear {{
+    left: 0;
+    width: 20%;
+    background: rgba(255, 51, 102, 0.98);
+}}
+.market-header-sentiment-seg--caution {{
+    left: 20%;
+    width: 20%;
+    background: rgba(255, 102, 102, 0.9);
+}}
+.market-header-sentiment-seg--neutral {{
+    left: 40%;
+    width: 20%;
+    background: rgba(255, 209, 102, 0.88);
+}}
+.market-header-sentiment-seg--greed {{
+    left: 60%;
+    width: 20%;
+    background: rgba(36, 238, 141, 0.86);
+}}
+.market-header-sentiment-seg--extreme {{
+    left: 80%;
+    width: 20%;
+    background: rgba(0, 255, 136, 0.96);
+}}
+.market-header-band-marker,
+.market-header-sentiment-marker {{
+    position: absolute;
+    top: 50%;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    border: 2px solid rgba(3, 8, 15, 0.95);
+}}
+.market-header-band-guides {{
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    color: {TEXT_MUTED};
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.62rem;
+    letter-spacing: 0.12px;
+    text-transform: uppercase;
+}}
+.market-header-note {{
+    color: {TEXT_MUTED};
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.7rem;
+    line-height: 1.3;
+    flex: 0 0 auto;
+}}
+.market-orbital-card {{
+    background:
+        radial-gradient(circle at top center, rgba(0, 212, 255, 0.07), transparent 36%),
+        linear-gradient(160deg, rgba(4, 10, 18, 0.96), rgba(1, 4, 9, 0.99));
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 22px;
+    padding: 16px 16px 12px;
+    min-height: 314px;
+    height: 314px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 16px 36px rgba(0,0,0,0.28);
+    overflow: hidden;
+    position: relative;
+}}
+.market-orbital-title,
+.market-orbital-stage,
+.market-orbital-guides,
+.market-orbital-note,
+.market-top-footer {{
+    position: relative;
+    z-index: 1;
+}}
+.market-orbital-title-row {{
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-start;
+    min-height: 28px;
+    flex-shrink: 0;
+}}
+.market-orbital-title {{
+    color: #E5E7EB;
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.74px;
+    text-transform: uppercase;
+    flex-shrink: 0;
+}}
+.market-orbital-topmeta {{
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.12px;
+    background: rgba(255,255,255,0.04);
+    white-space: nowrap;
+    flex-shrink: 0;
+}}
+.market-orbital-stage {{
+    position: relative;
+    height: 184px;
+    flex-shrink: 0;
+}}
+.market-orbital-svg {{
+    width: 100%;
+    height: 100%;
+    display: block;
+}}
+.market-orbital-center {{
+    position: absolute;
+    inset: 88px 0 auto 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    pointer-events: none;
+}}
+.market-orbital-value-row {{
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    justify-content: center;
+    min-width: 0;
+    width: 100%;
+    text-align: center;
+}}
+.market-orbital-value {{
+    color: #F8FAFC;
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 2.36rem;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: -0.6px;
+}}
+.market-orbital-guides {{
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    color: {TEXT_MUTED};
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.62rem;
+    letter-spacing: 0.1px;
+    flex-shrink: 0;
+    margin-top: -10px;
+}}
+.market-orbital-note {{
+    color: {TEXT_MUTED};
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.67rem;
+    line-height: 1.28;
+    flex: 0 0 auto;
+}}
+.market-top-unit {{
+    color: {TEXT_MUTED};
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.9rem;
+    font-weight: 700;
+}}
+.market-top-meta {{
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    color: {TEXT_MUTED};
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.72rem;
+}}
+.market-top-meta strong {{
+    color: #F8FAFC;
+    font-weight: 700;
+}}
+.market-top-footer {{
+    margin-top: auto;
+    flex-shrink: 0;
+}}
+.market-statline {{
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    padding-top: 4px;
+}}
+.market-statline-item {{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    min-width: 0;
+    padding: 0 6px;
+    text-align: center;
+}}
+.market-statline-item + .market-statline-item {{
+    border-left: 1px solid rgba(255,255,255,0.06);
+}}
+.market-statline-label {{
+    color: {TEXT_MUTED};
+    font-family: 'Manrope', 'Segoe UI', sans-serif;
+    font-size: 0.46rem;
+    font-weight: 700;
+    letter-spacing: 0.28px;
+    text-transform: uppercase;
+    line-height: 1;
+}}
+.market-statline-value {{
+    font-family: 'Space Grotesk', 'Manrope', sans-serif;
+    font-size: 0.82rem;
+    font-weight: 700;
+    line-height: 1;
+}}
 .market-details summary {{
     font-family: 'Space Grotesk', 'Manrope', sans-serif;
     font-size: 0.92rem;

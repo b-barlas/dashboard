@@ -4,11 +4,11 @@ from ui.ctx import get_ctx
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import html
+import math
 import re
 from threading import Lock
 
 import pandas as pd
-import plotly.graph_objs as go
 from core.market_decision import (
     ai_vote_metrics,
     action_decision_with_reason,
@@ -776,7 +776,6 @@ def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
     TEXT_MUTED = get_ctx(ctx, "TEXT_MUTED")
-    CARD_BG = get_ctx(ctx, "CARD_BG")
     POSITIVE = get_ctx(ctx, "POSITIVE")
     NEGATIVE = get_ctx(ctx, "NEGATIVE")
     WARNING = get_ctx(ctx, "WARNING")
@@ -892,86 +891,138 @@ def render(ctx: dict) -> None:
     selected_timeframe = st.session_state.get("market_timeframe", "1h")
     # Top row: Price and market cap metrics.
     m1, m2, m3, m4 = st.columns(4, gap="medium")
+    def _header_band_html(change_pct: float | None, tone_color: str) -> str:
+        if change_pct is None or pd.isna(change_pct):
+            marker_html = ""
+        else:
+            clipped = max(-5.0, min(5.0, float(change_pct)))
+            marker_left = 50.0 + clipped * 10.0
+            marker_html = (
+                f"<span class='market-header-band-marker' style='left:{marker_left:.2f}%; "
+                f"background:{tone_color}; box-shadow:0 0 0 4px rgba(255,255,255,0.04), 0 0 16px {tone_color};'></span>"
+            )
+        return (
+            "<div class='market-header-band'>"
+            f"<span class='market-header-band-seg market-header-band-seg--neg'></span>"
+            f"<span class='market-header-band-seg market-header-band-seg--neutral'></span>"
+            f"<span class='market-header-band-seg market-header-band-seg--pos'></span>"
+            f"{marker_html}"
+            "</div>"
+            "<div class='market-header-band-guides'><span>-5%</span><span>24H FLOW</span><span>+5%</span></div>"
+        )
+
+    def _market_summary_card(
+        *,
+        title: str,
+        value_text: str,
+        delta_pct: float | None,
+        context_label: str,
+        unavailable: bool = False,
+    ) -> str:
+        accent = TEXT_MUTED if unavailable else (POSITIVE if (delta_pct or 0) >= 0 else NEGATIVE)
+        if unavailable:
+            return (
+                f"<div class='market-header-card market-header-card--muted' style='--header-accent:{accent};'>"
+                f"<div class='market-header-title'>{html.escape(title)}</div>"
+                "<div class='market-header-main'>"
+                "<div class='market-header-value'>N/A</div>"
+                "<div class='market-header-pill market-header-pill--muted'>Offline</div>"
+                "</div>"
+                "<div class='market-header-note'>Live feed unavailable.</div>"
+                "</div>"
+            )
+        delta = float(delta_pct or 0.0)
+        tone_color = POSITIVE if delta >= 0 else NEGATIVE
+        delta_arrow = "▲" if delta >= 0 else "▼"
+        delta_text = f"{delta_arrow} {abs(delta):.2f}%"
+        return (
+            f"<div class='market-header-card' style='--header-accent:{tone_color};'>"
+            f"<div class='market-header-title'>{html.escape(title)}</div>"
+            f"<div class='market-header-main'>"
+            f"<div class='market-header-value'>{html.escape(value_text)}</div>"
+            f"<div class='market-header-pill' style='color:{tone_color}; border-color:{tone_color};'>{delta_text}</div>"
+            f"</div>"
+            f"{_header_band_html(delta, tone_color)}"
+            f"<div class='market-header-note'>{html.escape(context_label)}</div>"
+            f"</div>"
+        )
+
+    def _fear_greed_card(value: float | None, label: str, available: bool) -> str:
+        fg_color = POSITIVE if "Greed" in label else (NEGATIVE if "Fear" in label else WARNING)
+        if not available or value is None:
+            return (
+                f"<div class='market-header-card market-header-card--sentiment market-header-card--muted' style='--header-accent:{TEXT_MUTED};'>"
+                "<div class='market-header-title'>Fear &amp; Greed</div>"
+                "<div class='market-header-main market-header-main--sentiment'>"
+                "<div class='market-header-value'>N/A</div>"
+                "<div class='market-header-pill market-header-pill--muted'>Offline</div>"
+                "</div>"
+                "<div class='market-header-note'>Sentiment feed unavailable.</div>"
+                "</div>"
+            )
+        marker_left = max(0.0, min(100.0, float(value)))
+        return (
+            f"<div class='market-header-card market-header-card--sentiment' style='--header-accent:{fg_color};'>"
+            "<div class='market-header-title'>Fear &amp; Greed "
+            "<span title='Crypto Fear &amp; Greed Index (0-100). 0-25 = Extreme Fear, 75-100 = Extreme Greed.' "
+            "class='market-header-info'>i</span></div>"
+            "<div class='market-header-main market-header-main--sentiment'>"
+            f"<div class='market-header-value'>{int(value):d}</div>"
+            f"<div class='market-header-pill' style='color:{fg_color}; border-color:{fg_color};'>{html.escape(label)}</div>"
+            "</div>"
+            "<div class='market-header-sentiment-scale'>"
+            "<span class='market-header-sentiment-seg market-header-sentiment-seg--fear'></span>"
+            "<span class='market-header-sentiment-seg market-header-sentiment-seg--caution'></span>"
+            "<span class='market-header-sentiment-seg market-header-sentiment-seg--neutral'></span>"
+            "<span class='market-header-sentiment-seg market-header-sentiment-seg--greed'></span>"
+            "<span class='market-header-sentiment-seg market-header-sentiment-seg--extreme'></span>"
+            f"<span class='market-header-sentiment-marker' style='left:{marker_left:.2f}%; background:{fg_color}; box-shadow:0 0 0 4px rgba(255,255,255,0.04), 0 0 16px {fg_color};'></span>"
+            "</div>"
+            "<div class='market-header-band-guides'><span>Fear</span><span>Neutral</span><span>Greed</span></div>"
+            "<div class='market-header-note'>Sentiment context, not a standalone trigger.</div>"
+            "</div>"
+        )
+
     # Bitcoin price
     with m1:
-        if btc_price is not None and btc_price > 0:
-            delta_class = "metric-delta-positive" if (btc_change or 0) >= 0 else "metric-delta-negative"
-            delta_text = f"({btc_change:+.2f}%)" if btc_change is not None else ""
-            st.markdown(
-                f"<div class='metric-card'>"
-                f"  <div class='metric-label'>Bitcoin Price</div>"
-                f"  <div class='metric-value'>${btc_price:,.2f}</div>"
-                f"  <div class='{delta_class}'>{delta_text}</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f"<div class='metric-card'>"
-                f"  <div class='metric-label'>Bitcoin Price</div>"
-                f"  <div class='metric-value'>N/A</div>"
-                f"  <div style='color:{TEXT_MUTED};font-size:0.85rem;'>Data unavailable</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+        st.markdown(
+            _market_summary_card(
+                title="Bitcoin Price",
+                value_text=f"${btc_price:,.2f}" if btc_price is not None and btc_price > 0 else "N/A",
+                delta_pct=btc_change,
+                context_label="BTC is leading the tape right now.",
+                unavailable=not (btc_price is not None and btc_price > 0),
+            ),
+            unsafe_allow_html=True,
+        )
     # Ethereum price
     with m2:
-        if eth_price is not None and eth_price > 0:
-            delta_class = "metric-delta-positive" if (eth_change or 0) >= 0 else "metric-delta-negative"
-            delta_text = f"({eth_change:+.2f}%)" if eth_change is not None else ""
-            st.markdown(
-                f"<div class='metric-card'>"
-                f"  <div class='metric-label'>Ethereum Price</div>"
-                f"  <div class='metric-value'>${eth_price:,.2f}</div>"
-                f"  <div class='{delta_class}'>{delta_text}</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f"<div class='metric-card'>"
-                f"  <div class='metric-label'>Ethereum Price</div>"
-                f"  <div class='metric-value'>N/A</div>"
-                f"  <div style='color:{TEXT_MUTED};font-size:0.85rem;'>Data unavailable</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+        st.markdown(
+            _market_summary_card(
+                title="Ethereum Price",
+                value_text=f"${eth_price:,.2f}" if eth_price is not None and eth_price > 0 else "N/A",
+                delta_pct=eth_change,
+                context_label="ETH participation sets alt tone.",
+                unavailable=not (eth_price is not None and eth_price > 0),
+            ),
+            unsafe_allow_html=True,
+        )
     # Total market cap
     with m3:
-        if mcap_feed_ok:
-            delta_class = "metric-delta-positive" if delta_mcap >= 0 else "metric-delta-negative"
-            delta_text = f"({delta_mcap:+.2f}%)" if pd.notna(delta_mcap) else ""
-            st.markdown(
-                f"<div class='metric-card'>"
-                f"  <div class='metric-label'>Total Market Cap</div>"
-                f"  <div class='metric-value'>${total_mcap / 1e12:.2f}T</div>"
-                f"  <div class='{delta_class}'>{delta_text}</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f"<div class='metric-card'>"
-                f"  <div class='metric-label'>Total Market Cap</div>"
-                f"  <div class='metric-value'>N/A</div>"
-                f"  <div style='color:{TEXT_MUTED};font-size:0.85rem;'>Data unavailable</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+        st.markdown(
+            _market_summary_card(
+                title="Total Market Cap",
+                value_text=f"${total_mcap / 1e12:.2f}T" if mcap_feed_ok else "N/A",
+                delta_pct=delta_mcap if pd.notna(delta_mcap) else None,
+                context_label="Broad crypto balance sheet.",
+                unavailable=not mcap_feed_ok,
+            ),
+            unsafe_allow_html=True,
+        )
     # Fear & Greed index
     with m4:
-        sentiment_color = POSITIVE if "Greed" in fg_label else (NEGATIVE if "Fear" in fg_label else WARNING)
-        fg_value_display = f"{int(fg_value)}" if fg_available else "N/A"
-        fg_label_display = fg_label if fg_available else "Unavailable"
         st.markdown(
-            f"<div class='metric-card'>"
-            f"  <div class='metric-label'>Fear &amp; Greed "
-            f"<span title='Crypto Fear &amp; Greed Index (0-100). "
-            f"0-25 = Extreme Fear (potential accumulation zone), 75-100 = Extreme Greed (potential distribution zone).' "
-            f"style='cursor:help; font-size:0.7rem;'>ℹ️</span></div>"
-            f"  <div class='metric-value'>{fg_value_display}</div>"
-            f"  <div style='color:{sentiment_color};font-size:0.9rem;'>{fg_label_display}</div>"
-            f"</div>",
+            _fear_greed_card(fg_value, fg_label, fg_available),
             unsafe_allow_html=True,
         )
     # Second row: Dominance gauges and AI market outlook
@@ -1111,14 +1162,6 @@ def render(ctx: dict) -> None:
             return ("Moderate", WARNING)
         return ("Weak", NEGATIVE)
 
-    def _chip_center(label: str, tone_color: str, tip_text: str) -> str:
-        return (
-            f"<div class='market-gauge-chip-wrap'>"
-            f"<span class='market-gauge-chip' style='border:1px solid {tone_color}; color:{tone_color}; "
-            f"background:rgba(255,255,255,0.04);'>"
-            f"{label} {_tip('', tip_text)}</span></div>"
-        )
-
     def _dom_state(v: float | None, low_cut: float, high_cut: float) -> tuple[str, str]:
         if v is None or pd.isna(v):
             return ("N/A", TEXT_MUTED)
@@ -1130,116 +1173,163 @@ def render(ctx: dict) -> None:
         return ("Low", NEGATIVE)
 
     g1, g2, g3, g4 = st.columns(4, gap="medium")
-    GAUGE_DOMAIN = {"x": [0.06, 0.94], "y": [0, 1]}
-    GAUGE_HEIGHT = 186
-    GAUGE_MARGIN = dict(l=12, r=12, t=52, b=10)
-    GAUGE_NUMBER_Y = 0.16
+    def _clip_pct(v: float | None) -> float:
+        if v is None or pd.isna(v):
+            return 0.0
+        return float(max(0.0, min(100.0, float(v))))
 
-    def _render_market_gauge(
+    def _polar(cx: float, cy: float, r: float, angle_deg: float) -> tuple[float, float]:
+        rad = math.radians(angle_deg)
+        return cx + r * math.cos(rad), cy + r * math.sin(rad)
+
+    def _arc_path(cx: float, cy: float, r: float, start_deg: float, end_deg: float) -> str:
+        x1, y1 = _polar(cx, cy, r, start_deg)
+        x2, y2 = _polar(cx, cy, r, end_deg)
+        large_arc = 1 if abs(end_deg - start_deg) > 180 else 0
+        sweep = 1 if end_deg > start_deg else 0
+        return f"M {x1:.2f} {y1:.2f} A {r:.2f} {r:.2f} 0 {large_arc} {sweep} {x2:.2f} {y2:.2f}"
+
+    def _orbital_svg_html(
+        *,
+        value: float | None,
+        segments: list[tuple[float, float, str]],
+        marker_color: str,
+        accent_color: str,
+    ) -> str:
+        cx, cy, r = 120.0, 104.0, 80.0
+        start_deg, end_deg = 150.0, 390.0
+        base_path = _arc_path(cx, cy, r, start_deg, end_deg)
+        seg_paths = "".join(
+            f"<path d='{_arc_path(cx, cy, r, start_deg + (seg_start / 100.0) * (end_deg - start_deg), start_deg + (seg_end / 100.0) * (end_deg - start_deg))}' "
+            f"stroke='{color}' stroke-width='12.5' stroke-linecap='round' fill='none' />"
+            for seg_start, seg_end, color in segments
+        )
+        inner_glow = f"<path d='{base_path}' stroke='{accent_color}' stroke-width='3' stroke-linecap='round' fill='none' opacity='0.16' />"
+        marker_html = ""
+        if value is not None and not pd.isna(value):
+            angle = start_deg + (_clip_pct(value) / 100.0) * (end_deg - start_deg)
+            mx, my = _polar(cx, cy, r, angle)
+            marker_html = (
+                f"<circle cx='{mx:.2f}' cy='{my:.2f}' r='6.25' fill='{marker_color}' stroke='rgba(3,8,15,0.95)' stroke-width='2' />"
+                f"<circle cx='{mx:.2f}' cy='{my:.2f}' r='10.5' fill='none' stroke='{marker_color}' stroke-width='2' opacity='0.16' />"
+            )
+        return (
+            "<svg class='market-orbital-svg' viewBox='0 0 240 184' preserveAspectRatio='xMidYMid meet' aria-hidden='true'>"
+            "<defs>"
+            "<linearGradient id='orbitalShell' x1='0%' x2='100%' y1='0%' y2='0%'>"
+            "<stop offset='0%' stop-color='rgba(255,255,255,0.04)' />"
+            "<stop offset='100%' stop-color='rgba(255,255,255,0.01)' />"
+            "</linearGradient>"
+            "</defs>"
+            f"<path d='{base_path}' stroke='rgba(255,255,255,0.06)' stroke-width='14.5' stroke-linecap='round' fill='none' />"
+            f"{inner_glow}"
+            f"{seg_paths}"
+            f"{marker_html}"
+            "</svg>"
+        )
+
+    def _stat_metric(label: str, value: float, tone_color: str, tip_text: str) -> str:
+        return (
+            f"<div class='market-statline-item' title='{html.escape(tip_text, quote=True)}'>"
+            f"<span class='market-statline-label'>{html.escape(label)}</span>"
+            f"<span class='market-statline-value' style='color:{tone_color};'>{float(value):.0f}</span>"
+            f"</div>"
+        )
+
+    def _render_market_orbital_card(
         *,
         title: str,
-        value: float | None,
-        steps: list[dict[str, float | str]],
+        title_hover: str,
         value_text: str,
-        title_hover: str | None = None,
-    ) -> None:
-        title_text = html.escape(title)
-        if title_hover:
-            title_html = (
-                "<div style='text-align:center; margin-bottom:2px;'>"
-                f"<span title='{html.escape(title_hover)}' style='color:#E5E7EB; font-size:13px; cursor:help;'>"
-                f"{title_text}</span></div>"
+        unit: str = "",
+        chart_html: str,
+        guide_labels: tuple[str, str, str],
+        note: str,
+        footer_html: str = "",
+        top_meta_text: str = "",
+        top_meta_color: str = "",
+        top_meta_hover: str = "",
+    ) -> str:
+        unit_html = f"<span class='market-top-unit'>{html.escape(unit)}</span>" if unit else ""
+        footer = f"<div class='market-top-footer'>{footer_html}</div>" if footer_html else ""
+        left_label, mid_label, right_label = [html.escape(lbl) for lbl in guide_labels]
+        top_meta_html = ""
+        if top_meta_text:
+            top_meta_html = (
+                f"<span class='market-orbital-topmeta' title='{html.escape(top_meta_hover, quote=True)}' "
+                f"style='border:1px solid {top_meta_color}; color:{top_meta_color};'>{html.escape(top_meta_text)}</span>"
             )
-        else:
-            title_html = (
-                "<div style='text-align:center; margin-bottom:2px;'>"
-                f"<span style='color:#E5E7EB; font-size:13px;'>{title_text}</span></div>"
-            )
-        st.markdown(title_html, unsafe_allow_html=True)
-
-        if value is None or pd.isna(value):
-            st.markdown(
-                f"<div class='metric-card' style='height:{GAUGE_HEIGHT}px; display:flex; flex-direction:column; "
-                f"justify-content:center; align-items:center;'>"
-                f"<div class='metric-label'>{title_text}</div>"
-                f"<div class='metric-value'>N/A</div>"
-                f"<div style='color:{TEXT_MUTED}; font-size:0.85rem;'>Data unavailable</div>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-            return
-
-        safe_val = float(max(0.0, min(100.0, float(value))))
-        fig = go.Figure(
-            go.Indicator(
-                mode="gauge",
-                value=safe_val,
-                domain=GAUGE_DOMAIN,
-                gauge={
-                    "axis": {
-                        "range": [0, 100],
-                        "tickwidth": 1,
-                        "tickvals": [0, 50, 100],
-                        "tickfont": {"size": 12, "color": TEXT_MUTED},
-                    },
-                    "bar": {"color": ACCENT},
-                    "bgcolor": CARD_BG,
-                    "steps": steps,
-                },
-                title={"text": "", "font": {"size": 13, "color": "#E5E7EB"}},
-            )
+        return (
+            "<div class='market-orbital-card'>"
+            "<div class='market-orbital-title-row'>"
+            f"<div class='market-orbital-title' title='{html.escape(title_hover, quote=True)}'>{html.escape(title)}</div>"
+            f"{top_meta_html}"
+            "</div>"
+            "<div class='market-orbital-stage'>"
+            f"{chart_html}"
+            "<div class='market-orbital-center'>"
+            f"<div class='market-orbital-value-row'><div class='market-orbital-value'>{html.escape(value_text)}</div>{unit_html}</div>"
+            "</div>"
+            "</div>"
+            f"<div class='market-orbital-guides'><span>{left_label}</span><span>{mid_label}</span><span>{right_label}</span></div>"
+            f"<div class='market-orbital-note'>{note}</div>"
+            f"{footer}"
+            "</div>"
         )
-        fig.update_layout(
-            height=GAUGE_HEIGHT,
-            margin=GAUGE_MARGIN,
-            plot_bgcolor="#000000",
-            paper_bgcolor="#000000",
-        )
-        fig.add_annotation(
-            x=0.5,
-            y=GAUGE_NUMBER_Y,
-            xref="paper",
-            yref="paper",
-            text=html.escape(value_text),
-            showarrow=False,
-            yanchor="middle",
-            font={"color": "#F8FAFC", "size": 34},
-        )
-        st.plotly_chart(fig, width="stretch")
 
     # BTC dominance gauge
     with g1:
-        _render_market_gauge(
-            title="BTC Dominance (%)",
-            value=btc_dom_display,
-            steps=[
-                {"range": [0, AI_SHORT_THRESHOLD * 100], "color": NEGATIVE},
-                {"range": [AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100], "color": WARNING},
-                {"range": [AI_LONG_THRESHOLD * 100, 100], "color": POSITIVE},
-            ],
-            value_text=f"{float(btc_dom_display):.1f}" if btc_dom_display is not None else "N/A",
-        )
         btc_state, btc_color = _dom_state(btc_dom_display, AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100)
         st.markdown(
-            _chip_center("BTC Weight: " + btc_state, btc_color, "Bitcoin share of total market cap. High values usually indicate BTC-led market."),
+            _render_market_orbital_card(
+                title="BTC Dominance",
+                title_hover="Bitcoin share of total crypto market cap. Rising dominance usually means BTC-led positioning and a more defensive market tone.",
+                value_text=f"{float(btc_dom_display):.1f}" if btc_dom_display is not None else "N/A",
+                unit="%",
+                chart_html=_orbital_svg_html(
+                    value=btc_dom_display,
+                    segments=[
+                        (0.0, AI_SHORT_THRESHOLD * 100, NEGATIVE),
+                        (AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100, WARNING),
+                        (AI_LONG_THRESHOLD * 100, 100.0, POSITIVE),
+                    ],
+                    marker_color=btc_color,
+                    accent_color=btc_color,
+                ),
+                guide_labels=("Alt-heavy", "Balanced", "BTC-led"),
+                note="Structure context only. High BTC share usually means capital is hiding in Bitcoin first.",
+                footer_html=(
+                    f"<div class='market-top-meta'><span>Current state</span><span><strong style='color:{btc_color};'>{btc_state}</strong></span></div>"
+                ),
+            ),
             unsafe_allow_html=True,
         )
 
     # ETH dominance gauge
     with g2:
-        _render_market_gauge(
-            title="ETH Dominance (%)",
-            value=eth_dom_display,
-            steps=[
-                {"range": [0, 15], "color": NEGATIVE},
-                {"range": [15, 25], "color": WARNING},
-                {"range": [25, 100], "color": POSITIVE},
-            ],
-            value_text=f"{float(eth_dom_display):.1f}" if eth_dom_display is not None else "N/A",
-        )
         eth_state, eth_color = _dom_state(eth_dom_display, 15.0, 25.0)
         st.markdown(
-            _chip_center("ETH Weight: " + eth_state, eth_color, "Ethereum share of total market cap. Higher values show stronger ETH participation."),
+            _render_market_orbital_card(
+                title="ETH Dominance",
+                title_hover="Ethereum share of total crypto market cap. Higher ETH participation usually means stronger broad-market engagement.",
+                value_text=f"{float(eth_dom_display):.1f}" if eth_dom_display is not None else "N/A",
+                unit="%",
+                chart_html=_orbital_svg_html(
+                    value=eth_dom_display,
+                    segments=[
+                        (0.0, 15.0, NEGATIVE),
+                        (15.0, 25.0, WARNING),
+                        (25.0, 100.0, POSITIVE),
+                    ],
+                    marker_color=eth_color,
+                    accent_color=eth_color,
+                ),
+                guide_labels=("ETH-light", "Balanced", "ETH-heavy"),
+                note="Participation context only. Rising ETH share often supports healthier risk-on rotation.",
+                footer_html=(
+                    f"<div class='market-top-meta'><span>Participation</span><span><strong style='color:{eth_color};'>{eth_state}</strong></span></div>"
+                ),
+            ),
             unsafe_allow_html=True,
         )
 
@@ -1255,22 +1345,30 @@ def render(ctx: dict) -> None:
         if behaviour_weight_mode == "equal":
             ai_direction_hover += " Dominance feed unavailable right now, so equal-weight fallback is active."
         ai_direction_score = int(round(behaviour_prob * 100))
-        _render_market_gauge(
-            title="AI Direction Bias (%)",
-            value=float(ai_direction_score),
-            steps=[
-                {"range": [0, AI_SHORT_THRESHOLD * 100], "color": NEGATIVE},
-                {"range": [AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100], "color": WARNING},
-                {"range": [AI_LONG_THRESHOLD * 100, 100], "color": POSITIVE},
-            ],
-            value_text=f"{ai_direction_score:d}",
-            title_hover=ai_direction_hover,
-        )
         st.markdown(
-            _chip_center(
-                f"{behaviour_label} Bias",
-                behaviour_color,
-                ai_bias_tip,
+            _render_market_orbital_card(
+                title="AI Direction Bias",
+                title_hover=ai_direction_hover,
+                value_text=f"{ai_direction_score:d}",
+                unit="/100",
+                chart_html=_orbital_svg_html(
+                    value=float(ai_direction_score),
+                    segments=[
+                        (0.0, AI_SHORT_THRESHOLD * 100, NEGATIVE),
+                        (AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100, WARNING),
+                        (AI_LONG_THRESHOLD * 100, 100.0, POSITIVE),
+                    ],
+                    marker_color=behaviour_color,
+                    accent_color=behaviour_color,
+                ),
+                guide_labels=("Downside", "Neutral", "Upside"),
+                note=(
+                    "Composite ML direction across BTC/ETH/BNB/SOL/ADA/XRP. "
+                    + ("Dominance-weighted view is active." if behaviour_weight_mode == "dominance" else "Equal-weight fallback is active.")
+                ),
+                footer_html=(
+                    f"<div class='market-top-meta'><span>Bias</span><span><strong style='color:{behaviour_color};'>{html.escape(behaviour_label)} Bias</strong></span></div>"
+                ),
             ),
             unsafe_allow_html=True,
         )
@@ -1297,49 +1395,61 @@ def render(ctx: dict) -> None:
                 "Favor capital preservation and avoid forcing setups."
             ),
         }.get(composite_mode, setup_quality_hover)
-        _render_market_gauge(
-            title="Setup Quality (%)",
-            value=float(composite_score),
-            steps=[
-                {"range": [0, 52], "color": NEGATIVE},
-                {"range": [52, 68], "color": WARNING},
-                {"range": [68, 100], "color": POSITIVE},
-            ],
-            value_text=f"{int(round(composite_score)):d}",
-            title_hover=setup_quality_hover,
-        )
-        st.markdown(
-            _chip_center(
-                composite_mode,
-                composite_color,
-                setup_mode_hover,
-            ),
-            unsafe_allow_html=True,
-        )
         d_col = _score_tone(direction_score)[1]
         r_col = _score_tone(regime_score)[1]
         b_col = _score_tone(breadth_score)[1]
         t_col = _score_tone(trust_score)[1]
         st.markdown(
-            f"<div style='display:flex; justify-content:center; gap:6px; margin-top:9px; flex-wrap:wrap;'>"
-            f"<span title='Direction: strength of directional edge from AI direction bias. Higher = clearer market direction.' "
-            f"style='background:rgba(255,255,255,0.05); border:1px solid {d_col}; color:{d_col}; "
-            f"border-radius:999px; padding:2px 8px; font-size:0.72rem; overflow:visible; cursor:help;'>"
-            f"Direction {direction_score:.0f}</span>"
-            f"<span title='Regime: market environment quality proxy from total market-cap move behavior."
-            f"{' Market-cap feed unavailable, neutral fallback (50) active.' if regime_score_fallback else ''}' "
-            f"style='background:rgba(255,255,255,0.05); border:1px solid {r_col}; color:{r_col}; "
-            f"border-radius:999px; padding:2px 8px; font-size:0.72rem; overflow:visible; cursor:help;'>"
-            f"Regime {regime_score:.0f}</span>"
-            f"<span title='Breadth: how many major assets align on one side. Higher breadth means stronger participation.' "
-            f"style='background:rgba(255,255,255,0.05); border:1px solid {b_col}; color:{b_col}; "
-            f"border-radius:999px; padding:2px 8px; font-size:0.72rem; overflow:visible; cursor:help;'>"
-            f"Breadth {breadth_score:.0f}</span>"
-            f"<span title='Trust: reliability from cross-major model consistency. Lower dispersion = higher trust.' "
-            f"style='background:rgba(255,255,255,0.05); border:1px solid {t_col}; color:{t_col}; "
-            f"border-radius:999px; padding:2px 8px; font-size:0.72rem; overflow:visible; cursor:help;'>"
-            f"Trust {trust_score:.0f}</span>"
-            f"</div>",
+            _render_market_orbital_card(
+                title="Setup Quality",
+                title_hover=setup_quality_hover,
+                value_text=f"{int(round(composite_score)):d}",
+                unit="/100",
+                chart_html=_orbital_svg_html(
+                    value=float(composite_score),
+                    segments=[
+                        (0.0, 52.0, NEGATIVE),
+                        (52.0, 68.0, WARNING),
+                        (68.0, 100.0, POSITIVE),
+                    ],
+                    marker_color=composite_color,
+                    accent_color=composite_color,
+                ),
+                guide_labels=("Risk-Off", "Selective", "Risk-On"),
+                note="Composite setup climate for setup hunting, not direction alone.",
+                top_meta_text=composite_mode,
+                top_meta_color=composite_color,
+                top_meta_hover=setup_mode_hover,
+                footer_html=(
+                    "<div class='market-statline'>"
+                    + _stat_metric(
+                        "Direction",
+                        direction_score,
+                        d_col,
+                        "Direction: strength of directional edge from AI direction bias. Higher = clearer market direction.",
+                    )
+                    + _stat_metric(
+                        "Regime",
+                        regime_score,
+                        r_col,
+                        "Regime: market environment quality proxy from total market-cap move behavior."
+                        + (" Market-cap feed unavailable, neutral fallback (50) active." if regime_score_fallback else ""),
+                    )
+                    + _stat_metric(
+                        "Breadth",
+                        breadth_score,
+                        b_col,
+                        "Breadth: how many major assets align on one side. Higher breadth means stronger participation.",
+                    )
+                    + _stat_metric(
+                        "Trust",
+                        trust_score,
+                        t_col,
+                        "Trust: reliability from cross-major model consistency. Lower dispersion = higher trust.",
+                    )
+                    + "</div>"
+                ),
+            ),
             unsafe_allow_html=True,
         )
 
@@ -1460,7 +1570,7 @@ def render(ctx: dict) -> None:
     elif custom_coin_input.strip() and custom_bases_draft:
         st.caption("Custom symbols are ready. Click Run Scan to apply watchlist mode.")
 
-    exclude_stables = st.checkbox(
+    exclude_stables = st.toggle(
         "Exclude stablecoins",
         value=True,
         key="market_exclude_stables",
@@ -2982,7 +3092,7 @@ def render(ctx: dict) -> None:
         st.caption("Signals and plan levels are computed on closed candles; Price ($) shows the latest candle close.")
         controls_col, chips_col = st.columns([1.2, 2.8], gap="small")
         with controls_col:
-            show_advanced = st.checkbox("+ Show advanced columns", value=False, key="market_show_adv_cols")
+            show_advanced = st.toggle("Show advanced columns", value=False, key="market_show_adv_cols")
         with chips_col:
             st.markdown(
                 f"<div style='display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding-top:0.18rem;'>"
