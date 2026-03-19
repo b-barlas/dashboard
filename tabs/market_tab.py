@@ -2678,6 +2678,11 @@ def render(ctx: dict) -> None:
     results: list[dict] = st.session_state.get("market_scan_results", [])
     source_label = current_source_label
     data_mode = st.session_state.get("market_data_mode", "FULL MARKET MODE")
+    live_produced_rows: list[dict] = []
+    live_result_count_before_limit = 0
+    live_ranked_out_count = 0
+    attempted_symbols: set[str] = set()
+    skipped_symbols: list[tuple[str, str]] = []
 
     # Fetch top coins
     if should_scan:
