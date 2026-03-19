@@ -201,6 +201,8 @@ def build_ai_confidence_snapshot(**kwargs) -> ConfidenceSnapshot:
 
 
 def execution_trend_quality(adx_val: float | None) -> float:
+    if adx_val is None:
+        return 35.0
     try:
         adx = float(adx_val)
     except Exception:
@@ -276,10 +278,13 @@ def execution_confidence_from_components(
         cap = min(cap, 15.0)
     if str(structure_state or "").strip().upper() == "NONE":
         cap = min(cap, 45.0)
-    try:
-        adx = float(adx_val)
-    except Exception:
+    if adx_val is None:
         adx = float("nan")
+    else:
+        try:
+            adx = float(adx_val)
+        except Exception:
+            adx = float("nan")
     if adx != adx:
         cap = min(cap, 55.0)
     elif adx < 12.0:

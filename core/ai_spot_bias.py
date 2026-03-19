@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypedDict
 
 import numpy as np
 import pandas as pd
@@ -12,6 +13,20 @@ from core.ml import ml_ensemble_predict
 MIN_AI_ROWS = 60
 _TIMEFRAME_DIRECTION_THRESHOLD = 55.0
 _FINAL_AI_BIAS_THRESHOLD = 52.0
+
+
+class TraceSample(TypedDict):
+    direction: str
+    probability_up: float
+    directional_agreement: float
+    consensus_agreement: float
+    probability_edge: float
+    directional_quality: float
+    consensus_quality: float
+    agreement_quality: float
+    signed_strength: float
+    model_votes: tuple[str, str, str]
+    status: str
 
 
 @dataclass(frozen=True)
@@ -200,7 +215,7 @@ def _trace_sample(
     probability_up: float,
     raw_direction: str,
     details: dict,
-) -> dict[str, float | str]:
+) -> TraceSample:
     raw_dir = _dir_key(raw_direction)
     candidate_dir = raw_dir if raw_dir != "NEUTRAL" else _soft_direction_from_probability(float(probability_up))
     directional_agreement = float(details.get("directional_agreement", details.get("agreement", 0.0)) or 0.0)
@@ -233,7 +248,12 @@ def _trace_sample(
         "consensus_quality": consensus_quality,
         "agreement_quality": agreement_quality,
         "signed_strength": signed_strength,
-        "model_votes": tuple(normalized_votes),
+        "model_votes": (
+            normalized_votes[0],
+            normalized_votes[1],
+            normalized_votes[2],
+        ),
+        "status": "",
     }
 
 
@@ -242,8 +262,8 @@ def _build_recent_trace(
     *,
     timeframe: str,
     predictor,
-) -> list[dict[str, float | str]]:
-    trace: list[dict[str, float | str]] = []
+) -> list[TraceSample]:
+    trace: list[TraceSample] = []
     total_len = len(safe)
     for offset in _trace_offsets(timeframe):
         end_idx = total_len - int(offset)
@@ -261,7 +281,7 @@ def _build_recent_trace(
     return trace
 
 
-def _trace_model_verdict(trace: list[dict[str, float | str]], model_idx: int) -> str:
+def _trace_model_verdict(trace: list[TraceSample], model_idx: int) -> str:
     if not trace:
         return "NEUTRAL"
     weights = _trace_weights(len(trace))
@@ -269,7 +289,7 @@ def _trace_model_verdict(trace: list[dict[str, float | str]], model_idx: int) ->
     active_weight = 0.0
     directional_sequence: list[str] = []
     for weight, sample in zip(weights, trace):
-        votes = sample.get("model_votes") or ()
+        votes = sample["model_votes"]
         vote = _dir_key(votes[model_idx] if model_idx < len(votes) else "NEUTRAL")
         if vote == "UPSIDE":
             signed_score += weight
@@ -286,7 +306,7 @@ def _trace_model_verdict(trace: list[dict[str, float | str]], model_idx: int) ->
     dominance_ratio = abs(signed_score) / active_weight
     aligned_weight = 0.0
     for weight, sample in zip(weights, trace):
-        votes = sample.get("model_votes") or ()
+        votes = sample["model_votes"]
         vote = _dir_key(votes[model_idx] if model_idx < len(votes) else "NEUTRAL")
         if vote == dominant_dir:
             aligned_weight += weight
@@ -304,11 +324,15 @@ def _trace_model_verdict(trace: list[dict[str, float | str]], model_idx: int) ->
     return dominant_dir
 
 
-def _trace_model_votes(trace: list[dict[str, float | str]]) -> tuple[str, str, str]:
-    return tuple(_trace_model_verdict(trace, idx) for idx in range(3))
+def _trace_model_votes(trace: list[TraceSample]) -> tuple[str, str, str]:
+    return (
+        _trace_model_verdict(trace, 0),
+        _trace_model_verdict(trace, 1),
+        _trace_model_verdict(trace, 2),
+    )
 
 
-def _persistence_quality(trace: list[dict[str, float | str]], dominant_dir: str) -> float:
+def _persistence_quality(trace: list[TraceSample], dominant_dir: str) -> float:
     if not trace or dominant_dir == "NEUTRAL":
         return 0.0
     weights = _trace_weights(len(trace))
@@ -326,7 +350,7 @@ def _persistence_quality(trace: list[dict[str, float | str]], dominant_dir: str)
     return _clamp_100((aligned / total) * 100.0)
 
 
-def _stability_quality(trace: list[dict[str, float | str]], dominant_dir: str) -> float:
+def _stability_quality(trace: list[TraceSample], dominant_dir: str) -> float:
     dirs = [str(sample.get("direction") or "NEUTRAL") for sample in trace if str(sample.get("direction") or "NEUTRAL") != "NEUTRAL"]
     if len(dirs) <= 1:
         return 55.0 if dominant_dir == "NEUTRAL" else 80.0
