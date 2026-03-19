@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import patch
 
 try:
@@ -9,6 +10,8 @@ try:
     import pandas as pd
     from core.backtest import (
         build_setup_outcome_study,
+        grade_setup_class_quality,
+        _resolve_setup_context,
         _normalize_direction_signal,
         run_backtest,
         run_setup_confirm_backtest,
@@ -129,7 +132,7 @@ class CoreEngineTests(unittest.TestCase):
         def ml_predictor(_slice: pd.DataFrame):
             return 0.80, "Upside", {"directional_agreement": 0.80, "consensus_agreement": 0.80}
 
-        def conviction_fn(_signal_dir: str, _ai_dir: str, _strength: float, _agree: float = 0.0):
+        def conviction_fn(_signal_dir: str, _ai_dir: str, _confidence: float, _agree: float = 0.0):
             return "HIGH", None
 
         def signal_plain_fn(signal: str) -> str:
@@ -169,6 +172,77 @@ class CoreEngineTests(unittest.TestCase):
         self.assertIn("Setup Confirm", summary.columns)
         self.assertIn("Trades", summary.columns)
         self.assertIn("ProfitFactor", summary.columns)
+        self.assertIn("Expectancy", summary.columns)
+        self.assertIn("PayoffRatio", summary.columns)
+        self.assertIn("QualityGrade", summary.columns)
+        self.assertIn("QualityNote", summary.columns)
+
+    def test_grade_setup_class_quality_contract(self) -> None:
+        elite_grade, _elite_note = grade_setup_class_quality(
+            occurrences=48,
+            expectancy=0.92,
+            profit_factor=2.10,
+            payoff_ratio=1.35,
+            win_rate=56.0,
+        )
+        weak_grade, _weak_note = grade_setup_class_quality(
+            occurrences=14,
+            expectancy=-0.10,
+            profit_factor=0.82,
+            payoff_ratio=0.75,
+            win_rate=41.0,
+        )
+        self.assertEqual(elite_grade, "Elite")
+        self.assertEqual(weak_grade, "Weak")
+
+    def test_resolve_setup_context_uses_trend_snapshot_when_rr_is_available(self) -> None:
+        df = self._sample_df(240)
+        spot_snapshot = SimpleNamespace(
+            direction="UPSIDE",
+            timeframe_alignment=100.0,
+            structure_quality=88.0,
+            trend_quality=84.0,
+            regime_quality=82.0,
+            location_quality=86.0,
+            timeframe_conflict=False,
+            degraded_data=False,
+            range_regime=False,
+        )
+        confidence_snapshot = SimpleNamespace(score=82.0)
+        execution_snapshot = SimpleNamespace(
+            structure_quality=88.0,
+            trend_quality=84.0,
+            regime_quality=82.0,
+            location_quality=86.0,
+        )
+
+        with patch("core.backtest.build_spot_direction_snapshot", return_value=spot_snapshot), patch(
+            "core.backtest.build_confidence_snapshot", return_value=confidence_snapshot
+        ), patch(
+            "core.backtest.selected_timeframe_execution_snapshot", return_value=execution_snapshot
+        ), patch(
+            "core.backtest.selected_timeframe_rr_ratio", return_value=2.10
+        ):
+            ctx = _resolve_setup_context(
+                event_timestamp=df["timestamp"].iloc[200],
+                timeframe="1h",
+                df_slice=df.iloc[:201].copy(),
+                df_4h=df,
+                df_1d=df,
+                analysis_obj=DummyAnalysis(signal="Upside", bias=90.0, adx=30.0),
+                tactical_direction="UPSIDE",
+                ai_key="DOWNSIDE",
+                agreement=0.92,
+                adx_val=30.0,
+                conviction_label="HIGH",
+                directional_confidence=80.0,
+                bias_score=90.0,
+                rr_ratio=2.10,
+            )
+
+        self.assertEqual(ctx["action_reason"], "ENTER_TREND_LED")
+        self.assertEqual(ctx["direction_key"], "UPSIDE")
+        self.assertAlmostEqual(float(ctx["confidence"]), 82.0, places=4)
 
     def test_setup_outcome_study_generates_forward_path(self) -> None:
         df = self._sample_df(240)
@@ -179,7 +253,7 @@ class CoreEngineTests(unittest.TestCase):
         def ml_predictor(_slice: pd.DataFrame):
             return 0.82, "Upside", {"directional_agreement": 0.80, "consensus_agreement": 0.80}
 
-        def conviction_fn(_signal_dir: str, _ai_dir: str, _strength: float, _agree: float = 0.0):
+        def conviction_fn(_signal_dir: str, _ai_dir: str, _confidence: float, _agree: float = 0.0):
             return "HIGH", None
 
         def signal_plain_fn(signal: str) -> str:
@@ -223,12 +297,18 @@ class CoreEngineTests(unittest.TestCase):
         self.assertIn("occurrences", top)
         self.assertIn("favorable_rate", top)
         self.assertIn("median_dir_return", top)
+        self.assertIn("expectancy", top)
+        self.assertIn("payoff_ratio", top)
 
         by_class = summarize_setup_outcome_by_class(df, 10)
         self.assertGreater(len(by_class), 0)
         self.assertIn("Setup Confirm", by_class.columns)
         self.assertIn("Occurrences", by_class.columns)
         self.assertIn("FavorableRate", by_class.columns)
+        self.assertIn("Expectancy", by_class.columns)
+        self.assertIn("PayoffRatio", by_class.columns)
+        self.assertIn("QualityGrade", by_class.columns)
+        self.assertIn("QualityNote", by_class.columns)
 
     def test_backtest_positions_do_not_overlap(self) -> None:
         df = self._sample_df()

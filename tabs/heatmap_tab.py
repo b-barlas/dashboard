@@ -6,26 +6,9 @@ import time
 import pandas as pd
 import plotly.express as px
 import requests
+from core.symbols import is_stable_base_symbol
 from ui.ctx import get_ctx
 from ui.primitives import render_badge_row, render_help_details, render_insight_card, render_kpi_grid, render_page_header
-
-STABLE_SYMBOLS = {
-    "USDT",
-    "USDC",
-    "DAI",
-    "TUSD",
-    "FDUSD",
-    "PYUSD",
-    "USDE",
-    "USDD",
-    "USDP",
-    "GUSD",
-    "LUSD",
-    "FRAX",
-    "EURS",
-    "EURC",
-    "SUSDE",
-}
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -39,7 +22,7 @@ def _safe_float(value, default: float = 0.0) -> float:
 
 
 def _is_stablecoin(symbol: str) -> bool:
-    return str(symbol or "").upper().strip() in STABLE_SYMBOLS
+    return is_stable_base_symbol(symbol)
 
 
 def _http_get_json(

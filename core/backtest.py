@@ -5,14 +5,33 @@ from typing import Any, Callable, Protocol, Tuple
 
 import numpy as np
 import pandas as pd
+from core.ai_spot_bias import (
+    ai_spot_bias_consensus_agreement,
+    ai_spot_bias_directional_agreement,
+    ai_spot_bias_display_votes,
+    ai_spot_bias_probability_up,
+    ai_spot_bias_status,
+    build_ai_spot_bias_snapshot,
+)
+from core.confidence import (
+    build_ai_confidence_snapshot,
+    build_confidence_snapshot,
+    build_execution_confidence_snapshot,
+)
 from core.market_decision import (
     action_decision_with_reason,
+    ai_led_confirmation_snapshot,
     ai_vote_metrics,
     normalize_action_class,
+    selected_timeframe_execution_snapshot,
+    selected_timeframe_rr_ratio,
+    spot_action_decision_with_reason,
     structure_state,
+    trend_led_confirmation_snapshot,
 )
 from core.scalping import scalp_gate_thresholds
-from core.signal_contract import strength_from_bias
+from core.signal_contract import bias_confidence_from_bias
+from core.spot_direction import build_spot_direction_snapshot
 
 
 class AnalysisLike(Protocol):
@@ -30,7 +49,7 @@ class ConvictionLike(Protocol):
         self,
         signal_dir: str,
         ai_dir: str,
-        strength: float,
+        confidence: float,
         ai_agreement: float = 0.0,
     ) -> tuple[str, Any]:
         ...
@@ -104,6 +123,243 @@ def _direction_label_from_key(value: str) -> str:
     return "Neutral"
 
 
+def _timeframe_delta(timeframe: str | None) -> pd.Timedelta | None:
+    tf = str(timeframe or "").strip().lower()
+    mapping = {
+        "1m": pd.Timedelta(minutes=1),
+        "3m": pd.Timedelta(minutes=3),
+        "5m": pd.Timedelta(minutes=5),
+        "15m": pd.Timedelta(minutes=15),
+        "1h": pd.Timedelta(hours=1),
+        "4h": pd.Timedelta(hours=4),
+        "1d": pd.Timedelta(days=1),
+    }
+    return mapping.get(tf)
+
+
+def _event_close_time(timestamp: object, timeframe: str | None) -> pd.Timestamp | None:
+    ts = pd.to_datetime(timestamp, utc=True, errors="coerce")
+    delta = _timeframe_delta(timeframe)
+    if pd.isna(ts) or delta is None:
+        return None
+    return ts + delta
+
+
+def _closed_context_frame(
+    df: pd.DataFrame | None,
+    *,
+    event_close_time: pd.Timestamp | None,
+    timeframe: str,
+) -> pd.DataFrame | None:
+    if df is None or event_close_time is None or "timestamp" not in df.columns:
+        return None
+    delta = _timeframe_delta(timeframe)
+    if delta is None:
+        return None
+    out = df.copy()
+    out["timestamp"] = pd.to_datetime(out["timestamp"], utc=True, errors="coerce")
+    out = out.dropna(subset=["timestamp"])
+    if out.empty:
+        return None
+    closed_mask = (out["timestamp"] + delta) <= event_close_time
+    out = out.loc[closed_mask].copy()
+    if len(out) < 80:
+        return None
+    return out.reset_index(drop=True)
+
+
+def _resolve_setup_context(
+    *,
+    event_timestamp: object,
+    timeframe: str | None,
+    df_slice: pd.DataFrame | None,
+    df_4h: pd.DataFrame | None,
+    df_1d: pd.DataFrame | None,
+    analysis_obj: AnalysisLike | None,
+    tactical_direction: str,
+    ai_key: str,
+    agreement: float,
+    adx_val: float,
+    conviction_label: str,
+    directional_confidence: float,
+    bias_score: float,
+    rr_ratio: float | None = None,
+    ai_probability: float = float("nan"),
+    directional_agreement: float = 0.0,
+    consensus_agreement: float = 0.0,
+    ai_status: str = "",
+) -> dict[str, object]:
+    event_close = _event_close_time(event_timestamp, timeframe)
+    closed_4h = _closed_context_frame(df_4h, event_close_time=event_close, timeframe="4h")
+    closed_1d = _closed_context_frame(df_1d, event_close_time=event_close, timeframe="1d")
+
+    if closed_4h is not None or closed_1d is not None:
+        spot_snapshot = build_spot_direction_snapshot(df_4h=closed_4h, df_1d=closed_1d)
+        ai_spot_snapshot = build_ai_spot_bias_snapshot(df_4h=closed_4h, df_1d=closed_1d)
+        confidence_snapshot = build_confidence_snapshot(
+            direction=spot_snapshot.direction,
+            timeframe_alignment=spot_snapshot.timeframe_alignment,
+            structure_quality=spot_snapshot.structure_quality,
+            trend_quality=spot_snapshot.trend_quality,
+            regime_quality=spot_snapshot.regime_quality,
+            location_quality=spot_snapshot.location_quality,
+            timeframe_conflict=spot_snapshot.timeframe_conflict,
+            degraded_data=spot_snapshot.degraded_data,
+            range_regime=spot_snapshot.range_regime,
+        )
+        trend_led_snapshot = None
+        ai_spot_direction = str(ai_spot_snapshot.direction)
+        ai_spot_agreement = float(ai_spot_bias_directional_agreement(ai_spot_snapshot))
+        ai_spot_consensus = float(ai_spot_bias_consensus_agreement(ai_spot_snapshot))
+        ai_spot_probability = float(ai_spot_bias_probability_up(ai_spot_snapshot))
+        ai_spot_status = str(ai_spot_bias_status(ai_spot_snapshot) or "")
+        ai_spot_votes = int(ai_spot_bias_display_votes(ai_spot_snapshot))
+        ai_confidence_snapshot = build_ai_confidence_snapshot(
+            direction=ai_spot_snapshot.direction,
+            combined_score=float(ai_spot_snapshot.score),
+            conviction_quality=float(ai_spot_snapshot.conviction_quality),
+            timeframe_alignment=float(ai_spot_snapshot.timeframe_alignment),
+            consensus_quality=float(ai_spot_snapshot.consensus_quality),
+            support_votes=int(ai_spot_votes),
+            timeframe_conflict=bool(ai_spot_snapshot.timeframe_conflict),
+            degraded_data=bool(ai_spot_snapshot.degraded_data),
+        )
+        execution_snapshot = selected_timeframe_execution_snapshot(
+            df=df_slice,
+            direction=spot_snapshot.direction,
+            bias_score=float(bias_score),
+            adx_val=adx_val,
+            supertrend_trend=str(getattr(analysis_obj, "supertrend", "") or ""),
+            ichimoku_trend=str(getattr(analysis_obj, "ichimoku", "") or ""),
+            vwap_label=str(getattr(analysis_obj, "vwap", "") or ""),
+            psar_trend=str(getattr(analysis_obj, "psar", "") or ""),
+            bollinger_bias=str(getattr(analysis_obj, "bollinger", "") or ""),
+            williams_label=str(getattr(analysis_obj, "williams", "") or ""),
+            cci_label=str(getattr(analysis_obj, "cci", "") or ""),
+        )
+        setup_rr_ratio = float(selected_timeframe_rr_ratio(execution_snapshot, direction=spot_snapshot.direction))
+        trend_led_snapshot = trend_led_confirmation_snapshot(
+            spot_dir=spot_snapshot.direction,
+            spot_confidence=float(confidence_snapshot.score),
+            tactical_dir=tactical_direction,
+            adx_val=adx_val,
+            structure_quality=float(execution_snapshot.structure_quality),
+            trend_quality=float(execution_snapshot.trend_quality),
+            regime_quality=float(execution_snapshot.regime_quality),
+            location_quality=float(execution_snapshot.location_quality),
+            rr_ratio=setup_rr_ratio if np.isfinite(setup_rr_ratio) and setup_rr_ratio > 0.0 else None,
+        )
+        ai_led_snapshot = ai_led_confirmation_snapshot(
+            spot_dir=spot_snapshot.direction,
+            spot_confidence=float(confidence_snapshot.score),
+            ai_dir=ai_spot_direction,
+            ai_probability=float(ai_spot_probability),
+            directional_agreement=float(ai_spot_agreement),
+            consensus_agreement=float(ai_spot_consensus),
+            adx_val=adx_val,
+            location_quality=float(execution_snapshot.location_quality),
+            rr_ratio=setup_rr_ratio if np.isfinite(setup_rr_ratio) and setup_rr_ratio > 0.0 else None,
+            ai_status=ai_spot_status,
+        )
+        action_raw, action_reason = spot_action_decision_with_reason(
+            spot_snapshot.direction,
+            float(confidence_snapshot.score),
+            tactical_direction,
+            ai_spot_direction,
+            float(ai_spot_agreement),
+            adx_val,
+            trend_led_snapshot=trend_led_snapshot,
+            ai_led_snapshot=ai_led_snapshot,
+        )
+        return {
+            "action_raw": action_raw,
+            "action_reason": action_reason,
+            "direction_key": str(spot_snapshot.direction),
+            "confidence": float(confidence_snapshot.score),
+            "spot_snapshot": spot_snapshot,
+            "ai_spot_snapshot": ai_spot_snapshot,
+            "ai_direction_key": ai_spot_direction,
+            "ai_votes": f"{ai_spot_votes}/3",
+            "ai_confidence": float(ai_confidence_snapshot.score),
+            "ai_timeframe_conflict": bool(ai_spot_snapshot.timeframe_conflict),
+            "ai_degraded_data": bool(ai_spot_snapshot.degraded_data),
+            "directional_confidence": float(directional_confidence),
+            "bias": float(bias_score),
+        }
+
+    structure = structure_state(tactical_direction, ai_key, directional_confidence, float(agreement))
+    action_raw, action_reason = action_decision_with_reason(
+        tactical_direction,
+        directional_confidence,
+        structure,
+        str(conviction_label or ""),
+        float(agreement),
+        adx_val,
+    )
+    return {
+        "action_raw": action_raw,
+        "action_reason": action_reason,
+        "direction_key": str(tactical_direction),
+        "confidence": float("nan"),
+        "spot_snapshot": None,
+        "ai_spot_snapshot": None,
+        "ai_direction_key": str(ai_key),
+        "ai_votes": f"{ai_vote_metrics(ai_key, directional_agreement, consensus_agreement)[0]}/3",
+        "ai_confidence": float("nan"),
+        "ai_timeframe_conflict": False,
+        "ai_degraded_data": False,
+        "directional_confidence": float(directional_confidence),
+        "bias": float(bias_score),
+    }
+
+
+def _resolve_rr_ratio_from_plan(
+    *,
+    get_scalping_entry_target_fn: Callable[..., tuple] | None,
+    sr_lookback_fn: Callable[[str | None], int] | None,
+    df_slice: pd.DataFrame,
+    analysis_obj: AnalysisLike,
+    bias_score: float,
+) -> float | None:
+    if not callable(get_scalping_entry_target_fn):
+        return None
+    try:
+        try:
+            if callable(sr_lookback_fn):
+                _scalp_direction, _entry, _target, _stop, rr_ratio, _breakout_note = get_scalping_entry_target_fn(
+                    df_slice,
+                    bias_score,
+                    getattr(analysis_obj, "supertrend", ""),
+                    getattr(analysis_obj, "ichimoku", ""),
+                    getattr(analysis_obj, "vwap", ""),
+                    sr_lookback_fn=sr_lookback_fn,
+                )
+            else:
+                _scalp_direction, _entry, _target, _stop, rr_ratio, _breakout_note = get_scalping_entry_target_fn(
+                    df_slice,
+                    bias_score,
+                    getattr(analysis_obj, "supertrend", ""),
+                    getattr(analysis_obj, "ichimoku", ""),
+                    getattr(analysis_obj, "vwap", ""),
+                )
+        except TypeError as te:
+            if "sr_lookback_fn" not in str(te):
+                raise
+            _scalp_direction, _entry, _target, _stop, rr_ratio, _breakout_note = get_scalping_entry_target_fn(
+                df_slice,
+                bias_score,
+                getattr(analysis_obj, "supertrend", ""),
+                getattr(analysis_obj, "ichimoku", ""),
+                getattr(analysis_obj, "vwap", ""),
+            )
+        rr_f = float(rr_ratio)
+        if np.isfinite(rr_f) and rr_f > 0.0:
+            return rr_f
+    except Exception:
+        return None
+    return None
+
+
 def _infer_regime(df_slice: pd.DataFrame, analysis_obj: AnalysisLike) -> tuple[str, float]:
     """Classify local market regime at entry time.
 
@@ -151,6 +407,12 @@ def run_setup_confirm_backtest(
     conviction_fn: ConvictionLike,
     signal_plain_fn: Callable[[str], str],
     direction_key_fn: Callable[[str], str],
+    *,
+    timeframe: str | None = None,
+    df_4h: pd.DataFrame | None = None,
+    df_1d: pd.DataFrame | None = None,
+    get_scalping_entry_target_fn: Callable[..., tuple] | None = None,
+    sr_lookback_fn: Callable[[str | None], int] | None = None,
     exit_after: int = 5,
     commission: float = 0.001,
     slippage: float = 0.0005,
@@ -181,7 +443,7 @@ def run_setup_confirm_backtest(
         try:
             result = analyzer(df_slice)
             bias_score = _read_bias_like(result)
-            strength = float(strength_from_bias(bias_score))
+            directional_confidence = float(bias_confidence_from_bias(bias_score))
             _p, ai_direction, ai_details = ml_predictor(df_slice)
         except Exception:
             i += 1
@@ -201,28 +463,58 @@ def run_setup_confirm_backtest(
         consensus_agreement = (
             float(ai_details.get("consensus_agreement", 0.0)) if isinstance(ai_details, dict) else 0.0
         )
-        votes, _display_ratio, decision_agreement = ai_vote_metrics(
+        ai_status = str(ai_details.get("status", "")) if isinstance(ai_details, dict) else ""
+        votes, _, decision_agreement = ai_vote_metrics(
             ai_key,
             directional_agreement,
             consensus_agreement,
         )
 
-        structure = structure_state(signal_side, ai_key, strength, float(decision_agreement))
-        conviction_label, _ = conviction_fn(signal_side, ai_key, strength, float(decision_agreement))
+        structure = structure_state(signal_side, ai_key, directional_confidence, float(decision_agreement))
+        conviction_label, _ = conviction_fn(signal_side, ai_key, directional_confidence, float(decision_agreement))
         adx_raw = getattr(result, "adx", np.nan)
         try:
             adx_val = float(adx_raw)
         except Exception:
             adx_val = float("nan")
-
-        action_raw, action_reason = action_decision_with_reason(
-            signal_side,
-            strength,
-            structure,
-            str(conviction_label),
-            float(decision_agreement),
-            adx_val,
+        execution_confidence = build_execution_confidence_snapshot(
+            direction=signal_side,
+            bias_score=bias_score,
+            adx_val=adx_val,
+            structure_state=structure,
+            conviction_label=str(conviction_label),
+            ai_agreement=float(decision_agreement),
         )
+        rr_ratio = _resolve_rr_ratio_from_plan(
+            get_scalping_entry_target_fn=get_scalping_entry_target_fn,
+            sr_lookback_fn=sr_lookback_fn,
+            df_slice=df_slice,
+            analysis_obj=result,
+            bias_score=bias_score,
+        )
+
+        setup_ctx = _resolve_setup_context(
+            event_timestamp=df["timestamp"].iloc[i],
+            timeframe=timeframe,
+            df_slice=df_slice,
+            df_4h=df_4h,
+            df_1d=df_1d,
+            analysis_obj=result,
+            tactical_direction=signal_side,
+            ai_key=ai_key,
+            agreement=float(decision_agreement),
+            ai_probability=float(_p),
+            directional_agreement=float(directional_agreement),
+            consensus_agreement=float(consensus_agreement),
+            ai_status=ai_status,
+            adx_val=adx_val,
+            conviction_label=str(conviction_label),
+            directional_confidence=directional_confidence,
+            bias_score=bias_score,
+            rr_ratio=rr_ratio,
+        )
+        action_raw = str(setup_ctx["action_raw"])
+        action_reason = str(setup_ctx["action_reason"])
         action_class = normalize_action_class(action_raw)
         if action_class not in {"ENTER_TREND_AI", "ENTER_TREND_LED", "ENTER_AI_LED"}:
             i += 1
@@ -239,7 +531,8 @@ def run_setup_confirm_backtest(
             i += 1
             continue
 
-        is_upside = signal_side == "UPSIDE"
+        trade_direction = str(setup_ctx.get("direction_key") or signal_side)
+        is_upside = trade_direction == "UPSIDE"
         if is_upside:
             entry_exec = entry_open * (1.0 + slippage)
             exit_exec = exit_open * (1.0 - slippage)
@@ -263,10 +556,11 @@ def run_setup_confirm_backtest(
                 "Setup Confirm": _setup_confirm_label(action_class),
                 "Setup Class": action_class,
                 "Action Reason": action_reason,
-                "Direction": _direction_label_from_key(signal_side),
-                "AI Direction": _direction_label_from_key(ai_key),
-                "AI Votes": f"{votes}/3",
-                "Strength": round(strength, 1),
+                "Direction": _direction_label_from_key(trade_direction),
+                "AI Direction": _direction_label_from_key(str(setup_ctx.get("ai_direction_key") or ai_key)),
+                "AI Votes": str(setup_ctx.get("ai_votes") or f"{votes}/3"),
+                "Confidence": round(float(setup_ctx.get("confidence", float("nan"))), 1),
+                "Selected-TF Confidence": round(float(execution_confidence.score), 1),
                 "Bias": round(bias_score, 1),
                 "Entry": entry_exec,
                 "Exit": exit_exec,
@@ -290,26 +584,61 @@ def summarize_setup_confirm_performance(df_results: pd.DataFrame) -> pd.DataFram
         return pd.DataFrame()
 
     d = df_results.copy()
-    d["is_win"] = (pd.to_numeric(d["PnL (%)"], errors="coerce") > 0).astype(int)
+    d["PnL (%)"] = pd.to_numeric(d.get("PnL (%)", pd.Series(dtype=float)), errors="coerce")
+    d["is_win"] = (d["PnL (%)"] > 0).astype(int)
     grouped = (
         d.groupby("Setup Confirm", dropna=False)
         .agg(
             Trades=("PnL (%)", "count"),
             WinRate=("is_win", "mean"),
             AvgPnL=("PnL (%)", "mean"),
+            MedianPnL=("PnL (%)", "median"),
             TotalPnL=("PnL (%)", "sum"),
             GrossProfit=("PnL (%)", lambda s: float(pd.to_numeric(s, errors="coerce")[pd.to_numeric(s, errors="coerce") > 0].sum())),
             GrossLoss=("PnL (%)", lambda s: abs(float(pd.to_numeric(s, errors="coerce")[pd.to_numeric(s, errors="coerce") <= 0].sum()))),
+            AvgWin=("PnL (%)", lambda s: float(pd.to_numeric(s, errors="coerce")[pd.to_numeric(s, errors="coerce") > 0].mean()) if (pd.to_numeric(s, errors="coerce") > 0).any() else 0.0),
+            AvgLoss=("PnL (%)", lambda s: abs(float(pd.to_numeric(s, errors="coerce")[pd.to_numeric(s, errors="coerce") <= 0].mean())) if (pd.to_numeric(s, errors="coerce") <= 0).any() else 0.0),
         )
         .reset_index()
     )
     grouped["WinRate"] = grouped["WinRate"] * 100.0
+    grouped["Expectancy"] = grouped["AvgPnL"]
+    grouped["PayoffRatio"] = grouped.apply(
+        lambda r: (float(r["AvgWin"]) / float(r["AvgLoss"])) if float(r["AvgLoss"]) > 0 else (float("inf") if float(r["AvgWin"]) > 0 else 0.0),
+        axis=1,
+    )
     grouped["ProfitFactor"] = grouped.apply(
         lambda r: (float(r["GrossProfit"]) / float(r["GrossLoss"])) if float(r["GrossLoss"]) > 0 else float("inf"),
         axis=1,
     )
-    grouped = grouped.sort_values(by=["Trades", "TotalPnL"], ascending=[False, False]).reset_index(drop=True)
-    return grouped[["Setup Confirm", "Trades", "WinRate", "AvgPnL", "TotalPnL", "ProfitFactor"]]
+    grouped[["QualityGrade", "QualityNote"]] = grouped.apply(
+        lambda r: pd.Series(
+            grade_setup_class_quality(
+                occurrences=float(r["Trades"]),
+                expectancy=float(r["Expectancy"]),
+                profit_factor=float(r["ProfitFactor"]),
+                payoff_ratio=float(r["PayoffRatio"]),
+                win_rate=float(r["WinRate"]),
+            )
+        ),
+        axis=1,
+    )
+    grouped = grouped.sort_values(by=["Expectancy", "ProfitFactor", "Trades"], ascending=[False, False, False]).reset_index(drop=True)
+    return grouped[[
+        "Setup Confirm",
+        "Trades",
+        "WinRate",
+        "Expectancy",
+        "AvgWin",
+        "AvgLoss",
+        "PayoffRatio",
+        "MedianPnL",
+        "TotalPnL",
+        "ProfitFactor",
+        "QualityGrade",
+        "QualityNote",
+        "AvgPnL",
+    ]]
 
 
 def _allowed_setup_classes(setup_filter: str) -> set[str]:
@@ -321,6 +650,91 @@ def _allowed_setup_classes(setup_filter: str) -> set[str]:
     if s in {"AI-LED", "AI_LED", "ENTER_AI_LED"}:
         return {"ENTER_AI_LED"}
     return {"ENTER_TREND_AI", "ENTER_TREND_LED", "ENTER_AI_LED"}
+
+
+def _return_distribution_metrics(values: pd.Series | pd.Index | list[float] | tuple[float, ...]) -> dict[str, float]:
+    series = pd.to_numeric(pd.Series(values, dtype=float), errors="coerce").dropna()
+    if series.empty:
+        return {
+            "win_rate": 0.0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "expectancy": 0.0,
+            "payoff_ratio": 0.0,
+            "profit_factor": 0.0,
+            "median": 0.0,
+        }
+
+    wins = series[series > 0]
+    losses = series[series <= 0]
+    win_rate = float((len(wins) / len(series)) * 100.0)
+    avg_win = float(wins.mean()) if not wins.empty else 0.0
+    avg_loss_abs = abs(float(losses.mean())) if not losses.empty else 0.0
+    expectancy = float(series.mean())
+    gross_profit = float(wins.sum()) if not wins.empty else 0.0
+    gross_loss_abs = abs(float(losses.sum())) if not losses.empty else 0.0
+    payoff_ratio = (avg_win / avg_loss_abs) if avg_loss_abs > 0 else (float("inf") if avg_win > 0 else 0.0)
+    profit_factor = (gross_profit / gross_loss_abs) if gross_loss_abs > 0 else (float("inf") if gross_profit > 0 else 0.0)
+    median = float(np.nanmedian(series.values)) if len(series) else 0.0
+    return {
+        "win_rate": win_rate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss_abs,
+        "expectancy": expectancy,
+        "payoff_ratio": payoff_ratio,
+        "profit_factor": profit_factor,
+        "median": median,
+    }
+
+
+def grade_setup_class_quality(
+    *,
+    occurrences: float,
+    expectancy: float,
+    profit_factor: float,
+    payoff_ratio: float,
+    win_rate: float,
+) -> tuple[str, str]:
+    occ = max(0.0, float(occurrences))
+    exp = float(expectancy)
+    pf = float(profit_factor)
+    payoff = float(payoff_ratio)
+    wr = float(win_rate)
+
+    if occ < 8:
+        return "Unrated", "Too few events to trust the class."
+
+    elite = (
+        occ >= 35
+        and exp >= 0.75
+        and pf >= 1.80
+        and payoff >= 1.20
+        and wr >= 52.0
+    )
+    if elite:
+        return "Elite", "Strong expectancy with enough sample and robust payoff structure."
+
+    validated = (
+        occ >= 25
+        and exp >= 0.30
+        and pf >= 1.25
+        and payoff >= 1.00
+        and wr >= 48.0
+    )
+    if validated:
+        return "Validated", "Positive edge is present and sample size is becoming credible."
+
+    fragile = (
+        occ >= 12
+        and exp > 0.0
+        and pf >= 1.00
+        and payoff >= 0.90
+        and wr >= 44.0
+    )
+    if fragile:
+        return "Fragile", "Edge exists, but it is still thin or unstable."
+
+    return "Weak", "Current sample does not show a robust class-level edge."
 
 
 def _scalp_gate_thresholds(timeframe: str | None) -> tuple[float, float, float]:
@@ -340,6 +754,8 @@ def build_scalp_outcome_study(
     sr_lookback_fn: Callable[[str | None], int],
     *,
     timeframe: str = "1h",
+    df_4h: pd.DataFrame | None = None,
+    df_1d: pd.DataFrame | None = None,
     forward_bars: int = 10,
     window_size: int = 200,
     min_history: int = 55,
@@ -347,7 +763,7 @@ def build_scalp_outcome_study(
     """Event-study engine for scalp opportunities generated by market scalp logic."""
     forward_bars = max(1, int(forward_bars))
     min_history = max(30, int(min_history))
-    gate_min_rr, gate_min_adx, gate_min_strength = _scalp_gate_thresholds(timeframe)
+    gate_min_rr, gate_min_adx, gate_min_confidence = _scalp_gate_thresholds(timeframe)
 
     rows: list[dict] = []
     diagnostics: dict[str, Any] = {
@@ -356,7 +772,7 @@ def build_scalp_outcome_study(
         "gate_thresholds": {
             "min_rr": float(gate_min_rr),
             "min_adx": float(gate_min_adx),
-            "min_strength": float(gate_min_strength),
+            "min_confidence": float(gate_min_confidence),
         },
         "bars_evaluated": 0,
         "analysis_fail": 0,
@@ -390,7 +806,7 @@ def build_scalp_outcome_study(
         try:
             analysis = analyzer(df_slice)
             bias_score = _read_bias_like(analysis)
-            strength = float(strength_from_bias(bias_score))
+            directional_confidence = float(bias_confidence_from_bias(bias_score))
             _prob, ai_direction, ai_details = ml_predictor(df_slice)
         except Exception:
             diagnostics["analysis_fail"] += 1
@@ -410,23 +826,32 @@ def build_scalp_outcome_study(
         consensus_agreement = (
             float(ai_details.get("consensus_agreement", 0.0)) if isinstance(ai_details, dict) else 0.0
         )
-        votes, _display_ratio, decision_agreement = ai_vote_metrics(
+        ai_status = str(ai_details.get("status", "")) if isinstance(ai_details, dict) else ""
+        votes, _, decision_agreement = ai_vote_metrics(
             ai_key,
             directional_agreement,
             consensus_agreement,
         )
 
-        structure = structure_state(signal_side, ai_key, strength, float(decision_agreement))
-        conviction_label, _ = conviction_fn(signal_side, ai_key, strength, float(decision_agreement))
+        structure = structure_state(signal_side, ai_key, directional_confidence, float(decision_agreement))
+        conviction_label, _ = conviction_fn(signal_side, ai_key, directional_confidence, float(decision_agreement))
         adx_raw = getattr(analysis, "adx", np.nan)
         try:
             adx_val = float(adx_raw)
         except Exception:
             adx_val = float("nan")
+        execution_confidence = build_execution_confidence_snapshot(
+            direction=signal_side,
+            bias_score=bias_score,
+            adx_val=adx_val,
+            structure_state=structure,
+            conviction_label=str(conviction_label),
+            ai_agreement=float(decision_agreement),
+        )
 
         action_raw, _action_reason = action_decision_with_reason(
             signal_side,
-            strength,
+            directional_confidence,
             structure,
             str(conviction_label),
             float(decision_agreement),
@@ -466,20 +891,40 @@ def build_scalp_outcome_study(
             signal_direction=signal_side,
             rr_ratio=rr_ratio,
             adx_val=adx_val,
-            strength=strength,
+            confidence=float(execution_confidence.score),
             conviction_label=str(conviction_label),
             entry=entry,
             stop=stop,
             target=target,
             min_rr=gate_min_rr,
             min_adx=gate_min_adx,
-            min_strength=gate_min_strength,
+            min_confidence=gate_min_confidence,
         )
         if not gate_pass:
             gate_reject_counter[str(gate_reason or "UNKNOWN_GATE_REJECT")] += 1
             continue
 
         diagnostics["gate_pass_candidates"] += 1
+        setup_ctx = _resolve_setup_context(
+            event_timestamp=df["timestamp"].iloc[i],
+            timeframe=timeframe,
+            df_slice=df_slice,
+            df_4h=df_4h,
+            df_1d=df_1d,
+            analysis_obj=analysis,
+            tactical_direction=signal_side,
+            ai_key=ai_key,
+            agreement=float(decision_agreement),
+            ai_probability=float(_prob),
+            directional_agreement=float(directional_agreement),
+            consensus_agreement=float(consensus_agreement),
+            ai_status=ai_status,
+            adx_val=adx_val,
+            conviction_label=str(conviction_label),
+            directional_confidence=directional_confidence,
+            bias_score=bias_score,
+            rr_ratio=float(rr_ratio) if pd.notna(rr_ratio) else None,
+        )
         side_key = str(direction_key_fn(str(scalp_direction)))
         if side_key not in {"UPSIDE", "DOWNSIDE"}:
             diagnostics["side_key_reject"] += 1
@@ -571,10 +1016,12 @@ def build_scalp_outcome_study(
             "Setup Confirm": _setup_confirm_label(action_class),
             "Setup Class": action_class,
             "Direction": _direction_label_from_key(side_key),
-            "AI Direction": _direction_label_from_key(ai_key),
-            "AI Votes": f"{votes}/3",
-            "Tech vs AI Alignment": str(conviction_label or "").strip().upper(),
-            "Strength": round(strength, 1),
+            "AI Direction": _direction_label_from_key(str(setup_ctx.get("ai_direction_key") or ai_key)),
+            "AI Votes": str(setup_ctx.get("ai_votes") or f"{votes}/3"),
+            "Confidence": round(float(setup_ctx.get("confidence", float(execution_confidence.score))), 1),
+            "AI Confidence": round(float(setup_ctx.get("ai_confidence", float("nan"))), 1),
+            "AI Timeframe Conflict": bool(setup_ctx.get("ai_timeframe_conflict", False)),
+            "AI Degraded": bool(setup_ctx.get("ai_degraded_data", False)),
             "Event Price": event_price,
             "Target": target_f,
             "Stop": stop_f,
@@ -701,6 +1148,12 @@ def build_setup_outcome_study(
     conviction_fn: ConvictionLike,
     signal_plain_fn: Callable[[str], str],
     direction_key_fn: Callable[[str], str],
+    *,
+    timeframe: str | None = None,
+    df_4h: pd.DataFrame | None = None,
+    df_1d: pd.DataFrame | None = None,
+    get_scalping_entry_target_fn: Callable[..., tuple] | None = None,
+    sr_lookback_fn: Callable[[str | None], int] | None = None,
     setup_filter: str = "ALL",
     forward_bars: int = 10,
     window_size: int = 200,
@@ -731,7 +1184,7 @@ def build_setup_outcome_study(
         try:
             analysis = analyzer(df_slice)
             bias_score = _read_bias_like(analysis)
-            strength = float(strength_from_bias(bias_score))
+            directional_confidence = float(bias_confidence_from_bias(bias_score))
             _prob, ai_direction, ai_details = ml_predictor(df_slice)
         except Exception:
             continue
@@ -749,28 +1202,58 @@ def build_setup_outcome_study(
         consensus_agreement = (
             float(ai_details.get("consensus_agreement", 0.0)) if isinstance(ai_details, dict) else 0.0
         )
-        votes, _display_ratio, decision_agreement = ai_vote_metrics(
+        ai_status = str(ai_details.get("status", "")) if isinstance(ai_details, dict) else ""
+        votes, _, decision_agreement = ai_vote_metrics(
             ai_key,
             directional_agreement,
             consensus_agreement,
         )
 
-        structure = structure_state(signal_side, ai_key, strength, float(decision_agreement))
-        conviction_label, _ = conviction_fn(signal_side, ai_key, strength, float(decision_agreement))
+        structure = structure_state(signal_side, ai_key, directional_confidence, float(decision_agreement))
+        conviction_label, _ = conviction_fn(signal_side, ai_key, directional_confidence, float(decision_agreement))
         adx_raw = getattr(analysis, "adx", np.nan)
         try:
             adx_val = float(adx_raw)
         except Exception:
             adx_val = float("nan")
-
-        action_raw, action_reason = action_decision_with_reason(
-            signal_side,
-            strength,
-            structure,
-            str(conviction_label),
-            float(decision_agreement),
-            adx_val,
+        execution_confidence = build_execution_confidence_snapshot(
+            direction=signal_side,
+            bias_score=bias_score,
+            adx_val=adx_val,
+            structure_state=structure,
+            conviction_label=str(conviction_label),
+            ai_agreement=float(decision_agreement),
         )
+        rr_ratio = _resolve_rr_ratio_from_plan(
+            get_scalping_entry_target_fn=get_scalping_entry_target_fn,
+            sr_lookback_fn=sr_lookback_fn,
+            df_slice=df_slice,
+            analysis_obj=analysis,
+            bias_score=bias_score,
+        )
+
+        setup_ctx = _resolve_setup_context(
+            event_timestamp=df["timestamp"].iloc[i],
+            timeframe=timeframe,
+            df_slice=df_slice,
+            df_4h=df_4h,
+            df_1d=df_1d,
+            analysis_obj=analysis,
+            tactical_direction=signal_side,
+            ai_key=ai_key,
+            agreement=float(decision_agreement),
+            ai_probability=float(_prob),
+            directional_agreement=float(directional_agreement),
+            consensus_agreement=float(consensus_agreement),
+            ai_status=ai_status,
+            adx_val=adx_val,
+            conviction_label=str(conviction_label),
+            directional_confidence=directional_confidence,
+            bias_score=bias_score,
+            rr_ratio=rr_ratio,
+        )
+        action_raw = str(setup_ctx["action_raw"])
+        action_reason = str(setup_ctx["action_reason"])
         action_class = normalize_action_class(action_raw)
         if action_class not in allowed_classes:
             continue
@@ -794,7 +1277,8 @@ def build_setup_outcome_study(
         max_up_pct = ((max_high / event_price) - 1.0) * 100.0
         max_down_pct = ((min_low / event_price) - 1.0) * 100.0
 
-        is_upside = signal_side == "UPSIDE"
+        trade_direction = str(setup_ctx.get("direction_key") or signal_side)
+        is_upside = trade_direction == "UPSIDE"
         directional_return_pct = end_return_pct if is_upside else (-end_return_pct)
         favorable_exc_pct = max(0.0, max_up_pct) if is_upside else max(0.0, -max_down_pct)
         adverse_exc_pct = max(0.0, -max_down_pct) if is_upside else max(0.0, max_up_pct)
@@ -804,11 +1288,14 @@ def build_setup_outcome_study(
             "Setup Confirm": _setup_confirm_label(action_class),
             "Setup Class": action_class,
             "Action Reason": action_reason,
-            "Direction": _direction_label_from_key(signal_side),
-            "AI Direction": _direction_label_from_key(ai_key),
-            "AI Votes": f"{votes}/3",
-            "Tech vs AI Alignment": str(conviction_label or "").strip().upper(),
-            "Strength": round(strength, 1),
+            "Direction": _direction_label_from_key(trade_direction),
+            "AI Direction": _direction_label_from_key(str(setup_ctx.get("ai_direction_key") or ai_key)),
+            "AI Votes": str(setup_ctx.get("ai_votes") or f"{votes}/3"),
+            "Confidence": round(float(setup_ctx.get("confidence", float("nan"))), 1),
+            "AI Confidence": round(float(setup_ctx.get("ai_confidence", float("nan"))), 1),
+            "AI Timeframe Conflict": bool(setup_ctx.get("ai_timeframe_conflict", False)),
+            "AI Degraded": bool(setup_ctx.get("ai_degraded_data", False)),
+            "Selected-TF Confidence": round(float(execution_confidence.score), 1),
             "Bias": round(bias_score, 1),
             "Event Price": event_price,
             f"End Price (+{forward_bars})": end_price,
@@ -842,6 +1329,11 @@ def summarize_setup_outcome_study(df_events: pd.DataFrame, forward_bars: int) ->
             "occurrences": 0.0,
             "favorable_rate": 0.0,
             "median_dir_return": 0.0,
+            "expectancy": 0.0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "payoff_ratio": 0.0,
+            "profit_factor": 0.0,
             "avg_favorable_exc": 0.0,
             "avg_adverse_exc": 0.0,
         }
@@ -849,9 +1341,9 @@ def summarize_setup_outcome_study(df_events: pd.DataFrame, forward_bars: int) ->
     n = float(len(df_events))
     ret_col = f"Return @+{int(forward_bars)} (%)"
     returns = pd.to_numeric(df_events.get(ret_col, pd.Series(dtype=float)), errors="coerce")
-    fav = returns[returns > 0]
-    favorable_rate = (len(fav) / n) * 100.0 if n > 0 else 0.0
-    median_dir_return = float(np.nanmedian(returns.values)) if len(returns) else 0.0
+    metrics = _return_distribution_metrics(returns)
+    favorable_rate = metrics["win_rate"] if n > 0 else 0.0
+    median_dir_return = metrics["median"]
     avg_favorable_exc = float(
         pd.to_numeric(df_events.get("Favorable Excursion (%)", pd.Series(dtype=float)), errors="coerce").mean()
     )
@@ -862,6 +1354,11 @@ def summarize_setup_outcome_study(df_events: pd.DataFrame, forward_bars: int) ->
         "occurrences": n,
         "favorable_rate": favorable_rate,
         "median_dir_return": median_dir_return,
+        "expectancy": metrics["expectancy"],
+        "avg_win": metrics["avg_win"],
+        "avg_loss": metrics["avg_loss"],
+        "payoff_ratio": metrics["payoff_ratio"],
+        "profit_factor": metrics["profit_factor"],
         "avg_favorable_exc": avg_favorable_exc,
         "avg_adverse_exc": avg_adverse_exc,
     }
@@ -892,13 +1389,40 @@ def summarize_setup_outcome_by_class(df_events: pd.DataFrame, forward_bars: int)
             FavorableRate=("is_favorable", "mean"),
             MedianDirectionalReturn=(ret_col, "median"),
             AvgDirectionalReturn=(ret_col, "mean"),
+            AvgWin=(ret_col, lambda s: float(pd.to_numeric(s, errors="coerce")[pd.to_numeric(s, errors="coerce") > 0].mean()) if (pd.to_numeric(s, errors="coerce") > 0).any() else 0.0),
+            AvgLoss=(ret_col, lambda s: abs(float(pd.to_numeric(s, errors="coerce")[pd.to_numeric(s, errors="coerce") <= 0].mean())) if (pd.to_numeric(s, errors="coerce") <= 0).any() else 0.0),
             AvgFavorableExcursion=("Favorable Excursion (%)", "mean"),
             AvgAdverseExcursion=("Adverse Excursion (%)", "mean"),
         )
         .reset_index()
     )
     grouped["FavorableRate"] = grouped["FavorableRate"] * 100.0
-    return grouped.sort_values(by=["Occurrences", "AvgDirectionalReturn"], ascending=[False, False]).reset_index(drop=True)
+    grouped["Expectancy"] = grouped["AvgDirectionalReturn"]
+    grouped["PayoffRatio"] = grouped.apply(
+        lambda r: (float(r["AvgWin"]) / float(r["AvgLoss"])) if float(r["AvgLoss"]) > 0 else (float("inf") if float(r["AvgWin"]) > 0 else 0.0),
+        axis=1,
+    )
+    grouped["ProfitFactor"] = grouped.apply(
+        lambda r: (
+            float(r["AvgWin"]) * (float(r["FavorableRate"]) / 100.0)
+        ) / (
+            float(r["AvgLoss"]) * max(1e-9, 1.0 - (float(r["FavorableRate"]) / 100.0))
+        ) if float(r["AvgLoss"]) > 0 and float(r["FavorableRate"]) < 100.0 else (float("inf") if float(r["AvgWin"]) > 0 else 0.0),
+        axis=1,
+    )
+    grouped[["QualityGrade", "QualityNote"]] = grouped.apply(
+        lambda r: pd.Series(
+            grade_setup_class_quality(
+                occurrences=float(r["Occurrences"]),
+                expectancy=float(r["Expectancy"]),
+                profit_factor=float(r["ProfitFactor"]),
+                payoff_ratio=float(r["PayoffRatio"]),
+                win_rate=float(r["FavorableRate"]),
+            )
+        ),
+        axis=1,
+    )
+    return grouped.sort_values(by=["Expectancy", "ProfitFactor", "Occurrences"], ascending=[False, False, False]).reset_index(drop=True)
 
 
 def run_backtest(
@@ -912,8 +1436,8 @@ def run_backtest(
     """Run single-position backtest over a price series.
 
     Entry filter is direction-agnostic:
-    - Compute strength from directional bias (bias score)
-    - Enter LONG/SHORT only when strength >= threshold
+    - Compute execution confidence from directional bias (bias score)
+    - Enter LONG/SHORT only when confidence >= threshold
     """
     exit_after = max(1, int(exit_after))
     commission = max(0.0, float(commission))
@@ -939,15 +1463,32 @@ def run_backtest(
             result = analyzer(df_slice)
             raw_signal = result.signal
             bias_score = _read_bias_like(result)
-            strength_score = float(strength_from_bias(bias_score))
+            directional_confidence = float(bias_confidence_from_bias(bias_score))
         except Exception:
             i += 1
             continue
 
         sig_plain = _normalize_direction_signal(raw_signal)
+        tactical_structure = structure_state(
+            "UPSIDE" if sig_plain == "LONG" else ("DOWNSIDE" if sig_plain == "SHORT" else "NEUTRAL"),
+            "NEUTRAL",
+            directional_confidence,
+            0.0,
+        )
+        tactical_conviction = (
+            "TREND" if directional_confidence >= 70.0 else ("WEAK" if directional_confidence < 55.0 else "MEDIUM")
+        )
+        execution_confidence = build_execution_confidence_snapshot(
+            direction="UPSIDE" if sig_plain == "LONG" else ("DOWNSIDE" if sig_plain == "SHORT" else "NEUTRAL"),
+            bias_score=bias_score,
+            adx_val=getattr(result, "adx", np.nan),
+            structure_state=tactical_structure,
+            conviction_label=tactical_conviction,
+            ai_agreement=0.0,
+        )
 
-        long_ok = sig_plain == "LONG" and strength_score >= threshold
-        short_ok = sig_plain == "SHORT" and strength_score >= threshold
+        long_ok = sig_plain == "LONG" and float(execution_confidence.score) >= threshold
+        short_ok = sig_plain == "SHORT" and float(execution_confidence.score) >= threshold
         if not (long_ok or short_ok):
             i += 1
             continue
@@ -993,7 +1534,7 @@ def run_backtest(
             {
                 "Date": df["timestamp"].iloc[i],
                 "Signal Time": df["timestamp"].iloc[i],
-                "Strength": round(strength_score, 1),
+                "Confidence": round(float(execution_confidence.score), 1),
                 "Bias": round(bias_score, 1),
                 "Signal": sig_plain,
                 "Entry": entry_exec,
@@ -1015,7 +1556,7 @@ def run_backtest(
             df_results,
             "<div style='color:#FFB000;margin-top:1rem;'>"
             "<p><b>⚠️ No Signals:</b> No trades met the threshold criteria</p>"
-            "<p>Try lowering the strength threshold or using more data</p>"
+            "<p>Try lowering the confidence threshold or using more data</p>"
             "</div>",
         )
 

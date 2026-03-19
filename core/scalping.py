@@ -18,7 +18,7 @@ def _dir_key(value: str | None) -> str:
 
 
 def scalp_gate_thresholds(timeframe: str | None) -> tuple[float, float, float]:
-    """Timeframe-adaptive scalp gate thresholds: (min_rr, min_adx, min_strength)."""
+    """Timeframe-adaptive scalp gate thresholds: (min_rr, min_adx, min_confidence)."""
     t = str(timeframe or "").strip().lower()
     if t in {"5m", "15m"}:
         return 1.30, 18.0, 52.0
@@ -34,14 +34,14 @@ def scalp_quality_gate(
     signal_direction: str | None,
     rr_ratio: float | None,
     adx_val: float | None,
-    strength: float | None,
+    confidence: float | None = None,
     conviction_label: str | None,
     entry: float | None,
     stop: float | None,
     target: float | None,
     min_rr: float = 1.50,
     min_adx: float = 20.0,
-    min_strength: float = 55.0,
+    min_confidence: float = 55.0,
 ) -> tuple[bool, str]:
     """Single source-of-truth gate for execution-ready scalp opportunities.
 
@@ -76,11 +76,11 @@ def scalp_quality_gate(
         return False, "ADX_TOO_LOW"
 
     try:
-        strength_f = float(strength) if strength is not None else float("nan")
+        confidence_f = float(confidence) if confidence is not None else float("nan")
     except Exception:
-        strength_f = float("nan")
-    if pd.isna(strength_f) or strength_f < float(min_strength):
-        return False, "STRENGTH_TOO_LOW"
+        confidence_f = float("nan")
+    if pd.isna(confidence_f) or confidence_f < float(min_confidence):
+        return False, "CONFIDENCE_TOO_LOW"
 
     try:
         e = float(entry) if entry is not None else 0.0

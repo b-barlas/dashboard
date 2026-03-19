@@ -1,12 +1,8 @@
-"""Shared signal semantics for direction, bias and strength."""
+"""Shared signal semantics for direction, bias and confidence."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-STRENGTH_STRONG = 75.0
-STRENGTH_GOOD = 60.0
-STRENGTH_MIXED = 40.0
 
 
 def clamp_100(value: float) -> float:
@@ -22,14 +18,14 @@ def direction_from_bias(bias: float, *, long_threshold: float = 60.0, short_thre
     return "NEUTRAL"
 
 
-def strength_from_bias(bias: float) -> float:
-    """Convert directional bias (0-100) to direction-agnostic signal strength (0-100).
+def bias_confidence_from_bias(bias: float) -> float:
+    """Convert directional bias (0-100) to direction-agnostic confidence (0-100).
 
     Uses a non-linear calibration so real-market mid-range bias values do not
-    collapse into low-looking strength bands. This keeps interpretation closer
+    collapse into low-looking confidence bands. This keeps interpretation closer
     to trader expectations while preserving:
-    - 50 bias -> 0 strength
-    - 0/100 bias -> 100 strength
+    - 50 bias -> 0 confidence
+    - 0/100 bias -> 100 confidence
     """
     b = clamp_100(bias)
     raw = abs(b - 50.0) / 50.0  # 0..1
@@ -37,22 +33,11 @@ def strength_from_bias(bias: float) -> float:
     return clamp_100((raw ** gamma) * 100.0)
 
 
-def strength_bucket(strength: float) -> str:
-    s = clamp_100(strength)
-    if s >= STRENGTH_STRONG:
-        return "STRONG"
-    if s >= STRENGTH_GOOD:
-        return "GOOD"
-    if s >= STRENGTH_MIXED:
-        return "MIXED"
-    return "WEAK"
-
-
 @dataclass(frozen=True)
 class SignalSnapshot:
     direction: str
     bias: float
-    strength: float
+    confidence: float
     setup: str = ""
     alignment: str = ""
     rr: float = 0.0

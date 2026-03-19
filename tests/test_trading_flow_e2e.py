@@ -12,7 +12,7 @@ try:
         compute_position_pnl,
         estimate_liquidation,
     )
-    from core.signal_contract import strength_from_bias
+    from core.signal_contract import bias_confidence_from_bias
     from core.scalping import get_scalping_entry_target
     from core.signals import analyse
 
@@ -98,7 +98,7 @@ class TradingFlowE2ETests(unittest.TestCase):
         h_pack = compute_health_decision(
             direction="LONG",
             signal_direction="LONG",
-            strength=float(strength_from_bias(float(a.bias))),
+            confidence=float(bias_confidence_from_bias(float(a.bias))),
             conviction_label="MEDIUM",
             liq_distance_pct=float(liq_pack["distance_pct"]) if liq_pack["distance_pct"] is not None else None,
             invalidated=bool(inv_pack["invalidated"]),

@@ -11,6 +11,7 @@ import streamlit as st
 
 from core.data import (
     coingecko_coin_id as coingecko_coin_id_core,
+    fetch_coingecko_ohlcv_by_coin_id as fetch_coingecko_ohlcv_by_coin_id_core,
     fetch_ohlcv as fetch_ohlcv_core,
     fetch_ohlcv_cached as fetch_ohlcv_cached_core,
     get_btc_eth_prices as get_btc_eth_prices_core,
@@ -544,6 +545,15 @@ def fetch_ohlcv(symbol: str, timeframe: str, limit: int = 120) -> pd.DataFrame |
     return fetch_ohlcv_core(EXCHANGE, symbol, timeframe, limit, fetch_ohlcv_cached)
 
 
+def fetch_coingecko_ohlcv_by_coin_id(coin_id: str, timeframe: str, limit: int = 120) -> pd.DataFrame | None:
+    """Direct CoinGecko OHLCV fetch by coin id for provider-resolved custom watchlist symbols."""
+    df = fetch_coingecko_ohlcv_by_coin_id_core(coin_id, timeframe, limit)
+    if df is not None and not df.empty:
+        df.attrs["source_symbol"] = str(coin_id or "").strip()
+        df.attrs["source_provider"] = "coingecko"
+    return df
+
+
 @st.cache_data(ttl=120, show_spinner=False)
 def get_major_ohlcv_bundle(timeframe: str, limit: int = 500) -> dict[str, pd.DataFrame | None]:
     """Fetch a bundle of major market OHLCV frames for a timeframe."""
@@ -584,28 +594,28 @@ def scalp_quality_gate(
     signal_direction: str | None,
     rr_ratio: float | None,
     adx_val: float | None,
-    strength: float | None,
+    confidence: float | None = None,
     conviction_label: str | None,
     entry: float | None,
     stop: float | None,
     target: float | None,
     min_rr: float = 1.50,
     min_adx: float = 20.0,
-    min_strength: float = 55.0,
+    min_confidence: float = 55.0,
 ) -> tuple[bool, str]:
     return scalp_quality_gate_core(
         scalp_direction=scalp_direction,
         signal_direction=signal_direction,
         rr_ratio=rr_ratio,
         adx_val=adx_val,
-        strength=strength,
+        confidence=confidence,
         conviction_label=conviction_label,
         entry=entry,
         stop=stop,
         target=target,
         min_rr=min_rr,
         min_adx=min_adx,
-        min_strength=min_strength,
+        min_confidence=min_confidence,
     )
 
 # === Machine Learning Prediction ===

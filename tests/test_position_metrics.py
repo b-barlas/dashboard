@@ -49,7 +49,7 @@ class PositionMetricsTests(unittest.TestCase):
         out = compute_health_decision(
             direction="LONG",
             signal_direction="SHORT",
-            strength=42.0,
+            confidence=42.0,
             conviction_label="CONFLICT",
             liq_distance_pct=3.0,
             invalidated=True,

@@ -46,7 +46,7 @@ def _normalize_rows(rows: Iterable[dict], allowed_timeframes: set[str] | None = 
             {
                 "timeframe": timeframe,
                 "direction": direction,
-                "strength": float(row.get("strength", row.get("Strength", 0.0)) or 0.0),
+                "confidence": float(row.get("confidence", row.get("Confidence", 0.0)) or 0.0),
                 "weight": float(row.get("weight", row.get("Weight", TF_WEIGHTS.get(timeframe, 1.0))) or 0.0),
             }
         )
@@ -65,7 +65,7 @@ def _subset_metrics(rows: list[dict], allowed_timeframes: set[str] | None = None
     neutral_weight = sum(row["weight"] for row in subset if row["direction"] == "NEUTRAL")
     raw_alignment_pct = (max(upside_count, downside_count) / count * 100.0) if count else 0.0
     weighted_alignment_pct = (max(upside_weight, downside_weight) / total_weight * 100.0) if total_weight else 0.0
-    avg_strength = sum(row["strength"] for row in subset) / count if count else 0.0
+    avg_confidence = sum(row["confidence"] for row in subset) / count if count else 0.0
     dominant_bias = _dominant(upside_weight, downside_weight, neutral_weight)
     # A directional bias should only print when the non-neutral side has broad enough
     # weighted agreement. Otherwise we keep the read neutral and let alignment % tell the story.
@@ -85,7 +85,7 @@ def _subset_metrics(rows: list[dict], allowed_timeframes: set[str] | None = None
         "weighted_alignment_pct": weighted_alignment_pct,
         "dominant_bias": dominant_bias,
         "alignment_read": _alignment_read(weighted_alignment_pct),
-        "avg_strength": avg_strength,
+        "avg_confidence": avg_confidence,
     }
 
 
@@ -154,7 +154,7 @@ def compute_multitf_alignment(rows: list[dict]) -> dict:
         "weighted_alignment_pct": overall["weighted_alignment_pct"],
         "raw_alignment_pct": overall["raw_alignment_pct"],
         "alignment_read": overall["alignment_read"],
-        "avg_strength": overall["avg_strength"],
+        "avg_confidence": overall["avg_confidence"],
         "neutral_count": overall["neutral_count"],
         "higher_tf_bias": higher["dominant_bias"],
         "higher_tf_alignment_pct": higher["weighted_alignment_pct"],

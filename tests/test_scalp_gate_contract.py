@@ -10,7 +10,7 @@ class ScalpGateContractTests(unittest.TestCase):
             signal_direction="Upside",
             rr_ratio=1.8,
             adx_val=24.0,
-            strength=61.0,
+            confidence=61.0,
             conviction_label="MEDIUM",
             entry=100.0,
             stop=98.5,
@@ -25,7 +25,7 @@ class ScalpGateContractTests(unittest.TestCase):
             signal_direction="LONG",
             rr_ratio=1.8,
             adx_val=24.0,
-            strength=61.0,
+            confidence=61.0,
             conviction_label="MEDIUM",
             entry=100.0,
             stop=98.5,
@@ -40,7 +40,7 @@ class ScalpGateContractTests(unittest.TestCase):
             signal_direction="LONG",
             rr_ratio=1.9,
             adx_val=28.0,
-            strength=72.0,
+            confidence=72.0,
             conviction_label="HIGH",
             entry=100.0,
             stop=102.0,
@@ -55,7 +55,7 @@ class ScalpGateContractTests(unittest.TestCase):
             signal_direction="NEUTRAL",
             rr_ratio=2.0,
             adx_val=30.0,
-            strength=75.0,
+            confidence=75.0,
             conviction_label="HIGH",
             entry=100.0,
             stop=98.0,
@@ -70,7 +70,7 @@ class ScalpGateContractTests(unittest.TestCase):
             signal_direction="LONG",
             rr_ratio=1.7,
             adx_val=22.0,
-            strength=59.0,
+            confidence=59.0,
             conviction_label="CONFLICT",
             entry=100.0,
             stop=98.2,
@@ -85,7 +85,7 @@ class ScalpGateContractTests(unittest.TestCase):
             signal_direction="LONG",
             rr_ratio=1.2,
             adx_val=25.0,
-            strength=66.0,
+            confidence=66.0,
             conviction_label="HIGH",
             entry=100.0,
             stop=99.0,
@@ -100,7 +100,7 @@ class ScalpGateContractTests(unittest.TestCase):
             signal_direction="SHORT",
             rr_ratio=1.6,
             adx_val=18.0,
-            strength=63.0,
+            confidence=63.0,
             conviction_label="MEDIUM",
             entry=100.0,
             stop=101.0,
@@ -109,20 +109,20 @@ class ScalpGateContractTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "ADX_TOO_LOW")
 
-    def test_fail_on_low_strength(self):
+    def test_fail_on_low_confidence(self):
         ok, reason = scalp_quality_gate(
             scalp_direction="LONG",
             signal_direction="LONG",
             rr_ratio=1.7,
             adx_val=21.0,
-            strength=45.0,
+            confidence=45.0,
             conviction_label="MEDIUM",
             entry=100.0,
             stop=99.0,
             target=102.0,
         )
         self.assertFalse(ok)
-        self.assertEqual(reason, "STRENGTH_TOO_LOW")
+        self.assertEqual(reason, "CONFIDENCE_TOO_LOW")
 
     def test_fail_on_invalid_levels(self):
         ok, reason = scalp_quality_gate(
@@ -130,7 +130,7 @@ class ScalpGateContractTests(unittest.TestCase):
             signal_direction="LONG",
             rr_ratio=2.0,
             adx_val=30.0,
-            strength=70.0,
+            confidence=70.0,
             conviction_label="HIGH",
             entry=0.0,
             stop=99.0,

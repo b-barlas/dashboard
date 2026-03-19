@@ -1,4 +1,6 @@
 from tabs.spot_tab import (
+    _spot_confidence_display,
+    _spot_direction_fetch_symbol,
     _spot_ai_display_value,
     _spot_ai_fallback_note,
     _spot_axis_tickformat,
@@ -37,3 +39,13 @@ def test_spot_axis_tickformat_scales_with_price() -> None:
     assert _spot_axis_tickformat(65000.0) == ",.2f"
     assert _spot_axis_tickformat(0.12) == ",.6f"
     assert _spot_axis_tickformat(0.00012) == ",.8f"
+
+
+def test_spot_direction_fetch_symbol_keeps_canonical_requested_symbol_for_htf_context() -> None:
+    assert _spot_direction_fetch_symbol("BTC/USDT", "XBT/USD", "exchange") == "BTC/USDT"
+    assert _spot_direction_fetch_symbol("BTC/USDT", "BTC/USDT", "coingecko") == "BTC/USDT"
+
+
+def test_spot_confidence_display_formats_bucket() -> None:
+    assert _spot_confidence_display(85.0) == "85% (High)"
+    assert _spot_confidence_display(42.0) == "42% (Low)"

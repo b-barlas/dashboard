@@ -402,8 +402,15 @@ def fetch_coingecko_ohlcv(symbol: str, timeframe: str, limit: int) -> pd.DataFra
     coin_id = coingecko_coin_id(base)
     if not coin_id:
         return None
+    return fetch_coingecko_ohlcv_by_coin_id(coin_id, timeframe, limit)
+
+
+def fetch_coingecko_ohlcv_by_coin_id(coin_id: str, timeframe: str, limit: int) -> pd.DataFrame | None:
+    coin_key = str(coin_id or "").strip().lower()
+    if not coin_key:
+        return None
     days = _coingecko_days_for_request(timeframe, limit)
-    df = coingecko_market_chart(coin_id, days, timeframe)
+    df = coingecko_market_chart(coin_key, days, timeframe)
     if df is not None and len(df) > limit:
         df = df.tail(limit).reset_index(drop=True)
     return df

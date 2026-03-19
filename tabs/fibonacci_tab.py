@@ -420,7 +420,7 @@ def render(ctx: dict) -> None:
             warn_rows.append(
                 {
                     "Signal": f"{icon} {d_type}",
-                    "Strength": d_strength,
+                    "Divergence Strength": d_strength,
                     "Impact": (
                         "Supportive"
                         if (is_uptrend and "BULLISH" in d_type) or ((not is_uptrend) and "BEARISH" in d_type)
@@ -457,7 +457,7 @@ def render(ctx: dict) -> None:
 
         st.dataframe(
             warn_df.style.map(_warn_signal_style, subset=["Signal"])
-            .map(_warn_strength_style, subset=["Strength"])
+            .map(_warn_strength_style, subset=["Divergence Strength"])
             .map(_warn_impact_style, subset=["Impact"]),
             width="stretch",
             hide_index=True,

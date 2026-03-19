@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import threading
+import core.services as _services
 from core.backtest import run_backtest as run_backtest_core
 from core.services import (
     EXCHANGE,
@@ -81,6 +82,13 @@ def _fallback_signal_plain(signal: str) -> str:
     return "WAIT"
 
 
+def _missing_fetch_coingecko_ohlcv_by_coin_id(*_args, **_kwargs):
+    return None
+
+
+_missing_fetch_coingecko_ohlcv_by_coin_id._codex_missing_dep = True
+
+
 def _fallback_bias_score_badge(bias_score: float) -> str:
     try:
         return f"{round(float(bias_score))}"
@@ -152,6 +160,11 @@ sanitize_trading_terms = getattr(_ui_helpers, "sanitize_trading_terms", lambda t
 style_delta = getattr(_ui_helpers, "style_delta", lambda *_args, **_kwargs: "")
 style_scalp_opp = getattr(_ui_helpers, "style_scalp_opp", lambda *_args, **_kwargs: "")
 style_signal = getattr(_ui_helpers, "style_signal", lambda *_args, **_kwargs: "")
+fetch_coingecko_ohlcv_by_coin_id = getattr(
+    _services,
+    "fetch_coingecko_ohlcv_by_coin_id",
+    _missing_fetch_coingecko_ohlcv_by_coin_id,
+)
 
 
 def _wma(series: pd.Series, length: int) -> pd.Series:

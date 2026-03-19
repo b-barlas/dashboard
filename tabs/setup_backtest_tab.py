@@ -9,10 +9,11 @@ import plotly.graph_objs as go
 
 from core.backtest import (
     build_setup_outcome_study,
+    grade_setup_class_quality,
     summarize_setup_outcome_by_class,
     summarize_setup_outcome_study,
 )
-from core.signal_contract import strength_bucket
+from core.confidence import ai_confidence_bucket, confidence_bucket
 from ui.ctx import get_ctx
 from ui.primitives import render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
@@ -107,6 +108,14 @@ def _parse_coin_inputs(raw: str, normalize_fn, limit: int = 10) -> list[str]:
     return out
 
 
+def _htf_fetch_symbol(symbol: str, df: pd.DataFrame | None) -> str:
+    actual_symbol = str((df.attrs if hasattr(df, "attrs") else {}).get("source_symbol") or "").strip()
+    source_provider = str((df.attrs if hasattr(df, "attrs") else {}).get("source_provider") or "").strip().lower()
+    if source_provider == "exchange" and actual_symbol:
+        return actual_symbol
+    return str(symbol or actual_symbol or "").strip()
+
+
 def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
@@ -121,6 +130,8 @@ def render(ctx: dict) -> None:
     signal_plain = get_ctx(ctx, "signal_plain")
     direction_key = get_ctx(ctx, "direction_key")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
+    get_scalping_entry_target = ctx.get("get_scalping_entry_target") if isinstance(ctx, dict) else None
+    sr_lookback_fn = ctx.get("_sr_lookback") if isinstance(ctx, dict) else None
 
     def _chip(text: str, tone: str, extra_class: str = "", title: str | None = None) -> str:
         if not str(text or "").strip():
@@ -157,32 +168,56 @@ def render(ctx: dict) -> None:
             return _chip("Downside", "neg")
         return _chip("Neutral", "warn")
 
-    def _strength_chip(value: object) -> str:
+    def _parse_support_votes(votes_text: object) -> int:
+        m = re.search(r"(\d)\s*/\s*3", str(votes_text or ""))
+        return max(0, min(3, int(m.group(1)))) if m else 0
+
+    def _confidence_chip(value: object) -> str:
         try:
             s = float(value)
         except Exception:
             return ""
-        label = str(strength_bucket(s) or "MIXED").upper()
+        if not np.isfinite(s):
+            return ""
+        label = str(confidence_bucket(s) or "LOW").title()
         text = f"{s:.0f}% ({label})"
-        if label in {"STRONG", "VERY STRONG", "EXTREME", "GOOD"}:
+        if label.upper() == "HIGH":
             tone = "pos"
-        elif label in {"MIXED", "STARTING"}:
+        elif label.upper() == "MEDIUM":
             tone = "warn"
         else:
             tone = "neg"
         return _chip(text, tone)
 
-    def _alignment_chip(value: str) -> str:
-        v = str(value or "").strip().upper()
-        if v == "HIGH":
-            return _chip("HIGH", "pos")
-        if v in {"MEDIUM", "TREND"}:
-            return _chip(v, "warn")
-        if v == "CONFLICT":
-            return _chip("CONFLICT", "neg")
-        if v == "WEAK":
-            return _chip("WEAK", "warn")
-        return _chip(v or "N/A", "muted")
+    def _ai_confidence_chip(
+        value: object,
+        *,
+        direction: object,
+        votes_text: object,
+        timeframe_conflict: object = False,
+        degraded_data: object = False,
+    ) -> str:
+        try:
+            s = float(value)
+        except Exception:
+            return ""
+        if not np.isfinite(s):
+            return ""
+        label = ai_confidence_bucket(
+            s,
+            direction=str(direction or ""),
+            support_votes=_parse_support_votes(votes_text),
+            timeframe_conflict=bool(timeframe_conflict),
+            degraded_data=bool(degraded_data),
+        ).title()
+        text = f"{s:.0f}% ({label})"
+        if label.upper() == "HIGH":
+            tone = "pos"
+        elif label.upper() == "MEDIUM":
+            tone = "warn"
+        else:
+            tone = "neg"
+        return _chip(text, tone)
 
     def _ai_ensemble_chip(direction: str, votes_text: str) -> str:
         d = str(direction or "").strip()
@@ -237,9 +272,9 @@ def render(ctx: dict) -> None:
             "Coin",
             "Setup Confirm",
             "Direction",
-            "Strength",
+            "Confidence",
             "AI Ensemble",
-            "Tech vs AI Alignment",
+            "AI Confidence",
             "Event Price",
         ] + [f"Price +{i}" for i in range(1, n_forward + 1)] + [
             f"End Price (+{n_forward})",
@@ -262,14 +297,16 @@ def render(ctx: dict) -> None:
                     cells.append(f"<td>{_setup_chip(str(r.get(c, '')))}</td>")
                 elif c == "Direction":
                     cells.append(f"<td>{_direction_chip(str(r.get(c, '')))}</td>")
-                elif c == "Strength":
-                    cells.append(f"<td>{_strength_chip(r.get(c))}</td>")
+                elif c == "Confidence":
+                    cells.append(f"<td>{_confidence_chip(r.get(c))}</td>")
                 elif c == "AI Ensemble":
                     cells.append(
                         f"<td>{_ai_ensemble_chip(str(r.get('AI Direction', 'Neutral')), str(r.get('AI Votes', '0/3')))}</td>"
                     )
-                elif c == "Tech vs AI Alignment":
-                    cells.append(f"<td>{_alignment_chip(str(r.get(c, '')))}</td>")
+                elif c == "AI Confidence":
+                    cells.append(
+                        f"<td>{_ai_confidence_chip(r.get(c), direction=r.get('AI Direction'), votes_text=r.get('AI Votes'), timeframe_conflict=r.get('AI Timeframe Conflict', False), degraded_data=r.get('AI Degraded', False))}</td>"
+                    )
                 elif c == "Event Price":
                     v = pd.to_numeric(r.get(c), errors="coerce")
                     txt = f"${float(v):,.6f}" if pd.notna(v) else ""
@@ -569,6 +606,9 @@ def render(ctx: dict) -> None:
                 no_data.append(coin)
                 continue
             try:
+                direction_fetch_symbol = _htf_fetch_symbol(coin, df)
+                df_4h = df if timeframe == "4h" else fetch_ohlcv(direction_fetch_symbol, "4h", limit=260)
+                df_1d = df if timeframe == "1d" else fetch_ohlcv(direction_fetch_symbol, "1d", limit=260)
                 ev = build_setup_outcome_study(
                     df=df,
                     analyzer=analyse,
@@ -576,6 +616,11 @@ def render(ctx: dict) -> None:
                     conviction_fn=_calc_conviction,
                     signal_plain_fn=signal_plain,
                     direction_key_fn=direction_key,
+                    timeframe=timeframe,
+                    df_4h=df_4h,
+                    df_1d=df_1d,
+                    get_scalping_entry_target_fn=get_scalping_entry_target if callable(get_scalping_entry_target) else None,
+                    sr_lookback_fn=sr_lookback_fn if callable(sr_lookback_fn) else None,
                     setup_filter=setup_key,
                     forward_bars=forward_bars,
                 )
@@ -693,10 +738,24 @@ def render(ctx: dict) -> None:
                 "Share of events where directional return at the selected horizon is positive.",
             ),
             (
+                f"Expectancy @+{forward_bars}",
+                f"{float(summary.get('expectancy', 0.0)):+.2f}%",
+                "Mean directional return per event at the selected horizon. This is the simplest class edge metric.",
+            ),
+            (
                 "Best Hold Window",
                 best_window,
                 "Forward-bar range where mean directional edge is strongest. "
                 "'No positive edge' means none of the tested windows had positive mean edge.",
+            ),
+            (
+                "Payoff Ratio",
+                (
+                    f"{float(summary.get('payoff_ratio', 0.0)):.2f}x"
+                    if np.isfinite(float(summary.get("payoff_ratio", 0.0)))
+                    else "∞"
+                ),
+                "Average winner size divided by average loser size at the selected horizon.",
             ),
             (
                 "Risk Balance",
@@ -715,8 +774,9 @@ def render(ctx: dict) -> None:
 
     st.caption(
         "Simple read: Win Chance shows how often the setup moved in expected direction at the selected horizon; "
+        "Expectancy shows average edge per event; "
         "Best Hold Window shows where edge peaks (or No positive edge if all windows are weak); "
-        "Risk Balance compares favorable move vs adverse move."
+        "Payoff Ratio compares average winner vs loser size; Risk Balance compares favorable move vs adverse move."
     )
 
     if int(summary["occurrences"]) < 30:
@@ -741,20 +801,47 @@ def render(ctx: dict) -> None:
             else float("nan")
         )
         class_mean = float(class_returns_valid.mean()) if not class_returns_valid.empty else float("nan")
+        class_wins = class_returns_valid[class_returns_valid > 0]
+        class_losses = class_returns_valid[class_returns_valid <= 0]
+        class_avg_win = float(class_wins.mean()) if not class_wins.empty else float("nan")
+        class_avg_loss = abs(float(class_losses.mean())) if not class_losses.empty else float("nan")
+        class_payoff = (
+            (class_avg_win / class_avg_loss)
+            if np.isfinite(class_avg_win) and np.isfinite(class_avg_loss) and class_avg_loss > 0
+            else (float("inf") if np.isfinite(class_avg_win) and class_avg_win > 0 else float("nan"))
+        )
         class_ratio, class_risk = _risk_balance(
             float(class_fav),
             float(class_adv),
             avg_outcome=class_median,
             win_rate=class_win_rate,
         )
+        class_quality, class_quality_note = grade_setup_class_quality(
+            occurrences=float(len(grp)),
+            expectancy=float(class_mean) if np.isfinite(class_mean) else 0.0,
+            profit_factor=(
+                (class_avg_win * (class_win_rate / 100.0))
+                / (class_avg_loss * max(1e-9, 1.0 - (class_win_rate / 100.0)))
+            ) if np.isfinite(class_avg_win) and np.isfinite(class_avg_loss) and class_avg_loss > 0 and np.isfinite(class_win_rate) and class_win_rate < 100.0
+            else (float("inf") if np.isfinite(class_avg_win) and class_avg_win > 0 else 0.0),
+            payoff_ratio=class_payoff if np.isfinite(class_payoff) else 0.0,
+            win_rate=float(class_win_rate) if np.isfinite(class_win_rate) else 0.0,
+        )
         class_rows.append(
             {
                 "Setup Class": str(setup_class),
                 "Events": int(len(grp)),
+                "Quality": class_quality,
                 "Win %": f"{class_win_rate:.1f}%" if np.isfinite(class_win_rate) else "N/A",
+                "Expectancy": f"{class_mean:+.2f}%" if np.isfinite(class_mean) else "N/A",
+                "Payoff": (
+                    f"{class_payoff:.2f}x"
+                    if np.isfinite(class_payoff)
+                    else ("∞" if class_avg_win and class_avg_win > 0 else "N/A")
+                ),
                 "Best Window": class_window,
-                "Avg Outcome": f"{class_mean:+.2f}%" if np.isfinite(class_mean) else "N/A",
                 "Risk Note": class_risk,
+                "Quality Note": class_quality_note,
                 "Risk Balance": class_ratio,
             }
         )
@@ -765,16 +852,18 @@ def render(ctx: dict) -> None:
     else:
         class_view = class_view.sort_values(by=["Events"], ascending=False).reset_index(drop=True)
         class_display = class_view[
-            ["Setup Class", "Events", "Win %", "Best Window", "Avg Outcome", "Risk Note"]
+            ["Setup Class", "Events", "Quality", "Win %", "Expectancy", "Payoff", "Best Window", "Risk Note"]
         ].copy()
         _render_hover_table(
             class_display,
             {
                 "Setup Class": "Which Setup Confirm bucket produced the events (TREND+AI / TREND-led / AI-led).",
                 "Events": "How many times this setup class appeared in the selected sample.",
+                "Quality": "Policy grade from sample size + expectancy + payoff ratio + profit factor + win rate.",
                 "Win %": "Percent of events with positive directional return at the selected horizon (+N bars).",
+                "Expectancy": "Average directional return per event at the selected horizon.",
+                "Payoff": "Average winner size divided by average loser size for this class.",
                 "Best Window": "Forward-bar range where this class had the strongest mean directional edge.",
-                "Avg Outcome": "Average directional return at the selected horizon (+N bars).",
                 "Risk Note": "Risk bucket from excursion balance + win-rate + directional outcome quality.",
             },
             table_id="class-summary",
@@ -788,6 +877,20 @@ def render(ctx: dict) -> None:
             b["FavorableRate"] = b["FavorableRate"].map(lambda v: f"{float(v):.1f}%")
             b["MedianDirectionalReturn"] = b["MedianDirectionalReturn"].map(lambda v: f"{float(v):+.2f}%")
             b["AvgDirectionalReturn"] = b["AvgDirectionalReturn"].map(lambda v: f"{float(v):+.2f}%")
+            if "Expectancy" in b.columns:
+                b["Expectancy"] = b["Expectancy"].map(lambda v: f"{float(v):+.2f}%")
+            if "AvgWin" in b.columns:
+                b["AvgWin"] = b["AvgWin"].map(lambda v: f"{float(v):+.2f}%")
+            if "AvgLoss" in b.columns:
+                b["AvgLoss"] = b["AvgLoss"].map(lambda v: f"{float(v):+.2f}%")
+            if "PayoffRatio" in b.columns:
+                b["PayoffRatio"] = b["PayoffRatio"].map(lambda v: ("∞" if not np.isfinite(float(v)) else f"{float(v):.2f}x"))
+            if "ProfitFactor" in b.columns:
+                b["ProfitFactor"] = b["ProfitFactor"].map(lambda v: ("∞" if not np.isfinite(float(v)) else f"{float(v):.2f}"))
+            if "QualityGrade" in b.columns:
+                b["QualityGrade"] = b["QualityGrade"].astype(str)
+            if "QualityNote" in b.columns:
+                b["QualityNote"] = b["QualityNote"].astype(str)
             b["AvgFavorableExcursion"] = b["AvgFavorableExcursion"].map(lambda v: f"{float(v):+.2f}%")
             b["AvgAdverseExcursion"] = b["AvgAdverseExcursion"].map(lambda v: f"{float(v):+.2f}%")
             _render_hover_table(
@@ -798,6 +901,13 @@ def render(ctx: dict) -> None:
                     "FavorableRate": "Percent of events with positive directional return at the selected horizon.",
                     "MedianDirectionalReturn": "Median directional return at selected horizon; robust against outliers.",
                     "AvgDirectionalReturn": "Mean directional return at selected horizon.",
+                    "Expectancy": "Average directional return per event at the selected horizon.",
+                    "AvgWin": "Average positive directional return for this class.",
+                    "AvgLoss": "Average losing directional return magnitude for this class.",
+                    "PayoffRatio": "Average winner size divided by average loser size.",
+                    "ProfitFactor": "Gross positive return divided by gross negative return magnitude.",
+                    "QualityGrade": "Policy grade from sample size + expectancy + payoff structure + win rate.",
+                    "QualityNote": "Plain-language reason for the current quality grade.",
                     "AvgFavorableExcursion": "Average maximum favorable move reached within the forward window.",
                     "AvgAdverseExcursion": "Average maximum adverse move reached within the forward window.",
                 },

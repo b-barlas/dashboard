@@ -3,16 +3,29 @@ from ui.ctx import get_ctx
 import html
 
 import pandas as pd
+from core.confidence import build_confidence_snapshot, build_execution_confidence_snapshot, confidence_bucket
 from core.market_decision import (
     ai_vote_metrics,
-    action_decision_with_reason,
     normalize_action_class,
+    spot_action_decision_with_reason,
     structure_state,
 )
 from core.multitf import HIGHER_TFS, TF_SEQUENCE, TF_WEIGHTS, compute_multitf_alignment, summarize_scope_bias
-from core.signal_contract import strength_from_bias, strength_bucket
+from core.signal_contract import bias_confidence_from_bias
+from core.spot_direction import build_spot_direction_snapshot
 from ui.primitives import render_help_details, render_page_header
 from ui.snapshot_cache import live_or_snapshot
+
+
+def _prepare_closed_frame(df: pd.DataFrame | None, *, min_rows: int = 55) -> pd.DataFrame | None:
+    if df is None:
+        return None
+    if len(df) <= int(min_rows):
+        return None
+    df_eval = df.iloc[:-1].copy()
+    if len(df_eval) < int(min_rows):
+        return None
+    return df_eval
 
 
 def render(ctx: dict) -> None:
@@ -77,17 +90,9 @@ def render(ctx: dict) -> None:
             return "Very Strong"
         return "Extreme"
 
-    def _strength_label(value: float) -> str:
-        bucket = strength_bucket(float(value))
-        if bucket == "STRONG":
-            read = "Strong"
-        elif bucket == "GOOD":
-            read = "Good"
-        elif bucket == "MIXED":
-            read = "Mixed"
-        else:
-            read = "Weak"
-        return f"{float(value):.0f}% ({read.upper()})"
+    def _confidence_label(value: float) -> str:
+        bucket = confidence_bucket(float(value))
+        return f"{float(value):.0f}% ({bucket.title()})"
 
     def _setup_confirm_display(raw_action: str) -> str:
         cls = normalize_action_class(raw_action)
@@ -120,17 +125,17 @@ def render(ctx: dict) -> None:
     def _conviction_quality(rows: list[dict], dominant_bias: str) -> tuple[str, str]:
         if dominant_bias not in {"UPSIDE", "DOWNSIDE"}:
             return "Neutral", WARNING
-        strengths = [
-            float(row.get("strength", 0.0) or 0.0)
+        confidences = [
+            float(row.get("confidence", 0.0) or 0.0)
             for row in rows
             if str(row.get("direction", "")).upper() == dominant_bias
         ]
-        if not strengths:
+        if not confidences:
             return "No confirming TFs", WARNING
-        avg_strength = sum(strengths) / len(strengths)
-        bucket = strength_bucket(avg_strength)
-        color = POSITIVE if bucket in {"STRONG", "GOOD"} else (WARNING if bucket == "MIXED" else NEGATIVE)
-        return f"{avg_strength:.0f}% ({bucket})", color
+        avg_confidence = sum(confidences) / len(confidences)
+        bucket = confidence_bucket(avg_confidence)
+        color = POSITIVE if bucket == "HIGH" else (WARNING if bucket == "MEDIUM" else NEGATIVE)
+        return f"{avg_confidence:.0f}% ({bucket.title()})", color
 
     def _directional_alignment_copy(pct: float, scope_label: str, bias: str, row_count: int) -> str:
         pct_txt = f"{pct:.0f}%"
@@ -308,7 +313,7 @@ def render(ctx: dict) -> None:
             WARNING,
         )
 
-    def _build_rows(coin: str) -> list[dict]:
+    def _build_rows(coin: str, spot_direction: str, spot_confidence: float) -> list[dict]:
         rows: list[dict] = []
         for timeframe in TF_SEQUENCE:
             df = fetch_ohlcv(coin, timeframe, limit=200)
@@ -322,8 +327,8 @@ def render(ctx: dict) -> None:
                         "Delta": "—",
                         "Setup Confirm": "N/A",
                         "Direction": "No Data",
-                        "strength": 0.0,
-                        "Strength": "",
+                        "confidence": 0.0,
+                        "Confidence": "",
                         "AI Ensemble": "N/A",
                         "Tech vs AI Alignment": "N/A",
                         "ADX": "",
@@ -354,8 +359,8 @@ def render(ctx: dict) -> None:
                         "Delta": "—",
                         "Setup Confirm": "N/A",
                         "Direction": "No Data",
-                        "strength": 0.0,
-                        "Strength": "",
+                        "confidence": 0.0,
+                        "Confidence": "",
                         "AI Ensemble": "N/A",
                         "Tech vs AI Alignment": "N/A",
                         "ADX": "",
@@ -376,7 +381,7 @@ def render(ctx: dict) -> None:
                 continue
             analysis = analyse(df_eval)
             direction = direction_key(analysis.signal)
-            strength = round(float(strength_from_bias(float(analysis.bias))), 1)
+            directional_confidence = round(float(bias_confidence_from_bias(float(analysis.bias))), 1)
             try:
                 price_change = ((float(df_eval["close"].iloc[-1]) / float(df_eval["close"].iloc[-2])) - 1.0) * 100.0
             except Exception:
@@ -408,13 +413,26 @@ def render(ctx: dict) -> None:
             )
 
             sig_dir_decision = direction if direction in {"UPSIDE", "DOWNSIDE"} else "WAIT"
-            conviction_lbl, _ = _calc_conviction(sig_dir_decision, ai_dir_key, strength, decision_agreement)
-            structure_val = structure_state(sig_dir_decision, ai_dir_key, strength, decision_agreement)
-            action_raw, _reason_code = action_decision_with_reason(
+            conviction_lbl, _ = _calc_conviction(
                 sig_dir_decision,
-                strength,
-                structure_val,
-                str(conviction_lbl),
+                ai_dir_key,
+                directional_confidence,
+                decision_agreement,
+            )
+            structure_val = structure_state(sig_dir_decision, ai_dir_key, directional_confidence, float(decision_agreement))
+            execution_confidence = build_execution_confidence_snapshot(
+                direction=sig_dir_decision,
+                bias_score=float(analysis.bias),
+                adx_val=float(analysis.adx) if pd.notna(analysis.adx) else float("nan"),
+                structure_state=structure_val,
+                conviction_label=str(conviction_lbl),
+                ai_agreement=float(decision_agreement),
+            )
+            action_raw, _reason_code = spot_action_decision_with_reason(
+                spot_direction,
+                float(spot_confidence),
+                direction,
+                ai_dir_key,
                 decision_agreement,
                 float(analysis.adx) if pd.notna(analysis.adx) else float("nan"),
             )
@@ -427,10 +445,12 @@ def render(ctx: dict) -> None:
                     "Delta": format_delta(price_change) if price_change is not None else "—",
                     "Setup Confirm": _setup_confirm_display(action_raw),
                     "Direction": direction_label(direction),
-                    "strength": strength,
-                    "Strength": _strength_label(strength),
+                    "confidence": float(execution_confidence.score),
+                    "Confidence": _confidence_label(float(execution_confidence.score)),
                     "AI Ensemble": ai_display,
                     "Tech vs AI Alignment": str(conviction_lbl),
+                    "Spot Bias": direction_label(spot_direction),
+                    "Spot Confidence": f"{float(spot_confidence):.0f}%",
                     "ADX": _adx_label(analysis.adx),
                     "SuperTrend": _plain_trend_label(analysis.supertrend),
                     "Ichimoku": _plain_trend_label(analysis.ichimoku),
@@ -528,7 +548,24 @@ def render(ctx: dict) -> None:
             st.error(validation_error)
             return
         with st.spinner("Checking alignment across all timeframes..."):
-            live_rows = _build_rows(coin)
+            df_spot_4h = fetch_ohlcv(coin, "4h", limit=260)
+            df_spot_1d = fetch_ohlcv(coin, "1d", limit=260)
+            spot_snapshot = build_spot_direction_snapshot(
+                df_4h=_prepare_closed_frame(df_spot_4h, min_rows=81),
+                df_1d=_prepare_closed_frame(df_spot_1d, min_rows=81),
+            )
+            confidence_snapshot = build_confidence_snapshot(
+                direction=spot_snapshot.direction,
+                timeframe_alignment=spot_snapshot.timeframe_alignment,
+                structure_quality=spot_snapshot.structure_quality,
+                trend_quality=spot_snapshot.trend_quality,
+                regime_quality=spot_snapshot.regime_quality,
+                location_quality=spot_snapshot.location_quality,
+                timeframe_conflict=spot_snapshot.timeframe_conflict,
+                degraded_data=spot_snapshot.degraded_data,
+                range_regime=spot_snapshot.range_regime,
+            )
+            live_rows = _build_rows(coin, spot_snapshot.direction, float(confidence_snapshot.score))
             valid_live = [row for row in live_rows if row["direction"] in {"UPSIDE", "DOWNSIDE", "NEUTRAL"}]
             rows = live_rows
             from_cache = False
@@ -554,6 +591,8 @@ def render(ctx: dict) -> None:
                 "coin": coin,
                 "rows": rows,
                 "metrics": metrics,
+                "spot_direction": str(spot_snapshot.direction),
+                "spot_confidence": float(confidence_snapshot.score),
                 "from_cache": from_cache,
                 "cache_ts": cache_ts,
             }
@@ -567,6 +606,8 @@ def render(ctx: dict) -> None:
 
     rows = payload["rows"]
     metrics = payload["metrics"]
+    spot_direction = str(payload.get("spot_direction") or "NEUTRAL")
+    spot_confidence = float(payload.get("spot_confidence") or 0.0)
 
     if payload.get("from_cache"):
         st.warning(f"Live multi-timeframe data was unavailable. Showing cached snapshot from {payload.get('cache_ts')}.")
@@ -635,6 +676,11 @@ def render(ctx: dict) -> None:
     st.markdown(
         "<div class='panel-box' style='padding:12px 16px;'>"
         + _pill(
+            f"Spot Bias · {direction_label(spot_direction)} · {spot_confidence:.0f}%",
+            POSITIVE if spot_direction == "UPSIDE" else (NEGATIVE if spot_direction == "DOWNSIDE" else WARNING),
+            "Higher-timeframe spot bias from 1D + 4H with confidence score.",
+        )
+        + _pill(
             f"Higher-TF · {direction_label(metrics['higher_tf_bias'])} · {metrics['higher_tf_read']}",
             higher_color,
             "Structure-only read from 1h / 4h / 1d.",
@@ -645,14 +691,14 @@ def render(ctx: dict) -> None:
             "Timing read from 5m / 15m. Useful for entry timing, not structure by itself.",
         )
         + _pill(
-            f"Avg Strength · {metrics['avg_strength']:.0f}%",
+            f"Avg Confidence · {metrics['avg_confidence']:.0f}%",
             ACCENT,
-            "Average raw strength across all usable timeframes.",
+            "Average selected-timeframe confidence across all usable timeframes.",
         )
         + _pill(
-            f"Confirming TF Strength · {conviction_quality_label}",
+            f"Confirming Confidence · {conviction_quality_label}",
             conviction_quality_color,
-            "Average strength of only the timeframes that support the current directional bias.",
+            "Average confidence of only the timeframes that support the current directional bias.",
         )
         + _pill(
             f"Neutral TFs · {metrics['neutral_count']}",
@@ -669,7 +715,7 @@ def render(ctx: dict) -> None:
         body_html=(
             "<b>1.</b> Start with <b>Higher-TF Bias</b>. That is the structural layer and usually matters most.<br>"
             "<b>2.</b> Then read <b>Directional Alignment</b>. It measures weighted direction agreement, not full setup quality by itself.<br>"
-            "<b>3.</b> Check <b>Confirming TF Strength</b>. That tells you how strong the timeframes supporting the current bias are on average.<br>"
+            "<b>3.</b> Check <b>Confirming Confidence</b>. That tells you how strong the supporting timeframes look on their own confidence model.<br>"
             "<b>4.</b> Use <b>Short-TF Timing</b> as confirmation. If 5m/15m disagree with 1h/4h/1d, the structure may still be valid but entry timing is noisy.<br>"
             "<b>5.</b> If coverage is partial, trust the result less. Missing timeframes reduce confidence even when the visible alignment looks clean.<br>"
             "<b>6.</b> A `*` in <b>AI Ensemble</b> means the ML layer fell back to neutral for safety on that timeframe.<br>"
@@ -683,9 +729,9 @@ def render(ctx: dict) -> None:
             "<b>Timeframe</b>: the candle interval being checked.<br>"
             "<b>Layer</b>: 5m/15m are timing; 1h/4h/1d are structural.<br>"
             "<b>Δ (%)</b>: last closed-candle change for that timeframe.<br>"
-            "<b>Setup Confirm</b>: per-timeframe setup context using the same normalized classes as Spot-style snapshot logic. It is not a standalone trade command.<br>"
+            "<b>Setup Confirm</b>: per-timeframe confirmation of the global spot bias from 1D + 4H. It is not a standalone trade command.<br>"
             "<b>Direction</b>: Upside / Downside / Neutral technical bias for that timeframe.<br>"
-            "<b>Strength</b>: direction-agnostic signal power from the same analysis core used across the dashboard.<br>"
+            "<b>Confidence</b>: selected-timeframe confidence for that row. It is separate from the global spot-bias confidence shown in the pill above.<br>"
             "<b>AI Ensemble</b>: ML directional read plus vote count on that timeframe. `*` and `Fallback` mean the AI model could not form a reliable view and was shown as Neutral for safety.<br>"
             "<b>Tech vs AI Alignment</b>: conviction quality between technical structure and AI context.<br>"
             "<b>Show advanced columns</b>: adds full technical regime fields from the Spot-style breakdown for each timeframe.<br>"
@@ -700,7 +746,7 @@ def render(ctx: dict) -> None:
         "Δ (%)",
         "Setup Confirm",
         "Direction",
-        "Strength",
+        "Confidence",
         "AI Ensemble",
         "Tech vs AI Alignment",
     ]
@@ -747,7 +793,7 @@ def render(ctx: dict) -> None:
             "Δ (%)": row["Delta"],
             "Setup Confirm": row["Setup Confirm"],
             "Direction": row["Direction"],
-            "Strength": row["Strength"],
+            "Confidence": row["Confidence"],
             "AI Ensemble": row["AI Ensemble"],
             "Tech vs AI Alignment": row["Tech vs AI Alignment"],
         }
@@ -776,7 +822,7 @@ def render(ctx: dict) -> None:
                 "Δ (%)": row["Delta"],
                 "Setup Confirm": row["Setup Confirm"],
                 "Direction": row["Direction"],
-                "Strength": row["Strength"],
+                "Confidence": row["Confidence"],
                 "AI Ensemble": row["AI Ensemble"],
                 "Tech vs AI Alignment": row["Tech vs AI Alignment"],
                 "ADX": row["ADX"],
@@ -801,7 +847,7 @@ def render(ctx: dict) -> None:
         df_rows.style
         .map(_style_delta, subset=["Δ (%)"])
         .map(_style_setup_confirm, subset=["Setup Confirm"])
-        .map(_style_indicator, subset=["Direction", "Strength", "AI Ensemble"])
+        .map(_style_indicator, subset=["Direction", "Confidence", "AI Ensemble"])
         .map(_style_alignment, subset=["Tech vs AI Alignment"])
         .map(_style_layer, subset=["Layer"])
     )
@@ -826,6 +872,8 @@ def render(ctx: dict) -> None:
     export_df = pd.DataFrame(export_rows)
     export_df = export_df[[col for col in base_columns + advanced_columns if col in export_df.columns]]
     export_df["Dominant Bias"] = direction_label(metrics["dominant_bias"])
+    export_df["Spot Bias"] = direction_label(spot_direction)
+    export_df["Spot Confidence %"] = round(float(spot_confidence), 2)
     export_df["Directional Alignment %"] = round(metrics["weighted_alignment_pct"], 2)
     export_df["Directional Alignment Summary"] = overall_alignment_copy
     export_df["Higher-TF Bias"] = direction_label(metrics["higher_tf_bias"])
@@ -833,7 +881,7 @@ def render(ctx: dict) -> None:
     export_df["Higher-TF Bias Summary"] = higher_bias_copy
     export_df["Short-TF Timing"] = direction_label(metrics["tactical_bias"])
     export_df["Short-TF Timing Read"] = metrics["tactical_read"]
-    export_df["Confirming TF Strength"] = conviction_quality_label
+    export_df["Confirming Confidence"] = conviction_quality_label
     export_df["Coverage Summary"] = f"{metrics['coverage_count']}/{metrics['coverage_total']} ({metrics['coverage_read']})"
     export_csv = export_df.to_csv(index=False).encode("utf-8")
     st.download_button(

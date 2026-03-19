@@ -94,7 +94,7 @@ class SetupBacktestTabContractTests(unittest.TestCase):
             "Event Time": [ts[100], ts[120]],
             "Setup Confirm": ["TREND-led", "AI-led"],
             "Direction": ["Upside", "Downside"],
-            "Strength": [61.0, 58.0],
+            "Confidence": [74.0, 68.0],
             "AI Votes": ["2/3", "3/3"],
             "Event Price": [110.0, 112.0],
             "End Price (+10)": [112.0, 110.0],
@@ -164,6 +164,9 @@ class SetupBacktestTabContractTests(unittest.TestCase):
         self.assertIn("conviction_fn", kwargs)
         self.assertIn("signal_plain_fn", kwargs)
         self.assertIn("direction_key_fn", kwargs)
+        self.assertEqual(kwargs["timeframe"], "3m")
+        self.assertIn("df_4h", kwargs)
+        self.assertIn("df_1d", kwargs)
 
 
 if __name__ == "__main__":

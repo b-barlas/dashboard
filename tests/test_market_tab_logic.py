@@ -4,17 +4,27 @@ from unittest.mock import patch
 import pandas as pd
 
 from tabs.market_tab import (
+    _audit_scan_summary_lines,
     _ai_fallback_note,
+    _build_custom_scan_universe,
     _build_market_cap_map,
+    _candidate_scan_symbols,
     _canonical_pair_base,
+    _coingecko_coin_id_fallback_available,
+    _confidence_badge,
+    _custom_watchlist_fallback_coin_id,
     _custom_watchlist_enrichment_coverage,
+    _custom_watchlist_missing_status,
     _delta_fallback_symbol,
+    _direction_fetch_symbol,
     _filter_scan_symbols,
+    _fetch_market_scan_ohlcv,
     _healthy_empty_seen_for_sig,
     _healthy_empty_registry,
     _last_good_registry,
     _last_good_snapshot_for_sig,
     _normalize_custom_bases,
+    _consume_market_custom_clear,
     _market_scan_signature,
     _market_data_mode,
     _next_refill_candidate_batch,
@@ -24,6 +34,7 @@ from tabs.market_tab import (
     _remember_display_scan_state,
     _resolve_notice_scan_state,
     _resolve_display_scan_state,
+    _queue_market_custom_clear,
     _scan_candidate_pool_size,
     _merge_market_cap_maps,
     _market_result_priority_key,
@@ -37,14 +48,192 @@ from tabs.market_tab import (
     _should_use_major_fallback,
     _should_use_cached_scan,
     _fetch_ticker_delta_once,
+    _extract_ai_verdict,
+    _extract_confidence_label,
     _setup_confirm_priority,
     _setup_status_summary,
+    _share_line,
+    _share_line_against_total,
     _sync_market_cap_cells,
     _underfilled_universe_message,
 )
+from core.symbols import is_stable_base_symbol
+from threading import Lock
 
 
 class MarketTabLogicTests(unittest.TestCase):
+    def test_audit_scan_summary_lines_show_attempted_vs_displayed(self):
+        lines = _audit_scan_summary_lines(
+            displayed_rows=50,
+            attempted_count=87,
+            produced_count=58,
+            skipped_count=29,
+            ranked_out_count=8,
+            source_label="LIVE",
+        )
+        self.assertEqual(lines[0], "**Rows shown:** `50`")
+        self.assertIn("attempted `87`", lines[1])
+        self.assertIn("produced `58`", lines[1])
+        self.assertIn("skipped `29`", lines[1])
+        self.assertIn("ranked out `8`", lines[1])
+
+    def test_coin_id_fallback_availability_detects_missing_dependency_marker(self):
+        def _missing(*_args, **_kwargs):
+            return None
+
+        _missing._codex_missing_dep = True
+
+        self.assertFalse(_coingecko_coin_id_fallback_available(_missing))
+        self.assertTrue(_coingecko_coin_id_fallback_available(lambda *_args, **_kwargs: None))
+
+    def test_extract_ai_verdict_strips_votes_and_degraded_marker(self):
+        self.assertEqual(_extract_ai_verdict("Upside (2/3)"), "Upside")
+        self.assertEqual(_extract_ai_verdict("Neutral (0/3) *"), "Neutral")
+
+    def test_extract_confidence_label_reads_badge_suffix(self):
+        self.assertEqual(_extract_confidence_label("81% (Medium)"), "Medium")
+        self.assertEqual(_extract_confidence_label("44% (Very Low)"), "Very Low")
+
+    def test_share_line_formats_counts_in_requested_order(self):
+        line = _share_line({"Watch": 6, "Ready": 3, "Skip": 1}, ["Ready", "Watch", "Skip"])
+        self.assertEqual(line, "Ready: 3 (30%) • Watch: 6 (60%) • Skip: 1 (10%)")
+
+    def test_share_line_against_total_handles_sparse_counts(self):
+        line = _share_line_against_total({"Emerging Upside": 2}, ["Emerging Upside", "Emerging Downside"], 10)
+        self.assertEqual(line, "Emerging Upside: 2 (20%) • Emerging Downside: 0 (0%)")
+
+    def test_shared_stable_base_helper_recognizes_usd1(self):
+        self.assertTrue(is_stable_base_symbol("USD1"))
+        self.assertTrue(is_stable_base_symbol("usd1"))
+        self.assertTrue(is_stable_base_symbol("USDG"))
+        self.assertTrue(is_stable_base_symbol("usdg"))
+
+    def test_queue_market_custom_clear_marks_pending_and_clears_applied_watchlist(self):
+        state = {
+            "market_custom_coin_input": "BTC,ETH",
+            "market_custom_bases_applied": ["BTC", "ETH"],
+        }
+        _queue_market_custom_clear(state)
+        self.assertTrue(state["market_clear_custom_pending"])
+        self.assertEqual(state["market_custom_bases_applied"], [])
+        self.assertEqual(state["market_custom_coin_input"], "BTC,ETH")
+
+    def test_consume_market_custom_clear_removes_input_before_widget_creation(self):
+        state = {
+            "market_clear_custom_pending": True,
+            "market_custom_coin_input": "BTC,ETH",
+            "market_custom_bases_applied": ["BTC", "ETH"],
+        }
+        _consume_market_custom_clear(state)
+        self.assertNotIn("market_clear_custom_pending", state)
+        self.assertNotIn("market_custom_coin_input", state)
+        self.assertEqual(state["market_custom_bases_applied"], [])
+
+    def test_candidate_scan_symbols_excludes_usd1_when_stable_filter_enabled(self):
+        out = _candidate_scan_symbols(
+            usdt_symbols=["BTC/USDT", "USD1/USDT", "USDG/USDT", "ETH/USDT"],
+            market_rows=[],
+            exclude_stables=True,
+            custom_bases_applied=[],
+        )
+        self.assertEqual(out, ["BTC/USDT", "ETH/USDT"])
+
+    def test_custom_watchlist_missing_status_reports_skipped_symbols(self):
+        out = _custom_watchlist_missing_status(
+            ["COS", "BANANAS31", "TOWNS"],
+            [{"Coin": "BANANAS31"}],
+            [("COS/USDT", "no OHLCV data"), ("TOWNS/USDT", "insufficient candles (23)")],
+        )
+        self.assertEqual(
+            out,
+            [("COS", "no OHLCV data"), ("TOWNS", "insufficient candles (23)")],
+        )
+
+    def test_custom_watchlist_missing_status_marks_unresolved_coin_id_fallback(self):
+        out = _custom_watchlist_missing_status(
+            ["COS", "BANANAS31"],
+            [{"Coin": "BANANAS31"}],
+            [],
+        )
+        self.assertEqual(out, [("COS", "no exchange pair; coin-id unresolved for fallback")])
+
+    def test_custom_watchlist_missing_status_marks_unavailable_coin_id_fallback(self):
+        out = _custom_watchlist_missing_status(
+            ["COS", "BANANAS31"],
+            [{"Coin": "BANANAS31"}],
+            [],
+            coin_id_map={"COS": "contentos"},
+            coingecko_coin_id_fallback_available=False,
+        )
+        self.assertEqual(out, [("COS", "no exchange OHLCV data; CoinGecko fallback unavailable")])
+
+    def test_custom_watchlist_missing_status_marks_empty_coin_id_fallback(self):
+        out = _custom_watchlist_missing_status(
+            ["COS", "BANANAS31"],
+            [{"Coin": "BANANAS31"}],
+            [],
+            coin_id_map={"COS": "contentos"},
+            coingecko_coin_id_fallback_available=True,
+        )
+        self.assertEqual(out, [("COS", "no exchange OHLCV data; CoinGecko fallback returned empty")])
+
+    def test_custom_watchlist_fallback_coin_id_only_applies_in_custom_mode(self):
+        coin_id_map = {"COS": "contentos", "BANANAS31": "banana-gun"}
+        self.assertEqual(
+            _custom_watchlist_fallback_coin_id(
+                "COS/USDT",
+                custom_mode_active=True,
+                coin_id_map=coin_id_map,
+            ),
+            "contentos",
+        )
+        self.assertIsNone(
+            _custom_watchlist_fallback_coin_id(
+                "COS/USDT",
+                custom_mode_active=False,
+                coin_id_map=coin_id_map,
+            )
+        )
+
+    def test_fetch_market_scan_ohlcv_prefers_exchange_before_coin_id_fallback(self):
+        frame = pd.DataFrame({"close": [1.0]})
+
+        def _exchange_fetch(symbol, timeframe, limit=0):
+            return frame
+
+        def _coin_id_fetch(_coin_id, _timeframe, limit=0):
+            raise AssertionError("coin-id fallback should not run when exchange data exists")
+
+        out = _fetch_market_scan_ohlcv(
+            fetch_ohlcv=_exchange_fetch,
+            fetch_coingecko_ohlcv_by_coin_id=_coin_id_fetch,
+            fetch_lock=Lock(),
+            symbol="COS/USDT",
+            timeframe="1h",
+            limit=120,
+            fallback_coin_id="contentos",
+        )
+        self.assertIs(out, frame)
+
+    def test_build_custom_scan_universe_builds_usdt_pairs_from_custom_bases(self):
+        rows = [{"symbol": "COS", "market_cap": 100, "id": "contentos"}]
+
+        def _market_rows_fetch(symbols, vs_currency="usd"):
+            self.assertEqual(tuple(symbols), ("COS", "USD1"))
+            self.assertEqual(vs_currency, "usd")
+            return rows
+
+        unique_market_data, mcap_map, usdt_symbols, candidate_symbol_pool = _build_custom_scan_universe(
+            custom_bases_applied=["COS", "USD1"],
+            get_market_cap_rows_for_symbols=_market_rows_fetch,
+            exclude_stables=True,
+            scan_pool_n=10,
+        )
+        self.assertEqual(usdt_symbols, ["COS/USDT", "USD1/USDT"])
+        self.assertEqual(candidate_symbol_pool, ["COS/USDT"])
+        self.assertEqual(len(unique_market_data), 1)
+        self.assertEqual(mcap_map["COS"], 100)
+
     def test_alias_aware_symbol_filter_keeps_xbt_pair_for_btc_market_row(self):
         symbols = ["XBT/USD", "ETH/USD"]
         market_rows = [{"symbol": "btc"}, {"symbol": "eth"}]
@@ -140,27 +329,75 @@ class MarketTabLogicTests(unittest.TestCase):
             {
                 "Coin": "SOL",
                 "__action_raw": "🟡 ENTER (Trend-Led)",
-                "__structure_state": "FULL",
-                "__strength_val": 90.0,
+                "__confidence_val": 90.0,
+                "__ai_confidence_val": 40.0,
                 "__mcap_val": 500,
             },
             {
                 "Coin": "BTC",
                 "__action_raw": "✅ ENTER (Trend+AI)",
-                "__structure_state": "FULL",
-                "__strength_val": 70.0,
+                "__confidence_val": 70.0,
+                "__ai_confidence_val": 80.0,
                 "__mcap_val": 100,
             },
             {
                 "Coin": "ETH",
                 "__action_raw": "🟡 ENTER (AI-Led)",
-                "__structure_state": "FULL",
-                "__strength_val": 95.0,
+                "__confidence_val": 95.0,
+                "__ai_confidence_val": 95.0,
                 "__mcap_val": 1000,
             },
         ]
         ordered = sorted(rows, key=_market_result_priority_key)
         self.assertEqual([row["Coin"] for row in ordered], ["BTC", "SOL", "ETH"])
+
+    def test_market_result_priority_key_prefers_confidence_when_available(self):
+        rows = [
+            {
+                "Coin": "BTC",
+                "__action_raw": "TREND+AI",
+                "__confidence_val": 62.0,
+                "__ai_confidence_val": 90.0,
+                "__mcap_val": 100,
+            },
+            {
+                "Coin": "ETH",
+                "__action_raw": "TREND+AI",
+                "__confidence_val": 88.0,
+                "__ai_confidence_val": 40.0,
+                "__mcap_val": 100,
+            },
+        ]
+        ordered = sorted(rows, key=_market_result_priority_key)
+        self.assertEqual([row["Coin"] for row in ordered], ["ETH", "BTC"])
+
+    def test_market_result_priority_key_uses_ai_confidence_as_visible_tiebreaker(self):
+        rows = [
+            {
+                "Coin": "BTC",
+                "__action_raw": "TREND+AI",
+                "__confidence_val": 82.0,
+                "__ai_confidence_val": 58.0,
+                "__mcap_val": 100,
+            },
+            {
+                "Coin": "ETH",
+                "__action_raw": "TREND+AI",
+                "__confidence_val": 82.0,
+                "__ai_confidence_val": 76.0,
+                "__mcap_val": 100,
+            },
+        ]
+        ordered = sorted(rows, key=_market_result_priority_key)
+        self.assertEqual([row["Coin"] for row in ordered], ["ETH", "BTC"])
+
+    def test_direction_fetch_symbol_keeps_canonical_requested_symbol_for_htf_context(self):
+        self.assertEqual(_direction_fetch_symbol("BTC/USDT", "XBT/USD", "exchange"), "BTC/USDT")
+        self.assertEqual(_direction_fetch_symbol("BTC/USDT", "BTC/USDT", "coingecko"), "BTC/USDT")
+
+    def test_confidence_badge_formats_bucket(self):
+        self.assertEqual(_confidence_badge(84.0), "84% (High)")
+        self.assertEqual(_confidence_badge(41.0), "41% (Low)")
 
     def test_ai_fallback_note_surfaces_ml_safety_fallback(self):
         note = _ai_fallback_note({"status": "insufficient_features"})

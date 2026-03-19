@@ -75,12 +75,13 @@ def compute_health_decision(
     *,
     direction: str,
     signal_direction: str,
-    strength: float,
+    confidence: float,
     conviction_label: str,
     liq_distance_pct: float | None,
     invalidated: bool,
     levered_pnl_pct: float,
 ) -> dict:
+    quality = float(confidence)
     health_score = 100
     notes: list[str] = []
 
@@ -91,12 +92,12 @@ def compute_health_decision(
         health_score -= 15
         notes.append("no clear technical edge")
 
-    if strength < 50:
+    if quality < 50:
         health_score -= 20
-        notes.append("low strength")
-    elif strength < 60:
+        notes.append("low confidence")
+    elif quality < 60:
         health_score -= 10
-        notes.append("medium strength")
+        notes.append("medium confidence")
 
     if conviction_label == "CONFLICT":
         health_score -= 25

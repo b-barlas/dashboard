@@ -105,7 +105,7 @@ class ScalpBacktestTabContractTests(unittest.TestCase):
             "Event Time": [ts[100], ts[120]],
             "Setup Confirm": ["TREND-led", "AI-led"],
             "Direction": ["Upside", "Downside"],
-            "Strength": [61.0, 58.0],
+            "Confidence": [61.0, 58.0],
             "AI Votes": ["2/3", "3/3"],
             "Event Price": [110.0, 112.0],
             "Target": [111.0, 110.5],
@@ -118,7 +118,7 @@ class ScalpBacktestTabContractTests(unittest.TestCase):
             "Favorable Excursion (%)": [3.5, 2.9],
             "Adverse Excursion (%)": [1.1, 0.8],
             "AI Direction": ["Upside", "Downside"],
-            "Tech vs AI Alignment": ["HIGH", "MEDIUM"],
+            "AI Confidence": [72.0, 66.0],
         }
         for i in range(1, 11):
             ev[f"Price +{i}"] = [110.0 + i * 0.1, 112.0 - i * 0.1]

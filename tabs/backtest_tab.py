@@ -5,7 +5,8 @@ from ui.ctx import get_ctx
 import numpy as np
 import plotly.graph_objs as go
 from core.backtest import _normalize_direction_signal
-from core.signal_contract import strength_from_bias
+from core.confidence import build_execution_confidence_snapshot
+from core.signal_contract import bias_confidence_from_bias
 from ui.primitives import render_help_details, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
@@ -23,6 +24,27 @@ def render(ctx: dict) -> None:
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     run_backtest = get_ctx(ctx, "run_backtest")
 
+    def _raw_backtest_confidence(signal_raw: object, bias_score: float, adx_val: float | None) -> float:
+        sig_plain = _normalize_direction_signal(signal_raw)
+        direction = "UPSIDE" if sig_plain == "LONG" else ("DOWNSIDE" if sig_plain == "SHORT" else "NEUTRAL")
+        directional_confidence = float(bias_confidence_from_bias(float(bias_score)))
+        structure_state = (
+            "TREND" if directional_confidence >= 70.0 else ("EARLY" if directional_confidence >= 55.0 else "NONE")
+        )
+        conviction_label = (
+            "TREND" if directional_confidence >= 70.0 else ("MEDIUM" if directional_confidence >= 55.0 else "WEAK")
+        )
+        return float(
+            build_execution_confidence_snapshot(
+                direction=direction,
+                bias_score=float(bias_score),
+                adx_val=adx_val,
+                structure_state=structure_state,
+                conviction_label=conviction_label,
+                ai_agreement=0.0,
+            ).score
+        )
+
     render_page_header(
         st,
         title="Model Lab",
@@ -31,12 +53,13 @@ def render(ctx: dict) -> None:
             "<ul style='margin:0.5rem 0 0 1rem; padding:0; line-height:1.72;'>"
             "<li>The engine slides a window through historical candles and runs the <b>full technical analysis</b> "
             "(EMA, RSI, MACD, SuperTrend, Ichimoku, Bollinger, ADX, etc.) at each step.</li>"
-            "<li>When the <b>Signal</b> is Upside or Downside <b>and</b> the <b>Strength Score</b> exceeds your threshold, "
+            "<li>When the <b>Signal</b> is Upside or Downside <b>and</b> the <b>Confidence</b> exceeds your threshold, "
             "a simulated trade is opened at the <b>next candle open</b> "
             "(with your slippage assumption applied).</li>"
             "<li>The trade is automatically closed after <b>N candles</b> (your exit setting). "
             "Commission is deducted on both entry and exit.</li>"
-            "<li>This tests the raw <b>Direction + Strength</b> engine quality. "
+            "<li>This tests the raw <b>Direction + Confidence</b> engine quality. "
+            "Here, <b>Confidence</b> is the selected-timeframe execution confidence, not the higher-timeframe spot confidence metric. "
             "Use this as diagnostics to calibrate threshold and hold duration.</li>"
             "</ul>"
         ),
@@ -60,12 +83,12 @@ def render(ctx: dict) -> None:
         limit = st.slider("Number of Candles", 100, 1000, step=100, value=500)
     with col2:
         threshold = st.slider(
-            "Strength Threshold (%)",
+            "Confidence Threshold (%)",
             35,
             85,
             step=5,
             value=55,
-            help="Only take trades with strength above this level",
+            help="Only take trades with tactical confidence above this level",
             key="backtest_threshold",
         )
         exit_after = st.slider("Exit After N Candles", 1, 20, step=1, value=5)
@@ -132,7 +155,7 @@ def render(ctx: dict) -> None:
 
     if result_df.empty:
         st.warning("No signals generated for the given threshold.")
-        actionable_strengths: list[float] = []
+        actionable_confidences: list[float] = []
         long_count = 0
         short_count = 0
         if callable(analyse):
@@ -149,16 +172,16 @@ def render(ctx: dict) -> None:
                     elif sig == "SHORT":
                         short_count += 1
                     if sig in {"LONG", "SHORT"}:
-                        actionable_strengths.append(float(strength_from_bias(float(a.bias))))
+                        actionable_confidences.append(_raw_backtest_confidence(a.signal, float(a.bias), getattr(a, "adx", float("nan"))))
                 except Exception:
                     continue
 
-        if actionable_strengths:
-            arr = np.array(actionable_strengths, dtype=float)
+        if actionable_confidences:
+            arr = np.array(actionable_confidences, dtype=float)
             p70 = float(np.percentile(arr, 70))
             suggested = int(max(35, min(85, round(p70 / 5) * 5)))
             st.info(
-                f"Diagnostics: {len(actionable_strengths)} actionable bars found "
+                f"Diagnostics: {len(actionable_confidences)} actionable bars found "
                 f"(Upside {long_count}, Downside {short_count}), but very few pass threshold {threshold}%. "
                 f"Suggested threshold: {suggested}%."
             )
@@ -173,7 +196,7 @@ def render(ctx: dict) -> None:
                 return
         else:
             if callable(analyse):
-                bias_strengths: list[float] = []
+                tactical_confidences: list[float] = []
                 bias_long = 0
                 bias_short = 0
                 for i in range(55, len(df) - exit_after - 1):
@@ -184,24 +207,23 @@ def render(ctx: dict) -> None:
                     try:
                         a = analyse(df_slice)
                         bias = float(a.bias)
-                        s = float(strength_from_bias(bias))
-                        bias_strengths.append(s)
+                        tactical_confidences.append(_raw_backtest_confidence(a.signal, bias, getattr(a, "adx", float("nan"))))
                         if bias >= 60:
                             bias_long += 1
                         elif bias <= 40:
                             bias_short += 1
                     except Exception:
                         continue
-                if bias_strengths:
-                    avg_s = float(np.mean(bias_strengths))
-                    p75_s = float(np.percentile(np.array(bias_strengths), 75))
+                if tactical_confidences:
+                    avg_s = float(np.mean(tactical_confidences))
+                    p75_s = float(np.percentile(np.array(tactical_confidences), 75))
                     st.info(
                         "No actionable Upside/Downside bars were produced by the full signal gate in this window. "
                         f"Bias-only diagnostics: Upside candidates={bias_long}, Downside candidates={bias_short}, "
-                        f"avg strength={avg_s:.1f}%, 75th percentile={p75_s:.1f}%."
+                        f"avg confidence={avg_s:.1f}%, 75th percentile={p75_s:.1f}%."
                     )
                     st.caption(
-                        "Interpretation: strength exists, but quality filters can still force WAIT. "
+                        "Interpretation: directional bias exists, but tactical confidence is still not high enough to pass the gate. "
                         "Try lower timeframe, more candles, or a less selective market phase."
                     )
                 else:
@@ -352,8 +374,8 @@ def render(ctx: dict) -> None:
     styled_df["Entry"] = styled_df["Entry"].apply(lambda x: f"${x:,.4f}")
     styled_df["Exit"] = styled_df["Exit"].apply(lambda x: f"${x:,.4f}")
     styled_df["PnL (%)"] = styled_df["PnL (%)"].apply(lambda x: f"{x:+.2f}%")
-    if "Strength" in styled_df.columns:
-        styled_df["Strength"] = styled_df["Strength"].apply(lambda x: f"{x:.1f}%")
+    if "Confidence" in styled_df.columns:
+        styled_df["Confidence"] = styled_df["Confidence"].apply(lambda x: f"{x:.1f}%")
     if "Bias" in styled_df.columns:
         styled_df["Bias"] = styled_df["Bias"].apply(lambda x: f"{x:.1f}%")
     if "Regime Score" in styled_df.columns:
@@ -365,7 +387,7 @@ def render(ctx: dict) -> None:
         summary="Trade History Column Guide (?)",
         body_html=(
             f"{_tip('Signal', 'Direction opened by the model at that bar (Upside/Downside).')} | "
-            f"{_tip('Strength', 'Signal power score at entry (0-100).')} | "
+            f"{_tip('Confidence', 'Selected-timeframe tactical confidence at entry (0-100). This is not higher-timeframe spot confidence.')} | "
             f"{_tip('PnL (%)', 'Net trade return after commission and slippage assumptions.')} | "
             f"{_tip('Regime', 'Market state around the trade (TREND/RANGE/MIXED).')} | "
             f"{_tip('Regime Score', 'Numeric trend-quality context used by the engine at entry.')}"

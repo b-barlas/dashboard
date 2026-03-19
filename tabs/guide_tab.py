@@ -59,16 +59,19 @@ Technical engine computes 4 category blocks in range **[-1, +1]**:
 
 Those are combined into a final score, then converted:
 - `bias = (final_score + 1) / 2 * 100`  (0-100)
-- `strength = (abs(bias - 50) / 50) ^ 0.70 * 100`  (0-100, direction-agnostic)
+- `bias_confidence = (abs(bias - 50) / 50) ^ 0.70 * 100`  (0-100, direction-agnostic quality score)
 
-Strength buckets used in UI:
-- 0-39: Weak
-- 40-59: Mixed
-- 60-74: Good
-- 75-100: Strong
+Execution confidence buckets:
+- 0-39: Very Low
+- 40-59: Low
+- 60-79: Medium
+- 80-100: High
 
-Direction comes from technical signal mapping:
-- Upside / Downside / Neutral
+Spot-facing tabs now separate:
+- `Direction`: higher-timeframe technical bias from closed `1D + 4H` candles
+- `Confidence`: quality score for that spot direction
+- `AI Ensemble`: higher-timeframe AI bias from a separate AI engine
+- `AI Confidence`: quality score for that higher-timeframe AI verdict
 
 Ensemble AI (3 models) is used as confirmation:
 - Gradient Boosting 45%
@@ -87,9 +90,9 @@ Main table columns:
 - Coin, Price ($), Delta (%)
 - Setup Confirm
 - Direction
-- Strength
+- Confidence
 - AI Ensemble
-- Tech vs AI Alignment
+- AI Confidence
 - R:R, Entry/Stop/Target, Scalp Opportunity
 - Optional advanced indicator columns
 
@@ -98,29 +101,109 @@ Scanner input modes:
 - Custom mode: enter up to 10 symbols in Custom Coins, click Run Scan, and scanner analyzes only that watchlist
 - Top N control is disabled while custom mode is active
 - Custom watchlist mode does not depend on the live top-volume provider universe; it scans requested symbols directly
-- Selected timeframe controls candle context used for Direction/Strength, levels, and Delta
+- Selected timeframe controls tactical candle context, levels, scalp gating, and Delta
+- Visible `Direction` + `Confidence` come from closed `1D + 4H` spot bias
+- Visible `AI Ensemble` comes from a separate closed `1D + 4H` AI bias engine
+- Visible `AI Confidence` scores the quality of that HTF AI verdict
+
+How the 5 key columns are calculated:
+
+1. `Direction` (main spot direction)
+- Uses only closed `1D + 4H` candles
+- Technical engine builds a score for each timeframe from:
+  - structure
+  - trend
+  - momentum
+  - regime / location
+- `1D` leads and `4H` confirms
+- Final logic is intentionally strict:
+  - if `1D` is Neutral, final Direction becomes Neutral
+  - if `1D` and `4H` conflict, final Direction becomes Neutral
+  - otherwise final output is `Upside`, `Downside`, or `Neutral`
+
+2. `Confidence` (quality of Direction)
+- This is **not** a second direction column
+- It answers: “How trustworthy is the current technical Direction?”
+- Formula:
+  - 30% timeframe alignment
+  - 25% structure quality
+  - 20% trend quality
+  - 15% regime quality
+  - 10% location quality
+- Confidence is capped lower on purpose when:
+  - Direction is Neutral
+  - timeframes conflict
+  - structure is weak
+  - data is degraded
+  - regime is range/chop
+
+3. `AI Ensemble` (AI version of spot direction)
+- Uses a separate AI engine on closed `1D + 4H` candles
+- It does **not** copy the technical Direction formula
+- For each timeframe, AI quality comes from:
+  - 35% probability edge
+  - 25% agreement quality
+  - 25% persistence across recent closed bars
+  - 15% stability (not flip-flopping)
+- `1D` leads and `4H` confirms
+- Final output is again `Upside`, `Downside`, or `Neutral`
+- The 3 dots show how many of the 3 AI models support that final HTF AI verdict
+
+4. `AI Confidence` (quality of AI Ensemble)
+- This answers: “How trustworthy is the current HTF AI verdict?”
+- Formula:
+  - 40% conviction quality
+  - 25% combined HTF AI score
+  - 15% timeframe alignment
+  - 10% consensus quality
+  - 10% model support
+- AI Confidence is capped lower when:
+  - AI verdict is Neutral
+  - `1D` / `4H` AI conflict
+  - AI data degraded/fallback
+- directional call has weak model support
+
+Coin inline badge:
+- `Emerging Upside` / `Emerging Downside` can appear next to the ticker when confirmed HTF Direction is still Neutral, but 4H technical structure is already leading and AI confirms the same side while 1D is not opposing yet
+- Treat this as an early-attention signal, not as a replacement for confirmed Direction
+
+5. `Setup Confirm` (final confirmation class)
+- This is **not** the main direction
+- It answers: “Given the main spot direction, is the selected timeframe good enough right now?”
+- First, spot `Direction + Confidence` must be valid
+- Then selected timeframe execution is checked from:
+  - local structure quality
+  - local trend quality
+  - local regime quality
+  - local location quality
+  - local spot-style risk/reward from support / resistance / EMA21 / ATR
+- `TREND-led` = pure technical selected-timeframe confirmation
+- `AI-led` = pure AI confirmation, but it still must pass the same execution safety gates
+- `TREND+AI` = both motors are independently strong and also elite together
+- `WATCH` = the idea is alive, but timing is not clean yet
+- `SKIP` = edge is too weak, too conflicted, or badly located right now
 
 Setup Confirm classes (final confirmation class):
-- TREND+AI: strongest class (trend and AI align)
-- TREND-led: trend leads; AI works as guardrail
-- AI-led: AI leads; trend works as guardrail
-- WATCH: setup exists but confirmation incomplete
-- SKIP: no direction, conflict, or weak edge
+- TREND+AI: both technicals and AI agree, and both are very strong
+- TREND-led: the main direction exists, and the selected timeframe technical picture now supports it
+- AI-led: the main direction exists, and AI support is strong enough for a setup
+- WATCH: the idea is still alive, but timing is not clean yet
+- SKIP: the edge is too weak or the setup is not worth tracking now
 
 Scalp Opportunity is separate from Setup Confirm.
 It appears only if all execution gates pass:
 - Direction match
-- Timeframe-adaptive R:R / ADX / Strength thresholds
+- Timeframe-adaptive R:R / ADX / Confidence thresholds
 - No tech/AI conflict
 - Valid entry/stop/target
 
 Timeframe gate matrix:
-- 5m / 15m: R:R >= 1.30, ADX >= 18, Strength >= 52
-- 1h: R:R >= 1.40, ADX >= 18, Strength >= 52
-- 4h / 1d: R:R >= 1.70, ADX >= 22, Strength >= 60
+- 5m / 15m: R:R >= 1.30, ADX >= 18, Confidence >= 52
+- 1h: R:R >= 1.40, ADX >= 18, Confidence >= 52
+- 4h / 1d: R:R >= 1.70, ADX >= 22, Confidence >= 60
 
 Important consistency rule:
-- Direction/Strength and plan levels are computed from **closed candles**
+- Spot Direction/Confidence and tactical plan levels are computed from **closed candles**
 - Price column also reflects closed-candle close in scanner context
 
 Mode badges:
@@ -142,16 +225,28 @@ Read in this order:
 - Delta (%)
 - Setup Confirm
 - Direction
-- Strength
+- Confidence
 - AI Ensemble
-- Tech vs AI Alignment
+- AI Confidence
+
+Meaning:
+- `Direction`: higher-timeframe technical spot bias from `1D + 4H`
+- `AI Ensemble`: higher-timeframe AI bias from `1D + 4H`; the 3 dots show how many ensemble models support that final AI direction
+- `AI Confidence`: quality score of that higher-timeframe AI verdict
+
+These 5 columns use the same core logic as Market tab:
+- `Direction`: HTF technical bias (`1D + 4H`)
+- `Confidence`: quality of that HTF technical bias
+- `AI Ensemble`: HTF AI bias (`1D + 4H`)
+- `AI Confidence`: quality of that HTF AI verdict
+- `Setup Confirm`: selected-timeframe confirmation layer built on top of those HTF reads
 
 Setup Confirm classes:
-- TREND+AI: strongest confirmation class
-- TREND-led: trend leads, AI acts as guardrail
-- AI-led: AI leads, trend acts as guardrail
-- WATCH: setup exists, confirmation incomplete
-- SKIP: no actionable setup
+- TREND+AI: technicals and AI both agree, and both are strong
+- TREND-led: technicals support the main direction
+- AI-led: AI support is strong enough for the main direction
+- WATCH: keep it on the radar, but do not rush
+- SKIP: leave it alone for now
 
 2) Technical Regime Breakdown:
 - Trend Structure: SuperTrend, Ichimoku, VWAP, ADX, PSAR
@@ -171,6 +266,7 @@ Setup Confirm classes:
 Important:
 - Decision fields and levels are based on closed candles.
 - Spot tab uses the same core signal/decision engine as Market tab.
+- Visible `Direction` + `Confidence` are the same higher-timeframe spot read used in Market.
             """,
             "core",
         ),
@@ -181,7 +277,7 @@ Live position management tab.
 Main outputs:
 - Raw PnL, levered PnL, funding effect, net PnL
 - Estimated liquidation distance (simple model)
-- Direction / Strength / AI Ensemble / Alignment summary
+- Direction / Confidence / AI Ensemble / AI Confidence summary
 - Technical Invalidation Line (hard risk line)
 - Position health decision block (HOLD / REDUCE / EXIT style guidance)
 - Optional scalp setup block with gate reasons when unavailable
@@ -309,12 +405,13 @@ Single-coin timeframe alignment view across 5m / 15m / 1h / 4h / 1d.
 Use it to:
 - check whether short-term timing agrees with higher-timeframe structure
 - see which layer is leading (timing vs higher timeframe)
-- confirm the same read already seen in Market / Spot / Position
+- confirm the same spot-bias read already seen in Market / Spot / Position
 
 Read order:
 - Higher-TF Bias first (1h / 4h / 1d)
 - Weighted Alignment second
 - Timing Layer third (5m / 15m)
+- Confidence last, as the timeframe-level quality read for that row
 
 Higher timeframes carry more weight because they usually define the stronger structural regime.
 Neutral timeframes intentionally dilute the weighted score, so high alignment really means broad agreement.
@@ -388,11 +485,11 @@ Outputs:
             """
 Signal-engine diagnostics backtest.
 Use it to calibrate:
-- strength threshold
+- confidence threshold
 - fixed holding bars
 - fee/slippage assumptions
 
-This mode validates the raw Direction + Strength engine, not the full setup class model.
+This mode validates the raw Direction + Confidence engine, not only the higher-timeframe spot Direction model.
             """,
             "risk",
         ),
@@ -424,7 +521,7 @@ Scalp outcome study for execution-ready scalp events.
 
 Uses the same market scalp pipeline:
 - top-volume multi-coin scan (stablecoins excluded by default)
-- scalp gate (timeframe-adaptive R:R / ADX / Strength thresholds)
+- scalp gate (timeframe-adaptive R:R / ADX / Confidence thresholds)
 - generated scalp levels (entry / stop / target)
 
 Outputs:
@@ -464,7 +561,7 @@ Execution/indicator data order:
 1. Exchange OHLCV/ticker from the active UK-safe exchange
 2. If exchange fails, app falls back to the next UK-safe exchange
 
-This means trade-critical fields (price, candles, indicators, Setup Confirm/Direction/Strength)
+This means trade-critical fields (price, candles, indicators, Setup Confirm/Direction/Confidence)
 remain exchange-driven even when enrichment providers are rate-limited.
 Enrichment fields (for example Market Cap) may show as `—` in exchange-only mode.
 
@@ -534,10 +631,10 @@ Use this 60-second checklist:
 
 1. **Market tab**
 - Scanner table loads and shows multiple rows
-- Setup Confirm / Direction / AI columns are not empty
+- Setup Confirm / Direction / Confidence / AI Ensemble / AI Confidence are not empty
 
 2. **Spot tab**
-- Analyse runs and shows Direction + Strength + AI + Tech vs AI Alignment
+- Analyse runs and shows Direction + Confidence + HTF AI + AI Confidence
 - Spot Execution Plan appears
 
 3. **Position tab**

@@ -34,11 +34,19 @@ def _signal_plain_fallback(signal: str) -> str:
     return "WAIT"
 
 
+def _missing_fetch_coingecko_ohlcv_by_coin_id(*_args, **_kwargs):
+    return None
+
+
+_missing_fetch_coingecko_ohlcv_by_coin_id._codex_missing_dep = True
+
+
 _OPTIONAL_DEP_DEFAULTS: dict[str, object] = {
     # UI/helper fallbacks: safe to inject if a helper import changed.
     "direction_key": _direction_key_fallback,
     "direction_label": _direction_label_fallback,
     "signal_plain": _signal_plain_fallback,
+    "fetch_coingecko_ohlcv_by_coin_id": _missing_fetch_coingecko_ohlcv_by_coin_id,
     "sanitize_trading_terms": lambda t: "" if t is None else str(t),
     "style_delta": lambda *_args, **_kwargs: "",
     "style_scalp_opp": lambda *_args, **_kwargs: "",

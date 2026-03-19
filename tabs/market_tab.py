@@ -9,21 +9,42 @@ import re
 from threading import Lock
 
 import pandas as pd
+from core.ai_spot_bias import (
+    ai_spot_bias_consensus_agreement,
+    ai_spot_bias_directional_agreement,
+    ai_spot_bias_display_votes,
+    ai_spot_bias_probability_up,
+    ai_spot_bias_status,
+    build_ai_spot_bias_snapshot,
+)
+from core.confidence import (
+    ai_confidence_bucket,
+    build_ai_confidence_snapshot,
+    build_confidence_snapshot,
+    build_execution_confidence_snapshot,
+    confidence_bucket,
+)
 from core.market_decision import (
+    ai_led_confirmation_snapshot,
     ai_vote_metrics,
-    action_decision_with_reason,
     action_reason_text,
+    emerging_bias_snapshot,
     normalize_action_class,
-    structure_state,
+    selected_timeframe_execution_snapshot,
+    selected_timeframe_rr_ratio,
+    spot_action_decision_with_reason,
+    spot_structure_state,
+    trend_led_confirmation_snapshot,
 )
 from core.scalping import scalp_gate_thresholds
-from core.signal_contract import strength_from_bias, strength_bucket
+from core.signal_contract import bias_confidence_from_bias
+from core.spot_direction import build_spot_direction_snapshot
 from core.metric_catalog import (
     AI_LONG_THRESHOLD,
     AI_SHORT_THRESHOLD,
     direction_from_prob,
 )
-from core.symbols import canonical_base_symbol
+from core.symbols import canonical_base_symbol, is_stable_base_symbol
 from ui.primitives import render_help_details, render_kpi_grid, render_page_header
 
 _LAST_GOOD_RESULTS_KEY = "market_scan_last_good_results"
@@ -37,10 +58,6 @@ _HEALTHY_EMPTY_HISTORY_LIMIT = 32
 _LAST_GOOD_HISTORY_LIMIT = 32
 _SCAN_REFRESH_TTL_MINUTES = 3
 _RECOVERY_RETRY_BACKOFF_SECONDS = 30
-STABLE_BASES = {
-    "USDT", "USDC", "BUSD", "DAI", "TUSD", "USDE", "FDUSD", "PYUSD",
-    "RLUSD", "USDP", "GUSD", "EURS", "EURC",
-}
 _SETUP_CONFIRM_PRIORITY = {
     "ENTER_TREND_AI": 5,
     "ENTER_TREND_LED": 4,
@@ -48,7 +65,6 @@ _SETUP_CONFIRM_PRIORITY = {
     "WATCH": 2,
     "SKIP": 1,
 }
-_STRUCTURE_PRIORITY = {"FULL": 4, "TREND": 3, "EARLY": 2, "NONE": 1}
 _AI_FALLBACK_STATUS_TEXT = {
     "insufficient_candles": "AI fallback active: not enough candles for reliable ML; neutral safety output is shown.",
     "insufficient_features": "AI fallback active: indicators produced too few clean ML rows; neutral safety output is shown.",
@@ -88,11 +104,20 @@ def _sortable_float(value: object) -> float:
 def _market_result_priority_key(row: dict) -> tuple[float, float, float, float, str]:
     return (
         -float(_setup_confirm_priority(str(row.get("__action_raw", row.get("Setup Confirm", ""))))),
-        -float(_STRUCTURE_PRIORITY.get(str(row.get("__structure_state")), 0)),
-        -_sortable_float(row.get("__strength_val", 0.0)),
+        -_sortable_float(row.get("__confidence_val", 0.0)),
+        -_sortable_float(row.get("__ai_confidence_val", 0.0)),
         -_sortable_float(row.get("__mcap_val", 0)),
         str(row.get("Coin", "")),
     )
+
+
+def _emerging_badge_tone(direction: str) -> str:
+    key = str(direction or "").strip().upper()
+    if key == "UPSIDE":
+        return "pos"
+    if key == "DOWNSIDE":
+        return "neg"
+    return "muted"
 
 
 def _ai_fallback_note(ai_details: dict | None) -> str:
@@ -132,6 +157,67 @@ def _setup_status_summary(
     return label, head, sub
 
 
+def _queue_market_custom_clear(session_state: dict) -> None:
+    session_state["market_clear_custom_pending"] = True
+    session_state["market_custom_bases_applied"] = []
+
+
+def _consume_market_custom_clear(session_state: dict) -> None:
+    if not bool(session_state.pop("market_clear_custom_pending", False)):
+        return
+    session_state.pop("market_custom_coin_input", None)
+    session_state["market_custom_bases_applied"] = []
+
+
+def _share_line(counts: dict[str, int], order: list[str]) -> str:
+    total = int(sum(max(0, int(v)) for v in counts.values()))
+    if total <= 0:
+        return "No rows."
+    parts: list[str] = []
+    seen: set[str] = set()
+    for key in order:
+        if key in counts:
+            seen.add(key)
+            count = int(counts.get(key, 0) or 0)
+            pct = count / total * 100.0
+            parts.append(f"{key}: {count} ({pct:.0f}%)")
+    for key in sorted(counts.keys()):
+        if key in seen:
+            continue
+        count = int(counts.get(key, 0) or 0)
+        pct = count / total * 100.0
+        parts.append(f"{key}: {count} ({pct:.0f}%)")
+    return " • ".join(parts)
+
+
+def _share_line_against_total(counts: dict[str, int], order: list[str], total: int) -> str:
+    total_n = int(max(0, total))
+    if total_n <= 0:
+        return "No rows."
+    parts: list[str] = []
+    for key in order:
+        count = int(counts.get(key, 0) or 0)
+        pct = count / total_n * 100.0
+        parts.append(f"{key}: {count} ({pct:.0f}%)")
+    return " • ".join(parts)
+
+
+def _extract_ai_verdict(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "Unknown"
+    verdict = re.sub(r"\s*\(\s*\d+\s*/\s*3\s*\)\s*\*?\s*$", "", text).strip()
+    return verdict or "Unknown"
+
+
+def _extract_confidence_label(value: object) -> str:
+    text = str(value or "").strip()
+    match = re.search(r"\(([^()]+)\)\s*$", text)
+    if match:
+        return match.group(1).strip() or "Unknown"
+    return text or "Unknown"
+
+
 def _valid_market_bases(market_rows: list[dict]) -> set[str]:
     out: set[str] = set()
     for row in market_rows:
@@ -165,6 +251,66 @@ def _build_market_cap_map(market_rows: list[dict]) -> dict[str, int]:
     return out
 
 
+def _build_market_coin_id_map(market_rows: list[dict]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for coin in market_rows:
+        symbol = canonical_base_symbol((coin or {}).get("symbol") or "")
+        coin_id = str((coin or {}).get("id") or "").strip().lower()
+        if symbol and coin_id and symbol not in out:
+            out[symbol] = coin_id
+    return out
+
+
+def _build_custom_scan_universe(
+    *,
+    custom_bases_applied: list[str],
+    get_market_cap_rows_for_symbols,
+    exclude_stables: bool,
+    scan_pool_n: int,
+) -> tuple[list[dict], dict[str, int], list[str], list[str]]:
+    unique_market_data, mcap_map = _prepare_scan_market_enrichment(
+        get_market_cap_rows_for_symbols(tuple(custom_bases_applied), vs_currency="usd")
+    )
+    usdt_symbols = [f"{base}/USDT" for base in custom_bases_applied]
+    candidate_symbol_pool = _candidate_scan_symbols(
+        usdt_symbols=usdt_symbols,
+        market_rows=[],
+        exclude_stables=bool(exclude_stables),
+        custom_bases_applied=custom_bases_applied,
+    )[:scan_pool_n]
+    return unique_market_data, mcap_map, usdt_symbols, candidate_symbol_pool
+
+
+def _custom_watchlist_fallback_coin_id(
+    symbol: str,
+    *,
+    custom_mode_active: bool,
+    coin_id_map: dict[str, str],
+) -> str | None:
+    if not bool(custom_mode_active):
+        return None
+    return coin_id_map.get(_canonical_pair_base(symbol))
+
+
+def _fetch_market_scan_ohlcv(
+    *,
+    fetch_ohlcv,
+    fetch_coingecko_ohlcv_by_coin_id,
+    fetch_lock,
+    symbol: str,
+    timeframe: str,
+    limit: int,
+    fallback_coin_id: str | None = None,
+) -> pd.DataFrame | None:
+    with fetch_lock:
+        df = fetch_ohlcv(symbol, timeframe, limit=limit)
+        if df is not None:
+            return df
+        if not fallback_coin_id:
+            return None
+        return fetch_coingecko_ohlcv_by_coin_id(fallback_coin_id, timeframe, limit=limit)
+
+
 def _prepare_closed_frame(df: pd.DataFrame | None, *, min_rows: int = 55) -> pd.DataFrame | None:
     if df is None:
         return None
@@ -176,9 +322,183 @@ def _prepare_closed_frame(df: pd.DataFrame | None, *, min_rows: int = 55) -> pd.
     return df_eval
 
 
+def _direction_fetch_symbol(symbol: str, actual_symbol: str, source_provider: str) -> str:
+    # Keep HTF Direction/AI fetches anchored to the canonical requested symbol.
+    # If we inherit the selected-timeframe provider/variant here, the visible
+    # HTF columns can drift when the user changes timeframe and the selected
+    # candle fetch resolves through a different exchange/provider path.
+    return str(symbol or actual_symbol or "").strip()
+
+
+def _confidence_badge(score: float) -> str:
+    score_f = _sortable_float(score)
+    return f"{score_f:.0f}% ({confidence_bucket(score_f).title()})"
+
+
+def _ai_confidence_badge(snapshot, score: float) -> str:
+    score_f = _sortable_float(score)
+    dots = ai_spot_bias_display_votes(snapshot)
+    label = ai_confidence_bucket(
+        score_f,
+        direction=str(snapshot.direction or ""),
+        support_votes=int(dots),
+        timeframe_conflict=bool(snapshot.timeframe_conflict),
+        degraded_data=bool(snapshot.degraded_data),
+    )
+    return f"{score_f:.0f}% ({label.title()})"
+
+
+def _coingecko_coin_id_fallback_available(fetcher: object) -> bool:
+    return callable(fetcher) and not bool(getattr(fetcher, "_codex_missing_dep", False))
+
+
+def _audit_scan_summary_lines(
+    *,
+    displayed_rows: int,
+    attempted_count: int,
+    produced_count: int,
+    skipped_count: int,
+    ranked_out_count: int,
+    source_label: str,
+) -> list[str]:
+    lines = [f"**Rows shown:** `{int(max(0, displayed_rows))}`"]
+    if int(max(0, attempted_count)) > 0:
+        summary = (
+            f"**Live scan attempt:** attempted `{int(max(0, attempted_count))}`"
+            f" • produced `{int(max(0, produced_count))}`"
+            f" • skipped `{int(max(0, skipped_count))}`"
+        )
+        if int(max(0, ranked_out_count)) > 0:
+            summary += f" • ranked out `{int(max(0, ranked_out_count))}`"
+        lines.append(summary)
+    if str(source_label or "").strip().upper().startswith("CACHED"):
+        lines.append("_Current table is cached. Live attempt stats reflect the latest refresh attempt, not the cached rows._")
+    return lines
+
+
+def _spot_bias_label(direction: str) -> str:
+    raw = str(direction or "").strip().upper()
+    if raw == "UPSIDE":
+        return "Upside"
+    if raw == "DOWNSIDE":
+        return "Downside"
+    return "Neutral"
+
+
+def _spot_tf_summary(snapshot) -> str:
+    return (
+        f"{str(snapshot.timeframe).upper()}: {_spot_bias_label(snapshot.direction)} | "
+        f"Score {float(snapshot.score):.1f} | "
+        f"Structure {snapshot.structure_label} ({float(snapshot.structure_score):.0f}) | "
+        f"Trend {float(snapshot.trend_score):.0f} | "
+        f"Regime {snapshot.regime_label} ({float(snapshot.regime_quality):.0f}) | "
+        f"Location {float(snapshot.location_quality):.0f}"
+    )
+
+
+def _spot_direction_note(
+    snapshot,
+    *,
+    selected_timeframe: str,
+    tactical_direction: str,
+    tactical_signal: str,
+    tactical_bias: float,
+    tactical_comment: str,
+) -> str:
+    note = (
+        f"Spot bias (1D + 4H): {_spot_bias_label(snapshot.direction)} | "
+        f"Combined score {float(snapshot.score):.1f} | {str(snapshot.note or '').strip()} | "
+        f"{_spot_tf_summary(snapshot.one_day)} | "
+        f"{_spot_tf_summary(snapshot.four_hour)} | "
+        f"Tactical ({selected_timeframe}): {_spot_bias_label(tactical_direction)} | "
+        f"Signal: {tactical_signal} | Bias {float(tactical_bias):.1f}"
+    )
+    comment = str(tactical_comment or "").strip()
+    if comment:
+        note += f" | Signal comment: {comment}"
+    return note
+
+
+def _confidence_note(snapshot, score: float) -> str:
+    caps: list[str] = []
+    if str(snapshot.direction or "").strip().upper() == "NEUTRAL":
+        caps.append("neutral-direction cap <=35")
+    if bool(snapshot.timeframe_conflict):
+        caps.append("timeframe-conflict cap <=15")
+    if float(snapshot.structure_quality) < 40.0:
+        caps.append("weak-structure cap <=45")
+    if bool(snapshot.degraded_data):
+        caps.append("degraded-data cap <=55")
+    if bool(snapshot.range_regime):
+        caps.append("range-regime cap <=35")
+    cap_text = f" | Active caps: {', '.join(caps)}" if caps else ""
+    return (
+        f"Spot confidence: {float(score):.1f}% ({confidence_bucket(score).title()}) | "
+        f"Timeframe alignment {float(snapshot.timeframe_alignment):.0f} | "
+        f"Structure quality {float(snapshot.structure_quality):.0f} | "
+        f"Trend quality {float(snapshot.trend_quality):.0f} | "
+        f"Regime quality {float(snapshot.regime_quality):.0f} | "
+        f"Location quality {float(snapshot.location_quality):.0f}{cap_text}"
+    )
+
+
+def _ai_spot_tf_summary(snapshot) -> str:
+    status = str(getattr(snapshot, "status", "") or "").strip()
+    note = str(getattr(snapshot, "note", "") or "").strip()
+    suffix_parts = []
+    if status:
+        suffix_parts.append(f"Status {status}")
+    if note:
+        suffix_parts.append(note)
+    suffix = f" | {' | '.join(suffix_parts)}" if suffix_parts else ""
+    return (
+        f"{str(snapshot.timeframe).upper()}: {_spot_bias_label(snapshot.direction)} | "
+        f"Score {float(snapshot.score):.1f} | "
+        f"Prob Up {float(snapshot.probability_up) * 100:.0f}% | "
+        f"Directional agreement {float(snapshot.directional_agreement) * 100:.0f}% | "
+        f"Consensus {float(snapshot.consensus_agreement) * 100:.0f}%{suffix}"
+    )
+
+
+def _ai_spot_bias_note(snapshot) -> str:
+    dots = ai_spot_bias_display_votes(snapshot)
+    return (
+        f"AI spot bias (1D + 4H): {_spot_bias_label(snapshot.direction)} | "
+        f"Combined score {float(snapshot.score):.1f} | "
+        f"Conviction quality {float(snapshot.conviction_quality):.0f} | "
+        f"Timeframe alignment {float(snapshot.timeframe_alignment):.0f} | "
+        f"Displayed model-support dots {dots}/3 | "
+        f"{str(snapshot.note or '').strip()} | "
+        f"{_ai_spot_tf_summary(snapshot.one_day)} | "
+        f"{_ai_spot_tf_summary(snapshot.four_hour)}"
+    )
+
+
+def _ai_confidence_note(snapshot, score: float) -> str:
+    dots = ai_spot_bias_display_votes(snapshot)
+    caps: list[str] = []
+    if str(snapshot.direction or "").strip().upper() == "NEUTRAL":
+        caps.append("neutral-verdict cap <=58")
+    if bool(snapshot.timeframe_conflict):
+        caps.append("timeframe-conflict cap <=30")
+    if bool(snapshot.degraded_data):
+        caps.append("degraded-data cap <=35")
+    if str(snapshot.direction or "").strip().upper() != "NEUTRAL" and int(dots) <= 1:
+        caps.append("low-model-support cap <=59")
+    cap_text = f" | Active caps: {', '.join(caps)}" if caps else ""
+    return (
+        f"AI confidence: {float(score):.1f}% ({ai_confidence_bucket(float(score), direction=str(snapshot.direction or ''), support_votes=int(dots), timeframe_conflict=bool(snapshot.timeframe_conflict), degraded_data=bool(snapshot.degraded_data)).title()}) | "
+        f"HTF AI verdict {_spot_bias_label(snapshot.direction)} | "
+        f"Combined score {float(snapshot.score):.1f} | "
+        f"Conviction quality {float(snapshot.conviction_quality):.0f} | "
+        f"Timeframe alignment {float(snapshot.timeframe_alignment):.0f} | "
+        f"Consensus quality {float(snapshot.consensus_quality):.0f} | "
+        f"Model support {int(dots)}/3{cap_text}"
+    )
+
+
 def _is_stable_base(base: str) -> bool:
-    b = str(base or "").upper().strip()
-    return bool(b and b in STABLE_BASES)
+    return is_stable_base_symbol(base)
 
 
 def _cache_is_fresh(cache_ts: str | None, ttl_minutes: int) -> bool:
@@ -671,6 +991,44 @@ def _candidate_scan_symbols(
     return candidates
 
 
+def _custom_watchlist_missing_status(
+    custom_bases_applied: list[str],
+    visible_rows: list[dict],
+    skipped_symbols: list[tuple[str, str]],
+    *,
+    coin_id_map: dict[str, str] | None = None,
+    coingecko_coin_id_fallback_available: bool = True,
+) -> list[tuple[str, str]]:
+    requested_bases = _normalize_custom_bases(custom_bases_applied)
+    if not requested_bases:
+        return []
+    visible_bases: set[str] = set()
+    for row in visible_rows:
+        base = canonical_base_symbol((row or {}).get("Coin") or "")
+        if base:
+            visible_bases.add(base)
+    skipped_by_base: dict[str, str] = {}
+    for symbol, reason in skipped_symbols:
+        base = _canonical_pair_base(symbol)
+        if base and base not in skipped_by_base:
+            skipped_by_base[base] = str(reason or "").strip() or "scan skipped"
+    missing: list[tuple[str, str]] = []
+    for base in requested_bases:
+        if base in visible_bases:
+            continue
+        reason = skipped_by_base.get(base)
+        if not reason:
+            fallback_coin_id = (coin_id_map or {}).get(base)
+            if fallback_coin_id and not bool(coingecko_coin_id_fallback_available):
+                reason = "no exchange OHLCV data; CoinGecko fallback unavailable"
+            elif fallback_coin_id:
+                reason = "no exchange OHLCV data; CoinGecko fallback returned empty"
+            else:
+                reason = "no exchange pair; coin-id unresolved for fallback"
+        missing.append((base, reason))
+    return missing
+
+
 def _next_universe_fetch_n(
     current_fetch_n: int,
     *,
@@ -786,6 +1144,8 @@ def render(ctx: dict) -> None:
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     get_top_volume_usdt_symbols = get_ctx(ctx, "get_top_volume_usdt_symbols")
     get_market_cap_rows_for_symbols = get_ctx(ctx, "get_market_cap_rows_for_symbols")
+    fetch_coingecko_ohlcv_by_coin_id = get_ctx(ctx, "fetch_coingecko_ohlcv_by_coin_id")
+    coingecko_coin_id_fallback_available = _coingecko_coin_id_fallback_available(fetch_coingecko_ohlcv_by_coin_id)
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     analyse = get_ctx(ctx, "analyse")
     get_scalping_entry_target = get_ctx(ctx, "get_scalping_entry_target")
@@ -1377,7 +1737,7 @@ def render(ctx: dict) -> None:
     with g4:
         setup_quality_hover = (
             "Setup Quality formula: 35% Direction + 20% Regime + 25% Breadth + 20% Trust. "
-            "Direction = AI Direction Bias strength, Regime = market-cap environment quality, "
+            "Direction = AI directional confidence, Regime = market-cap environment quality, "
             "Breadth = major-asset participation on one side, Trust = cross-major model consistency. "
             "This score measures market environment quality, not trade direction alone."
         )
@@ -1426,7 +1786,7 @@ def render(ctx: dict) -> None:
                         "Direction",
                         direction_score,
                         d_col,
-                        "Direction: strength of directional edge from AI direction bias. Higher = clearer market direction.",
+                        "Direction: confidence of directional edge from AI direction bias. Higher = clearer market direction.",
                     )
                     + _stat_metric(
                         "Regime",
@@ -1498,6 +1858,7 @@ def render(ctx: dict) -> None:
                 break
         return out
 
+    _consume_market_custom_clear(st.session_state)
     custom_bases_applied = _normalize_custom_bases(list(st.session_state.get("market_custom_bases_applied", [])))
     custom_mode_active = bool(custom_bases_applied)
 
@@ -1520,7 +1881,7 @@ def render(ctx: dict) -> None:
             format_func=lambda x: "All Directions" if x == "Both" else x,
         )
     with controls[2]:
-        top_n_default = int(st.session_state.get("market_top_n", 50))
+        top_n_default = int(st.session_state.get("market_top_n", 10))
         top_n = st.slider(
             "Top N",
             min_value=3,
@@ -1552,8 +1913,7 @@ def render(ctx: dict) -> None:
         custom_bases_applied = list(custom_bases_draft)
         custom_mode_active = bool(custom_bases_applied)
     if clear_custom:
-        st.session_state["market_custom_coin_input"] = ""
-        st.session_state["market_custom_bases_applied"] = []
+        _queue_market_custom_clear(st.session_state)
         st.rerun()
 
     if custom_mode_active:
@@ -1577,7 +1937,7 @@ def render(ctx: dict) -> None:
         help="Hide stable/synthetic USD-pegged coins from scanner universe.",
     )
     CACHE_TTL_MINUTES = 15
-    gate_min_rr, gate_min_adx, gate_min_strength = scalp_gate_thresholds(timeframe)
+    gate_min_rr, gate_min_adx, gate_min_confidence = scalp_gate_thresholds(timeframe)
 
     def _fmt_price(v: float) -> str:
         try:
@@ -1650,11 +2010,6 @@ def render(ctx: dict) -> None:
         if rr_val <= 0:
             return ""
         return f"{rr_val:.2f}"
-
-    def _strength_badge(bias: float) -> str:
-        strength = float(strength_from_bias(bias))
-        label = strength_bucket(strength)
-        return f"{strength:.0f}% ({label})"
 
     def _setup_confirm_display(raw_action: str) -> str:
         cls = normalize_action_class(raw_action)
@@ -1745,25 +2100,14 @@ def render(ctx: dict) -> None:
                 return "neg"
             return "warn"
 
-        if col == "Strength":
-            if "GOOD" in s or "STRONG" in s:
-                return "pos"
-            if "MIXED" in s:
-                return "warn"
-            return "neg"
-
-        if col == "Tech vs AI Alignment":
-            if "CONFLICT" in s:
-                return "neg"
+        if col in {"Confidence", "AI Confidence"}:
             if "HIGH" in s:
                 return "pos"
             if "MEDIUM" in s:
                 return "warn"
-            if "TREND" in s:
-                return "warn"
-            if "WEAK" in s:
-                return "warn"
-            return "muted"
+            if "VERY LOW" in s or "LOW" in s:
+                return "neg"
+            return "warn"
 
         if col == "R:R":
             try:
@@ -1877,15 +2221,35 @@ def render(ctx: dict) -> None:
             txt = ""
         if col == "Coin":
             pair = str(row.get("__pair", "")).strip()
+            emerging_label = str(row.get("__emerging_label", "")).strip()
+            emerging_note = str(row.get("__emerging_note", "")).strip()
+            emerging_tone = _emerging_badge_tone(str(row.get("__emerging_direction", "")))
+            tone_map = {
+                "pos": "mk-pos",
+                "neg": "mk-neg",
+                "warn": "mk-warn",
+                "muted": "mk-muted",
+                "info": "mk-info",
+            }
+            badge_html = ""
+            if emerging_label:
+                badge_cls = tone_map.get(emerging_tone, "mk-muted")
+                badge_title = f" title='{html.escape(emerging_note)}'" if emerging_note else ""
+                badge_html = (
+                    f"<span class='mk-coin-badge {badge_cls}'{badge_title}>"
+                    f"{html.escape(emerging_label)}"
+                    f"</span>"
+                )
             if pair:
                 return (
                     f"<span class='mk-coin-wrap'>"
                     f"<span class='mk-coin'>{html.escape(txt)}</span>"
+                    f"{badge_html}"
                     f"<span class='mk-coin-tooltip'>{html.escape(pair)}</span>"
                     f"</span>"
                 )
-            return f"<span class='mk-coin'>{html.escape(txt)}</span>"
-        if col in {"Setup Confirm", "Direction", "Strength", "R:R", "Scalp Opportunity"}:
+            return f"<span class='mk-coin-wrap'><span class='mk-coin'>{html.escape(txt)}</span>{badge_html}</span>"
+        if col in {"Setup Confirm", "Direction", "Confidence", "AI Confidence", "R:R", "Scalp Opportunity"}:
             if col == "Setup Confirm":
                 reason_code = str(row.get("__action_reason", "")).strip()
                 reason_text = action_reason_text(reason_code)
@@ -1907,11 +2271,14 @@ def render(ctx: dict) -> None:
             if col == "Direction":
                 direction_note = str(row.get("__direction_note", "")).strip()
                 return _chip(txt, _tone_for_col(col, txt), title=direction_note or None)
+            if col == "Confidence":
+                confidence_note = str(row.get("__confidence_note", "")).strip()
+                return _chip(txt, _tone_for_col(col, txt), title=confidence_note or None)
+            if col == "AI Confidence":
+                ai_confidence_note = str(row.get("__ai_confidence_note", "")).strip()
+                return _chip(txt, _tone_for_col(col, txt), title=ai_confidence_note or None)
             if col == "Scalp Opportunity" and txt.upper() == "NEUTRAL":
                 return ""
-            if col == "Strength":
-                strength_note = str(row.get("__strength_note", "")).strip()
-                return _chip(txt, _tone_for_col(col, txt), title=strength_note or None)
             if col == "R:R":
                 rr_note = str(row.get("__rr_note", "")).strip()
                 rr_text = txt
@@ -1919,9 +2286,6 @@ def render(ctx: dict) -> None:
                     rr_text = f"{txt}*"
                 return _chip(rr_text, _tone_for_col(col, txt), title=rr_note or None)
             return _chip(txt, _tone_for_col(col, txt))
-        if col == "Tech vs AI Alignment":
-            align_note = str(row.get("__alignment_note", "")).strip()
-            return _chip(txt, _tone_for_col(col, txt), title=align_note or None)
         if col == "AI Ensemble":
             t = _tone_for_col(col, txt)
             ai_note = str(row.get("__ai_note", "")).strip()
@@ -2045,14 +2409,14 @@ def render(ctx: dict) -> None:
     def _render_pro_table(df: pd.DataFrame, cols: list[str]) -> None:
         sticky_order: list[str] = ["Coin"]
         col_widths = {
-            "Coin": 120,
+            "Coin": 182,
             "Price ($)": 122,
             "Δ (%)": 92,
             "Setup Confirm": 160,
             "Direction": 130,
-            "Strength": 132,
+            "Confidence": 150,
             "AI Ensemble": 170,
-            "Tech vs AI Alignment": 190,
+            "AI Confidence": 155,
         }
         left_offsets: dict[str, str] = {}
         running_left = 0
@@ -2230,6 +2594,21 @@ def render(ctx: dict) -> None:
               position:relative;
               display:inline-flex;
               align-items:center;
+              flex-wrap:wrap;
+              gap:6px;
+            }}
+            .mk-coin-badge {{
+              display:inline-flex;
+              align-items:center;
+              padding:1px 7px;
+              border-radius:999px;
+              border:1px solid rgba(148,163,184,0.28);
+              background:rgba(148,163,184,0.08);
+              font-size:0.62rem;
+              font-weight:800;
+              letter-spacing:0.18px;
+              line-height:1.35;
+              box-shadow:inset 0 0 0 1px rgba(255,255,255,0.03);
             }}
             .mk-table td.mk-coin-cell {{
               overflow:visible !important;
@@ -2355,16 +2734,12 @@ def render(ctx: dict) -> None:
                     provider_fetch_n_local = next_fetch_n_local
 
             if custom_mode_active:
-                unique_market_data, mcap_map = _prepare_scan_market_enrichment(
-                    get_market_cap_rows_for_symbols(tuple(custom_bases_applied), vs_currency="usd")
-                )
-                usdt_symbols = [f"{base}/USDT" for base in custom_bases_applied]
-                candidate_symbol_pool = _candidate_scan_symbols(
-                    usdt_symbols=usdt_symbols,
-                    market_rows=[],
-                    exclude_stables=bool(exclude_stables),
+                unique_market_data, mcap_map, usdt_symbols, candidate_symbol_pool = _build_custom_scan_universe(
                     custom_bases_applied=custom_bases_applied,
-                )[:scan_pool_n]
+                    get_market_cap_rows_for_symbols=get_market_cap_rows_for_symbols,
+                    exclude_stables=bool(exclude_stables),
+                    scan_pool_n=scan_pool_n,
+                )
                 working_symbols = candidate_symbol_pool[:requested_n]
             else:
                 provider_fetch_n, usdt_symbols, unique_market_data, mcap_map, candidate_symbol_pool = (
@@ -2373,6 +2748,7 @@ def render(ctx: dict) -> None:
                 working_symbols = candidate_symbol_pool[:requested_n]
 
             has_market_rows = bool(unique_market_data)
+            coin_id_map = _build_market_coin_id_map(unique_market_data)
             used_major_fallback = False
 
             if _should_use_major_fallback(
@@ -2396,16 +2772,14 @@ def render(ctx: dict) -> None:
             # 2) Run analysis/model pipeline in parallel on fetched frames.
             fetch_lock = Lock()
 
-            def _fetch_ohlcv_thread_safe(sym: str) -> pd.DataFrame | None:
-                with fetch_lock:
-                    return fetch_ohlcv(sym, timeframe, limit=500)
-
             def _scan_one(
                 sym: str,
                 df_eval: pd.DataFrame,
                 pair_label: str,
                 actual_symbol: str,
                 source_provider: str,
+                df_direction_4h: pd.DataFrame | None,
+                df_direction_1d: pd.DataFrame | None,
             ) -> dict | None:
                 """Analyse a single symbol for the scanner. Returns a row dict or None."""
 
@@ -2413,7 +2787,6 @@ def render(ctx: dict) -> None:
                 agreement = float(ai_details.get("agreement", 0.0)) if isinstance(ai_details, dict) else 0.0
                 directional_agreement = float(ai_details.get("directional_agreement", agreement)) if isinstance(ai_details, dict) else agreement
                 consensus_agreement = float(ai_details.get("consensus_agreement", 0.0)) if isinstance(ai_details, dict) else 0.0
-                model_votes = list(ai_details.get("model_votes", [])) if isinstance(ai_details, dict) else []
                 latest_closed = df_eval.iloc[-1]
 
                 base = _canonical_pair_base(sym)
@@ -2421,7 +2794,7 @@ def render(ctx: dict) -> None:
                 # Keep price semantics aligned with all decision metrics (closed-candle context).
                 price = float(latest_closed["close"])
                 # Delta source of truth: selected-timeframe closed candles.
-                # This keeps table delta aligned with Direction/Strength calculations.
+                # This keeps table delta aligned with tactical setup and confidence calculations.
                 price_change = None
                 delta_note = "Source: selected-timeframe closed candles."
                 try:
@@ -2498,103 +2871,163 @@ def render(ctx: dict) -> None:
                 target_price = target_s if scalp_direction else 0.0
 
                 signal_direction = direction_key(signal_plain(signal))
+                signal_text = sanitize_trading_terms(signal)
+                comment_text = sanitize_trading_terms(str(getattr(a, 'comment', '') or '').strip())
+                spot_snapshot = build_spot_direction_snapshot(
+                    df_4h=df_direction_4h,
+                    df_1d=df_direction_1d,
+                )
+                confidence_snapshot = build_confidence_snapshot(
+                    direction=spot_snapshot.direction,
+                    timeframe_alignment=spot_snapshot.timeframe_alignment,
+                    structure_quality=spot_snapshot.structure_quality,
+                    trend_quality=spot_snapshot.trend_quality,
+                    regime_quality=spot_snapshot.regime_quality,
+                    location_quality=spot_snapshot.location_quality,
+                    timeframe_conflict=spot_snapshot.timeframe_conflict,
+                    degraded_data=spot_snapshot.degraded_data,
+                    range_regime=spot_snapshot.range_regime,
+                )
+                ai_spot_snapshot = build_ai_spot_bias_snapshot(
+                    df_4h=df_direction_4h,
+                    df_1d=df_direction_1d,
+                    predictor=ml_ensemble_predict,
+                )
+                spot_direction = direction_key(spot_snapshot.direction)
                 include = (
                     (direction_filter == 'Both')
-                    or (direction_filter == 'Upside' and signal_direction == "UPSIDE")
-                    or (direction_filter == 'Downside' and signal_direction == "DOWNSIDE")
+                    or (direction_filter == 'Upside' and spot_direction == "UPSIDE")
+                    or (direction_filter == 'Downside' and spot_direction == "DOWNSIDE")
                 )
                 if not include:
                     return None
 
-                signal_text = sanitize_trading_terms(signal)
-                comment_text = sanitize_trading_terms(str(getattr(a, 'comment', '') or '').strip())
-                direction_note = (
-                    f"Source signal: {signal_text} | Bias: {float(bias_score_v):.1f} | "
-                    f"Signal comment: {comment_text}"
-                ).strip()
+                direction_note = _spot_direction_note(
+                    spot_snapshot,
+                    selected_timeframe=timeframe,
+                    tactical_direction=signal_direction,
+                    tactical_signal=signal_text,
+                    tactical_bias=float(bias_score_v),
+                    tactical_comment=comment_text,
+                )
+                confidence_note = _confidence_note(spot_snapshot, float(confidence_snapshot.score))
 
-                ai_display = direction_label(ai_direction)
                 ai_direction_key = direction_key(ai_direction)
-                consensus_votes, _display_ratio, decision_agreement = ai_vote_metrics(
+                _, _, decision_agreement = ai_vote_metrics(
                     ai_direction_key,
                     float(directional_agreement),
                     float(consensus_agreement),
                 )
-                ai_fallback_note = _ai_fallback_note(ai_details if isinstance(ai_details, dict) else None)
-                ai_display = f"{ai_display} ({consensus_votes}/3)"
-                if ai_fallback_note:
+                ai_display_votes = ai_spot_bias_display_votes(ai_spot_snapshot)
+                ai_display = f"{direction_label(ai_spot_snapshot.direction)} ({ai_display_votes}/3)"
+                if bool(ai_spot_snapshot.degraded_data):
                     ai_display += " *"
-                ai_note = (
-                    f"AI direction: {direction_label(ai_direction)} | "
-                    f"Displayed votes: {consensus_votes}/3 | "
-                    f"Directional agreement: {float(directional_agreement) * 100:.0f}% | "
-                    f"Consensus agreement: {float(consensus_agreement) * 100:.0f}%"
+                ai_note = _ai_spot_bias_note(ai_spot_snapshot)
+                ai_confidence_snapshot = build_ai_confidence_snapshot(
+                    direction=ai_spot_snapshot.direction,
+                    combined_score=float(ai_spot_snapshot.score),
+                    conviction_quality=float(ai_spot_snapshot.conviction_quality),
+                    timeframe_alignment=float(ai_spot_snapshot.timeframe_alignment),
+                    consensus_quality=float(ai_spot_snapshot.consensus_quality),
+                    support_votes=int(ai_display_votes),
+                    timeframe_conflict=bool(ai_spot_snapshot.timeframe_conflict),
+                    degraded_data=bool(ai_spot_snapshot.degraded_data),
                 )
-                if model_votes:
-                    vote_labels = [direction_label(str(v)) for v in model_votes]
-                    ai_note += f" | Model votes: {', '.join(vote_labels)}"
-                if ai_fallback_note:
-                    ai_note += f" | {ai_fallback_note}"
+                ai_confidence_note = _ai_confidence_note(ai_spot_snapshot, float(ai_confidence_snapshot.score))
+                emerging_snapshot = emerging_bias_snapshot(
+                    spot_snapshot=spot_snapshot,
+                    ai_spot_snapshot=ai_spot_snapshot,
+                    ai_confidence_score=float(ai_confidence_snapshot.score),
+                )
 
-                _emoji_map = {"HIGH": "🟢", "MEDIUM": "🟡", "TREND": "🟡", "WEAK": "⚪", "CONFLICT": "🔴"}
-                strength_val = float(strength_from_bias(float(bias_score_v)))
-                strength_note = (
-                    f"Bias: {float(bias_score_v):.1f} | Strength: {strength_val:.1f} "
-                    f"(formula: |bias-50|^0.70 scaled to 0-100) | "
-                    f"Bands: Weak<40, Mixed 40-59, Good 60-74, Strong>=75"
-                )
-                structure_val = structure_state(
+                ai_spot_direction_key = direction_key(ai_spot_snapshot.direction)
+                ai_spot_agreement = float(ai_spot_bias_directional_agreement(ai_spot_snapshot))
+                ai_spot_consensus = float(ai_spot_bias_consensus_agreement(ai_spot_snapshot))
+                ai_spot_probability_up = float(ai_spot_bias_probability_up(ai_spot_snapshot))
+                ai_spot_status = str(ai_spot_bias_status(ai_spot_snapshot) or "")
+                directional_confidence = float(bias_confidence_from_bias(float(bias_score_v)))
+                structure_val = spot_structure_state(
+                    spot_snapshot.direction,
                     signal_direction,
                     ai_direction,
-                    strength_val,
+                    float(confidence_snapshot.score),
                     float(decision_agreement),
                 )
                 _conv_lbl, _ = _calc_conviction(
                     signal_direction,
                     ai_direction,
-                    strength_val,
+                    directional_confidence,
                     float(decision_agreement),
                 )
-                conviction = f"{_emoji_map.get(_conv_lbl, '')} {_conv_lbl}" if _conv_lbl else ""
-                structure_desc = {
-                    "FULL": "Trend+AI confirmed",
-                    "TREND": "Trend-led structure",
-                    "EARLY": "Early structure",
-                    "NONE": "No structure",
-                }.get(str(structure_val), str(structure_val))
-                align_note = (
-                    f"Tech: {direction_label(signal_direction)} | "
-                    f"AI: {direction_label(ai_direction)} ({consensus_votes}/3) | "
-                    f"Directional agreement: {float(directional_agreement) * 100:.0f}% | "
-                    f"Consensus agreement: {float(consensus_agreement) * 100:.0f}% | "
-                    f"Structure: {structure_desc}"
+                execution_confidence = build_execution_confidence_snapshot(
+                    direction=signal_direction,
+                    bias_score=float(bias_score_v),
+                    adx_val=float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
+                    structure_state=str(structure_val),
+                    conviction_label=str(_conv_lbl),
+                    ai_agreement=float(decision_agreement),
                 )
-                if str(_conv_lbl) == "CONFLICT":
-                    align_note += " | Conflict: technical and AI directions are opposite."
-                elif str(_conv_lbl) == "WEAK":
-                    align_note += " | Weak: no hard conflict, but confirmation quality is low."
                 rr_val = float(rr_ratio) if rr_ratio else 0.0
-                action, action_reason_code = action_decision_with_reason(
+                execution_snapshot = selected_timeframe_execution_snapshot(
+                    df=df_eval,
+                    direction=spot_snapshot.direction,
+                    bias_score=float(bias_score_v),
+                    adx_val=float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
+                    supertrend_trend=str(supertrend_trend_v),
+                    ichimoku_trend=str(ichimoku_trend_v),
+                    vwap_label=str(vwap_label_v),
+                    psar_trend=str(psar_trend_v),
+                    bollinger_bias=str(bollinger_bias_v),
+                    williams_label=str(a.williams),
+                    cci_label=str(a.cci),
+                )
+                setup_rr_val = float(selected_timeframe_rr_ratio(execution_snapshot, direction=spot_snapshot.direction))
+                trend_led_snapshot = trend_led_confirmation_snapshot(
+                    spot_dir=spot_snapshot.direction,
+                    spot_confidence=float(confidence_snapshot.score),
+                    tactical_dir=signal_direction,
+                    adx_val=float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
+                    structure_quality=float(execution_snapshot.structure_quality),
+                    trend_quality=float(execution_snapshot.trend_quality),
+                    regime_quality=float(execution_snapshot.regime_quality),
+                    location_quality=float(execution_snapshot.location_quality),
+                    rr_ratio=setup_rr_val if math.isfinite(setup_rr_val) and setup_rr_val > 0.0 else None,
+                )
+                ai_led_snapshot = ai_led_confirmation_snapshot(
+                    spot_dir=spot_snapshot.direction,
+                    spot_confidence=float(confidence_snapshot.score),
+                    ai_dir=ai_spot_direction_key,
+                    ai_probability=float(ai_spot_probability_up),
+                    directional_agreement=float(ai_spot_agreement),
+                    consensus_agreement=float(ai_spot_consensus),
+                    adx_val=float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
+                    location_quality=float(execution_snapshot.location_quality),
+                    rr_ratio=setup_rr_val if math.isfinite(setup_rr_val) and setup_rr_val > 0.0 else None,
+                    ai_status=ai_spot_status,
+                )
+                action, action_reason_code = spot_action_decision_with_reason(
+                    spot_snapshot.direction,
+                    float(confidence_snapshot.score),
                     signal_direction,
-                    strength_val,
-                    structure_val,
-                    str(_conv_lbl),
-                    float(decision_agreement),
+                    ai_spot_snapshot.direction,
+                    float(ai_spot_agreement),
                     float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
+                    trend_led_snapshot=trend_led_snapshot,
+                    ai_led_snapshot=ai_led_snapshot,
                 )
                 scalp_gate_pass, _ = scalp_quality_gate(
                     scalp_direction=scalp_direction,
                     signal_direction=signal_direction,
                     rr_ratio=rr_val,
                     adx_val=float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
-                    strength=strength_val,
+                    confidence=float(execution_confidence.score),
                     conviction_label=str(_conv_lbl),
                     entry=entry_s,
                     stop=stop_s,
                     target=target_s,
                     min_rr=gate_min_rr,
                     min_adx=gate_min_adx,
-                    min_strength=gate_min_strength,
+                    min_confidence=gate_min_confidence,
                 )
                 scalp_opportunity_label = direction_label(scalp_direction or "") if scalp_gate_pass else ""
 
@@ -2646,22 +3079,25 @@ def render(ctx: dict) -> None:
                 return {
                     'Coin': base,
                     '__pair': pair_label,
+                    '__emerging_label': emerging_snapshot.label,
+                    '__emerging_direction': emerging_snapshot.direction,
+                    '__emerging_note': emerging_snapshot.note,
                     'Price ($)': _fmt_price(price),
                     'Δ (%)': format_delta(price_change) if price_change is not None else '',
                     '__delta_note': delta_note if price_change is not None else "",
                     'Setup Confirm': _setup_confirm_display(action),
                     '__action_raw': action,
                     '__action_reason': action_reason_code,
-                    'Direction': direction_label(signal_plain(signal)),
+                    'Direction': direction_label(spot_snapshot.direction),
                     '__direction_note': direction_note,
-                    'Strength': _strength_badge(float(bias_score_v)),
-                    '__strength_note': strength_note,
+                    'Confidence': _confidence_badge(float(confidence_snapshot.score)),
+                    '__confidence_note': confidence_note,
                     'AI Ensemble': ai_display,
-                    '__ai_votes': consensus_votes,
+                    '__ai_votes': ai_display_votes,
                     '__ai_note': ai_note,
-                    'Tech vs AI Alignment': conviction,
-                    '__alignment_note': align_note,
-                    '__structure_state': structure_val,
+                    'AI Confidence': _ai_confidence_badge(ai_spot_snapshot, float(ai_confidence_snapshot.score)),
+                    '__ai_confidence_note': ai_confidence_note,
+                    '__ai_confidence_val': float(ai_confidence_snapshot.score),
                     'Scalp Opportunity': scalp_opportunity_label,
                     'Entry Price': _fmt_price(entry_price) if entry_price else '',
                     '__entry_note': entry_note,
@@ -2690,16 +3126,39 @@ def render(ctx: dict) -> None:
                     'PSAR': psar_trend_v if psar_trend_v != "Unavailable" else '',
                     'Williams %R': a.williams,
                     'CCI': a.cci,
-                    '__strength_val': strength_val,
+                    '__confidence_val': float(confidence_snapshot.score),
                 }
 
             def _scan_candidate_batch(symbol_batch: list[str]) -> tuple[list[dict], list[tuple[str, str]], int]:
-                fetched_frames: list[tuple[str, pd.DataFrame, str, str, str]] = []
+                fetched_frames: list[
+                    tuple[str, pd.DataFrame, str, str, str, pd.DataFrame | None, pd.DataFrame | None]
+                ] = []
                 fetch_failures: list[tuple[str, str]] = []
                 for sym in symbol_batch:
-                    df = _fetch_ohlcv_thread_safe(sym)
+                    fallback_coin_id = _custom_watchlist_fallback_coin_id(
+                        sym,
+                        custom_mode_active=custom_mode_active,
+                        coin_id_map=coin_id_map,
+                    )
+                    df = _fetch_market_scan_ohlcv(
+                        fetch_ohlcv=fetch_ohlcv,
+                        fetch_coingecko_ohlcv_by_coin_id=fetch_coingecko_ohlcv_by_coin_id,
+                        fetch_lock=fetch_lock,
+                        symbol=sym,
+                        timeframe=timeframe,
+                        limit=500,
+                        fallback_coin_id=fallback_coin_id,
+                    )
                     if df is None:
-                        fetch_failures.append((sym, "no OHLCV data"))
+                        reason = "no OHLCV data"
+                        if custom_mode_active:
+                            if fallback_coin_id and not coingecko_coin_id_fallback_available:
+                                reason = "no exchange OHLCV data; CoinGecko fallback unavailable"
+                            elif fallback_coin_id:
+                                reason = "no exchange OHLCV data; CoinGecko fallback returned empty"
+                            else:
+                                reason = "no exchange pair; coin-id unresolved for fallback"
+                        fetch_failures.append((sym, reason))
                         continue
                     actual_symbol = str(df.attrs.get("source_symbol") or "").strip() or sym
                     source_provider = str(df.attrs.get("source_provider") or "").strip() or "exchange"
@@ -2716,14 +3175,63 @@ def render(ctx: dict) -> None:
                     if df_eval is None:
                         fetch_failures.append((pair_label, "insufficient closed-candle history"))
                         continue
-                    fetched_frames.append((sym, df_eval, pair_label, actual_symbol, source_provider))
+                    direction_fetch_symbol = _direction_fetch_symbol(sym, actual_symbol, source_provider)
+                    # Keep HTF context stable across selected-timeframe changes.
+                    df_4h_raw = _fetch_market_scan_ohlcv(
+                        fetch_ohlcv=fetch_ohlcv,
+                        fetch_coingecko_ohlcv_by_coin_id=fetch_coingecko_ohlcv_by_coin_id,
+                        fetch_lock=fetch_lock,
+                        symbol=direction_fetch_symbol,
+                        timeframe="4h",
+                        limit=260,
+                        fallback_coin_id=fallback_coin_id,
+                    )
+                    df_1d_raw = _fetch_market_scan_ohlcv(
+                        fetch_ohlcv=fetch_ohlcv,
+                        fetch_coingecko_ohlcv_by_coin_id=fetch_coingecko_ohlcv_by_coin_id,
+                        fetch_lock=fetch_lock,
+                        symbol=direction_fetch_symbol,
+                        timeframe="1d",
+                        limit=260,
+                        fallback_coin_id=fallback_coin_id,
+                    )
+                    df_direction_4h = _prepare_closed_frame(df_4h_raw, min_rows=81)
+                    df_direction_1d = _prepare_closed_frame(df_1d_raw, min_rows=81)
+                    fetched_frames.append(
+                        (
+                            sym,
+                            df_eval,
+                            pair_label,
+                            actual_symbol,
+                            source_provider,
+                            df_direction_4h,
+                            df_direction_1d,
+                        )
+                    )
 
                 batch_results: list[dict] = []
                 scan_errors: list[tuple[str, str]] = []
                 with ThreadPoolExecutor(max_workers=4) as executor:
                     futures = {
-                        executor.submit(_scan_one, sym, df_eval, pair_label, actual_symbol, source_provider): pair_label
-                        for sym, df_eval, pair_label, actual_symbol, source_provider in fetched_frames
+                        executor.submit(
+                            _scan_one,
+                            sym,
+                            df_eval,
+                            pair_label,
+                            actual_symbol,
+                            source_provider,
+                            df_direction_4h,
+                            df_direction_1d,
+                        ): pair_label
+                        for (
+                            sym,
+                            df_eval,
+                            pair_label,
+                            actual_symbol,
+                            source_provider,
+                            df_direction_4h,
+                            df_direction_1d,
+                        ) in fetched_frames
                     }
                     for future in as_completed(futures):
                         try:
@@ -2738,9 +3246,12 @@ def render(ctx: dict) -> None:
                 return batch_results, [*fetch_failures, *scan_errors], len(fetched_frames)
 
             fresh_results: list[dict] = []
+            live_produced_rows: list[dict] = []
             skipped_symbols: list[tuple[str, str]] = []
             total_fetched_frame_count = 0
             attempted_symbols: set[str] = set()
+            live_result_count_before_limit = 0
+            live_ranked_out_count = 0
             display_scan_state: dict[str, object] | None = None
             scan_pool_target_n = int(scan_pool_n)
             pending_batch = list(working_symbols)
@@ -2862,6 +3373,26 @@ def render(ctx: dict) -> None:
             else:
                 st.session_state["market_scan_error_count"] = 0
 
+            if custom_mode_active:
+                if not coingecko_coin_id_fallback_available:
+                    st.warning(
+                        "CoinGecko custom-watchlist fallback is unavailable in this session. "
+                        "Exchange-missing custom symbols may stay hidden until the fallback dependency is restored."
+                    )
+                custom_missing = _custom_watchlist_missing_status(
+                    custom_bases_applied,
+                    fresh_results,
+                    skipped_symbols,
+                    coin_id_map=coin_id_map,
+                    coingecko_coin_id_fallback_available=coingecko_coin_id_fallback_available,
+                )
+                if custom_missing:
+                    detail = " • ".join(f"{base}: {reason}" for base, reason in custom_missing)
+                    st.warning(
+                        "Some custom watchlist coins could not be shown in the table. "
+                        f"Hidden: {detail}."
+                    )
+
             scan_degraded = bool(skipped_symbols) or (bool(attempted_symbols) and total_fetched_frame_count == 0)
 
             last_good_registry = _last_good_registry(
@@ -2883,9 +3414,12 @@ def render(ctx: dict) -> None:
             )
             limit_n = len(custom_bases_applied) if custom_mode_active else int(top_n)
             fresh_results = _sync_market_cap_cells(fresh_results, display_mcap_map, readable_market_cap)
+            live_result_count_before_limit = len(fresh_results)
+            live_produced_rows = list(fresh_results)
             # Sort by setup priority: TREND+AI > TREND-led > AI-led > WATCH > SKIP,
-            # then structure, strength and market-cap tie-breakers.
+            # then structure, confidence, and market-cap tie-breakers.
             fresh_results = sorted(fresh_results, key=_market_result_priority_key)[:limit_n]
+            live_ranked_out_count = max(0, live_result_count_before_limit - len(fresh_results))
             if fresh_results:
                 st.session_state["market_scan_results"] = fresh_results
                 st.session_state["market_scan_sig"] = scan_sig
@@ -3044,11 +3578,14 @@ def render(ctx: dict) -> None:
             st,
             summary="How to read quickly (?)",
             body_html=(
-                "<b>Decision sequence:</b> <b>Setup Confirm</b> -> <b>Direction + Strength</b> -> "
-                "<b>AI Ensemble + Tech vs AI Alignment</b>.<br><br>"
-                "<b>Setup Confirm classes:</b> TREND+AI (strongest), TREND-led, AI-led, WATCH, SKIP.<br>"
-                "<b>AI Ensemble:</b> direction + 3-dot agreement meter (more filled dots = stronger model agreement).<br>"
-                "<b>Scalp Opportunity:</b> separate execution gate; shown only when direction/levels/quality thresholds all pass.<br><br>"
+                "<b>Reading order:</b> <b>Setup Confirm</b> -> <b>Direction + Confidence</b> -> "
+                "<b>AI Ensemble + AI Confidence</b>.<br><br>"
+                "<b>Setup Confirm classes:</b> TREND+AI (strongest confirmation), TREND-led, AI-led, WATCH, SKIP.<br>"
+                "TREND-led means the selected timeframe technicals now support the main direction. AI-led means AI support is strong enough, but it still must pass the same selected-timeframe execution and spot-risk gates.<br>"
+                "<b>Direction + Confidence:</b> spot bias from 1D + 4H closed candles and the quality of that bias.<br>"
+                "<b>AI Ensemble:</b> higher-timeframe AI bias from 1D + 4H with a 3-dot model-support meter.<br>"
+                "<b>AI Confidence:</b> quality score of that HTF AI verdict (combined score + conviction + timeframe alignment + consensus + model support).<br>"
+                "<b>Scalp Opportunity:</b> separate selected-timeframe execution gate; shown only when direction/levels/quality thresholds all pass.<br><br>"
                 "<b>Scan mode:</b> default Top N market scan. Custom Coins (max 10) scans only your watchlist until cleared."
             ),
         )
@@ -3060,19 +3597,21 @@ def render(ctx: dict) -> None:
                 "<b>Price ($)</b>: latest closed-candle price from active feed.<br>"
                 "<b>Δ (%)</b>: change from previous closed candle to latest closed candle on selected timeframe (fallback: ticker % if candle delta unavailable).<br><br>"
                 "<b>Setup Confirm</b>: final scanner confirmation class (not a direct execution order). "
-                "Calculated from Direction + Strength + AI Ensemble + Alignment + ADX regime checks.<br>"
-                "<b>Direction</b>: side from technical signal mapping (Upside / Downside / Neutral).<br>"
-                "<b>Strength</b>: technical signal power (0-100), derived from bias distance to neutral midpoint (50).<br>"
-                "<b>AI Ensemble</b>: side label plus 3-dot model-agreement meter (filled dots = stronger agreement). "
-                "* means AI is showing a neutral safety fallback because reliable ML output was unavailable for that row.<br>"
-                "<b>Tech vs AI Alignment</b>: confirmation quality between technical side and AI side (HIGH/MEDIUM/TREND/WEAK/CONFLICT).<br>"
+                "Calculated from spot Direction + Confidence, then evaluated by a pure technical Trend-led path and a separate pure AI AI-led path using selected-timeframe execution quality and a spot-style local risk model.<br>"
+                "<b>Emerging badge</b>: if the coin name shows Emerging Upside/Downside, 4H technical structure is leading early, AI confirms the same side, and 1D is not opposing yet. This is an attention signal, not a confirmed bias replacement.<br>"
+                "<b>Direction</b>: spot bias from 1D + 4H closed candles (Upside / Downside / Neutral).<br>"
+                "<b>Confidence</b>: quality score of that spot Direction call (timeframe alignment + structure + trend + regime + location).<br>"
+                "<b>AI Ensemble</b>: higher-timeframe AI bias from 1D + 4H. Dots show how many of the 3 ensemble models support that final HTF AI direction. "
+                "* means one of the AI higher-timeframe contexts degraded into neutral safety output.<br>"
+                "<b>AI Confidence</b>: quality score of the HTF AI verdict (conviction + combined score + timeframe alignment + consensus + model support). "
+                "Neutral/conflict/degraded states are capped lower on purpose.<br>"
                 "<b>R:R</b>: reward-to-risk ratio from target distance vs stop distance.<br>"
                 "<b>Entry Price</b>: model entry level (close/EMA5 with ATR buffer).<br>"
                 "<b>Stop Loss</b>: risk invalidation level (support/resistance with ATR clamps).<br>"
                 "<b>Target Price</b>: first take-profit level (structure level with minimum ATR extension).<br>"
                 "<b>R:R marker (*)</b>: conditional plan; target may require breakout.<br>"
                 "<b>Scalp Opportunity</b>: shown only when the single execution gate passes "
-                "(Direction match + no CONFLICT + valid levels + timeframe-adaptive R:R/ADX/Strength thresholds).<br>"
+                "(selected-timeframe direction match + no CONFLICT + valid levels + timeframe-adaptive R:R/ADX/Confidence thresholds).<br>"
                 "<b>Market Cap ($)</b>: size/liquidity context.<br><br>"
                 "<b>Advanced columns (what they mean + short calc):</b><br>"
                 "<b>ADX</b>: trend strength (14-period directional movement strength; not side).<br>"
@@ -3089,35 +3628,113 @@ def render(ctx: dict) -> None:
                 "<b>Candle Pattern</b>: candlestick pattern classifier with directional label (bullish/bearish/neutral)."
             ),
         )
-        st.caption("Signals and plan levels are computed on closed candles; Price ($) shows the latest candle close.")
+        st.caption(
+            "Price ($) shows the latest candle close. "
+            "Direction and Confidence use 4H + 1D closed candles. "
+            "Setup, scalp plan levels, and delta stay on the selected timeframe closed candles."
+        )
         controls_col, chips_col = st.columns([1.2, 2.8], gap="small")
         with controls_col:
             show_advanced = st.toggle("Show advanced columns", value=False, key="market_show_adv_cols")
         with chips_col:
+            custom_fallback_chip = ""
+            if custom_mode_active and not coingecko_coin_id_fallback_available:
+                custom_fallback_chip = (
+                    f"<span class='market-inline-chip' style='border:1px solid {WARNING}; color:{WARNING}; "
+                    f"background:rgba(255,209,102,0.08);'>CoinGecko fallback degraded</span>"
+                )
             st.markdown(
                 f"<div style='display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding-top:0.18rem;'>"
                 f"<span class='market-inline-chip' style='border:1px solid {source_color}; color:{source_color}; "
                 f"background:rgba(255,255,255,0.04);'>{source_chip} • {source_label}</span>"
                 f"<span class='market-inline-chip' style='border:1px solid {mode_color}; color:{mode_color}; "
                 f"background:rgba(255,255,255,0.04);'>{data_mode}</span>"
+                f"{custom_fallback_chip}"
                 f"</div>",
                 unsafe_allow_html=True,
             )
 
         df_results = pd.DataFrame(results)
+        df_live_produced = pd.DataFrame(live_produced_rows) if live_produced_rows else pd.DataFrame()
+
+        def _distribution_bundle(df: pd.DataFrame) -> dict[str, object]:
+            total = int(len(df))
+            if total <= 0:
+                return {
+                    "total": 0,
+                    "setup_counts": {"Ready": 0, "Watch": 0, "Skip": 0},
+                    "direction_counts": {},
+                    "ai_ensemble_counts": {},
+                    "ai_confidence_counts": {},
+                    "emerging_counts": {},
+                    "enter_count": 0,
+                    "watch_count": 0,
+                    "skip_count": 0,
+                }
+            if "__action_raw" in df.columns:
+                action_series = df["__action_raw"].astype(str)
+            else:
+                action_series = df.get("Setup Confirm", pd.Series(dtype=str)).astype(str)
+            action_class_series = action_series.apply(_setup_confirm_class)
+            enter_count_local = int(action_class_series.str.startswith("ENTER_").sum())
+            watch_count_local = int((action_class_series == "WATCH").sum())
+            skip_count_local = int((action_class_series == "SKIP").sum())
+            direction_counts_local = (
+                df["Direction"].astype(str).replace("", "Unknown").value_counts(dropna=False).to_dict()
+                if "Direction" in df.columns
+                else {}
+            )
+            ai_ensemble_counts_local = (
+                df["AI Ensemble"].apply(_extract_ai_verdict).value_counts(dropna=False).to_dict()
+                if "AI Ensemble" in df.columns
+                else {}
+            )
+            ai_confidence_counts_local = (
+                df["AI Confidence"].apply(_extract_confidence_label).value_counts(dropna=False).to_dict()
+                if "AI Confidence" in df.columns
+                else {}
+            )
+            emerging_counts_local = (
+                df["__emerging_label"]
+                .astype(str)
+                .replace("", pd.NA)
+                .dropna()
+                .value_counts(dropna=False)
+                .to_dict()
+                if "__emerging_label" in df.columns
+                else {}
+            )
+            return {
+                "total": total,
+                "setup_counts": {
+                    "Ready": enter_count_local,
+                    "Watch": watch_count_local,
+                    "Skip": skip_count_local,
+                },
+                "direction_counts": direction_counts_local,
+                "ai_ensemble_counts": ai_ensemble_counts_local,
+                "ai_confidence_counts": ai_confidence_counts_local,
+                "emerging_counts": emerging_counts_local,
+                "enter_count": enter_count_local,
+                "watch_count": watch_count_local,
+                "skip_count": skip_count_local,
+            }
 
         # Quick scan health summary (visual-first, logic unchanged)
-        if "__action_raw" in df_results.columns:
-            action_series = df_results["__action_raw"].astype(str)
-        else:
-            action_series = df_results.get("Setup Confirm", pd.Series(dtype=str)).astype(str)
-        action_class_series = action_series.apply(_setup_confirm_class)
-        enter_count = int(action_class_series.str.startswith("ENTER_").sum())
-        watch_count = int((action_class_series == "WATCH").sum())
-        skip_count = int((action_class_series == "SKIP").sum())
-        trend_ai_enter_count = int((action_class_series == "ENTER_TREND_AI").sum())
-        trend_led_enter_count = int((action_class_series == "ENTER_TREND_LED").sum())
-        ai_led_enter_count = int((action_class_series == "ENTER_AI_LED").sum())
+        shown_bundle = _distribution_bundle(df_results)
+        produced_bundle = _distribution_bundle(df_live_produced)
+        enter_count = int(shown_bundle["enter_count"])
+        watch_count = int(shown_bundle["watch_count"])
+        skip_count = int(shown_bundle["skip_count"])
+        shown_action_series = (
+            df_results["__action_raw"].astype(str)
+            if "__action_raw" in df_results.columns
+            else df_results.get("Setup Confirm", pd.Series(dtype=str)).astype(str)
+        )
+        shown_action_class_series = shown_action_series.apply(_setup_confirm_class)
+        trend_ai_enter_count = int((shown_action_class_series == "ENTER_TREND_AI").sum())
+        trend_led_enter_count = int((shown_action_class_series == "ENTER_TREND_LED").sum())
+        ai_led_enter_count = int((shown_action_class_series == "ENTER_AI_LED").sum())
 
         best_scalp_coin = "—"
         best_scalp_sub = ""
@@ -3148,29 +3765,33 @@ def render(ctx: dict) -> None:
                     best_scalp_coin = f"{best_coin} ({best_rr:.2f})"
                     best_action = str(best_row.get("__action_raw", best_row.get("Setup Confirm", ""))).strip()
                     best_direction = str(best_row.get("Direction", "")).strip()
-                    best_strength = str(best_row.get("Strength", "")).strip()
+                    best_confidence = str(best_row.get("Confidence", "")).strip()
                     best_ai = str(best_row.get("AI Ensemble", "")).strip()
                     best_action_compact = _setup_confirm_display(best_action)
                     best_scalp_sub = (
                         f"Setup: {best_action_compact} • Direction: {best_direction} • "
-                        f"Strength: {best_strength} • Ensemble: {best_ai}"
+                        f"Confidence: {best_confidence} • Ensemble: {best_ai}"
                     )
 
-        strength_coin = "—"
-        strength_val_head = None
-        strength_sub = "No strength data available."
-        if "__strength_val" in df_results.columns and len(df_results) > 0:
-            strength_series = pd.to_numeric(df_results["__strength_val"], errors="coerce").dropna()
-            if not strength_series.empty:
-                strength_idx = strength_series.idxmax()
-                row = df_results.loc[strength_idx]
-                strength_coin = str(row.get("Coin", "—"))
-                strength_val_head = float(row.get("__strength_val", 0.0))
-                strength_sub = (
+        confidence_coin = "—"
+        confidence_val_head = None
+        confidence_sub = "No confidence data available."
+        if "__confidence_val" in df_results.columns and len(df_results) > 0:
+            confidence_series = pd.to_numeric(df_results["__confidence_val"], errors="coerce").dropna()
+            if not confidence_series.empty:
+                confidence_idx = confidence_series.idxmax()
+                row = df_results.loc[confidence_idx]
+                confidence_coin = str(row.get("Coin", "—"))
+                confidence_val_head = float(row.get("__confidence_val", 0.0))
+                confidence_sub = (
                     f"Direction: {row.get('Direction', '')} • "
-                    f"Ensemble: {row.get('AI Ensemble', '')}"
+                    f"Setup: {row.get('Setup Confirm', '')}"
                 )
-        strength_head = strength_coin if strength_val_head is None else f"{strength_coin} ({strength_val_head:.0f}%)"
+        confidence_head = (
+            confidence_coin
+            if confidence_val_head is None
+            else f"{confidence_coin} ({confidence_val_head:.0f}%)"
+        )
 
         status_label, status_head, status_sub = _setup_status_summary(
             enter_count=enter_count,
@@ -3204,14 +3825,95 @@ def render(ctx: dict) -> None:
                     "label_title": best_scalp_sub,
                 },
                 {
-                    "label": "Strength Leader",
-                    "value": strength_head,
-                    "subtext": strength_sub,
+                    "label": "Confidence Leader",
+                    "value": confidence_head,
+                    "subtext": confidence_sub,
                 },
             ],
             columns=4,
         )
         st.markdown("<div style='height:0.7rem;'></div>", unsafe_allow_html=True)
+
+        total_rows = int(shown_bundle["total"])
+        attempted_count = int(len(attempted_symbols)) if "attempted_symbols" in locals() else 0
+        skipped_count_live = int(len(skipped_symbols)) if "skipped_symbols" in locals() else 0
+        setup_counts = dict(shown_bundle["setup_counts"])
+        direction_counts = dict(shown_bundle["direction_counts"])
+        ai_ensemble_counts = dict(shown_bundle["ai_ensemble_counts"])
+        ai_confidence_counts = dict(shown_bundle["ai_confidence_counts"])
+        audit_bundle = produced_bundle if int(produced_bundle["total"]) > 0 else shown_bundle
+        audit_total_rows = int(audit_bundle["total"])
+        audit_setup_counts = dict(audit_bundle["setup_counts"])
+        audit_direction_counts = dict(audit_bundle["direction_counts"])
+        audit_ai_ensemble_counts = dict(audit_bundle["ai_ensemble_counts"])
+        watch_ratio = (int(audit_bundle["watch_count"]) / audit_total_rows) if audit_total_rows > 0 else 0.0
+        direction_neutral_ratio = (
+            int(audit_direction_counts.get("Neutral", 0)) / audit_total_rows
+        ) if audit_total_rows > 0 else 0.0
+        ai_neutral_ratio = (
+            int(audit_ai_ensemble_counts.get("Neutral", 0)) / audit_total_rows
+        ) if audit_total_rows > 0 else 0.0
+        skip_ratio = (int(audit_bundle["skip_count"]) / audit_total_rows) if audit_total_rows > 0 else 0.0
+        audit_flags: list[str] = []
+        if watch_ratio >= 0.65:
+            audit_flags.append("WATCH-heavy table: selected-timeframe execution gates are filtering most names.")
+        if ai_neutral_ratio >= 0.65:
+            audit_flags.append("AI is mostly Neutral: HTF AI sees limited clean edge in the current market regime.")
+        if skip_ratio >= 0.65:
+            if direction_neutral_ratio >= 0.65:
+                audit_flags.append(
+                    "SKIP-heavy table: most candidates are being rejected upstream because the HTF Direction is still Neutral."
+                )
+            else:
+                audit_flags.append("SKIP-heavy table: location/risk filters are rejecting most candidates.")
+        with st.expander("Distribution Audit", expanded=False):
+            st.caption(
+                "Use this live snapshot to judge whether the current thresholds are balanced or too strict for the market regime."
+            )
+            for line in _audit_scan_summary_lines(
+                displayed_rows=total_rows,
+                attempted_count=attempted_count,
+                produced_count=live_result_count_before_limit,
+                skipped_count=skipped_count_live,
+                ranked_out_count=live_ranked_out_count,
+                source_label=source_label,
+            ):
+                st.markdown(line)
+            st.markdown("**Shown rows**")
+            st.markdown(f"Setup Confirm: {_share_line(setup_counts, ['Ready', 'Watch', 'Skip'])}")
+            st.markdown(f"Direction: {_share_line(direction_counts, ['Upside', 'Downside', 'Neutral'])}")
+            st.markdown(f"AI Ensemble: {_share_line(ai_ensemble_counts, ['Upside', 'Downside', 'Neutral'])}")
+            st.markdown(
+                f"AI Confidence: {_share_line(ai_confidence_counts, ['High', 'Medium', 'Low', 'Very Low'])}"
+            )
+            st.markdown(
+                f"Emerging: {_share_line_against_total(dict(shown_bundle['emerging_counts']), ['Emerging Upside', 'Emerging Downside'], total_rows)}"
+            )
+            if int(produced_bundle["total"]) > 0 and int(produced_bundle["total"]) != total_rows:
+                produced_total = int(produced_bundle["total"])
+                st.markdown("**Live produced before Top N**")
+                st.markdown(
+                    f"Setup Confirm: {_share_line(dict(produced_bundle['setup_counts']), ['Ready', 'Watch', 'Skip'])}"
+                )
+                st.markdown(
+                    f"Direction: {_share_line(dict(produced_bundle['direction_counts']), ['Upside', 'Downside', 'Neutral'])}"
+                )
+                st.markdown(
+                    f"AI Ensemble: {_share_line(dict(produced_bundle['ai_ensemble_counts']), ['Upside', 'Downside', 'Neutral'])}"
+                )
+                st.markdown(
+                    f"AI Confidence: {_share_line(dict(produced_bundle['ai_confidence_counts']), ['High', 'Medium', 'Low', 'Very Low'])}"
+                )
+                st.markdown(
+                    f"Emerging: {_share_line_against_total(dict(produced_bundle['emerging_counts']), ['Emerging Upside', 'Emerging Downside'], produced_total)}"
+                )
+                if produced_total != total_rows:
+                    st.caption("Skew flags below are based on the live produced rows before the Top N cut.")
+            if audit_flags:
+                for flag in audit_flags:
+                    st.markdown(f"- {flag}")
+            else:
+                st.markdown("- No obvious distribution skew detected in this scan.")
 
         # indicator visual formatting
         df_results["SuperTrend"] = df_results["SuperTrend"].apply(format_trend)
@@ -3258,9 +3960,9 @@ def render(ctx: dict) -> None:
             "Δ (%)",
             "Setup Confirm",
             "Direction",
-            "Strength",
+            "Confidence",
             "AI Ensemble",
-            "Tech vs AI Alignment",
+            "AI Confidence",
             "R:R",
             "Entry Price",
             "Stop Loss",
@@ -3298,9 +4000,9 @@ def render(ctx: dict) -> None:
                 "__rr_note",
                 "__adx_raw",
                 "__direction_note",
-                "__strength_note",
+                "__confidence_note",
+                    "__ai_confidence_note",
                     "__ai_note",
-                    "__alignment_note",
                     "__pair",
                 ] if c in df_results.columns and c not in display_cols
             ]

@@ -13,7 +13,8 @@ from core.backtest import (
     build_scalp_outcome_study,
     summarize_scalp_outcome_study,
 )
-from core.signal_contract import strength_bucket
+from core.confidence import ai_confidence_bucket, confidence_bucket
+from core.symbols import is_stable_base_symbol
 from ui.ctx import get_ctx
 from ui.primitives import render_help_details, render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
@@ -78,11 +79,6 @@ def render(ctx: dict) -> None:
     scalp_quality_gate = get_ctx(ctx, "scalp_quality_gate")
     _sr_lookback = get_ctx(ctx, "_sr_lookback")
 
-    STABLE_BASES = {
-        "USDT", "USDC", "BUSD", "DAI", "TUSD", "USDE", "FDUSD", "PYUSD",
-        "RLUSD", "USDP", "GUSD", "EURS", "EURC",
-    }
-
     def _chip(text: str, tone: str, extra_class: str = "", title: str | None = None) -> str:
         if not str(text or "").strip():
             return ""
@@ -107,32 +103,54 @@ def render(ctx: dict) -> None:
             return _chip("Downside", "neg")
         return _chip("Neutral", "warn")
 
-    def _strength_chip(value: object) -> str:
+    def _parse_support_votes(votes_text: object) -> int:
+        m = re.search(r"(\d)\s*/\s*3", str(votes_text or ""))
+        return max(0, min(3, int(m.group(1)))) if m else 0
+
+    def _confidence_chip(value: object) -> str:
         try:
             s = float(value)
         except Exception:
             return ""
-        label = str(strength_bucket(s) or "MIXED").upper()
-        text = f"{s:.0f}% ({label})"
-        if label in {"STRONG", "VERY STRONG", "EXTREME", "GOOD"}:
+        label = str(confidence_bucket(s) or "LOW").upper()
+        text = f"{s:.0f}% ({label.title()})"
+        if label == "HIGH":
             tone = "pos"
-        elif label in {"MIXED", "STARTING"}:
+        elif label == "MEDIUM":
             tone = "warn"
         else:
             tone = "neg"
         return _chip(text, tone)
 
-    def _alignment_chip(value: str) -> str:
-        v = str(value or "").strip().upper()
-        if v == "HIGH":
-            return _chip("HIGH", "pos")
-        if v in {"MEDIUM", "TREND"}:
-            return _chip(v, "warn")
-        if v == "CONFLICT":
-            return _chip("CONFLICT", "neg")
-        if v == "WEAK":
-            return _chip("WEAK", "warn")
-        return _chip(v or "N/A", "muted")
+    def _ai_confidence_chip(
+        value: object,
+        *,
+        direction: object,
+        votes_text: object,
+        timeframe_conflict: object = False,
+        degraded_data: object = False,
+    ) -> str:
+        try:
+            s = float(value)
+        except Exception:
+            return ""
+        if not np.isfinite(s):
+            return ""
+        label = ai_confidence_bucket(
+            s,
+            direction=str(direction or ""),
+            support_votes=_parse_support_votes(votes_text),
+            timeframe_conflict=bool(timeframe_conflict),
+            degraded_data=bool(degraded_data),
+        ).title()
+        text = f"{s:.0f}% ({label})"
+        if label.upper() == "HIGH":
+            tone = "pos"
+        elif label.upper() == "MEDIUM":
+            tone = "warn"
+        else:
+            tone = "neg"
+        return _chip(text, tone)
 
     def _ai_ensemble_chip(direction: str, votes_text: str) -> str:
         d = str(direction or "").strip()
@@ -181,7 +199,7 @@ def render(ctx: dict) -> None:
             "CONFLICT": "Tech/AI conflict",
             "RR_TOO_LOW": "R:R too low",
             "ADX_TOO_LOW": "ADX too low",
-            "STRENGTH_TOO_LOW": "Strength too low",
+            "CONFIDENCE_TOO_LOW": "Confidence too low",
             "INVALID_LEVELS": "Invalid levels",
             "UNKNOWN_GATE_REJECT": "Unknown reject",
         }
@@ -304,9 +322,9 @@ def render(ctx: dict) -> None:
             "Pair",
             "Setup Confirm",
             "Direction",
-            "Strength",
+            "Confidence",
             "AI Ensemble",
-            "Tech vs AI Alignment",
+            "AI Confidence",
             "Event Price",
             "Target",
             "Stop",
@@ -333,14 +351,16 @@ def render(ctx: dict) -> None:
                     cells.append(f"<td><span class='sb-plain'>{html.escape(str(r.get(c, '')))}</span></td>")
                 elif c == "Direction":
                     cells.append(f"<td>{_direction_chip(str(r.get(c, '')))}</td>")
-                elif c == "Strength":
-                    cells.append(f"<td>{_strength_chip(r.get(c))}</td>")
+                elif c == "Confidence":
+                    cells.append(f"<td>{_confidence_chip(r.get(c, r.get('Strength')))}</td>")
                 elif c == "AI Ensemble":
                     cells.append(
                         f"<td>{_ai_ensemble_chip(str(r.get('AI Direction', 'Neutral')), str(r.get('AI Votes', '0/3')))}</td>"
                     )
-                elif c == "Tech vs AI Alignment":
-                    cells.append(f"<td>{_alignment_chip(str(r.get(c, '')))}</td>")
+                elif c == "AI Confidence":
+                    cells.append(
+                        f"<td>{_ai_confidence_chip(r.get(c, r.get('AI Confidence')), direction=r.get('AI Direction'), votes_text=r.get('AI Votes'), timeframe_conflict=r.get('AI Timeframe Conflict', False), degraded_data=r.get('AI Degraded', False))}</td>"
+                    )
                 elif c in {"Event Price", "Target", "Stop"}:
                     v = pd.to_numeric(r.get(c), errors="coerce")
                     txt = f"${float(v):,.6f}" if pd.notna(v) else ""
@@ -484,7 +504,8 @@ def render(ctx: dict) -> None:
             "2. If <b>Custom Coins</b> is empty, scan runs on the top-volume universe (controlled by Universe Size).<br>"
             "3. If <b>Custom Coins</b> has symbols, scan runs <b>only</b> on those symbols (Universe Size is ignored).<br>"
             "4. Each event is tracked for the next N bars and labeled as <b>TP-first</b>, <b>SL-first</b>, or <b>TIMEOUT</b>.<br>"
-            "5. Use Direction/Coin Scoreboards to decide which side or symbols are currently worth testing in live flow."
+            "5. <b>Confidence</b> in the event table is the selected-timeframe execution confidence used by the scalp engine.<br>"
+            "6. Use Direction/Coin Scoreboards to decide which side or symbols are currently worth testing in live flow."
         ),
     )
 
@@ -570,7 +591,7 @@ def render(ctx: dict) -> None:
         pairs = [f"{b}/USDT" for b in custom_bases]
     if exclude_stables:
         before_n = len(pairs)
-        pairs = [p for p in pairs if p.split("/", 1)[0] not in STABLE_BASES]
+        pairs = [p for p in pairs if not is_stable_base_symbol(p.split("/", 1)[0])]
         removed_n = max(0, before_n - len(pairs))
         if removed_n:
             st.caption(f"Stablecoin filter removed {removed_n} pair(s) from study universe.")
@@ -652,6 +673,8 @@ def render(ctx: dict) -> None:
                 scalp_quality_gate_fn=scalp_quality_gate,
                 sr_lookback_fn=_sr_lookback,
                 timeframe=timeframe,
+                df_4h=(df if timeframe == "4h" else fetch_ohlcv(pair, "4h", limit=260)),
+                df_1d=(df if timeframe == "1d" else fetch_ohlcv(pair, "1d", limit=260)),
                 forward_bars=forward_bars,
             )
             diag = {}
@@ -1013,7 +1036,8 @@ def render(ctx: dict) -> None:
         st.markdown("#### Event table")
         _render_event_table_html(events_df, forward_bars)
 
-    csv_data = events_df.to_csv(index=False).encode("utf-8")
+    export_df = events_df.rename(columns={"Strength": "Confidence"}) if "Strength" in events_df.columns else events_df
+    csv_data = export_df.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download Scalp Outcome Study (CSV)",
         data=csv_data,

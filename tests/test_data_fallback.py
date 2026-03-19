@@ -337,6 +337,11 @@ class DataFallbackTests(unittest.TestCase):
                 data.fetch_coingecko_ohlcv("BTC/USDT", "4h", 500)
         mocked_market_chart.assert_called_once_with("bitcoin", 85, "4h")
 
+    def test_fetch_coingecko_ohlcv_by_coin_id_uses_explicit_coin_id(self):
+        with patch("core.data.coingecko_market_chart", return_value=None) as mocked_market_chart:
+            data.fetch_coingecko_ohlcv_by_coin_id("banana-gun", "1h", 120)
+        mocked_market_chart.assert_called_once_with("banana-gun", 6, "1h")
+
     def test_fetch_ohlcv_marks_coingecko_fallback_in_attrs(self):
         frame = pd.DataFrame(
             {

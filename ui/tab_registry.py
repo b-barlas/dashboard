@@ -41,6 +41,7 @@ _TAB_DEPS = [
             "get_market_top_snapshot", "get_price_change",
             "_tip", "get_major_ohlcv_bundle", "ml_ensemble_predict", "get_top_volume_usdt_symbols",
             "get_market_cap_rows_for_symbols",
+            "fetch_coingecko_ohlcv_by_coin_id",
             "fetch_ohlcv", "analyse", "get_scalping_entry_target", "scalp_quality_gate", "_calc_conviction",
             "signal_plain", "direction_key", "direction_label", "bias_score_badge", "readable_market_cap", "leverage_badge",
             "format_delta", "format_trend", "format_adx", "format_stochrsi",

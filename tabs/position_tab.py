@@ -7,23 +7,153 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
 import ta
+from core.ai_spot_bias import (
+    ai_spot_bias_consensus_agreement,
+    ai_spot_bias_directional_agreement,
+    ai_spot_bias_display_votes,
+    ai_spot_bias_probability_up,
+    ai_spot_bias_status,
+    build_ai_spot_bias_snapshot,
+)
+from core.confidence import (
+    ai_confidence_bucket,
+    build_ai_confidence_snapshot,
+    build_confidence_snapshot,
+    build_execution_confidence_snapshot,
+    confidence_bucket,
+)
 from core.market_decision import (
-    action_decision_with_reason,
+    ai_led_confirmation_snapshot,
     action_reason_text,
     normalize_action_class,
+    selected_timeframe_execution_snapshot,
+    selected_timeframe_rr_ratio,
+    spot_action_decision_with_reason,
     structure_state,
+    trend_led_confirmation_snapshot,
 )
 from core.market_decision import ai_vote_metrics
 from core.scalping import scalp_gate_thresholds
-from core.signal_contract import strength_from_bias, strength_bucket
+from core.signal_contract import bias_confidence_from_bias
 from core.position_metrics import (
     compute_hard_invalidation,
     compute_health_decision,
     compute_position_pnl,
     estimate_liquidation,
 )
+from core.spot_direction import build_spot_direction_snapshot
 from ui.primitives import render_help_details, render_page_header
 from ui.snapshot_cache import live_or_snapshot
+
+
+def _prepare_closed_frame(df: pd.DataFrame | None, *, min_rows: int = 55) -> pd.DataFrame | None:
+    if df is None:
+        return None
+    if len(df) <= int(min_rows):
+        return None
+    df_eval = df.iloc[:-1].copy()
+    if len(df_eval) < int(min_rows):
+        return None
+    return df_eval
+
+
+def _direction_fetch_symbol(symbol: str, actual_symbol: str, source_provider: str) -> str:
+    # Use the canonical requested symbol for HTF context fetches so spot
+    # Direction/AI semantics do not drift with selected-timeframe provider
+    # resolution.
+    return str(symbol or actual_symbol or "").strip()
+
+
+def _confidence_display(score: float) -> str:
+    score_f = max(0.0, min(100.0, float(score)))
+    return f"{score_f:.0f}% ({confidence_bucket(score_f).title()})"
+
+
+def _ai_confidence_display(snapshot, score: float) -> str:
+    score_f = max(0.0, min(100.0, float(score)))
+    label = ai_confidence_bucket(
+        score_f,
+        direction=str(snapshot.direction or ""),
+        support_votes=int(ai_spot_bias_display_votes(snapshot)),
+        timeframe_conflict=bool(snapshot.timeframe_conflict),
+        degraded_data=bool(snapshot.degraded_data),
+    )
+    return f"{score_f:.0f}% ({label.title()})"
+
+
+def _spot_bias_label(direction: str) -> str:
+    raw = str(direction or "").strip().upper()
+    if raw == "UPSIDE":
+        return "Upside"
+    if raw == "DOWNSIDE":
+        return "Downside"
+    return "Neutral"
+
+
+def _spot_tf_note(snapshot) -> str:
+    return (
+        f"{str(snapshot.timeframe).upper()}: {_spot_bias_label(snapshot.direction)} | "
+        f"Score {float(snapshot.score):.1f} | "
+        f"Structure {snapshot.structure_label} ({float(snapshot.structure_score):.0f}) | "
+        f"Trend {float(snapshot.trend_score):.0f} | "
+        f"Regime {snapshot.regime_label} ({float(snapshot.regime_quality):.0f}) | "
+        f"Location {float(snapshot.location_quality):.0f}"
+    )
+
+
+def _ai_spot_tf_note(snapshot) -> str:
+    status = str(getattr(snapshot, "status", "") or "").strip()
+    note = str(getattr(snapshot, "note", "") or "").strip()
+    suffix_parts = []
+    if status:
+        suffix_parts.append(f"Status {status}")
+    if note:
+        suffix_parts.append(note)
+    suffix = f" | {' | '.join(suffix_parts)}" if suffix_parts else ""
+    return (
+        f"{str(snapshot.timeframe).upper()}: {_spot_bias_label(snapshot.direction)} | "
+        f"Score {float(snapshot.score):.1f} | "
+        f"Prob Up {float(snapshot.probability_up) * 100:.0f}% | "
+        f"Directional agreement {float(snapshot.directional_agreement) * 100:.0f}% | "
+        f"Consensus {float(snapshot.consensus_agreement) * 100:.0f}%{suffix}"
+    )
+
+
+def _ai_spot_note(snapshot) -> str:
+    dots = ai_spot_bias_display_votes(snapshot)
+    return (
+        f"AI spot bias (1D + 4H): {_spot_bias_label(snapshot.direction)} | "
+        f"Combined score {float(snapshot.score):.1f} | "
+        f"Conviction quality {float(snapshot.conviction_quality):.0f} | "
+        f"Timeframe alignment {float(snapshot.timeframe_alignment):.0f} | "
+        f"Displayed model-support dots {dots}/3 | "
+        f"{str(snapshot.note or '').strip()} | "
+        f"{_ai_spot_tf_note(snapshot.one_day)} | "
+        f"{_ai_spot_tf_note(snapshot.four_hour)}"
+    )
+
+
+def _ai_confidence_note(snapshot, score: float) -> str:
+    dots = ai_spot_bias_display_votes(snapshot)
+    caps: list[str] = []
+    if str(snapshot.direction or "").strip().upper() == "NEUTRAL":
+        caps.append("neutral-verdict cap <=58")
+    if bool(snapshot.timeframe_conflict):
+        caps.append("timeframe-conflict cap <=30")
+    if bool(snapshot.degraded_data):
+        caps.append("degraded-data cap <=35")
+    if str(snapshot.direction or "").strip().upper() != "NEUTRAL" and int(dots) <= 1:
+        caps.append("low-model-support cap <=59")
+    cap_text = f" | Active caps: {', '.join(caps)}" if caps else ""
+    return (
+        f"AI confidence: {float(score):.1f}% ({ai_confidence_bucket(float(score), direction=str(snapshot.direction or ''), support_votes=int(dots), timeframe_conflict=bool(snapshot.timeframe_conflict), degraded_data=bool(snapshot.degraded_data)).title()}) | "
+        f"HTF AI verdict {_spot_bias_label(snapshot.direction)} | "
+        f"Combined score {float(snapshot.score):.1f} | "
+        f"Conviction quality {float(snapshot.conviction_quality):.0f} | "
+        f"Timeframe alignment {float(snapshot.timeframe_alignment):.0f} | "
+        f"Consensus quality {float(snapshot.consensus_quality):.0f} | "
+        f"Model support {int(dots)}/3{cap_text}"
+    )
 
 
 def render(ctx: dict) -> None:
@@ -69,7 +199,7 @@ def render(ctx: dict) -> None:
         summary="How to read quickly",
         body_html=(
             "1) Confirm <b>PnL + Liquidation Distance</b> first. "
-            "2) Check <b>Direction / Strength / AI / Alignment</b>. "
+            "2) Check <b>Direction / Confidence / HTF AI / AI Confidence</b>. "
             "3) Respect <b>Technical Invalidation</b> as hard risk line. "
             "4) Follow the <b>Decision Model</b> action (HOLD / REDUCE / EXIT style)."
         ),
@@ -252,10 +382,39 @@ def render(ctx: dict) -> None:
                     st.error(f"Not enough closed-candle data to analyse position for {tf}.")
                     continue
 
+                actual_symbol = str(df.attrs.get("source_symbol") or "").strip() or coin
+                source_provider = str(df.attrs.get("source_provider") or "").strip() or "exchange"
+                direction_fetch_symbol = _direction_fetch_symbol(coin, actual_symbol, source_provider)
+                # Keep HTF context stable across selected-timeframe changes.
+                df_4h_raw = fetch_ohlcv(direction_fetch_symbol, "4h", limit=260)
+                df_1d_raw = fetch_ohlcv(direction_fetch_symbol, "1d", limit=260)
+                df_direction_4h = _prepare_closed_frame(df_4h_raw, min_rows=81)
+                df_direction_1d = _prepare_closed_frame(df_1d_raw, min_rows=81)
+                spot_snapshot = build_spot_direction_snapshot(
+                    df_4h=df_direction_4h,
+                    df_1d=df_direction_1d,
+                )
+                confidence_snapshot = build_confidence_snapshot(
+                    direction=spot_snapshot.direction,
+                    timeframe_alignment=spot_snapshot.timeframe_alignment,
+                    structure_quality=spot_snapshot.structure_quality,
+                    trend_quality=spot_snapshot.trend_quality,
+                    regime_quality=spot_snapshot.regime_quality,
+                    location_quality=spot_snapshot.location_quality,
+                    timeframe_conflict=spot_snapshot.timeframe_conflict,
+                    degraded_data=spot_snapshot.degraded_data,
+                    range_regime=spot_snapshot.range_regime,
+                )
+                ai_spot_snapshot = build_ai_spot_bias_snapshot(
+                    df_4h=df_direction_4h,
+                    df_1d=df_direction_1d,
+                    predictor=ml_ensemble_predict,
+                )
+
                 a = analyse(df_eval)
                 signal, volume_spike = a.signal, a.volume_spike
                 atr_comment, candle_pattern, bias_score = a.atr_comment, a.candle_pattern, a.bias
-                strength_score = float(strength_from_bias(float(bias_score)))
+                directional_confidence = float(bias_confidence_from_bias(float(bias_score)))
                 adx_val, supertrend_trend, ichimoku_trend = a.adx, a.supertrend, a.ichimoku
                 stochrsi_k_val, bollinger_bias, vwap_label = a.stochrsi_k, a.bollinger, a.vwap
                 psar_trend, williams_label, cci_label = a.psar, a.williams, a.cci
@@ -351,7 +510,7 @@ def render(ctx: dict) -> None:
                     consensus_agreement = float(
                         (ai_details or {}).get("consensus_agreement", directional_agreement)
                     )
-                    ai_votes, _display_ratio, decision_agreement = ai_vote_metrics(
+                    ai_votes, _, decision_agreement = ai_vote_metrics(
                         ai_dir,
                         directional_agreement,
                         consensus_agreement,
@@ -360,18 +519,104 @@ def render(ctx: dict) -> None:
                     ai_dir = "NEUTRAL"
                     decision_agreement = 0.0
 
-                # Alignment: alignment of Direction + AI + Strength
-                conviction_lbl, _ = _calc_conviction(signal_dir, ai_dir, strength_score, decision_agreement)
+                base_conviction_lbl, _ = _calc_conviction(
+                    signal_dir,
+                    ai_dir,
+                    directional_confidence,
+                    decision_agreement,
+                )
+                tactical_structure = structure_state(signal_dir, ai_dir, directional_confidence, decision_agreement)
+                execution_confidence = build_execution_confidence_snapshot(
+                    direction=signal_dir,
+                    bias_score=float(bias_score),
+                    adx_val=float(adx_val) if pd.notna(adx_val) else float("nan"),
+                    structure_state=tactical_structure,
+                    conviction_label=str(base_conviction_lbl),
+                    ai_agreement=float(decision_agreement),
+                )
+                conviction_lbl, _ = _calc_conviction(signal_dir, ai_dir, float(execution_confidence.score), decision_agreement)
+                ai_spot_direction = direction_key(ai_spot_snapshot.direction)
+                ai_spot_votes = ai_spot_bias_display_votes(ai_spot_snapshot)
+                ai_confidence_snapshot = build_ai_confidence_snapshot(
+                    direction=ai_spot_snapshot.direction,
+                    combined_score=float(ai_spot_snapshot.score),
+                    conviction_quality=float(ai_spot_snapshot.conviction_quality),
+                    timeframe_alignment=float(ai_spot_snapshot.timeframe_alignment),
+                    consensus_quality=float(ai_spot_snapshot.consensus_quality),
+                    support_votes=int(ai_spot_votes),
+                    timeframe_conflict=bool(ai_spot_snapshot.timeframe_conflict),
+                    degraded_data=bool(ai_spot_snapshot.degraded_data),
+                )
+                ai_spot_agreement = float(ai_spot_bias_directional_agreement(ai_spot_snapshot))
+                ai_spot_consensus = float(ai_spot_bias_consensus_agreement(ai_spot_snapshot))
+                ai_spot_probability_up = float(ai_spot_bias_probability_up(ai_spot_snapshot))
+                ai_spot_status = str(ai_spot_bias_status(ai_spot_snapshot) or "")
+                df_scalp = df_eval.tail(120).copy()
+                scalp_direction = None
+                entry_s = target_s = stop_s = rr_ratio = 0.0
+                breakout_note = ""
+                if df_scalp is not None and len(df_scalp) > 30:
+                    try:
+                        scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note = get_scalping_entry_target(
+                            df_scalp,
+                            bias_score,
+                            supertrend_trend,
+                            ichimoku_trend,
+                            vwap_label,
+                        )
+                    except Exception:
+                        scalp_direction = None
+                        entry_s = target_s = stop_s = rr_ratio = 0.0
+                        breakout_note = ""
+
+                execution_snapshot = selected_timeframe_execution_snapshot(
+                    df=df_eval,
+                    direction=spot_snapshot.direction,
+                    bias_score=float(bias_score),
+                    adx_val=float(adx_val) if pd.notna(adx_val) else float("nan"),
+                    supertrend_trend=str(supertrend_trend),
+                    ichimoku_trend=str(ichimoku_trend),
+                    vwap_label=str(vwap_label),
+                    psar_trend=str(psar_trend),
+                    bollinger_bias=str(bollinger_bias),
+                    williams_label=str(williams_label),
+                    cci_label=str(cci_label),
+                )
+                setup_rr_ratio = float(selected_timeframe_rr_ratio(execution_snapshot, direction=spot_snapshot.direction))
+                trend_led_snapshot = trend_led_confirmation_snapshot(
+                    spot_dir=spot_snapshot.direction,
+                    spot_confidence=float(confidence_snapshot.score),
+                    tactical_dir=signal_dir,
+                    adx_val=float(adx_val) if pd.notna(adx_val) else float("nan"),
+                    structure_quality=float(execution_snapshot.structure_quality),
+                    trend_quality=float(execution_snapshot.trend_quality),
+                    regime_quality=float(execution_snapshot.regime_quality),
+                    location_quality=float(execution_snapshot.location_quality),
+                    rr_ratio=setup_rr_ratio if np.isfinite(setup_rr_ratio) and setup_rr_ratio > 0.0 else None,
+                )
+                ai_led_snapshot = ai_led_confirmation_snapshot(
+                    spot_dir=spot_snapshot.direction,
+                    spot_confidence=float(confidence_snapshot.score),
+                    ai_dir=ai_spot_direction,
+                    ai_probability=float(ai_spot_probability_up),
+                    directional_agreement=float(ai_spot_agreement),
+                    consensus_agreement=float(ai_spot_consensus),
+                    adx_val=float(adx_val) if pd.notna(adx_val) else float("nan"),
+                    location_quality=float(execution_snapshot.location_quality),
+                    rr_ratio=setup_rr_ratio if np.isfinite(setup_rr_ratio) and setup_rr_ratio > 0.0 else None,
+                    ai_status=ai_spot_status,
+                )
 
                 # Setup confirm mirrors market/spot decision policy.
-                structure_state_val = structure_state(signal_dir, ai_dir, strength_score, decision_agreement)
-                action_raw, action_reason_code = action_decision_with_reason(
+                action_raw, action_reason_code = spot_action_decision_with_reason(
+                    spot_snapshot.direction,
+                    float(confidence_snapshot.score),
                     signal_dir,
-                    float(strength_score),
-                    structure_state_val,
-                    conviction_lbl,
-                    float(decision_agreement),
+                    ai_spot_snapshot.direction,
+                    float(ai_spot_agreement),
                     float(adx_val),
+                    trend_led_snapshot=trend_led_snapshot,
+                    ai_led_snapshot=ai_led_snapshot,
                 )
 
                 # Spot-style setup snapshot (selected coin/timeframe).
@@ -388,12 +633,13 @@ def render(ctx: dict) -> None:
                     else (NEGATIVE if str(delta_display).strip().startswith("▼") else WARNING)
                 )
 
-                sig_color = POSITIVE if signal_dir == "UPSIDE" else (NEGATIVE if signal_dir == "DOWNSIDE" else WARNING)
-                ai_color = POSITIVE if ai_dir == "UPSIDE" else (NEGATIVE if ai_dir == "DOWNSIDE" else WARNING)
-                _s_bucket = strength_bucket(strength_score)
-                strength_display = f"{strength_score:.0f}% ({_s_bucket})"
-                conf_color = POSITIVE if _s_bucket in {"STRONG", "GOOD"} else (WARNING if _s_bucket == "MIXED" else NEGATIVE)
-                conv_color = POSITIVE if conviction_lbl == "HIGH" else (WARNING if conviction_lbl in {"MEDIUM", "TREND"} else NEGATIVE)
+                sig_color = POSITIVE if spot_snapshot.direction == "UPSIDE" else (NEGATIVE if spot_snapshot.direction == "DOWNSIDE" else WARNING)
+                ai_color = POSITIVE if ai_spot_direction == "UPSIDE" else (NEGATIVE if ai_spot_direction == "DOWNSIDE" else WARNING)
+                confidence_display = _confidence_display(float(confidence_snapshot.score))
+                conf_bucket = confidence_bucket(float(confidence_snapshot.score))
+                conf_color = POSITIVE if conf_bucket == "HIGH" else (WARNING if conf_bucket == "MEDIUM" else NEGATIVE)
+                ai_conf_bucket = str(ai_confidence_snapshot.label or "LOW").upper()
+                ai_conf_color = POSITIVE if ai_conf_bucket == "HIGH" else (WARNING if ai_conf_bucket == "MEDIUM" else NEGATIVE)
                 setup_confirm = _setup_confirm_display(action_raw)
                 setup_reason = action_reason_text(action_reason_code)
                 action_class = normalize_action_class(action_raw)
@@ -404,6 +650,23 @@ def render(ctx: dict) -> None:
                 else:
                     setup_color = NEGATIVE
 
+                direction_note = (
+                    f"Spot bias (1D + 4H): {_spot_bias_label(spot_snapshot.direction)} | "
+                    f"Combined score {float(spot_snapshot.score):.1f} | {str(spot_snapshot.note or '').strip()} | "
+                    f"{_spot_tf_note(spot_snapshot.one_day)} | "
+                    f"{_spot_tf_note(spot_snapshot.four_hour)} | "
+                    f"Tactical ({tf}): {direction_label(signal_dir)} | Bias {float(bias_score):.1f}"
+                )
+                confidence_note = (
+                    f"Spot confidence: {float(confidence_snapshot.score):.1f}% ({confidence_snapshot.label.title()}) | "
+                    f"Timeframe alignment {float(spot_snapshot.timeframe_alignment):.0f} | "
+                    f"Structure quality {float(spot_snapshot.structure_quality):.0f} | "
+                    f"Trend quality {float(spot_snapshot.trend_quality):.0f} | "
+                    f"Regime quality {float(spot_snapshot.regime_quality):.0f} | "
+                    f"Location quality {float(spot_snapshot.location_quality):.0f}"
+                )
+                ai_note = _ai_spot_note(ai_spot_snapshot)
+                ai_confidence_note = _ai_confidence_note(ai_spot_snapshot, float(ai_confidence_snapshot.score))
                 st.markdown(
                     f"<style>"
                     f".spot-summary-title{{"
@@ -453,18 +716,18 @@ def render(ctx: dict) -> None:
                     f"<div class='spot-summary-item' title='{setup_reason}'>"
                     f"<div class='spot-summary-label'>Setup Confirm</div>"
                     f"<div class='spot-summary-value' style='color:{setup_color};'>{setup_confirm}</div></div>"
-                    f"<div class='spot-summary-item' title='Technical side from closed candles (Upside/Downside/Neutral).'>"
+                    f"<div class='spot-summary-item' title='{html.escape(direction_note, quote=True)}'>"
                     f"<div class='spot-summary-label'>Direction</div>"
-                    f"<div class='spot-summary-value' style='color:{sig_color};'>{signal_clean}</div></div>"
-                    f"<div class='spot-summary-item' title='Direction-agnostic signal power from the technical stack (0-100).'>"
-                    f"<div class='spot-summary-label'>Strength</div>"
-                    f"<div class='spot-summary-value' style='color:{conf_color};'>{strength_display}</div></div>"
-                    f"<div class='spot-summary-item' title='Model vote direction and vote count out of 3 models.'>"
+                    f"<div class='spot-summary-value' style='color:{sig_color};'>{direction_label(spot_snapshot.direction)}</div></div>"
+                    f"<div class='spot-summary-item' title='{html.escape(confidence_note, quote=True)}'>"
+                    f"<div class='spot-summary-label'>Confidence</div>"
+                    f"<div class='spot-summary-value' style='color:{conf_color};'>{confidence_display}</div></div>"
+                    f"<div class='spot-summary-item' title='{html.escape(ai_note, quote=True)}'>"
                     f"<div class='spot-summary-label'>AI Ensemble</div>"
-                    f"<div class='spot-summary-value' style='color:{ai_color};'>{direction_label(ai_dir)} ({ai_votes}/3)</div></div>"
-                    f"<div class='spot-summary-item' title='How well technical direction and AI direction agree.'>"
-                    f"<div class='spot-summary-label'>Tech vs AI Alignment</div>"
-                    f"<div class='spot-summary-value' style='color:{conv_color};'>{conviction_lbl}</div></div>"
+                    f"<div class='spot-summary-value' style='color:{ai_color};'>{direction_label(ai_spot_snapshot.direction)} ({ai_spot_votes}/3){' *' if ai_spot_snapshot.degraded_data else ''}</div></div>"
+                    f"<div class='spot-summary-item' title='{html.escape(ai_confidence_note, quote=True)}'>"
+                    f"<div class='spot-summary-label'>AI Confidence</div>"
+                    f"<div class='spot-summary-value' style='color:{ai_conf_color};'>{_ai_confidence_display(ai_spot_snapshot, float(ai_confidence_snapshot.score))}</div></div>"
                     f"</div></div>",
                     unsafe_allow_html=True,
                 )
@@ -586,22 +849,22 @@ def render(ctx: dict) -> None:
 
                 # Risk alert for position
                 pos_dir = direction_key(direction)
-                if pos_dir == signal_dir and strength_score < 50:
+                if pos_dir == direction_key(spot_snapshot.direction) and float(confidence_snapshot.score) < 50:
                     st.markdown(
                         f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
                         f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
-                        f"<span style='color:{NEGATIVE}; font-weight:600;'>Low Strength</span>"
-                        f"<span style='color:{TEXT_MUTED};'> — Position direction matches signal but strength "
-                        f"is only {strength_score:.0f}%. Consider tightening stop-loss.</span></div>",
+                        f"<span style='color:{NEGATIVE}; font-weight:600;'>Low Confidence</span>"
+                        f"<span style='color:{TEXT_MUTED};'> — Position direction matches the spot bias but confidence "
+                        f"is only {float(confidence_snapshot.score):.0f}%. Consider tighter risk control.</span></div>",
                         unsafe_allow_html=True,
                     )
-                elif pos_dir != signal_dir and signal_dir != "NEUTRAL":
+                elif pos_dir != direction_key(spot_snapshot.direction) and direction_key(spot_snapshot.direction) != "NEUTRAL":
                     st.markdown(
                         f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
                         f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
                         f"<span style='color:{NEGATIVE}; font-weight:600;'>Direction Conflict</span>"
                         f"<span style='color:{TEXT_MUTED};'> — Your {direction_label(direction)} position conflicts with "
-                        f"the current {direction_label(signal_dir)} signal. Review position validity.</span></div>",
+                        f"the current spot bias {direction_label(spot_snapshot.direction)}. Review position validity.</span></div>",
                         unsafe_allow_html=True,
                     )
 
@@ -643,7 +906,7 @@ def render(ctx: dict) -> None:
                 health_pack = compute_health_decision(
                     direction=direction,
                     signal_direction=signal_dir_legacy,
-                    strength=float(strength_score),
+                    confidence=float(execution_confidence.score),
                     conviction_label=conviction_lbl,
                     liq_distance_pct=liq_dist_pct,
                     invalidated=invalidated,
@@ -672,10 +935,12 @@ def render(ctx: dict) -> None:
                         "Net PnL ($)": round(float(net_pnl_usd), 2),
                         "Est. Liquidation": (round(float(liq_price), 6) if liq_price is not None else None),
                         "Liq Distance (%)": (round(float(liq_dist_pct), 4) if liq_dist_pct is not None else None),
-                        "Signal Direction": signal_clean,
-                        "Strength (%)": round(float(strength_score), 2),
-                        "AI Direction": direction_label(ai_dir),
-                        "Alignment": conviction_lbl,
+                        "Spot Direction": direction_label(spot_snapshot.direction),
+                        "Tactical Direction": signal_clean,
+                        "Confidence (%)": round(float(confidence_snapshot.score), 2),
+                        "Confidence (Selected TF) (%)": round(float(execution_confidence.score), 2),
+                        "AI Direction": direction_label(ai_spot_snapshot.direction),
+                        "AI Confidence (%)": round(float(ai_confidence_snapshot.score), 2),
                         "Technical Invalidation": round(float(invalidation), 6),
                         "Invalidation State": inv_state,
                         "Health Label": health_label,
@@ -686,10 +951,10 @@ def render(ctx: dict) -> None:
                 reason_map = {
                     "signal conflict": "signal conflict",
                     "no clear technical edge": "no clear edge",
-                    "low strength": "low strength",
-                    "medium strength": "medium strength",
+                    "low confidence": "low confidence",
+                    "medium confidence": "medium confidence",
                     "AI conflict": "AI conflict",
-                    "low conviction": "weak alignment",
+                    "low conviction": "weak conviction",
                     "liquidation too close": "liquidation too close",
                     "liquidation moderately close": "liquidation moderately close",
                     "hard invalidation broken": "invalidation broken",
@@ -724,31 +989,21 @@ def render(ctx: dict) -> None:
                 )
 
                 # === Scalping Setup ===
-                df_scalp = df_eval.tail(120).copy()
-                
                 if df_scalp is not None and len(df_scalp) > 30:
-                    # === Scalping Strategy Call ===
-                    scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note = get_scalping_entry_target(
-                        df_scalp,
-                        bias_score,
-                        supertrend_trend,
-                        ichimoku_trend,
-                        vwap_label,
-                    )
-                    gate_min_rr, gate_min_adx, gate_min_strength = scalp_gate_thresholds(tf)
+                    gate_min_rr, gate_min_adx, gate_min_confidence = scalp_gate_thresholds(tf)
                     scalp_ok, scalp_reason = scalp_quality_gate(
                         scalp_direction=scalp_direction,
                         signal_direction=signal_dir,
                         rr_ratio=rr_ratio,
                         adx_val=adx_val,
-                        strength=strength_score,
+                        confidence=float(execution_confidence.score),
                         conviction_label=conviction_lbl,
                         entry=entry_s,
                         stop=stop_s,
                         target=target_s,
                         min_rr=gate_min_rr,
                         min_adx=gate_min_adx,
-                        min_strength=gate_min_strength,
+                        min_confidence=gate_min_confidence,
                     )
                 
                     # === Display Scalping Result ===
@@ -780,7 +1035,7 @@ def render(ctx: dict) -> None:
                             "CONFLICT": "Technical vs AI alignment is in conflict.",
                             "RR_TOO_LOW": f"R:R below required threshold ({gate_min_rr:.2f}).",
                             "ADX_TOO_LOW": f"ADX below required trend threshold ({gate_min_adx:.0f}).",
-                            "STRENGTH_TOO_LOW": f"Strength below required threshold ({gate_min_strength:.0f}).",
+                            "CONFIDENCE_TOO_LOW": f"Confidence below required threshold ({gate_min_confidence:.0f}).",
                             "INVALID_LEVELS": "Invalid Entry/Stop/Target levels.",
                         }
                         msg = breakout_note or reason_map.get(scalp_reason, "No valid scalping setup with current filters.")
