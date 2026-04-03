@@ -209,6 +209,37 @@ class ServicesHttpTests(unittest.TestCase):
         self.assertEqual(out["fg_label"], "Greed")
         mocked_fg.assert_called_once()
 
+    def test_get_heatmap_rows_returns_live_coingecko_payload(self):
+        fake_st = self._fake_st()
+        sample_rows = [{"Symbol": "BTC", "Market Cap": 10.0, "Change 24h (%)": 1.0}]
+        with patch("core.services.st", fake_st):
+            with patch("core.services._fetch_coingecko_heatmap_rows", return_value=sample_rows):
+                rows, source, feed_mode, _asof = svc.get_heatmap_rows(limit=10, live_ttl_sec=90)
+        self.assertEqual(rows, sample_rows)
+        self.assertEqual(source, "CoinGecko")
+        self.assertEqual(feed_mode, "LIVE")
+        self.assertIn("heatmap_last_good_v3", fake_st.session_state)
+
+    def test_get_heatmap_rows_uses_cached_snapshot_when_live_providers_fail(self):
+        cached_rows = [{"Symbol": "ETH", "Market Cap": 5.0, "Change 24h (%)": -1.0}]
+        fake_st = self._fake_st(
+            {
+                "heatmap_last_good_v3": {
+                    "rows": cached_rows,
+                    "source": "CoinGecko",
+                    "ts": "2026-01-01 00:00:00 UTC",
+                }
+            }
+        )
+        with patch("core.services.st", fake_st):
+            with patch("core.services._fetch_coingecko_heatmap_rows", return_value=[]):
+                with patch("core.services._fetch_coinpaprika_heatmap_rows", return_value=[]):
+                    rows, source, feed_mode, asof = svc.get_heatmap_rows(limit=10, live_ttl_sec=90)
+        self.assertEqual(rows, cached_rows)
+        self.assertEqual(source, "CoinGecko")
+        self.assertEqual(feed_mode, "CACHED")
+        self.assertEqual(asof, "2026-01-01 00:00:00 UTC")
+
     def test_exchange_pair_price_change_direct_fetch_is_cached(self):
         svc._fetch_pair_price_change_from_exchange_direct.clear()
         with patch.object(svc.EXCHANGE, "fetch_ticker", return_value={"last": 90_000.0, "percentage": 1.2}) as mocked_fetch:

@@ -25,11 +25,10 @@ from tabs.whale_tab import render as render_whale_tab_ui
 
 
 TAB_TITLES = [
-    "Market", "Spot", "Position", "AI Workspace",
-    "Heatmap", "Monte Carlo",
-    "Fibonacci", "Risk Analytics", "Whale Tracker",
-    "Multi-TF", "Correlation", "Portfolio Scenario",
-    "Sessions", "Tools", "Model Lab", "Setup Backtest", "Scalp Backtest", "Analysis Guide",
+    "Market", "Spot", "Position", "Multi-TF", "Sessions",
+    "AI Workspace", "Heatmap", "Whale Tracker", "Risk Analytics",
+    "Monte Carlo", "Fibonacci", "Correlation", "Portfolio Scenario",
+    "Tools", "Model Lab", "Setup Backtest", "Scalp Backtest", "Analysis Guide",
 ]
 
 
@@ -71,6 +70,22 @@ _TAB_DEPS = [
         ],
     ),
     (
+        render_multitf_tab_ui,
+        [
+            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING",
+            "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "analyse",
+            "direction_key", "direction_label", "format_delta", "format_stochrsi",
+            "ml_ensemble_predict", "_calc_conviction",
+        ],
+    ),
+    (
+        render_sessions_tab_ui,
+        [
+            "ACCENT", "TEXT_MUTED", "WARNING", "POSITIVE", "NEGATIVE", "_normalize_coin_input",
+            "_validate_coin_symbol", "fetch_ohlcv", "EXCHANGE", "readable_market_cap", "_tip",
+        ],
+    ),
+    (
         render_ml_tab_ui,
         [
             "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "CARD_BG", "_tip",
@@ -82,7 +97,26 @@ _TAB_DEPS = [
     ),
     (
         render_heatmap_tab_ui,
-        ["ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "TEXT_LIGHT", "PRIMARY_BG", "NEON_BLUE", "_tip"],
+        [
+            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING",
+            "TEXT_LIGHT", "PRIMARY_BG", "NEON_BLUE", "_tip", "get_heatmap_rows",
+        ],
+    ),
+    (
+        render_whale_tab_ui,
+        [
+            "ACCENT", "TEXT_MUTED", "TEXT_LIGHT", "POSITIVE", "NEGATIVE", "WARNING", "NEON_BLUE",
+            "GOLD", "_tip", "fetch_trending_coins", "fetch_top_gainers_losers", "fetch_ohlcv",
+            "get_top_volume_usdt_symbols",
+        ],
+    ),
+    (
+        render_risk_analytics_tab_ui,
+        [
+            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "NEON_BLUE", "NEON_PURPLE",
+            "PRIMARY_BG", "_tip", "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv",
+            "calculate_risk_metrics",
+        ],
     ),
     (
         render_monte_carlo_tab_ui,
@@ -101,31 +135,6 @@ _TAB_DEPS = [
         ],
     ),
     (
-        render_risk_analytics_tab_ui,
-        [
-            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "NEON_BLUE", "NEON_PURPLE",
-            "PRIMARY_BG", "_tip", "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv",
-            "calculate_risk_metrics",
-        ],
-    ),
-    (
-        render_whale_tab_ui,
-        [
-            "ACCENT", "TEXT_MUTED", "TEXT_LIGHT", "POSITIVE", "NEGATIVE", "WARNING", "NEON_BLUE",
-            "GOLD", "_tip", "fetch_trending_coins", "fetch_top_gainers_losers", "fetch_ohlcv",
-            "get_top_volume_usdt_symbols",
-        ],
-    ),
-    (
-        render_multitf_tab_ui,
-        [
-            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING",
-            "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "analyse",
-            "direction_key", "direction_label", "format_delta", "format_stochrsi",
-            "ml_ensemble_predict", "_calc_conviction",
-        ],
-    ),
-    (
         render_correlation_tab_ui,
         ["ACCENT", "TEXT_MUTED", "_tip", "_normalize_coin_input", "fetch_ohlcv", "EXCHANGE"],
     ),
@@ -134,13 +143,6 @@ _TAB_DEPS = [
         [
             "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "_tip",
             "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv",
-        ],
-    ),
-    (
-        render_sessions_tab_ui,
-        [
-            "ACCENT", "TEXT_MUTED", "WARNING", "POSITIVE", "NEGATIVE", "_normalize_coin_input",
-            "_validate_coin_symbol", "fetch_ohlcv", "EXCHANGE", "readable_market_cap", "_tip",
         ],
     ),
     (

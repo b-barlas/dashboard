@@ -1,7 +1,10 @@
 import unittest
 
 try:
-    from ui.deps_factory import build_app_deps
+    from ui.deps_factory import (
+        build_app_deps,
+        missing_fetch_coingecko_ohlcv_by_coin_id,
+    )
     from ui.tab_registry import required_dep_keys
 
     DEPS_OK = True
@@ -22,6 +25,13 @@ class DepsFactoryContractTests(unittest.TestCase):
     def test_build_app_deps_raises_on_missing(self):
         with self.assertRaises(KeyError):
             build_app_deps({})
+
+    def test_missing_coingecko_fallback_is_marked(self):
+        self.assertTrue(getattr(missing_fetch_coingecko_ohlcv_by_coin_id, "_codex_missing_dep", False))
+        self.assertIn(
+            "dependency injection",
+            str(getattr(missing_fetch_coingecko_ohlcv_by_coin_id, "_codex_missing_dep_reason", "")),
+        )
 
 
 if __name__ == "__main__":

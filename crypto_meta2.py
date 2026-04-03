@@ -51,45 +51,18 @@ from ui.theme import (
     tip as _tip,
 )
 from ui.app_shell import render_app
-from ui.deps_factory import build_app_deps
-from ui.styles import app_css
-
-
-def _fallback_direction_key(direction: str) -> str:
-    d = str(direction or "").strip().upper()
-    if d in {"UPSIDE", "LONG", "BUY", "BULLISH", "STRONG BUY"}:
-        return "UPSIDE"
-    if d in {"DOWNSIDE", "SHORT", "SELL", "BEARISH", "STRONG SELL"}:
-        return "DOWNSIDE"
-    return "NEUTRAL"
-
-
-def _fallback_direction_label(direction: str) -> str:
-    d = _fallback_direction_key(direction)
-    if d == "UPSIDE":
-        return "Upside"
-    if d == "DOWNSIDE":
-        return "Downside"
-    return "Neutral"
-
-
-def _fallback_signal_plain(signal: str) -> str:
-    s = str(signal or "").strip().upper()
-    if s in {"STRONG BUY", "BUY"}:
-        return "LONG"
-    if s in {"STRONG SELL", "SELL"}:
-        return "SHORT"
-    return "WAIT"
-
-
-def _missing_fetch_coingecko_ohlcv_by_coin_id(*_args, **_kwargs):
-    return None
-
-
-_missing_fetch_coingecko_ohlcv_by_coin_id._codex_missing_dep = True
-_missing_fetch_coingecko_ohlcv_by_coin_id._codex_missing_dep_reason = (
-    "core.services helper unavailable during app bootstrap"
+from ui.deps_factory import (
+    build_app_deps,
+    direction_key_fallback,
+    direction_label_fallback,
+    missing_fetch_coingecko_ohlcv_by_coin_id,
+    sanitize_trading_terms_fallback,
+    signal_plain_fallback,
+    style_delta_fallback,
+    style_scalp_opp_fallback,
+    style_signal_fallback,
 )
+from ui.styles import app_css
 
 
 def _fallback_bias_score_badge(bias_score: float) -> str:
@@ -149,6 +122,16 @@ def _fallback_readable_market_cap(value) -> str:
     return f"{v:,.0f}"
 
 
+def _missing_get_heatmap_rows(*_args, **_kwargs):
+    return [], "Unavailable", "EMPTY", None
+
+
+_missing_get_heatmap_rows._codex_missing_dep = True
+_missing_get_heatmap_rows._codex_missing_dep_reason = (
+    "core.services heatmap helper unavailable during app bootstrap"
+)
+
+
 bias_score_badge = getattr(_ui_helpers, "bias_score_badge", _fallback_bias_score_badge)
 format_adx = getattr(_ui_helpers, "format_adx", _fallback_format_adx)
 format_delta = getattr(_ui_helpers, "format_delta", _fallback_format_delta)
@@ -156,18 +139,19 @@ format_stochrsi = getattr(_ui_helpers, "format_stochrsi", _fallback_format_stoch
 format_trend = getattr(_ui_helpers, "format_trend", _fallback_format_trend)
 leverage_badge = getattr(_ui_helpers, "leverage_badge", _fallback_leverage_badge)
 readable_market_cap = getattr(_ui_helpers, "readable_market_cap", _fallback_readable_market_cap)
-direction_key = getattr(_ui_helpers, "direction_key", _fallback_direction_key)
-direction_label = getattr(_ui_helpers, "direction_label", _fallback_direction_label)
-signal_plain = getattr(_ui_helpers, "signal_plain", _fallback_signal_plain)
-sanitize_trading_terms = getattr(_ui_helpers, "sanitize_trading_terms", lambda t: "" if t is None else str(t))
-style_delta = getattr(_ui_helpers, "style_delta", lambda *_args, **_kwargs: "")
-style_scalp_opp = getattr(_ui_helpers, "style_scalp_opp", lambda *_args, **_kwargs: "")
-style_signal = getattr(_ui_helpers, "style_signal", lambda *_args, **_kwargs: "")
+direction_key = getattr(_ui_helpers, "direction_key", direction_key_fallback)
+direction_label = getattr(_ui_helpers, "direction_label", direction_label_fallback)
+signal_plain = getattr(_ui_helpers, "signal_plain", signal_plain_fallback)
+sanitize_trading_terms = getattr(_ui_helpers, "sanitize_trading_terms", sanitize_trading_terms_fallback)
+style_delta = getattr(_ui_helpers, "style_delta", style_delta_fallback)
+style_scalp_opp = getattr(_ui_helpers, "style_scalp_opp", style_scalp_opp_fallback)
+style_signal = getattr(_ui_helpers, "style_signal", style_signal_fallback)
 fetch_coingecko_ohlcv_by_coin_id = getattr(
     _services,
     "fetch_coingecko_ohlcv_by_coin_id",
-    _missing_fetch_coingecko_ohlcv_by_coin_id,
+    missing_fetch_coingecko_ohlcv_by_coin_id,
 )
+get_heatmap_rows = getattr(_services, "get_heatmap_rows", _missing_get_heatmap_rows)
 
 
 def _wma(series: pd.Series, length: int) -> pd.Series:

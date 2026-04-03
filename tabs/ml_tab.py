@@ -32,6 +32,14 @@ from core.metric_catalog import AI_LONG_THRESHOLD, AI_SHORT_THRESHOLD, direction
 from core.signal_contract import bias_confidence_from_bias
 from core.spot_direction import build_spot_direction_snapshot
 from ui.primitives import render_help_details, render_intro_card, render_kpi_grid, render_page_header
+from ui.signal_panels import build_indicator_groups_html, build_setup_snapshot_html
+from ui.signal_formatters import (
+    adx_bucket_only as _adx_bucket_only,
+    ai_confidence_note as _ai_confidence_note,
+    ai_spot_note as _ai_spot_note,
+    setup_confirm_display as _setup_confirm_display,
+    spot_bias_label as _spot_bias_label,
+)
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -66,70 +74,6 @@ def _prepare_closed_frame(df: pd.DataFrame | None, *, min_rows: int = 55) -> pd.
     return df_eval
 
 
-def _spot_bias_label(direction: str) -> str:
-    raw = str(direction or "").strip().upper()
-    if raw == "UPSIDE":
-        return "Upside"
-    if raw == "DOWNSIDE":
-        return "Downside"
-    return "Neutral"
-
-
-def _ai_spot_tf_note(snapshot) -> str:
-    status = str(getattr(snapshot, "status", "") or "").strip()
-    note = str(getattr(snapshot, "note", "") or "").strip()
-    suffix_parts = []
-    if status:
-        suffix_parts.append(f"Status {status}")
-    if note:
-        suffix_parts.append(note)
-    suffix = f" | {' | '.join(suffix_parts)}" if suffix_parts else ""
-    return (
-        f"{str(snapshot.timeframe).upper()}: {_spot_bias_label(snapshot.direction)} | "
-        f"Score {float(snapshot.score):.1f} | "
-        f"Prob Up {float(snapshot.probability_up) * 100:.0f}% | "
-        f"Directional agreement {float(snapshot.directional_agreement) * 100:.0f}% | "
-        f"Consensus {float(snapshot.consensus_agreement) * 100:.0f}%{suffix}"
-    )
-
-
-def _ai_spot_note(snapshot) -> str:
-    dots = ai_spot_bias_display_votes(snapshot)
-    return (
-        f"AI spot bias (1D + 4H): {_spot_bias_label(snapshot.direction)} | "
-        f"Combined score {float(snapshot.score):.1f} | "
-        f"Conviction quality {float(snapshot.conviction_quality):.0f} | "
-        f"Timeframe alignment {float(snapshot.timeframe_alignment):.0f} | "
-        f"Displayed model-support dots {dots}/3 | "
-        f"{str(snapshot.note or '').strip()} | "
-        f"{_ai_spot_tf_note(snapshot.one_day)} | "
-        f"{_ai_spot_tf_note(snapshot.four_hour)}"
-    )
-
-
-def _ai_confidence_note(snapshot, score: float) -> str:
-    dots = ai_spot_bias_display_votes(snapshot)
-    caps: list[str] = []
-    if str(snapshot.direction or "").strip().upper() == "NEUTRAL":
-        caps.append("neutral-verdict cap <=58")
-    if bool(snapshot.timeframe_conflict):
-        caps.append("timeframe-conflict cap <=30")
-    if bool(snapshot.degraded_data):
-        caps.append("degraded-data cap <=35")
-    if str(snapshot.direction or "").strip().upper() != "NEUTRAL" and int(dots) <= 1:
-        caps.append("low-model-support cap <=59")
-    cap_text = f" | Active caps: {', '.join(caps)}" if caps else ""
-    return (
-        f"AI confidence: {float(score):.1f}% ({ai_confidence_bucket(float(score), direction=str(snapshot.direction or ''), support_votes=int(dots), timeframe_conflict=bool(snapshot.timeframe_conflict), degraded_data=bool(snapshot.degraded_data)).title()}) | "
-        f"HTF AI verdict {_spot_bias_label(snapshot.direction)} | "
-        f"Combined score {float(snapshot.score):.1f} | "
-        f"Conviction quality {float(snapshot.conviction_quality):.0f} | "
-        f"Timeframe alignment {float(snapshot.timeframe_alignment):.0f} | "
-        f"Consensus quality {float(snapshot.consensus_quality):.0f} | "
-        f"Model support {int(dots)}/3{cap_text}"
-    )
-
-
 def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
@@ -151,23 +95,6 @@ def render(ctx: dict) -> None:
     get_market_indices = get_ctx(ctx, "get_market_indices")
     _debug = get_ctx(ctx, "_debug")
 
-    def _adx_bucket_only(adx_value: float) -> str:
-        try:
-            adx_f = float(adx_value)
-        except Exception:
-            return ""
-        if not pd.notna(adx_f):
-            return ""
-        if adx_f < 20:
-            return "Weak"
-        if adx_f < 25:
-            return "Starting"
-        if adx_f < 50:
-            return "Strong"
-        if adx_f < 75:
-            return "Very Strong"
-        return "Extreme"
-
     def _stochrsi_bucket(v: float) -> str:
         try:
             x = float(v)
@@ -180,41 +107,6 @@ def render(ctx: dict) -> None:
         if x > 0.8:
             return "High"
         return "Neutral"
-
-    def _clean_indicator_text(v: str) -> str:
-        txt = str(v or "").strip()
-        for token in ["🟢", "🔴", "🟡", "⚪", "🔥", "▲▲", "▲", "▼", "→", "–"]:
-            txt = txt.replace(token, "")
-        return " ".join(txt.split()).strip()
-
-    def _indicator_color(v: str) -> str:
-        u = str(v or "").upper()
-        if "VERY STRONG" in u or "EXTREME" in u:
-            return POSITIVE
-        if "STRONG" in u and "NOT" not in u:
-            return POSITIVE
-        if "WEAK" in u:
-            return NEGATIVE
-        if "STARTING" in u:
-            return WARNING
-        if any(k in u for k in ["BULLISH", "ABOVE", "OVERSOLD", "LOW", "NEAR BOTTOM", "UP SPIKE"]):
-            return POSITIVE
-        if any(k in u for k in ["BEARISH", "BELOW", "OVERBOUGHT", "HIGH", "NEAR TOP", "DOWN SPIKE"]):
-            return NEGATIVE
-        return WARNING
-
-    def _indicator_cell(name: str, value: str, tooltip: str) -> str:
-        val = _clean_indicator_text(value)
-        if not val:
-            return ""
-        color = _indicator_color(val)
-        tip = html.escape(str(tooltip or ""), quote=True)
-        return (
-            f"<div class='spot-indicator-item'>"
-            f"<div class='spot-indicator-name'>{name}</div>"
-            f"<div class='spot-indicator-value' style='color:{color};' title='{tip}'>{val}</div>"
-            f"</div>"
-        )
 
     def _to_side_key(raw: str) -> str:
         k = str(raw or "").strip().upper()
@@ -231,20 +123,6 @@ def render(ctx: dict) -> None:
         if k == "DOWNSIDE":
             return "Downside"
         return "Neutral"
-
-    def _setup_confirm_display(raw_action: str) -> str:
-        cls = normalize_action_class(raw_action)
-        if cls == "ENTER_TREND_AI":
-            return "TREND+AI"
-        if cls == "ENTER_TREND_LED":
-            return "TREND-led"
-        if cls == "ENTER_AI_LED":
-            return "AI-led"
-        if cls == "WATCH":
-            return "WATCH"
-        if cls == "SKIP":
-            return "SKIP"
-        return str(raw_action or "").strip() or "SKIP"
 
     def _format_delta_pct(delta: float | None) -> str:
         if delta is None:
@@ -850,100 +728,6 @@ def render(ctx: dict) -> None:
     # Detailed indicator panel per timeframe (optional, collapse by default).
     tf_row_map = {str(r.get("Timeframe")): r for r in rows if r.get("Direction") != "NO DATA"}
     with st.expander("Show Technical Indicator Panels"):
-        st.markdown(
-            f"<style>"
-            f".aiw-snap-title{{"
-            f"  margin:0.35rem 0 0.25rem 0;"
-            f"  text-align:center;"
-            f"  color:{TEXT_MUTED};"
-            f"  font-size:0.78rem;"
-            f"  text-transform:uppercase;"
-            f"  letter-spacing:0.45px;"
-            f"}}"
-            f".aiw-snap-wrap{{"
-            f"  background:linear-gradient(140deg, rgba(4, 10, 18, 0.95), rgba(2, 5, 11, 0.95));"
-            f"  border:1px solid rgba(0, 212, 255, 0.16);"
-            f"  border-radius:12px;"
-            f"  padding:10px 12px;"
-            f"  margin:0.08rem 0 0.45rem 0;"
-            f"}}"
-            f".aiw-snap-grid{{"
-            f"  display:flex;"
-            f"  flex-wrap:wrap;"
-            f"  justify-content:center;"
-            f"  gap:0.45rem 0.75rem;"
-            f"}}"
-            f".aiw-snap-item{{"
-            f"  flex:0 1 150px;"
-            f"  min-width:130px;"
-            f"  text-align:center;"
-            f"  padding:4px 6px;"
-            f"}}"
-            f".aiw-snap-label{{"
-            f"  color:{TEXT_MUTED};"
-            f"  font-size:0.67rem;"
-            f"  text-transform:uppercase;"
-            f"  letter-spacing:0.55px;"
-            f"}}"
-            f".aiw-snap-value{{"
-            f"  font-size:1.02rem;"
-            f"  font-weight:700;"
-            f"  margin-top:3px;"
-            f"}}"
-            f".spot-indicator-sep{{"
-            f"  margin:8px 0 6px 0;"
-            f"  text-align:center;"
-            f"  color:{TEXT_MUTED};"
-            f"  font-size:0.80rem;"
-            f"  text-transform:uppercase;"
-            f"  letter-spacing:0.45px;"
-            f"}}"
-            f".spot-indicator-wrap{{"
-            f"  display:grid;"
-            f"  grid-template-columns:repeat(auto-fit,minmax(250px,1fr));"
-            f"  gap:0.55rem;"
-            f"  margin:0.2rem 0 0.45rem 0;"
-            f"}}"
-            f".spot-indicator-group{{"
-            f"  background:rgba(0,0,0,0.56);"
-            f"  border:1px solid rgba(0, 212, 255, 0.14);"
-            f"  border-radius:12px;"
-            f"  padding:8px 8px 6px 8px;"
-            f"}}"
-            f".spot-indicator-group-title{{"
-            f"  color:{ACCENT};"
-            f"  text-align:center;"
-            f"  font-size:0.74rem;"
-            f"  text-transform:uppercase;"
-            f"  letter-spacing:0.55px;"
-            f"  margin-bottom:4px;"
-            f"}}"
-            f".spot-indicator-grid{{"
-            f"  display:flex;"
-            f"  flex-wrap:wrap;"
-            f"  justify-content:center;"
-            f"  gap:4px 10px;"
-            f"  align-items:center;"
-            f"}}"
-            f".spot-indicator-item{{"
-            f"  text-align:center;"
-            f"  padding:4px 2px;"
-            f"  flex:0 1 118px;"
-            f"}}"
-            f".spot-indicator-name{{"
-            f"  color:{TEXT_MUTED};"
-            f"  font-size:0.68rem;"
-            f"  text-transform:uppercase;"
-            f"  letter-spacing:0.5px;"
-            f"}}"
-            f".spot-indicator-value{{"
-            f"  font-size:0.95rem;"
-            f"  font-weight:700;"
-            f"  margin-top:2px;"
-            f"}}"
-            f"</style>",
-            unsafe_allow_html=True,
-        )
         for tf in selected_timeframes:
             df_eval = tf_eval_cache.get(tf)
             if df_eval is None or len(df_eval) < 55:
@@ -1143,30 +927,49 @@ def render(ctx: dict) -> None:
                 )
                 ai_spot_note = _ai_spot_note(ai_spot_snapshot)
                 ai_confidence_note = _ai_confidence_note(ai_spot_snapshot, float(ai_confidence_snapshot.score))
-                st.markdown(
-                    f"<div class='aiw-snap-title'>Setup Snapshot ({tf})</div>"
-                    f"<div class='aiw-snap-wrap'><div class='aiw-snap-grid'>"
-                    f"<div class='aiw-snap-item' title='Closed-candle move on selected timeframe.'>"
-                    f"<div class='aiw-snap-label'>Δ (%)</div>"
-                    f"<div class='aiw-snap-value' style='color:{delta_color};'>{delta_display}</div></div>"
-                    f"<div class='aiw-snap-item' title='Execution class from market decision policy.'>"
-                    f"<div class='aiw-snap-label'>Setup Confirm</div>"
-                    f"<div class='aiw-snap-value' style='color:{setup_color};'>{setup_confirm}</div></div>"
-                    f"<div class='aiw-snap-item' title='Higher-timeframe spot bias from 1D + 4H closed candles.'>"
-                    f"<div class='aiw-snap-label'>Direction</div>"
-                    f"<div class='aiw-snap-value' style='color:{signal_color};'>{_spot_bias_label(spot_snapshot.direction)}</div></div>"
-                    f"<div class='aiw-snap-item' title='Quality score of the spot bias from timeframe alignment, structure, trend, regime, and location.'>"
-                    f"<div class='aiw-snap-label'>Confidence</div>"
-                    f"<div class='aiw-snap-value' style='color:{confidence_color};'>{confidence_display}</div></div>"
-                    f"<div class='aiw-snap-item' title='{html.escape(ai_spot_note, quote=True)}'>"
-                    f"<div class='aiw-snap-label'>AI Ensemble</div>"
-                    f"<div class='aiw-snap-value' style='color:{ai_spot_color};'>{ai_spot_label} ({ai_spot_votes}/3){' *' if ai_spot_snapshot.degraded_data else ''}</div></div>"
-                    f"<div class='aiw-snap-item' title='{html.escape(ai_confidence_note, quote=True)}'>"
-                    f"<div class='aiw-snap-label'>AI Confidence</div>"
-                    f"<div class='aiw-snap-value' style='color:{ai_conf_color};'>{float(ai_confidence_snapshot.score):.0f}% ({ai_confidence_snapshot.label.title()})</div></div>"
-                    f"</div></div>",
-                    unsafe_allow_html=True,
+                setup_snapshot_html = build_setup_snapshot_html(
+                    title=f"Setup Snapshot ({tf})",
+                    text_muted=TEXT_MUTED,
+                    items=[
+                        {
+                            "label": "Δ (%)",
+                            "value": delta_display,
+                            "color": delta_color,
+                            "title": "Closed-candle move on selected timeframe.",
+                        },
+                        {
+                            "label": "Setup Confirm",
+                            "value": setup_confirm,
+                            "color": setup_color,
+                            "title": "Execution class from market decision policy.",
+                        },
+                        {
+                            "label": "Direction",
+                            "value": _spot_bias_label(spot_snapshot.direction),
+                            "color": signal_color,
+                            "title": "Higher-timeframe spot bias from 1D + 4H closed candles.",
+                        },
+                        {
+                            "label": "Confidence",
+                            "value": confidence_display,
+                            "color": confidence_color,
+                            "title": "Quality score of the spot bias from timeframe alignment, structure, trend, regime, and location.",
+                        },
+                        {
+                            "label": "AI Ensemble",
+                            "value": f"{ai_spot_label} ({ai_spot_votes}/3){' *' if ai_spot_snapshot.degraded_data else ''}",
+                            "color": ai_spot_color,
+                            "title": ai_spot_note,
+                        },
+                        {
+                            "label": "AI Confidence",
+                            "value": f"{float(ai_confidence_snapshot.score):.0f}% ({ai_confidence_snapshot.label.title()})",
+                            "color": ai_conf_color,
+                            "title": ai_confidence_note,
+                        },
+                    ],
                 )
+                st.markdown(setup_snapshot_html, unsafe_allow_html=True)
 
                 ichi_meta_parts = []
                 if ar.ichimoku_tk_cross:
@@ -1219,56 +1022,64 @@ def render(ctx: dict) -> None:
                         parts.append(f"VWAP: {vwap_ctx}")
                     spike_hover = " | ".join(parts)
 
-                supertrend_txt = _clean_indicator_text(ar.supertrend)
-                ichimoku_txt = _clean_indicator_text(ar.ichimoku)
-                vwap_txt = _clean_indicator_text(ar.vwap)
-                adx_txt = _clean_indicator_text(_adx_bucket_only(ar.adx))
-                bollinger_txt = _clean_indicator_text(ar.bollinger)
-                stochrsi_txt = _clean_indicator_text(_stochrsi_bucket(ar.stochrsi_k))
-                psar_txt = _clean_indicator_text(ar.psar)
-                will_txt = _clean_indicator_text(ar.williams)
-                cci_txt = _clean_indicator_text(ar.cci)
-                volume_txt = _clean_indicator_text(spike_label) if ar.volume_spike else ""
-                volatility_txt = _clean_indicator_text(str(ar.atr_comment).replace("▲", "").replace("▼", "").replace("–", ""))
-                pattern_txt = _clean_indicator_text(str(ar.candle_pattern).split(" (")[0] if ar.candle_pattern else "")
-
-                trend_cells = "".join(
-                    [
-                        _indicator_cell("SuperTrend", supertrend_txt, "ATR-based trend line direction."),
-                        _indicator_cell("Ichimoku", ichimoku_txt, f"Cloud trend context. {ichimoku_hover}".strip()),
-                        _indicator_cell("VWAP", vwap_txt, "Price relative to volume-weighted average price."),
-                        _indicator_cell("ADX", adx_txt, "Trend strength (not direction)."),
-                        _indicator_cell("PSAR", psar_txt, "Parabolic SAR trend-following state."),
-                    ]
+                indicator_groups_html = build_indicator_groups_html(
+                    title=f"Indicators ({tf})",
+                    accent=ACCENT,
+                    text_muted=TEXT_MUTED,
+                    positive=POSITIVE,
+                    negative=NEGATIVE,
+                    warning=WARNING,
+                    groups=[
+                        (
+                            "Trend Structure",
+                            [
+                                {"name": "SuperTrend", "value": ar.supertrend, "tooltip": "ATR-based trend line direction."},
+                                {
+                                    "name": "Ichimoku",
+                                    "value": ar.ichimoku,
+                                    "tooltip": f"Cloud trend context. {ichimoku_hover}".strip(),
+                                },
+                                {"name": "VWAP", "value": ar.vwap, "tooltip": "Price relative to volume-weighted average price."},
+                                {"name": "ADX", "value": _adx_bucket_only(ar.adx), "tooltip": "Trend strength (not direction)."},
+                                {"name": "PSAR", "value": ar.psar, "tooltip": "Parabolic SAR trend-following state."},
+                            ],
+                        ),
+                        (
+                            "Momentum Signals",
+                            [
+                                {"name": "StochRSI", "value": _stochrsi_bucket(ar.stochrsi_k), "tooltip": "Momentum pressure zone."},
+                                {"name": "Williams %R", "value": ar.williams, "tooltip": "Range-position momentum signal."},
+                                {"name": "CCI", "value": ar.cci, "tooltip": "Mean-reversion momentum signal."},
+                                {
+                                    "name": "Pattern",
+                                    "value": str(ar.candle_pattern).split(" (")[0] if ar.candle_pattern else "",
+                                    "tooltip": "Latest candle pattern direction.",
+                                },
+                            ],
+                        ),
+                        (
+                            "Volatility & Volume",
+                            [
+                                {
+                                    "name": "Bollinger",
+                                    "value": ar.bollinger,
+                                    "tooltip": "Band location (extension / pullback context).",
+                                },
+                                {
+                                    "name": "Volatility",
+                                    "value": str(ar.atr_comment).replace("▲", "").replace("▼", "").replace("–", ""),
+                                    "tooltip": "ATR/band-width regime.",
+                                },
+                                {
+                                    "name": "Volume",
+                                    "value": spike_label if ar.volume_spike else "",
+                                    "tooltip": f"Abnormal volume event. {spike_hover}".strip(),
+                                },
+                            ],
+                        ),
+                    ],
                 )
-                momentum_cells = "".join(
-                    [
-                        _indicator_cell("StochRSI", stochrsi_txt, "Momentum pressure zone."),
-                        _indicator_cell("Williams %R", will_txt, "Range-position momentum signal."),
-                        _indicator_cell("CCI", cci_txt, "Mean-reversion momentum signal."),
-                        _indicator_cell("Pattern", pattern_txt, "Latest candle pattern direction."),
-                    ]
-                )
-                vol_cells = "".join(
-                    [
-                        _indicator_cell("Bollinger", bollinger_txt, "Band location (extension / pullback context)."),
-                        _indicator_cell("Volatility", volatility_txt, "ATR/band-width regime."),
-                        _indicator_cell("Volume", volume_txt, f"Abnormal volume event. {spike_hover}".strip()),
-                    ]
-                )
-
-                if trend_cells or momentum_cells or vol_cells:
-                    st.markdown(
-                        f"<div class='spot-indicator-sep'>Indicators ({tf})</div>"
-                        f"<div class='spot-indicator-wrap'>"
-                        f"<div class='spot-indicator-group'><div class='spot-indicator-group-title'>Trend Structure</div>"
-                        f"<div class='spot-indicator-grid'>{trend_cells}</div></div>"
-                        f"<div class='spot-indicator-group'><div class='spot-indicator-group-title'>Momentum Signals</div>"
-                        f"<div class='spot-indicator-grid'>{momentum_cells}</div></div>"
-                        f"<div class='spot-indicator-group'><div class='spot-indicator-group-title'>Volatility & Volume</div>"
-                        f"<div class='spot-indicator-grid'>{vol_cells}</div></div>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+                if indicator_groups_html:
+                    st.markdown(indicator_groups_html, unsafe_allow_html=True)
             except Exception as exc:
                 _debug(f"AI Workspace indicator grid error ({tf}): {exc}")

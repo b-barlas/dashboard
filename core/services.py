@@ -47,7 +47,7 @@ from core.scalping import (
     scalp_quality_gate as scalp_quality_gate_core,
 )
 from core.telemetry import record_event
-from core.symbols import canonical_base_symbol
+from core.symbols import canonical_base_symbol, is_stable_base_symbol
 from core.signals import (
     AnalysisResult,
     analyse as analyse_core,
@@ -109,6 +109,68 @@ def _is_finite(v) -> bool:
 def _is_positive(v) -> bool:
     f = _safe_float(v)
     return f is not None and f > 0
+
+
+def _read_top_snapshot_state(session_state: dict) -> tuple[dict, dict]:
+    previous = session_state.get(_TOP_SNAPSHOT_KEY, {})
+    previous_meta = session_state.get(_TOP_SNAPSHOT_META_KEY, {})
+    return (
+        dict(previous) if isinstance(previous, dict) else {},
+        dict(previous_meta) if isinstance(previous_meta, dict) else {},
+    )
+
+
+def _merge_top_snapshot_fields(
+    live: dict[str, float | int | str | None],
+    previous: dict,
+    previous_meta: dict,
+    *,
+    now_epoch: float,
+) -> tuple[dict[str, float | int | str | None], dict, dict]:
+    merged: dict[str, float | int | str | None] = {}
+    updated_snapshot = dict(previous)
+    updated_meta = dict(previous_meta)
+    for field in _TOP_SNAPSHOT_FIELDS:
+        live_value = live.get(field)
+        if _valid_top_metric_field(field, live_value):
+            merged[field] = live_value
+            updated_snapshot[field] = live_value
+            updated_meta[field] = now_epoch
+            continue
+
+        prev_value = previous.get(field)
+        if _snapshot_field_is_fresh(field, prev_value, previous_meta, now_epoch=now_epoch):
+            merged[field] = prev_value
+            updated_snapshot[field] = prev_value
+            continue
+
+        merged[field] = None
+        updated_snapshot.pop(field, None)
+        updated_meta.pop(field, None)
+
+    if not _valid_top_metric_field("fg_label", merged.get("fg_label")):
+        merged["fg_label"] = _fg_label_from_value(_safe_float(merged.get("fg_value")))
+
+    return merged, updated_snapshot, updated_meta
+
+
+def _should_persist_top_snapshot_state(
+    live: dict[str, float | int | str | None],
+    updated_snapshot: dict,
+    previous: dict,
+    updated_meta: dict,
+    previous_meta: dict,
+) -> bool:
+    return (
+        any(_valid_top_metric_field(field, live.get(field)) for field in _TOP_SNAPSHOT_FIELDS)
+        or updated_snapshot != previous
+        or updated_meta != previous_meta
+    )
+
+
+def _persist_top_snapshot_state(session_state: dict, snapshot: dict, meta: dict) -> None:
+    session_state[_TOP_SNAPSHOT_KEY] = snapshot
+    session_state[_TOP_SNAPSHOT_META_KEY] = meta
 
 
 def _http_get_json(url: str, params: dict | None = None, timeout: int = 10,
@@ -197,6 +259,138 @@ def get_fear_greed():
     except Exception as e:
         _debug(f"get_fear_greed error: {e}")
         return None, "Unavailable"
+
+
+def _fetch_coingecko_heatmap_rows(limit: int = 180) -> list[dict]:
+    payload = _http_get_json(
+        "https://api.coingecko.com/api/v3/coins/markets",
+        params={
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": min(max(limit, 100), 250),
+            "page": 1,
+            "sparkline": False,
+            "price_change_percentage": "24h",
+        },
+        timeout=8,
+        retries=2,
+    )
+    if not isinstance(payload, list):
+        return []
+
+    rows: list[dict] = []
+    for coin in payload:
+        symbol = str(coin.get("symbol") or "").upper().strip()
+        if not symbol:
+            continue
+        mcap = _safe_float(coin.get("market_cap"))
+        if mcap is None or mcap <= 0:
+            continue
+        pct = coin.get("price_change_percentage_24h")
+        if pct is None:
+            pct = coin.get("price_change_percentage_24h_in_currency")
+        cid = str(coin.get("id") or "").strip()
+        key = f"cg:{cid}" if cid else f"cg:{symbol}:{str(coin.get('name') or symbol).strip()}"
+        rows.append(
+            {
+                "Symbol": symbol,
+                "Name": str(coin.get("name") or symbol),
+                "TreemapKey": key,
+                "Market Cap": float(mcap),
+                "Change 24h (%)": _safe_float(pct) or 0.0,
+                "Price": _safe_float(coin.get("current_price")) or 0.0,
+                "Sector": "Crypto",
+                "Stablecoin": is_stable_base_symbol(symbol),
+                "Provider": "CoinGecko",
+            }
+        )
+
+    rows.sort(key=lambda row: row["Market Cap"], reverse=True)
+    return rows[:limit]
+
+
+def _fetch_coinpaprika_heatmap_rows(limit: int = 180) -> list[dict]:
+    payload = _http_get_json(
+        "https://api.coinpaprika.com/v1/tickers",
+        timeout=8,
+        retries=2,
+    )
+    if not isinstance(payload, list):
+        return []
+
+    rows: list[dict] = []
+    for coin in payload:
+        symbol = str(coin.get("symbol") or "").upper().strip()
+        if not symbol:
+            continue
+        quotes = coin.get("quotes") if isinstance(coin, dict) else {}
+        usd_q = quotes.get("USD") if isinstance(quotes, dict) else {}
+        mcap = _safe_float(usd_q.get("market_cap"))
+        if mcap is None or mcap <= 0:
+            continue
+        pid = str(coin.get("id") or "").strip()
+        key = f"cp:{pid}" if pid else f"cp:{symbol}:{str(coin.get('name') or symbol).strip()}"
+        rows.append(
+            {
+                "Symbol": symbol,
+                "Name": str(coin.get("name") or symbol),
+                "TreemapKey": key,
+                "Market Cap": float(mcap),
+                "Change 24h (%)": _safe_float(usd_q.get("percent_change_24h")) or 0.0,
+                "Price": _safe_float(usd_q.get("price")) or 0.0,
+                "Sector": "Crypto",
+                "Stablecoin": is_stable_base_symbol(symbol),
+                "Provider": "CoinPaprika",
+            }
+        )
+
+    rows.sort(key=lambda row: row["Market Cap"], reverse=True)
+    return rows[:limit]
+
+
+def get_heatmap_rows(limit: int = 180, live_ttl_sec: int = 90) -> tuple[list[dict], str, str, str | None]:
+    cache_key = "heatmap_last_good_v3"
+    live_key = "heatmap_live_cache_v1"
+    now_epoch = time.time()
+    now_utc = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    live_cached = st.session_state.get(live_key, {})
+    if isinstance(live_cached, dict):
+        live_rows = live_cached.get("rows")
+        live_at = _safe_float(live_cached.get("fetched_at")) or 0.0
+        if isinstance(live_rows, list) and live_rows and (now_epoch - live_at) <= live_ttl_sec:
+            return (
+                live_rows,
+                str(live_cached.get("source") or "Live cache"),
+                "LIVE",
+                str(live_cached.get("ts") or now_utc),
+            )
+
+    rows = _fetch_coingecko_heatmap_rows(limit=limit)
+    if rows:
+        payload = {"rows": rows, "source": "CoinGecko", "ts": now_utc, "fetched_at": now_epoch}
+        st.session_state[live_key] = payload
+        st.session_state[cache_key] = payload
+        return rows, "CoinGecko", "LIVE", now_utc
+
+    rows = _fetch_coinpaprika_heatmap_rows(limit=limit)
+    if rows:
+        payload = {"rows": rows, "source": "CoinPaprika", "ts": now_utc, "fetched_at": now_epoch}
+        st.session_state[live_key] = payload
+        st.session_state[cache_key] = payload
+        return rows, "CoinPaprika", "LIVE", now_utc
+
+    cached = st.session_state.get(cache_key, {})
+    cached_rows = cached.get("rows") if isinstance(cached, dict) else None
+    if isinstance(cached_rows, list) and cached_rows:
+        return (
+            cached_rows,
+            str(cached.get("source") or "Cached"),
+            "CACHED",
+            str(cached.get("ts") or ""),
+        )
+
+    return [], "Unavailable", "EMPTY", None
 
 
 @st.cache_data(ttl=90, show_spinner=False)
@@ -383,10 +577,7 @@ def get_market_top_snapshot() -> dict[str, float | int | str | None]:
     - Any missing field falls back to the last valid snapshot only while that
       specific field remains inside its freshness window.
     """
-    key = _TOP_SNAPSHOT_KEY
-    meta_key = _TOP_SNAPSHOT_META_KEY
-    previous = st.session_state.get(key, {})
-    previous_meta = st.session_state.get(meta_key, {})
+    previous, previous_meta = _read_top_snapshot_state(st.session_state)
     live: dict[str, float | int | str | None] = {}
     now_epoch = time.time()
 
@@ -468,36 +659,21 @@ def get_market_top_snapshot() -> dict[str, float | int | str | None]:
         _debug(f"get_market_top_snapshot fear_greed fallback: {e}")
 
     # 4) Merge with last-good snapshot field-by-field
-    merged: dict[str, float | int | str | None] = {}
-    updated_snapshot = dict(previous) if isinstance(previous, dict) else {}
-    updated_meta = dict(previous_meta) if isinstance(previous_meta, dict) else {}
-    for field in _TOP_SNAPSHOT_FIELDS:
-        live_value = live.get(field)
-        if _valid_top_metric_field(field, live_value):
-            merged[field] = live_value
-            updated_snapshot[field] = live_value
-            updated_meta[field] = now_epoch
-        else:
-            prev_value = previous.get(field) if isinstance(previous, dict) else None
-            if _snapshot_field_is_fresh(field, prev_value, previous_meta, now_epoch=now_epoch):
-                merged[field] = prev_value
-                updated_snapshot[field] = prev_value
-            else:
-                merged[field] = None
-                updated_snapshot.pop(field, None)
-                updated_meta.pop(field, None)
-
-    if not _valid_top_metric_field("fg_label", merged.get("fg_label")):
-        merged["fg_label"] = _fg_label_from_value(_safe_float(merged.get("fg_value")))
-
-    should_persist = (
-        any(_valid_top_metric_field(f, live.get(f)) for f in _TOP_SNAPSHOT_FIELDS)
-        or updated_snapshot != previous
-        or updated_meta != previous_meta
+    merged, updated_snapshot, updated_meta = _merge_top_snapshot_fields(
+        live,
+        previous,
+        previous_meta,
+        now_epoch=now_epoch,
+    )
+    should_persist = _should_persist_top_snapshot_state(
+        live,
+        updated_snapshot,
+        previous,
+        updated_meta,
+        previous_meta,
     )
     if should_persist:
-        st.session_state[key] = updated_snapshot
-        st.session_state[meta_key] = updated_meta
+        _persist_top_snapshot_state(st.session_state, updated_snapshot, updated_meta)
 
     return merged
 

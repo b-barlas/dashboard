@@ -18,7 +18,12 @@ def render_app(deps: dict) -> None:
         render_sidebar_panel(
             st,
             title="Core Workflow",
-            body_html="1) Market: scan universe<br>2) Position: execute/manage",
+            body_html=(
+                "1) Market: scan and prioritize<br>"
+                "2) Spot / Multi-TF: confirm structure<br>"
+                "3) Position: manage open risk<br>"
+                "4) Sessions: time the entry"
+            ),
             tone="accent",
         )
         t = snapshot_summary(st)

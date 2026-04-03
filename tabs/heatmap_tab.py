@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-import time
-
 import pandas as pd
 import plotly.express as px
-import requests
 from core.symbols import is_stable_base_symbol
 from ui.ctx import get_ctx
 from ui.primitives import render_badge_row, render_help_details, render_insight_card, render_kpi_grid, render_page_header
@@ -25,166 +21,6 @@ def _is_stablecoin(symbol: str) -> bool:
     return is_stable_base_symbol(symbol)
 
 
-def _http_get_json(
-    url: str,
-    params: dict | None = None,
-    timeout: int = 8,
-    retries: int = 2,
-):
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": "crypto-market-dashboard/1.0",
-    }
-    for attempt in range(retries):
-        try:
-            resp = requests.get(url, params=params, timeout=timeout, headers=headers)
-            if resp.status_code == 200:
-                return resp.json()
-            if resp.status_code not in {429, 500, 502, 503, 504}:
-                break
-        except Exception:
-            pass
-        if attempt < retries - 1:
-            time.sleep(0.35 * (attempt + 1))
-    return None
-
-
-def _fetch_coingecko_heatmap_rows(limit: int = 180) -> list[dict]:
-    payload = _http_get_json(
-        "https://api.coingecko.com/api/v3/coins/markets",
-        params={
-            "vs_currency": "usd",
-            "order": "market_cap_desc",
-            "per_page": min(max(limit, 100), 250),
-            "page": 1,
-            "sparkline": False,
-            "price_change_percentage": "24h",
-        },
-        timeout=8,
-        retries=2,
-    )
-    if not isinstance(payload, list):
-        return []
-
-    rows: list[dict] = []
-    for c in payload:
-        symbol = str(c.get("symbol") or "").upper().strip()
-        if not symbol:
-            continue
-        mcap = _safe_float(c.get("market_cap"))
-        if mcap <= 0:
-            continue
-        pct = c.get("price_change_percentage_24h")
-        if pct is None:
-            pct = c.get("price_change_percentage_24h_in_currency")
-        cid = str(c.get("id") or "").strip()
-        key = f"cg:{cid}" if cid else f"cg:{symbol}:{str(c.get('name') or symbol).strip()}"
-        rows.append(
-            {
-                "Symbol": symbol,
-                "Name": str(c.get("name") or symbol),
-                "TreemapKey": key,
-                "Market Cap": mcap,
-                "Change 24h (%)": _safe_float(pct, 0.0),
-                "Price": _safe_float(c.get("current_price"), 0.0),
-                "Sector": "Crypto",
-                "Stablecoin": _is_stablecoin(symbol),
-                "Provider": "CoinGecko",
-            }
-        )
-
-    rows.sort(key=lambda r: r["Market Cap"], reverse=True)
-    return rows[:limit]
-
-
-def _fetch_coinpaprika_heatmap_rows(limit: int = 180) -> list[dict]:
-    payload = _http_get_json(
-        "https://api.coinpaprika.com/v1/tickers",
-        timeout=8,
-        retries=2,
-    )
-    if not isinstance(payload, list):
-        return []
-
-    rows: list[dict] = []
-    for c in payload:
-        symbol = str(c.get("symbol") or "").upper().strip()
-        if not symbol:
-            continue
-        quotes = c.get("quotes") if isinstance(c, dict) else {}
-        usd_q = quotes.get("USD") if isinstance(quotes, dict) else {}
-        mcap = _safe_float(usd_q.get("market_cap"))
-        if mcap <= 0:
-            continue
-        pid = str(c.get("id") or "").strip()
-        key = f"cp:{pid}" if pid else f"cp:{symbol}:{str(c.get('name') or symbol).strip()}"
-        rows.append(
-            {
-                "Symbol": symbol,
-                "Name": str(c.get("name") or symbol),
-                "TreemapKey": key,
-                "Market Cap": mcap,
-                "Change 24h (%)": _safe_float(usd_q.get("percent_change_24h"), 0.0),
-                "Price": _safe_float(usd_q.get("price"), 0.0),
-                "Sector": "Crypto",
-                "Stablecoin": _is_stablecoin(symbol),
-                "Provider": "CoinPaprika",
-            }
-        )
-
-    rows.sort(key=lambda r: r["Market Cap"], reverse=True)
-    return rows[:limit]
-
-
-def _load_heatmap_rows(
-    st,
-    limit: int = 180,
-    live_ttl_sec: int = 90,
-) -> tuple[list[dict], str, str, str | None]:
-    cache_key = "heatmap_last_good_v3"
-    live_key = "heatmap_live_cache_v1"
-    now_epoch = time.time()
-    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    live_cached = st.session_state.get(live_key, {})
-    if isinstance(live_cached, dict):
-        live_rows = live_cached.get("rows")
-        live_at = _safe_float(live_cached.get("fetched_at"), 0.0)
-        if isinstance(live_rows, list) and live_rows and (now_epoch - live_at) <= live_ttl_sec:
-            return (
-                live_rows,
-                str(live_cached.get("source") or "Live cache"),
-                "LIVE",
-                str(live_cached.get("ts") or now_utc),
-            )
-
-    rows = _fetch_coingecko_heatmap_rows(limit=limit)
-    if rows:
-        payload = {"rows": rows, "source": "CoinGecko", "ts": now_utc, "fetched_at": now_epoch}
-        st.session_state[live_key] = payload
-        st.session_state[cache_key] = payload
-        return rows, "CoinGecko", "LIVE", now_utc
-
-    rows = _fetch_coinpaprika_heatmap_rows(limit=limit)
-    if rows:
-        payload = {"rows": rows, "source": "CoinPaprika", "ts": now_utc, "fetched_at": now_epoch}
-        st.session_state[live_key] = payload
-        st.session_state[cache_key] = payload
-        return rows, "CoinPaprika", "LIVE", now_utc
-
-    cached = st.session_state.get(cache_key, {})
-    cached_rows = cached.get("rows") if isinstance(cached, dict) else None
-    if isinstance(cached_rows, list) and cached_rows:
-        return (
-            cached_rows,
-            str(cached.get("source") or "Cached"),
-            "CACHED",
-            str(cached.get("ts") or ""),
-        )
-
-    return [], "Unavailable", "EMPTY", None
-
-
 def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
@@ -195,6 +31,7 @@ def render(ctx: dict) -> None:
     PRIMARY_BG = get_ctx(ctx, "PRIMARY_BG")
     NEON_BLUE = get_ctx(ctx, "NEON_BLUE")
     _tip = get_ctx(ctx, "_tip")
+    get_heatmap_rows = get_ctx(ctx, "get_heatmap_rows")
 
     render_page_header(
         st,
@@ -207,7 +44,7 @@ def render(ctx: dict) -> None:
         ),
     )
     with st.spinner("Loading market data for heatmap..."):
-        rows, source, feed_mode, asof_utc = _load_heatmap_rows(st, limit=180, live_ttl_sec=90)
+        rows, source, feed_mode, asof_utc = get_heatmap_rows(limit=180, live_ttl_sec=90)
 
     if not rows:
         st.error("Could not fetch market heatmap data from live providers.")

@@ -1,4 +1,4 @@
-"""Dependency factory for app-shell injection."""
+"""Dependency factory and bootstrap-safe fallback helpers."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from ui.tab_registry import required_dep_keys
 
 
-def _direction_key_fallback(direction: str) -> str:
+def direction_key_fallback(direction: str) -> str:
     d = str(direction or "").strip().upper()
     if d in {"UPSIDE", "LONG", "BUY", "BULLISH", "STRONG BUY"}:
         return "UPSIDE"
@@ -16,8 +16,8 @@ def _direction_key_fallback(direction: str) -> str:
     return "NEUTRAL"
 
 
-def _direction_label_fallback(direction: str) -> str:
-    d = _direction_key_fallback(direction)
+def direction_label_fallback(direction: str) -> str:
+    d = direction_key_fallback(direction)
     if d == "UPSIDE":
         return "Upside"
     if d == "DOWNSIDE":
@@ -25,7 +25,7 @@ def _direction_label_fallback(direction: str) -> str:
     return "Neutral"
 
 
-def _signal_plain_fallback(signal: str) -> str:
+def signal_plain_fallback(signal: str) -> str:
     s = str(signal or "").strip().upper()
     if s in {"STRONG BUY", "BUY"}:
         return "LONG"
@@ -34,26 +34,42 @@ def _signal_plain_fallback(signal: str) -> str:
     return "WAIT"
 
 
-def _missing_fetch_coingecko_ohlcv_by_coin_id(*_args, **_kwargs):
+def missing_fetch_coingecko_ohlcv_by_coin_id(*_args, **_kwargs):
     return None
 
 
-_missing_fetch_coingecko_ohlcv_by_coin_id._codex_missing_dep = True
-_missing_fetch_coingecko_ohlcv_by_coin_id._codex_missing_dep_reason = (
+missing_fetch_coingecko_ohlcv_by_coin_id._codex_missing_dep = True
+missing_fetch_coingecko_ohlcv_by_coin_id._codex_missing_dep_reason = (
     "dependency injection missing at app boot"
 )
 
 
-_OPTIONAL_DEP_DEFAULTS: dict[str, object] = {
+def sanitize_trading_terms_fallback(text):
+    return "" if text is None else str(text)
+
+
+def style_delta_fallback(*_args, **_kwargs) -> str:
+    return ""
+
+
+def style_scalp_opp_fallback(*_args, **_kwargs) -> str:
+    return ""
+
+
+def style_signal_fallback(*_args, **_kwargs) -> str:
+    return ""
+
+
+OPTIONAL_DEP_DEFAULTS: dict[str, object] = {
     # UI/helper fallbacks: safe to inject if a helper import changed.
-    "direction_key": _direction_key_fallback,
-    "direction_label": _direction_label_fallback,
-    "signal_plain": _signal_plain_fallback,
-    "fetch_coingecko_ohlcv_by_coin_id": _missing_fetch_coingecko_ohlcv_by_coin_id,
-    "sanitize_trading_terms": lambda t: "" if t is None else str(t),
-    "style_delta": lambda *_args, **_kwargs: "",
-    "style_scalp_opp": lambda *_args, **_kwargs: "",
-    "style_signal": lambda *_args, **_kwargs: "",
+    "direction_key": direction_key_fallback,
+    "direction_label": direction_label_fallback,
+    "signal_plain": signal_plain_fallback,
+    "fetch_coingecko_ohlcv_by_coin_id": missing_fetch_coingecko_ohlcv_by_coin_id,
+    "sanitize_trading_terms": sanitize_trading_terms_fallback,
+    "style_delta": style_delta_fallback,
+    "style_scalp_opp": style_scalp_opp_fallback,
+    "style_signal": style_signal_fallback,
 }
 
 
@@ -65,7 +81,7 @@ def build_app_deps(source: Mapping[str, object], **overrides: object) -> dict:
 
     # Soft-fill optional helper dependencies to keep app boot resilient across
     # helper refactors.
-    for key, value in _OPTIONAL_DEP_DEFAULTS.items():
+    for key, value in OPTIONAL_DEP_DEFAULTS.items():
         if key in required and key not in merged:
             merged[key] = value
 
