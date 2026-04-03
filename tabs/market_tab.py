@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from ui.ctx import get_ctx
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -118,6 +119,148 @@ def _emerging_badge_tone(direction: str) -> str:
     if key == "DOWNSIDE":
         return "neg"
     return "muted"
+
+
+def _emerging_badge_symbol(direction: str) -> str:
+    key = str(direction or "").strip().upper()
+    if key == "UPSIDE":
+        return "↗"
+    if key == "DOWNSIDE":
+        return "↘"
+    return "•"
+
+
+def _emerging_badge_text(direction: str) -> str:
+    key = str(direction or "").strip().upper()
+    if key in {"UPSIDE", "DOWNSIDE"}:
+        return "LEAD"
+    return "INFO"
+
+
+@dataclass(frozen=True)
+class MarketLeadSnapshot:
+    score: float
+    state: str
+    label: str
+    note: str
+    breadth_component: float
+    rotation_component: float
+    flow_component: float
+    dominance_component: float
+    upside_leads: int
+    downside_leads: int
+
+
+def _market_lead_breadth_component(rows: list[dict]) -> tuple[float, int, int]:
+    upside = 0
+    downside = 0
+    for row in rows:
+        label = str((row or {}).get("__emerging_label", "")).strip()
+        if label == "Emerging Upside":
+            upside += 1
+        elif label == "Emerging Downside":
+            downside += 1
+    total = upside + downside
+    if total < 3:
+        return 0.0, upside, downside
+    score = ((upside - downside) / float(total)) * 100.0
+    return float(max(-100.0, min(100.0, score))), upside, downside
+
+
+def _market_lead_snapshot(
+    *,
+    produced_rows: list[dict],
+    delta_mcap: float | None,
+    btc_change: float | None,
+    eth_change: float | None,
+    btc_dom: float | None,
+    eth_dom: float | None,
+    custom_mode_active: bool,
+) -> MarketLeadSnapshot:
+    def _clip_signed(value: float | None, scale: float) -> float:
+        if value is None or pd.isna(value):
+            return 0.0
+        return float(max(-100.0, min(100.0, float(value) * scale)))
+
+    breadth_component, upside_leads, downside_leads = _market_lead_breadth_component(
+        [] if custom_mode_active else list(produced_rows or [])
+    )
+
+    majors = [
+        float(v)
+        for v in (btc_change, eth_change)
+        if v is not None and not pd.isna(v)
+    ]
+    major_avg = float(sum(majors) / len(majors)) if majors else 0.0
+    rotation_component = _clip_signed(
+        (float(delta_mcap) if delta_mcap is not None and not pd.isna(delta_mcap) else 0.0) - major_avg,
+        18.0,
+    )
+    flow_component = _clip_signed(delta_mcap, 16.0)
+
+    dom_parts: list[float] = []
+    if btc_dom is not None and not pd.isna(btc_dom):
+        dom_parts.append((55.0 - float(btc_dom)) * 8.0)
+    if eth_dom is not None and not pd.isna(eth_dom):
+        dom_parts.append((float(eth_dom) - 11.0) * 14.0)
+    dominance_component = float(
+        max(-100.0, min(100.0, (sum(dom_parts) / len(dom_parts)) if dom_parts else 0.0))
+    )
+
+    signed_score = (
+        0.35 * breadth_component
+        + 0.30 * rotation_component
+        + 0.20 * flow_component
+        + 0.15 * dominance_component
+    )
+    score = float(max(0.0, min(100.0, 50.0 + signed_score * 0.5)))
+
+    if score >= 62.0:
+        state = "UPSIDE"
+        label = "Upside"
+        note = "Early upside pressure is building before full confirmation."
+    elif score <= 38.0:
+        state = "DOWNSIDE"
+        label = "Downside"
+        note = "Early downside pressure is building before full confirmation."
+    elif abs(signed_score) < 10.0 and (upside_leads + downside_leads) < 3:
+        state = "NONE"
+        label = "No Clear Lead"
+        note = "No meaningful early lead is building yet."
+    else:
+        state = "BALANCED"
+        label = "Balanced"
+        note = "Early pressure is mixed across breadth and market internals."
+
+    return MarketLeadSnapshot(
+        score=score,
+        state=state,
+        label=label,
+        note=note,
+        breadth_component=breadth_component,
+        rotation_component=rotation_component,
+        flow_component=flow_component,
+        dominance_component=dominance_component,
+        upside_leads=upside_leads,
+        downside_leads=downside_leads,
+    )
+
+
+def _coin_pair_meta(coin: str, pair: str) -> str:
+    coin_txt = str(coin or "").strip()
+    pair_txt = str(pair or "").strip()
+    if not coin_txt or not pair_txt:
+        return ""
+    coin_up = coin_txt.upper()
+    pair_up = pair_txt.upper()
+    if pair_up in {
+        coin_up,
+        f"{coin_up}/USDT",
+        f"{coin_up}/USD",
+        f"{coin_up}/USDC",
+    }:
+        return ""
+    return pair_txt
 
 
 def _ai_fallback_note(ai_details: dict | None) -> str:
@@ -350,6 +493,24 @@ def _ai_confidence_badge(snapshot, score: float) -> str:
 
 def _coingecko_coin_id_fallback_available(fetcher: object) -> bool:
     return callable(fetcher) and not bool(getattr(fetcher, "_codex_missing_dep", False))
+
+
+def _coingecko_coin_id_fallback_reason(fetcher: object) -> str:
+    if callable(fetcher) and not bool(getattr(fetcher, "_codex_missing_dep", False)):
+        return ""
+    detail = str(getattr(fetcher, "_codex_missing_dep_reason", "") or "").strip()
+    if detail:
+        return detail
+    if callable(fetcher):
+        return "dependency marked unavailable in this session"
+    return "fallback fetcher is not callable"
+
+
+def _coingecko_coin_id_unavailable_message(reason: str | None) -> str:
+    detail = str(reason or "").strip()
+    if detail:
+        return f"no exchange OHLCV data; CoinGecko fallback unavailable ({detail})"
+    return "no exchange OHLCV data; CoinGecko fallback unavailable"
 
 
 def _audit_scan_summary_lines(
@@ -998,6 +1159,7 @@ def _custom_watchlist_missing_status(
     *,
     coin_id_map: dict[str, str] | None = None,
     coingecko_coin_id_fallback_available: bool = True,
+    coingecko_coin_id_fallback_reason: str = "",
 ) -> list[tuple[str, str]]:
     requested_bases = _normalize_custom_bases(custom_bases_applied)
     if not requested_bases:
@@ -1020,7 +1182,7 @@ def _custom_watchlist_missing_status(
         if not reason:
             fallback_coin_id = (coin_id_map or {}).get(base)
             if fallback_coin_id and not bool(coingecko_coin_id_fallback_available):
-                reason = "no exchange OHLCV data; CoinGecko fallback unavailable"
+                reason = _coingecko_coin_id_unavailable_message(coingecko_coin_id_fallback_reason)
             elif fallback_coin_id:
                 reason = "no exchange OHLCV data; CoinGecko fallback returned empty"
             else:
@@ -1146,6 +1308,7 @@ def render(ctx: dict) -> None:
     get_market_cap_rows_for_symbols = get_ctx(ctx, "get_market_cap_rows_for_symbols")
     fetch_coingecko_ohlcv_by_coin_id = get_ctx(ctx, "fetch_coingecko_ohlcv_by_coin_id")
     coingecko_coin_id_fallback_available = _coingecko_coin_id_fallback_available(fetch_coingecko_ohlcv_by_coin_id)
+    coingecko_coin_id_fallback_reason = _coingecko_coin_id_fallback_reason(fetch_coingecko_ohlcv_by_coin_id)
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     analyse = get_ctx(ctx, "analyse")
     get_scalping_entry_target = get_ctx(ctx, "get_scalping_entry_target")
@@ -1532,7 +1695,6 @@ def render(ctx: dict) -> None:
             return ("Balanced", WARNING)
         return ("Low", NEGATIVE)
 
-    g1, g2, g3, g4 = st.columns(4, gap="medium")
     def _clip_pct(v: float | None) -> float:
         if v is None or pd.isna(v):
             return 0.0
@@ -1636,182 +1798,7 @@ def render(ctx: dict) -> None:
             f"{footer}"
             "</div>"
         )
-
-    # BTC dominance gauge
-    with g1:
-        btc_state, btc_color = _dom_state(btc_dom_display, AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100)
-        st.markdown(
-            _render_market_orbital_card(
-                title="BTC Dominance",
-                title_hover="Bitcoin share of total crypto market cap. Rising dominance usually means BTC-led positioning and a more defensive market tone.",
-                value_text=f"{float(btc_dom_display):.1f}" if btc_dom_display is not None else "N/A",
-                unit="%",
-                chart_html=_orbital_svg_html(
-                    value=btc_dom_display,
-                    segments=[
-                        (0.0, AI_SHORT_THRESHOLD * 100, NEGATIVE),
-                        (AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100, WARNING),
-                        (AI_LONG_THRESHOLD * 100, 100.0, POSITIVE),
-                    ],
-                    marker_color=btc_color,
-                    accent_color=btc_color,
-                ),
-                guide_labels=("Alt-heavy", "Balanced", "BTC-led"),
-                note="Structure context only. High BTC share usually means capital is hiding in Bitcoin first.",
-                footer_html=(
-                    f"<div class='market-top-meta'><span>Current state</span><span><strong style='color:{btc_color};'>{btc_state}</strong></span></div>"
-                ),
-            ),
-            unsafe_allow_html=True,
-        )
-
-    # ETH dominance gauge
-    with g2:
-        eth_state, eth_color = _dom_state(eth_dom_display, 15.0, 25.0)
-        st.markdown(
-            _render_market_orbital_card(
-                title="ETH Dominance",
-                title_hover="Ethereum share of total crypto market cap. Higher ETH participation usually means stronger broad-market engagement.",
-                value_text=f"{float(eth_dom_display):.1f}" if eth_dom_display is not None else "N/A",
-                unit="%",
-                chart_html=_orbital_svg_html(
-                    value=eth_dom_display,
-                    segments=[
-                        (0.0, 15.0, NEGATIVE),
-                        (15.0, 25.0, WARNING),
-                        (25.0, 100.0, POSITIVE),
-                    ],
-                    marker_color=eth_color,
-                    accent_color=eth_color,
-                ),
-                guide_labels=("ETH-light", "Balanced", "ETH-heavy"),
-                note="Participation context only. Rising ETH share often supports healthier risk-on rotation.",
-                footer_html=(
-                    f"<div class='market-top-meta'><span>Participation</span><span><strong style='color:{eth_color};'>{eth_state}</strong></span></div>"
-                ),
-            ),
-            unsafe_allow_html=True,
-        )
-
-    # AI direction bias gauge
-    with g3:
-        ai_direction_hover = (
-            "AI Direction Bias is the market-direction score from BTC/ETH/BNB/SOL/ADA/XRP model outputs. "
-            "If dominance data is available, it uses dominance weighting; otherwise equal weighting fallback is used. "
-            f"Score zones: 0-{int(AI_SHORT_THRESHOLD * 100)} = Downside bias, "
-            f"{int(AI_SHORT_THRESHOLD * 100)}-{int(AI_LONG_THRESHOLD * 100)} = Neutral bias, "
-            f"{int(AI_LONG_THRESHOLD * 100)}-100 = Upside bias."
-        )
-        if behaviour_weight_mode == "equal":
-            ai_direction_hover += " Dominance feed unavailable right now, so equal-weight fallback is active."
-        ai_direction_score = int(round(behaviour_prob * 100))
-        st.markdown(
-            _render_market_orbital_card(
-                title="AI Direction Bias",
-                title_hover=ai_direction_hover,
-                value_text=f"{ai_direction_score:d}",
-                unit="/100",
-                chart_html=_orbital_svg_html(
-                    value=float(ai_direction_score),
-                    segments=[
-                        (0.0, AI_SHORT_THRESHOLD * 100, NEGATIVE),
-                        (AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100, WARNING),
-                        (AI_LONG_THRESHOLD * 100, 100.0, POSITIVE),
-                    ],
-                    marker_color=behaviour_color,
-                    accent_color=behaviour_color,
-                ),
-                guide_labels=("Downside", "Neutral", "Upside"),
-                note=(
-                    "Composite ML direction across BTC/ETH/BNB/SOL/ADA/XRP. "
-                    + ("Dominance-weighted view is active." if behaviour_weight_mode == "dominance" else "Equal-weight fallback is active.")
-                ),
-                footer_html=(
-                    f"<div class='market-top-meta'><span>Bias</span><span><strong style='color:{behaviour_color};'>{html.escape(behaviour_label)} Bias</strong></span></div>"
-                ),
-            ),
-            unsafe_allow_html=True,
-        )
-
-    # Setup quality gauge (composite)
-    with g4:
-        setup_quality_hover = (
-            "Setup Quality formula: 35% Direction + 20% Regime + 25% Breadth + 20% Trust. "
-            "Direction = AI directional confidence, Regime = market-cap environment quality, "
-            "Breadth = major-asset participation on one side, Trust = cross-major model consistency. "
-            "This score measures market environment quality, not trade direction alone."
-        )
-        setup_mode_hover = {
-            "Risk-On": (
-                "Risk-On: broad market conditions are favorable. "
-                "Direction, participation, and model trust are strong enough for active setup hunting."
-            ),
-            "Selective": (
-                "Selective: market quality is mixed. "
-                "Some setups can work, but confirmation standards should stay strict and risk should stay controlled."
-            ),
-            "Risk-Off": (
-                "Risk-Off: market environment is weak or fragmented. "
-                "Favor capital preservation and avoid forcing setups."
-            ),
-        }.get(composite_mode, setup_quality_hover)
-        d_col = _score_tone(direction_score)[1]
-        r_col = _score_tone(regime_score)[1]
-        b_col = _score_tone(breadth_score)[1]
-        t_col = _score_tone(trust_score)[1]
-        st.markdown(
-            _render_market_orbital_card(
-                title="Setup Quality",
-                title_hover=setup_quality_hover,
-                value_text=f"{int(round(composite_score)):d}",
-                unit="/100",
-                chart_html=_orbital_svg_html(
-                    value=float(composite_score),
-                    segments=[
-                        (0.0, 52.0, NEGATIVE),
-                        (52.0, 68.0, WARNING),
-                        (68.0, 100.0, POSITIVE),
-                    ],
-                    marker_color=composite_color,
-                    accent_color=composite_color,
-                ),
-                guide_labels=("Risk-Off", "Selective", "Risk-On"),
-                note="Composite setup climate for setup hunting, not direction alone.",
-                top_meta_text=composite_mode,
-                top_meta_color=composite_color,
-                top_meta_hover=setup_mode_hover,
-                footer_html=(
-                    "<div class='market-statline'>"
-                    + _stat_metric(
-                        "Direction",
-                        direction_score,
-                        d_col,
-                        "Direction: confidence of directional edge from AI direction bias. Higher = clearer market direction.",
-                    )
-                    + _stat_metric(
-                        "Regime",
-                        regime_score,
-                        r_col,
-                        "Regime: market environment quality proxy from total market-cap move behavior."
-                        + (" Market-cap feed unavailable, neutral fallback (50) active." if regime_score_fallback else ""),
-                    )
-                    + _stat_metric(
-                        "Breadth",
-                        breadth_score,
-                        b_col,
-                        "Breadth: how many major assets align on one side. Higher breadth means stronger participation.",
-                    )
-                    + _stat_metric(
-                        "Trust",
-                        trust_score,
-                        t_col,
-                        "Trust: reliability from cross-major model consistency. Lower dispersion = higher trust.",
-                    )
-                    + "</div>"
-                ),
-            ),
-            unsafe_allow_html=True,
-        )
+    market_signal_cards_placeholder = st.container()
 
     # Divider
     st.markdown("\n\n")
@@ -1969,17 +1956,18 @@ def render(ctx: dict) -> None:
             .replace("– ", "")
             .strip()
         )
-        if "Near Top" in clean:
+        clean_upper = clean.upper()
+        if "NEAR TOP" in clean_upper:
             return "▼ Near Top"
-        if "Near Bottom" in clean:
+        if "NEAR BOTTOM" in clean_upper:
             return "▲ Near Bottom"
-        if "Near VWAP" in clean:
+        if "NEAR VWAP" in clean_upper:
             return "→ Near VWAP"
-        if any(k in clean for k in ["Bullish", "Above", "Oversold", "Low"]):
+        if "BULLISH" in clean_upper or clean_upper in {"ABOVE", "OVERSOLD", "LOW"}:
             return f"▲ {clean}"
-        if any(k in clean for k in ["Bearish", "Below", "Overbought", "High"]):
+        if "BEARISH" in clean_upper or clean_upper in {"BELOW", "OVERBOUGHT", "HIGH"}:
             return f"▼ {clean}"
-        if any(k in clean for k in ["Neutral", "Moderate", "Starting"]):
+        if any(k in clean_upper for k in ["NEUTRAL", "MODERATE", "STARTING", "INDECISION", "MIXED"]):
             return f"→ {clean}"
         return clean
 
@@ -2221,9 +2209,11 @@ def render(ctx: dict) -> None:
             txt = ""
         if col == "Coin":
             pair = str(row.get("__pair", "")).strip()
+            pair_meta = _coin_pair_meta(txt, pair)
             emerging_label = str(row.get("__emerging_label", "")).strip()
             emerging_note = str(row.get("__emerging_note", "")).strip()
-            emerging_tone = _emerging_badge_tone(str(row.get("__emerging_direction", "")))
+            emerging_direction = str(row.get("__emerging_direction", ""))
+            emerging_tone = _emerging_badge_tone(emerging_direction)
             tone_map = {
                 "pos": "mk-pos",
                 "neg": "mk-neg",
@@ -2234,21 +2224,40 @@ def render(ctx: dict) -> None:
             badge_html = ""
             if emerging_label:
                 badge_cls = tone_map.get(emerging_tone, "mk-muted")
-                badge_title = f" title='{html.escape(emerging_note)}'" if emerging_note else ""
+                badge_symbol = _emerging_badge_symbol(emerging_direction)
+                badge_text = _emerging_badge_text(emerging_direction)
+                badge_title_text = emerging_label if not emerging_note else f"{emerging_label} | {emerging_note}"
+                badge_title = f" title='{html.escape(badge_title_text)}'"
                 badge_html = (
                     f"<span class='mk-coin-badge {badge_cls}'{badge_title}>"
-                    f"{html.escape(emerging_label)}"
+                    f"<span class='mk-em-key'>{html.escape(badge_text)}</span>"
+                    f"<span class='mk-em-arrow'>{html.escape(badge_symbol)}</span>"
                     f"</span>"
                 )
+            pair_meta_html = (
+                f"<span class='mk-coin-meta'>{html.escape(pair_meta)}</span>"
+                if pair_meta
+                else ""
+            )
             if pair:
                 return (
                     f"<span class='mk-coin-wrap'>"
+                    f"<span class='mk-coin-top'>"
                     f"<span class='mk-coin'>{html.escape(txt)}</span>"
                     f"{badge_html}"
+                    f"</span>"
+                    f"{pair_meta_html}"
                     f"<span class='mk-coin-tooltip'>{html.escape(pair)}</span>"
                     f"</span>"
                 )
-            return f"<span class='mk-coin-wrap'><span class='mk-coin'>{html.escape(txt)}</span>{badge_html}</span>"
+            return (
+                f"<span class='mk-coin-wrap'>"
+                f"<span class='mk-coin-top'>"
+                f"<span class='mk-coin'>{html.escape(txt)}</span>"
+                f"{badge_html}"
+                f"</span>"
+                f"</span>"
+            )
         if col in {"Setup Confirm", "Direction", "Confidence", "AI Confidence", "R:R", "Scalp Opportunity"}:
             if col == "Setup Confirm":
                 reason_code = str(row.get("__action_reason", "")).strip()
@@ -2270,13 +2279,28 @@ def render(ctx: dict) -> None:
                 )
             if col == "Direction":
                 direction_note = str(row.get("__direction_note", "")).strip()
-                return _chip(txt, _tone_for_col(col, txt), title=direction_note or None)
+                return _chip(
+                    txt,
+                    _tone_for_col(col, txt),
+                    title=direction_note or None,
+                    extra_class="mk-chip-direction",
+                )
             if col == "Confidence":
                 confidence_note = str(row.get("__confidence_note", "")).strip()
-                return _chip(txt, _tone_for_col(col, txt), title=confidence_note or None)
+                return _chip(
+                    txt,
+                    _tone_for_col(col, txt),
+                    title=confidence_note or None,
+                    extra_class="mk-chip-score",
+                )
             if col == "AI Confidence":
                 ai_confidence_note = str(row.get("__ai_confidence_note", "")).strip()
-                return _chip(txt, _tone_for_col(col, txt), title=ai_confidence_note or None)
+                return _chip(
+                    txt,
+                    _tone_for_col(col, txt),
+                    title=ai_confidence_note or None,
+                    extra_class="mk-chip-score mk-chip-ai-score",
+                )
             if col == "Scalp Opportunity" and txt.upper() == "NEUTRAL":
                 return ""
             if col == "R:R":
@@ -2284,8 +2308,14 @@ def render(ctx: dict) -> None:
                 rr_text = txt
                 if rr_note:
                     rr_text = f"{txt}*"
-                return _chip(rr_text, _tone_for_col(col, txt), title=rr_note or None)
-            return _chip(txt, _tone_for_col(col, txt))
+                return _chip(
+                    rr_text,
+                    _tone_for_col(col, txt),
+                    title=rr_note or None,
+                    extra_class="mk-chip-score mk-chip-rr",
+                )
+            extra_cls = "mk-chip-direction mk-chip-scalp" if col == "Scalp Opportunity" else ""
+            return _chip(txt, _tone_for_col(col, txt), extra_class=extra_cls)
         if col == "AI Ensemble":
             t = _tone_for_col(col, txt)
             ai_note = str(row.get("__ai_note", "")).strip()
@@ -2311,7 +2341,7 @@ def render(ctx: dict) -> None:
                 for i in range(3)
             )
             return (
-                f"<span class='mk-chip {tone_cls} mk-chip-ai'{title_attr}>"
+                f"<span class='mk-chip {tone_cls} mk-chip-ai mk-chip-ensemble'{title_attr}>"
                 f"<span class='mk-ai-text'>{html.escape(base_txt)}</span>"
                 f"<span class='mk-ai-dots'>{dots_html}</span>"
                 f"</span>"
@@ -2353,40 +2383,45 @@ def render(ctx: dict) -> None:
             delta_note = str(row.get("__delta_note", "")).strip()
             title_attr = f" title='{html.escape(delta_note, quote=True)}'" if delta_note else ""
             if txt.startswith("▲"):
-                return f"<span class='mk-delta mk-pos-t'{title_attr}>{html.escape(txt)}</span>"
+                return f"<span class='mk-delta mk-pos-t mk-num-strong'{title_attr}>{html.escape(txt)}</span>"
             if txt.startswith("▼"):
-                return f"<span class='mk-delta mk-neg-t'{title_attr}>{html.escape(txt)}</span>"
-            return f"<span class='mk-delta mk-muted-t'{title_attr}>{html.escape(txt)}</span>"
+                return f"<span class='mk-delta mk-neg-t mk-num-strong'{title_attr}>{html.escape(txt)}</span>"
+            return f"<span class='mk-delta mk-muted-t mk-num-strong'{title_attr}>{html.escape(txt)}</span>"
         if col == "Price ($)":
             if not txt:
                 return ""
             plain = txt[1:] if txt.startswith("$") else txt
-            return f"<span class='mk-plain'>{html.escape(plain)}</span>"
+            return f"<span class='mk-plain mk-num mk-price'>{html.escape(plain)}</span>"
         if col == "Entry Price":
             if not txt:
                 return ""
             entry_note = str(row.get("__entry_note", "")).strip()
             if entry_note:
                 return (
-                    f"<span class='mk-plain' title='{html.escape(entry_note, quote=True)}'>"
+                    f"<span class='mk-plain mk-num mk-level' title='{html.escape(entry_note, quote=True)}'>"
                     f"{html.escape(txt)}</span>"
                 )
-            return f"<span class='mk-plain'>{html.escape(txt)}</span>"
+            return f"<span class='mk-plain mk-num mk-level'>{html.escape(txt)}</span>"
         if col == "Stop Loss":
-            return f"<span class='mk-plain'>{html.escape(txt)}</span>" if txt else ""
+            return f"<span class='mk-plain mk-num mk-level'>{html.escape(txt)}</span>" if txt else ""
         if col == "Target Price":
             if not txt:
                 return ""
             target_note = str(row.get("__target_note", "")).strip()
             if target_note:
                 return (
-                    f"<span class='mk-plain' title='{html.escape(target_note, quote=True)}'>"
+                    f"<span class='mk-plain mk-num mk-level' title='{html.escape(target_note, quote=True)}'>"
                     f"{html.escape(txt)}</span>"
                 )
-            return f"<span class='mk-plain'>{html.escape(txt)}</span>"
+            return f"<span class='mk-plain mk-num mk-level'>{html.escape(txt)}</span>"
         if col == "Ichimoku":
             ichi_title = str(row.get("__ichimoku_detail", "")).strip()
-            return _chip(txt, _tone_for_col(col, txt), title=ichi_title or None) if txt else ""
+            return _chip(
+                txt,
+                _tone_for_col(col, txt),
+                title=ichi_title or None,
+                extra_class="mk-chip-indicator",
+            ) if txt else ""
         if col == "ADX":
             adx_raw = row.get("__adx_raw")
             adx_title = None
@@ -2401,13 +2436,26 @@ def render(ctx: dict) -> None:
                     adx_title = f"ADX {adx_f:.1f} | Scalp trend gate: {gate_txt}"
             except Exception:
                 adx_title = None
-            return _chip(txt, _tone_for_col(col, txt), title=adx_title) if txt else ""
+            return _chip(
+                txt,
+                _tone_for_col(col, txt),
+                title=adx_title,
+                extra_class="mk-chip-indicator mk-chip-adx",
+            ) if txt else ""
         if col in {"SuperTrend", "Ichimoku", "VWAP", "Bollinger", "Stochastic RSI", "Volatility", "PSAR", "Williams %R", "CCI", "Candle Pattern"}:
-            return _chip(txt, _tone_for_col(col, txt)) if txt else ""
+            return _chip(
+                txt,
+                _tone_for_col(col, txt),
+                extra_class="mk-chip-indicator",
+            ) if txt else ""
         return f"<span class='mk-plain'>{html.escape(txt)}</span>"
 
     def _render_pro_table(df: pd.DataFrame, cols: list[str]) -> None:
         sticky_order: list[str] = ["Coin"]
+        core_signal_cols = {"Setup Confirm", "Direction", "Confidence", "AI Ensemble", "AI Confidence"}
+        trend_cols = {"ADX", "SuperTrend", "Ichimoku", "VWAP", "PSAR"}
+        momentum_cols = {"Stochastic RSI", "Williams %R", "CCI", "Candle Pattern"}
+        volatility_volume_cols = {"Bollinger", "Volatility", "Spike Alert"}
         col_widths = {
             "Coin": 182,
             "Price ($)": 122,
@@ -2424,6 +2472,52 @@ def render(ctx: dict) -> None:
             left_offsets[c] = f"{running_left}px"
             running_left += col_widths[c]
         sticky_cols = set(sticky_order)
+
+        group_row_html = ""
+        core_row_html = ""
+        has_advanced_cols = any(c not in primary_cols for c in cols)
+        core_members = [c for c in cols if c in core_signal_cols]
+        if has_advanced_cols:
+            first_core_idx = cols.index(core_members[0]) if core_members else 0
+            last_core_idx = cols.index(core_members[-1]) if core_members else -1
+            group_cells = []
+
+            if first_core_idx > 0:
+                group_cells.append(f"<th colspan='{first_core_idx}' class='mk-core-gap'></th>")
+            if core_members:
+                core_span = (last_core_idx - first_core_idx) + 1
+                group_cells.append(f"<th colspan='{core_span}' class='mk-core-cell'>Setup Snapshot</th>")
+
+            trailing_primary = max(len(primary_cols) - (last_core_idx + 1), 0)
+            if trailing_primary > 0:
+                group_cells.append(f"<th colspan='{trailing_primary}' class='mk-core-gap'></th>")
+
+            group_defs = [
+                ("Trend Structure", [c for c in cols if c in trend_cols], "trend"),
+                ("Momentum Signals", [c for c in cols if c in momentum_cols], "momentum"),
+                ("Volatility & Volume", [c for c in cols if c in volatility_volume_cols], "context"),
+            ]
+            for label, members, tone in group_defs:
+                if not members:
+                    continue
+                group_cells.append(
+                    f"<th colspan='{len(members)}' class='mk-group-{tone}'>{html.escape(label)}</th>"
+                )
+            if group_cells:
+                group_row_html = f"<tr class='mk-group-row'>{''.join(group_cells)}</tr>"
+        elif core_members:
+            first_core_idx = cols.index(core_members[0])
+            last_core_idx = cols.index(core_members[-1])
+            left_span = first_core_idx
+            core_span = (last_core_idx - first_core_idx) + 1
+            right_span = len(cols) - last_core_idx - 1
+            core_cells = []
+            if left_span > 0:
+                core_cells.append(f"<th colspan='{left_span}' class='mk-core-gap'></th>")
+            core_cells.append(f"<th colspan='{core_span}' class='mk-core-cell'>Setup Snapshot</th>")
+            if right_span > 0:
+                core_cells.append(f"<th colspan='{right_span}' class='mk-core-gap'></th>")
+            core_row_html = f"<tr class='mk-core-row'>{''.join(core_cells)}</tr>"
 
         header_html = []
         for c in cols:
@@ -2509,6 +2603,62 @@ def render(ctx: dict) -> None:
               z-index:4;
               background:linear-gradient(180deg, rgba(18,24,36,0.98), rgba(12,18,30,0.98));
             }}
+            .mk-group-row th {{
+              position:static;
+              top:auto;
+              z-index:1;
+              padding:7px 10px 6px;
+              font-size:0.56rem;
+              font-weight:850;
+              letter-spacing:0.18em;
+              text-transform:uppercase;
+              color:rgba(191,211,230,0.82);
+              background:linear-gradient(180deg, rgba(10,16,26,0.98), rgba(8,13,22,0.98));
+              border-bottom:1px solid rgba(148,163,184,0.14);
+              border-right:1px solid rgba(148,163,184,0.06);
+            }}
+            .mk-group-core {{
+              box-shadow: inset 0 -1px 0 rgba(148,163,184,0.18);
+            }}
+            .mk-group-trend {{
+              color:rgba(125,211,252,0.86);
+              box-shadow: inset 0 -1px 0 rgba(125,211,252,0.18);
+            }}
+            .mk-group-momentum {{
+              color:rgba(253,224,71,0.84);
+              box-shadow: inset 0 -1px 0 rgba(253,224,71,0.16);
+            }}
+            .mk-group-context {{
+              color:rgba(244,114,182,0.82);
+              box-shadow: inset 0 -1px 0 rgba(244,114,182,0.14);
+            }}
+            .mk-core-row th {{
+              position:static;
+              top:auto;
+              z-index:1;
+              padding:6px 10px 5px;
+              font-size:0.55rem;
+              font-weight:860;
+              letter-spacing:0.18em;
+              text-transform:uppercase;
+              background:linear-gradient(180deg, rgba(9,14,23,0.98), rgba(8,12,21,0.98));
+              border-bottom:1px solid rgba(148,163,184,0.10);
+              border-right:1px solid rgba(148,163,184,0.04);
+            }}
+            .mk-core-gap {{
+              color:transparent;
+            }}
+            .mk-core-cell {{
+              text-align:left;
+              color:rgba(145,224,255,0.86);
+              box-shadow:
+                inset 0 1px 0 rgba(0,212,255,0.10),
+                inset 0 -1px 0 rgba(0,212,255,0.18);
+            }}
+            .mk-header-row th {{
+              top:0;
+              z-index:4;
+            }}
             .mk-table td {{
               padding:8px 10px;
               color:#E5E7EB;
@@ -2518,17 +2668,35 @@ def render(ctx: dict) -> None:
               vertical-align:middle;
               overflow:hidden;
               text-overflow:ellipsis;
+              transition:
+                background-color 0.16s ease,
+                border-color 0.16s ease,
+                box-shadow 0.16s ease;
+            }}
+            .mk-table tbody tr:nth-child(odd) td {{
+              background-color:rgba(255,255,255,0.012);
+            }}
+            .mk-table tbody tr:nth-child(even) td {{
+              background-color:rgba(255,255,255,0.004);
             }}
             .mk-table tr:hover td {{
-              background-color:rgba(0,212,255,0.06);
+              background-color:rgba(0,212,255,0.052);
+              border-bottom-color:rgba(0,212,255,0.20);
             }}
             .mk-table tr:hover td[style*="position:sticky"] {{
-              background-color:rgba(8,12,20,1.0) !important;
+              background:linear-gradient(180deg, rgba(11,18,29,1.0), rgba(8,14,24,1.0)) !important;
+            }}
+            .mk-table tr:hover td.mk-coin-cell {{
+              box-shadow:
+                inset 2px 0 0 rgba(0,212,255,0.42),
+                1px 0 0 rgba(148,163,184,0.22),
+                2px 0 10px rgba(0,0,0,0.24) !important;
             }}
             .mk-chip {{
               display:inline-flex;
               align-items:center;
               gap:6px;
+              min-height:22px;
               padding:2px 8px;
               max-width:100%;
               border-radius:999px;
@@ -2540,17 +2708,78 @@ def render(ctx: dict) -> None:
               text-overflow:ellipsis;
               white-space:nowrap;
               box-sizing:border-box;
+              box-shadow:inset 0 0 0 1px rgba(255,255,255,0.02);
             }}
             .mk-chip-action {{
+              min-height:23px;
               font-size:0.70rem;
-              padding:2px 6px;
-              letter-spacing:0.1px;
+              padding:2px 7px;
+              font-weight:800;
+              letter-spacing:0.02em;
               gap:4px;
             }}
-            .mk-chip-ai {{
-              gap:8px;
-              min-height:26px;
+            .mk-chip-direction {{
+              min-height:23px;
+              padding:2px 9px;
+              font-weight:800;
+              letter-spacing:0.01em;
+            }}
+            .mk-chip-score {{
+              min-height:21px;
+              padding:2px 9px;
+              font-weight:750;
+              font-variant-numeric: tabular-nums;
+              font-feature-settings:"tnum" 1, "lnum" 1;
+            }}
+            .mk-chip-ai-score {{
+              border-style:solid;
+            }}
+            .mk-chip-rr {{
+              font-weight:800;
+            }}
+            .mk-chip-scalp {{
+              min-height:21px;
               padding:2px 8px;
+            }}
+            .mk-chip-ai {{
+              gap:7px;
+              min-height:24px;
+              padding:2px 8px;
+            }}
+            .mk-chip-ensemble {{
+              gap:7px;
+            }}
+            .mk-chip-indicator {{
+              min-height:21px;
+              padding:2px 8px;
+              font-size:0.71rem;
+              font-weight:760;
+              letter-spacing:0.01em;
+              box-shadow:
+                inset 0 0 0 1px rgba(255,255,255,0.018),
+                inset 0 -1px 0 rgba(255,255,255,0.012);
+            }}
+            .mk-chip-adx {{
+              font-variant-numeric: tabular-nums;
+              font-feature-settings:"tnum" 1, "lnum" 1;
+            }}
+            .mk-num {{
+              display:inline-block;
+              font-variant-numeric: tabular-nums;
+              font-feature-settings:"tnum" 1, "lnum" 1;
+              letter-spacing:0.01em;
+            }}
+            .mk-num-strong {{
+              font-variant-numeric: tabular-nums;
+              font-feature-settings:"tnum" 1, "lnum" 1;
+            }}
+            .mk-price {{
+              color:#F8FAFC;
+              font-weight:760;
+            }}
+            .mk-level {{
+              color:#DCE7F5;
+              font-weight:700;
             }}
             .mk-ai-text {{
               line-height:1.15;
@@ -2593,22 +2822,81 @@ def render(ctx: dict) -> None:
             .mk-coin-wrap {{
               position:relative;
               display:inline-flex;
+              flex-direction:column;
+              align-items:flex-start;
+              justify-content:center;
+              gap:3px;
+            }}
+            .mk-coin-top {{
+              display:inline-flex;
               align-items:center;
               flex-wrap:wrap;
-              gap:6px;
+              gap:7px;
+            }}
+            .mk-coin-meta {{
+              color:rgba(191,211,230,0.62);
+              font-size:0.54rem;
+              font-weight:650;
+              letter-spacing:0.10em;
+              text-transform:uppercase;
+              line-height:1;
+              opacity:0.78;
             }}
             .mk-coin-badge {{
               display:inline-flex;
               align-items:center;
-              padding:1px 7px;
+              justify-content:center;
+              gap:5px;
+              min-width:26px;
+              height:21px;
+              padding:0 8px 0 9px;
               border-radius:999px;
               border:1px solid rgba(148,163,184,0.28);
-              background:rgba(148,163,184,0.08);
-              font-size:0.62rem;
+              background:
+                linear-gradient(180deg, rgba(15,23,42,0.94), rgba(15,23,42,0.78)),
+                radial-gradient(circle at top, rgba(255,255,255,0.06), rgba(255,255,255,0.00) 58%);
+              font-size:0.72rem;
               font-weight:800;
-              letter-spacing:0.18px;
-              line-height:1.35;
-              box-shadow:inset 0 0 0 1px rgba(255,255,255,0.03);
+              letter-spacing:0.01em;
+              line-height:1;
+              box-shadow:
+                inset 0 0 0 1px rgba(255,255,255,0.03),
+                0 1px 4px rgba(0,0,0,0.18),
+                0 0 0 1px rgba(255,255,255,0.02);
+              backdrop-filter: blur(6px);
+            }}
+            .mk-em-key {{
+              font-size:0.49rem;
+              font-weight:900;
+              letter-spacing:0.18em;
+              text-transform:uppercase;
+              opacity:0.82;
+            }}
+            .mk-em-arrow {{
+              font-size:0.82rem;
+              font-weight:900;
+              line-height:1;
+              transform:translateY(-0.5px);
+            }}
+            .mk-coin-badge.mk-pos {{
+              border-color:rgba(16,185,129,0.38);
+              background:
+                linear-gradient(180deg, rgba(4,34,28,0.96), rgba(5,28,23,0.82)),
+                radial-gradient(circle at top, rgba(16,185,129,0.11), rgba(16,185,129,0.00) 58%);
+              box-shadow:
+                inset 0 0 0 1px rgba(255,255,255,0.03),
+                0 1px 4px rgba(0,0,0,0.18),
+                0 0 0 1px rgba(16,185,129,0.08);
+            }}
+            .mk-coin-badge.mk-neg {{
+              border-color:rgba(244,63,94,0.38);
+              background:
+                linear-gradient(180deg, rgba(42,12,23,0.96), rgba(34,10,19,0.82)),
+                radial-gradient(circle at top, rgba(244,63,94,0.11), rgba(244,63,94,0.00) 58%);
+              box-shadow:
+                inset 0 0 0 1px rgba(255,255,255,0.03),
+                0 1px 4px rgba(0,0,0,0.18),
+                0 0 0 1px rgba(244,63,94,0.08);
             }}
             .mk-table td.mk-coin-cell {{
               overflow:visible !important;
@@ -2647,7 +2935,7 @@ def render(ctx: dict) -> None:
             </style>
             <div class="mk-wrap">
               <table class="mk-table">
-                <thead><tr>{''.join(header_html)}</tr></thead>
+                <thead>{group_row_html}{core_row_html}<tr class="mk-header-row">{''.join(header_html)}</tr></thead>
                 <tbody>{''.join(rows_html)}</tbody>
               </table>
             </div>
@@ -2943,6 +3231,7 @@ def render(ctx: dict) -> None:
                     spot_snapshot=spot_snapshot,
                     ai_spot_snapshot=ai_spot_snapshot,
                     ai_confidence_score=float(ai_confidence_snapshot.score),
+                    tech_confidence_score=float(confidence_snapshot.score),
                 )
 
                 ai_spot_direction_key = direction_key(ai_spot_snapshot.direction)
@@ -3158,7 +3447,9 @@ def render(ctx: dict) -> None:
                         reason = "no OHLCV data"
                         if custom_mode_active:
                             if fallback_coin_id and not coingecko_coin_id_fallback_available:
-                                reason = "no exchange OHLCV data; CoinGecko fallback unavailable"
+                                reason = _coingecko_coin_id_unavailable_message(
+                                    coingecko_coin_id_fallback_reason
+                                )
                             elif fallback_coin_id:
                                 reason = "no exchange OHLCV data; CoinGecko fallback returned empty"
                             else:
@@ -3380,9 +3671,15 @@ def render(ctx: dict) -> None:
 
             if custom_mode_active:
                 if not coingecko_coin_id_fallback_available:
+                    unavailable_reason = (
+                        f" Reason: {coingecko_coin_id_fallback_reason}."
+                        if coingecko_coin_id_fallback_reason
+                        else ""
+                    )
                     st.warning(
                         "CoinGecko custom-watchlist fallback is unavailable in this session. "
                         "Exchange-missing custom symbols may stay hidden until the fallback dependency is restored."
+                        f"{unavailable_reason}"
                     )
                 custom_missing = _custom_watchlist_missing_status(
                     custom_bases_applied,
@@ -3390,6 +3687,7 @@ def render(ctx: dict) -> None:
                     skipped_symbols,
                     coin_id_map=coin_id_map,
                     coingecko_coin_id_fallback_available=coingecko_coin_id_fallback_available,
+                    coingecko_coin_id_fallback_reason=coingecko_coin_id_fallback_reason,
                 )
                 if custom_missing:
                     detail = " • ".join(f"{base}: {reason}" for base, reason in custom_missing)
@@ -3603,13 +3901,14 @@ def render(ctx: dict) -> None:
                 "<b>Δ (%)</b>: change from previous closed candle to latest closed candle on selected timeframe (fallback: ticker % if candle delta unavailable).<br><br>"
                 "<b>Setup Confirm</b>: final scanner confirmation class (not a direct execution order). "
                 "Calculated from spot Direction + Confidence, then evaluated by a pure technical Trend-led path and a separate pure AI AI-led path using selected-timeframe execution quality and a spot-style local risk model.<br>"
-                "<b>Emerging badge</b>: if the coin name shows Emerging Upside/Downside, 4H technical structure is leading early, AI confirms the same side, and 1D is not opposing yet. This is an attention signal, not a confirmed bias replacement.<br>"
+                "<b>LEAD badge</b>: if the coin name shows <b>LEAD ↗</b> or <b>LEAD ↘</b>, 4H technical structure is already leading while confirmed HTF Direction is still Neutral or still low-confidence. AI may confirm the same side or stay neutral, but a strong opposite AI blocks the badge. 1D must not be opposing yet. This is an early-attention signal, not a confirmed bias replacement.<br>"
                 "<b>Direction</b>: spot bias from 1D + 4H closed candles (Upside / Downside / Neutral).<br>"
                 "<b>Confidence</b>: quality score of that spot Direction call (timeframe alignment + structure + trend + regime + location).<br>"
                 "<b>AI Ensemble</b>: higher-timeframe AI bias from 1D + 4H. Dots show how many of the 3 ensemble models support that final HTF AI direction. "
                 "* means one of the AI higher-timeframe contexts degraded into neutral safety output.<br>"
                 "<b>AI Confidence</b>: quality score of the HTF AI verdict (conviction + combined score + timeframe alignment + consensus + model support). "
                 "Neutral/conflict/degraded states are capped lower on purpose.<br>"
+                "<b>Advanced colors</b>: advanced columns use trend/momentum/context meaning, not always direct market direction. For example, low volatility can be supportive/green even when the main Direction is still bearish.<br>"
                 "<b>R:R</b>: reward-to-risk ratio from target distance vs stop distance.<br>"
                 "<b>Entry Price</b>: model entry level (close/EMA5 with ATR buffer).<br>"
                 "<b>Stop Loss</b>: risk invalidation level (support/resistance with ATR clamps).<br>"
@@ -3638,15 +3937,19 @@ def render(ctx: dict) -> None:
             "Direction and Confidence use 4H + 1D closed candles. "
             "Setup, scalp plan levels, and delta stay on the selected timeframe closed candles."
         )
-        controls_col, chips_col = st.columns([1.2, 2.8], gap="small")
+        controls_col, chips_col = st.columns([1.6, 2.4], gap="small")
         with controls_col:
-            show_advanced = st.toggle("Show advanced columns", value=False, key="market_show_adv_cols")
+            toggle_cols = st.columns(2, gap="small")
+            with toggle_cols[0]:
+                show_advanced = st.toggle("Show advanced columns", value=False, key="market_show_adv_cols")
+            with toggle_cols[1]:
+                show_diagnostics = st.toggle("Show diagnostics", value=False, key="market_show_diagnostics")
         with chips_col:
             custom_fallback_chip = ""
             if custom_mode_active and not coingecko_coin_id_fallback_available:
                 custom_fallback_chip = (
                     f"<span class='market-inline-chip' style='border:1px solid {WARNING}; color:{WARNING}; "
-                    f"background:rgba(255,209,102,0.08);'>CoinGecko fallback degraded</span>"
+                    f"background:rgba(255,209,102,0.08);'>CoinGecko fallback unavailable</span>"
                 )
             st.markdown(
                 f"<div style='display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding-top:0.18rem;'>"
@@ -3728,18 +4031,279 @@ def render(ctx: dict) -> None:
         # Quick scan health summary (visual-first, logic unchanged)
         shown_bundle = _distribution_bundle(df_results)
         produced_bundle = _distribution_bundle(df_live_produced)
+
+        def _lead_component_display(value: float) -> tuple[float, str]:
+            clipped = max(-100.0, min(100.0, float(value)))
+            display = 50.0 + clipped * 0.5
+            if clipped >= 15.0:
+                return display, POSITIVE
+            if clipped <= -15.0:
+                return display, NEGATIVE
+            return display, WARNING
+
+        market_lead_snapshot = _market_lead_snapshot(
+            produced_rows=live_produced_rows,
+            delta_mcap=delta_mcap if pd.notna(delta_mcap) else None,
+            btc_change=float(btc_change) if btc_change is not None and not pd.isna(btc_change) else None,
+            eth_change=float(eth_change) if eth_change is not None and not pd.isna(eth_change) else None,
+            btc_dom=btc_dom_display,
+            eth_dom=eth_dom_display,
+            custom_mode_active=custom_mode_active,
+        )
+        if market_lead_snapshot.state == "UPSIDE":
+            market_lead_color = POSITIVE
+        elif market_lead_snapshot.state == "DOWNSIDE":
+            market_lead_color = NEGATIVE
+        elif market_lead_snapshot.state == "BALANCED":
+            market_lead_color = WARNING
+        else:
+            market_lead_color = TEXT_MUTED
+
+        ai_direction_hover = (
+            "Composite ML bias across BTC/ETH/BNB/SOL/ADA/XRP. "
+            "Dominance-weighted when available, otherwise equal-weight fallback. "
+            f"Zones: 0-{int(AI_SHORT_THRESHOLD * 100)} downside, "
+            f"{int(AI_SHORT_THRESHOLD * 100)}-{int(AI_LONG_THRESHOLD * 100)} neutral, "
+            f"{int(AI_LONG_THRESHOLD * 100)}-100 upside."
+        )
+        if behaviour_weight_mode == "equal":
+            ai_direction_hover += " Dominance feed unavailable; equal-weight fallback is active."
+        ai_direction_score = int(round(behaviour_prob * 100))
+
+        setup_quality_hover = (
+            "Composite market environment quality. "
+            "35% Direction, 20% Regime, 25% Breadth, 20% Trust. "
+            "Reads setup climate, not trade direction alone."
+        )
+        setup_mode_hover = {
+            "Risk-On": (
+                "Risk-On: broad market conditions are favorable. "
+                "Direction, participation, and model trust are strong enough for active setup hunting."
+            ),
+            "Selective": (
+                "Selective: market quality is mixed. "
+                "Some setups can work, but confirmation standards should stay strict and risk should stay controlled."
+            ),
+            "Risk-Off": (
+                "Risk-Off: market environment is weak or fragmented. "
+                "Favor capital preservation and avoid forcing setups."
+            ),
+        }.get(composite_mode, setup_quality_hover)
+        d_col = _score_tone(direction_score)[1]
+        r_col = _score_tone(regime_score)[1]
+        b_col = _score_tone(breadth_score)[1]
+        t_col = _score_tone(trust_score)[1]
+
+        market_lead_hover = (
+            "Early market-pressure gauge before full confirmation. "
+            "Blends lead breadth, total-market rotation versus BTC/ETH, broad flow, and dominance posture."
+        )
+        if custom_mode_active:
+            market_lead_hover += " Custom watchlist mode reduces breadth input, so the card leans more on market internals."
+
+        with market_signal_cards_placeholder:
+            g1, g2, g3, g4, g5 = st.columns(5, gap="medium")
+            with g1:
+                btc_state, btc_color = _dom_state(btc_dom_display, AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100)
+                st.markdown(
+                    _render_market_orbital_card(
+                        title="BTC Dominance",
+                        title_hover="Bitcoin share of total crypto market cap. Rising dominance usually means BTC-led positioning and a more defensive market tone.",
+                        value_text=f"{float(btc_dom_display):.1f}" if btc_dom_display is not None else "N/A",
+                        unit="%",
+                        chart_html=_orbital_svg_html(
+                            value=btc_dom_display,
+                            segments=[
+                                (0.0, AI_SHORT_THRESHOLD * 100, NEGATIVE),
+                                (AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100, WARNING),
+                                (AI_LONG_THRESHOLD * 100, 100.0, POSITIVE),
+                            ],
+                            marker_color=btc_color,
+                            accent_color=btc_color,
+                        ),
+                        guide_labels=("Alt-heavy", "Balanced", "BTC-led"),
+                        note="Structure context only. High BTC share usually means capital is hiding in Bitcoin first.",
+                        footer_html=(
+                            f"<div class='market-top-meta'><span>Current state</span><span><strong style='color:{btc_color};'>{btc_state}</strong></span></div>"
+                        ),
+                    ),
+                    unsafe_allow_html=True,
+                )
+            with g2:
+                eth_state, eth_color = _dom_state(eth_dom_display, 9.0, 13.0)
+                st.markdown(
+                    _render_market_orbital_card(
+                        title="ETH Dominance",
+                        title_hover="Ethereum share of total crypto market cap. Rising ETH dominance usually signals healthier alt participation and broader risk appetite.",
+                        value_text=f"{float(eth_dom_display):.1f}" if eth_dom_display is not None else "N/A",
+                        unit="%",
+                        chart_html=_orbital_svg_html(
+                            value=eth_dom_display,
+                            segments=[
+                                (0.0, 9.0, NEGATIVE),
+                                (9.0, 13.0, WARNING),
+                                (13.0, 100.0, POSITIVE),
+                            ],
+                            marker_color=eth_color,
+                            accent_color=eth_color,
+                        ),
+                        guide_labels=("Muted", "Balanced", "ETH-led"),
+                        note="Participation context only. Rising ETH share usually means broader alt participation is starting to improve.",
+                        footer_html=(
+                            f"<div class='market-top-meta'><span>Current state</span><span><strong style='color:{eth_color};'>{eth_state}</strong></span></div>"
+                        ),
+                    ),
+                    unsafe_allow_html=True,
+                )
+            with g3:
+                breadth_display, breadth_color = _lead_component_display(market_lead_snapshot.breadth_component)
+                rotation_display, rotation_color = _lead_component_display(market_lead_snapshot.rotation_component)
+                flow_display, flow_color = _lead_component_display(market_lead_snapshot.flow_component)
+                dominance_display, dominance_color = _lead_component_display(market_lead_snapshot.dominance_component)
+                st.markdown(
+                    _render_market_orbital_card(
+                        title="Market Lead",
+                        title_hover=market_lead_hover,
+                        value_text=f"{int(round(market_lead_snapshot.score)):d}",
+                        unit="/100",
+                        chart_html=_orbital_svg_html(
+                            value=float(market_lead_snapshot.score),
+                            segments=[
+                                (0.0, 38.0, NEGATIVE),
+                                (38.0, 62.0, WARNING),
+                                (62.0, 100.0, POSITIVE),
+                            ],
+                            marker_color=market_lead_color,
+                            accent_color=market_lead_color,
+                        ),
+                        guide_labels=("Downside", "Balanced", "Upside"),
+                        note=market_lead_snapshot.note,
+                        top_meta_text=market_lead_snapshot.label,
+                        top_meta_color=market_lead_color,
+                        top_meta_hover=market_lead_hover,
+                        footer_html=(
+                            "<div class='market-statline'>"
+                            + _stat_metric(
+                                "Breadth",
+                                breadth_display,
+                                breadth_color,
+                                f"Lead breadth from the produced scanner universe. Upside leads: {market_lead_snapshot.upside_leads} • Downside leads: {market_lead_snapshot.downside_leads}.",
+                            )
+                            + _stat_metric(
+                                "Rotation",
+                                rotation_display,
+                                rotation_color,
+                                "Rotation spread compares total market-cap flow with BTC/ETH flow. Positive means broad market is outperforming the majors.",
+                            )
+                            + _stat_metric(
+                                "Flow",
+                                flow_display,
+                                flow_color,
+                                "Broad market flow from total market-cap change. Higher = cleaner early participation.",
+                            )
+                            + _stat_metric(
+                                "Dom",
+                                dominance_display,
+                                dominance_color,
+                                "Dominance posture favors upside when BTC share eases and ETH share holds up; the reverse leans defensive.",
+                            )
+                            + "</div>"
+                        ),
+                    ),
+                    unsafe_allow_html=True,
+                )
+            with g4:
+                st.markdown(
+                    _render_market_orbital_card(
+                        title="AI Direction Bias",
+                        title_hover=ai_direction_hover,
+                        value_text=f"{ai_direction_score:d}",
+                        unit="/100",
+                        chart_html=_orbital_svg_html(
+                            value=float(ai_direction_score),
+                            segments=[
+                                (0.0, AI_SHORT_THRESHOLD * 100, NEGATIVE),
+                                (AI_SHORT_THRESHOLD * 100, AI_LONG_THRESHOLD * 100, WARNING),
+                                (AI_LONG_THRESHOLD * 100, 100.0, POSITIVE),
+                            ],
+                            marker_color=behaviour_color,
+                            accent_color=behaviour_color,
+                        ),
+                        guide_labels=("Downside", "Neutral", "Upside"),
+                        note=(
+                            "Composite ML direction across BTC/ETH/BNB/SOL/ADA/XRP. "
+                            + ("Dominance-weighted view is active." if behaviour_weight_mode == "dominance" else "Equal-weight fallback is active.")
+                        ),
+                        footer_html=(
+                            f"<div class='market-top-meta'><span>Bias</span><span><strong style='color:{behaviour_color};'>{html.escape(behaviour_label)} Bias</strong></span></div>"
+                        ),
+                    ),
+                    unsafe_allow_html=True,
+                )
+            with g5:
+                st.markdown(
+                    _render_market_orbital_card(
+                        title="Setup Quality",
+                        title_hover=setup_quality_hover,
+                        value_text=f"{int(round(composite_score)):d}",
+                        unit="/100",
+                        chart_html=_orbital_svg_html(
+                            value=float(composite_score),
+                            segments=[
+                                (0.0, 52.0, NEGATIVE),
+                                (52.0, 68.0, WARNING),
+                                (68.0, 100.0, POSITIVE),
+                            ],
+                            marker_color=composite_color,
+                            accent_color=composite_color,
+                        ),
+                        guide_labels=("Risk-Off", "Selective", "Risk-On"),
+                        note="Composite setup climate for setup hunting, not direction alone.",
+                        top_meta_text=composite_mode,
+                        top_meta_color=composite_color,
+                        top_meta_hover=setup_mode_hover,
+                        footer_html=(
+                            "<div class='market-statline'>"
+                            + _stat_metric(
+                                "Direction",
+                                direction_score,
+                                d_col,
+                                "Direction: confidence of directional edge from AI direction bias. Higher = clearer market direction.",
+                            )
+                            + _stat_metric(
+                                "Regime",
+                                regime_score,
+                                r_col,
+                                "Regime: market environment quality proxy from total market-cap move behavior."
+                                + (" Market-cap feed unavailable, neutral fallback (50) active." if regime_score_fallback else ""),
+                            )
+                            + _stat_metric(
+                                "Breadth",
+                                breadth_score,
+                                b_col,
+                                "Breadth: how many major assets align on one side. Higher breadth means stronger participation.",
+                            )
+                            + _stat_metric(
+                                "Trust",
+                                trust_score,
+                                t_col,
+                                "Trust: reliability from cross-major model consistency. Lower dispersion = higher trust.",
+                            )
+                            + "</div>"
+                        ),
+                    ),
+                    unsafe_allow_html=True,
+                )
+
         enter_count = int(shown_bundle["enter_count"])
         watch_count = int(shown_bundle["watch_count"])
         skip_count = int(shown_bundle["skip_count"])
-        shown_action_series = (
-            df_results["__action_raw"].astype(str)
-            if "__action_raw" in df_results.columns
-            else df_results.get("Setup Confirm", pd.Series(dtype=str)).astype(str)
-        )
-        shown_action_class_series = shown_action_series.apply(_setup_confirm_class)
-        trend_ai_enter_count = int((shown_action_class_series == "ENTER_TREND_AI").sum())
-        trend_led_enter_count = int((shown_action_class_series == "ENTER_TREND_LED").sum())
-        ai_led_enter_count = int((shown_action_class_series == "ENTER_AI_LED").sum())
+        lead_bundle = produced_bundle if int(produced_bundle["total"]) > 0 else shown_bundle
+        lead_scope_label = "Produced universe" if int(produced_bundle["total"]) > 0 else "Shown rows"
+        emerging_counts = dict(lead_bundle["emerging_counts"])
+        emerging_up_count = int(emerging_counts.get("Emerging Upside", 0))
+        emerging_down_count = int(emerging_counts.get("Emerging Downside", 0))
+        emerging_total = int(emerging_up_count + emerging_down_count)
 
         best_scalp_coin = "—"
         best_scalp_sub = ""
@@ -3804,12 +4368,19 @@ def render(ctx: dict) -> None:
             skip_count=skip_count,
             source_label=source_label,
         )
-        enter_mix_head = "NO READY CLASS" if enter_count == 0 else "CLASS BREAKDOWN"
-        enter_mix_sub = (
-            f"Trend+AI: {trend_ai_enter_count} • "
-            f"Trend-led: {trend_led_enter_count} • "
-            f"AI-led: {ai_led_enter_count}"
-        )
+        if emerging_total <= 0:
+            emerging_head = "NO LEAD SIGNAL"
+        elif emerging_up_count > 0 and emerging_down_count <= 0:
+            emerging_head = f"{emerging_up_count} UPSIDE LEAD" if emerging_up_count == 1 else f"{emerging_up_count} UPSIDE LEADS"
+        elif emerging_down_count > 0 and emerging_up_count <= 0:
+            emerging_head = (
+                f"{emerging_down_count} DOWNSIDE LEAD"
+                if emerging_down_count == 1
+                else f"{emerging_down_count} DOWNSIDE LEADS"
+            )
+        else:
+            emerging_head = f"{emerging_total} LEAD SIGNALS"
+        emerging_sub = f"{lead_scope_label} • Upside: {emerging_up_count} • Downside: {emerging_down_count}"
         render_kpi_grid(
             st,
             items=[
@@ -3819,9 +4390,9 @@ def render(ctx: dict) -> None:
                     "subtext": status_sub,
                 },
                 {
-                    "label": "Setup Class Mix",
-                    "value": enter_mix_head,
-                    "subtext": enter_mix_sub,
+                    "label": "LEAD Signals",
+                    "value": emerging_head,
+                    "subtext": emerging_sub,
                 },
                 {
                     "label": "Best Scalp Opportunity",
@@ -3871,54 +4442,55 @@ def render(ctx: dict) -> None:
                 )
             else:
                 audit_flags.append("SKIP-heavy table: location/risk filters are rejecting most candidates.")
-        with st.expander("Distribution Audit", expanded=False):
-            st.caption(
-                "Use this live snapshot to judge whether the current thresholds are balanced or too strict for the market regime."
-            )
-            for line in _audit_scan_summary_lines(
-                displayed_rows=total_rows,
-                attempted_count=attempted_count,
-                produced_count=live_result_count_before_limit,
-                skipped_count=skipped_count_live,
-                ranked_out_count=live_ranked_out_count,
-                source_label=source_label,
-            ):
-                st.markdown(line)
-            st.markdown("**Shown rows**")
-            st.markdown(f"Setup Confirm: {_share_line(setup_counts, ['Ready', 'Watch', 'Skip'])}")
-            st.markdown(f"Direction: {_share_line(direction_counts, ['Upside', 'Downside', 'Neutral'])}")
-            st.markdown(f"AI Ensemble: {_share_line(ai_ensemble_counts, ['Upside', 'Downside', 'Neutral'])}")
-            st.markdown(
-                f"AI Confidence: {_share_line(ai_confidence_counts, ['High', 'Medium', 'Low', 'Very Low'])}"
-            )
-            st.markdown(
-                f"Emerging: {_share_line_against_total(dict(shown_bundle['emerging_counts']), ['Emerging Upside', 'Emerging Downside'], total_rows)}"
-            )
-            if int(produced_bundle["total"]) > 0 and int(produced_bundle["total"]) != total_rows:
-                produced_total = int(produced_bundle["total"])
-                st.markdown("**Live produced before Top N**")
+        if show_diagnostics:
+            with st.expander("Distribution Audit", expanded=False):
+                st.caption(
+                    "Use this live snapshot to judge whether the current thresholds are balanced or too strict for the market regime."
+                )
+                for line in _audit_scan_summary_lines(
+                    displayed_rows=total_rows,
+                    attempted_count=attempted_count,
+                    produced_count=live_result_count_before_limit,
+                    skipped_count=skipped_count_live,
+                    ranked_out_count=live_ranked_out_count,
+                    source_label=source_label,
+                ):
+                    st.markdown(line)
+                st.markdown("**Shown rows**")
+                st.markdown(f"Setup Confirm: {_share_line(setup_counts, ['Ready', 'Watch', 'Skip'])}")
+                st.markdown(f"Direction: {_share_line(direction_counts, ['Upside', 'Downside', 'Neutral'])}")
+                st.markdown(f"AI Ensemble: {_share_line(ai_ensemble_counts, ['Upside', 'Downside', 'Neutral'])}")
                 st.markdown(
-                    f"Setup Confirm: {_share_line(dict(produced_bundle['setup_counts']), ['Ready', 'Watch', 'Skip'])}"
+                    f"AI Confidence: {_share_line(ai_confidence_counts, ['High', 'Medium', 'Low', 'Very Low'])}"
                 )
                 st.markdown(
-                    f"Direction: {_share_line(dict(produced_bundle['direction_counts']), ['Upside', 'Downside', 'Neutral'])}"
+                    f"LEAD: {_share_line_against_total(dict(shown_bundle['emerging_counts']), ['Emerging Upside', 'Emerging Downside'], total_rows)}"
                 )
-                st.markdown(
-                    f"AI Ensemble: {_share_line(dict(produced_bundle['ai_ensemble_counts']), ['Upside', 'Downside', 'Neutral'])}"
-                )
-                st.markdown(
-                    f"AI Confidence: {_share_line(dict(produced_bundle['ai_confidence_counts']), ['High', 'Medium', 'Low', 'Very Low'])}"
-                )
-                st.markdown(
-                    f"Emerging: {_share_line_against_total(dict(produced_bundle['emerging_counts']), ['Emerging Upside', 'Emerging Downside'], produced_total)}"
-                )
-                if produced_total != total_rows:
-                    st.caption("Skew flags below are based on the live produced rows before the Top N cut.")
-            if audit_flags:
-                for flag in audit_flags:
-                    st.markdown(f"- {flag}")
-            else:
-                st.markdown("- No obvious distribution skew detected in this scan.")
+                if int(produced_bundle["total"]) > 0 and int(produced_bundle["total"]) != total_rows:
+                    produced_total = int(produced_bundle["total"])
+                    st.markdown("**Live produced before Top N**")
+                    st.markdown(
+                        f"Setup Confirm: {_share_line(dict(produced_bundle['setup_counts']), ['Ready', 'Watch', 'Skip'])}"
+                    )
+                    st.markdown(
+                        f"Direction: {_share_line(dict(produced_bundle['direction_counts']), ['Upside', 'Downside', 'Neutral'])}"
+                    )
+                    st.markdown(
+                        f"AI Ensemble: {_share_line(dict(produced_bundle['ai_ensemble_counts']), ['Upside', 'Downside', 'Neutral'])}"
+                    )
+                    st.markdown(
+                        f"AI Confidence: {_share_line(dict(produced_bundle['ai_confidence_counts']), ['High', 'Medium', 'Low', 'Very Low'])}"
+                    )
+                    st.markdown(
+                        f"LEAD: {_share_line_against_total(dict(produced_bundle['emerging_counts']), ['Emerging Upside', 'Emerging Downside'], produced_total)}"
+                    )
+                    if produced_total != total_rows:
+                        st.caption("Skew flags below are based on the live produced rows before the Top N cut.")
+                if audit_flags:
+                    for flag in audit_flags:
+                        st.markdown(f"- {flag}")
+                else:
+                    st.markdown("- No obvious distribution skew detected in this scan.")
 
         # indicator visual formatting
         df_results["SuperTrend"] = df_results["SuperTrend"].apply(format_trend)
@@ -3947,7 +4519,11 @@ def render(ctx: dict) -> None:
                 return "Neutral"
             return cleaned
 
-        df_results["Ichimoku"] = df_results["Ichimoku"].apply(_format_ichimoku_cell)
+        df_results["Ichimoku"] = (
+            df_results["Ichimoku"]
+            .apply(_format_ichimoku_cell)
+            .apply(_normalize_indicator_label)
+        )
         df_results["Stochastic RSI"] = (
             df_results["Stochastic RSI"]
             .apply(lambda v: format_stochrsi(v, timeframe=timeframe))
@@ -3958,6 +4534,7 @@ def render(ctx: dict) -> None:
         df_results["PSAR"] = df_results["PSAR"].apply(_normalize_indicator_label)
         df_results["Williams %R"] = df_results["Williams %R"].apply(_normalize_indicator_label)
         df_results["CCI"] = df_results["CCI"].apply(_normalize_indicator_label)
+        df_results["Candle Pattern"] = df_results["Candle Pattern"].apply(_normalize_indicator_label)
 
         primary_cols = [
             "Coin",
@@ -3980,14 +4557,14 @@ def render(ctx: dict) -> None:
             "SuperTrend",
             "Ichimoku",
             "VWAP",
-            "Spike Alert",
-            "Bollinger",
-            "Stochastic RSI",
-            "Volatility",
             "PSAR",
+            "Stochastic RSI",
             "Williams %R",
             "CCI",
             "Candle Pattern",
+            "Bollinger",
+            "Volatility",
+            "Spike Alert",
         ]
         all_cols = primary_cols + [c for c in advanced_extra_cols if c not in primary_cols]
         display_cols = all_cols if show_advanced else primary_cols
@@ -3996,6 +4573,9 @@ def render(ctx: dict) -> None:
                     "__action_reason",
                     "__action_raw",
                     "__entry_note",
+                "__emerging_label",
+                "__emerging_direction",
+                "__emerging_note",
                 "__ichimoku_detail",
                 "__spike_dir",
                 "__spike_vol_ratio",

@@ -164,7 +164,9 @@ How the 5 key columns are calculated:
 - directional call has weak model support
 
 Coin inline badge:
-- `Emerging Upside` / `Emerging Downside` can appear next to the ticker when confirmed HTF Direction is still Neutral, but 4H technical structure is already leading and AI confirms the same side while 1D is not opposing yet
+- `LEAD ↗` / `LEAD ↘` can appear next to the ticker when 4H technical structure is already leading, while confirmed HTF Direction is still Neutral or still low-confidence
+- AI can confirm the same side or stay neutral; a strong opposite AI blocks the badge
+- `1D` must not be opposing yet
 - Treat this as an early-attention signal, not as a replacement for confirmed Direction
 
 5. `Setup Confirm` (final confirmation class)

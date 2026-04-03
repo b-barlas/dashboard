@@ -39,6 +39,9 @@ def _missing_fetch_coingecko_ohlcv_by_coin_id(*_args, **_kwargs):
 
 
 _missing_fetch_coingecko_ohlcv_by_coin_id._codex_missing_dep = True
+_missing_fetch_coingecko_ohlcv_by_coin_id._codex_missing_dep_reason = (
+    "dependency injection missing at app boot"
+)
 
 
 _OPTIONAL_DEP_DEFAULTS: dict[str, object] = {

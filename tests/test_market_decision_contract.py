@@ -342,7 +342,7 @@ class MarketDecisionContractTests(unittest.TestCase):
         self.assertEqual(snap.direction, "UPSIDE")
         self.assertEqual(snap.label, "Emerging Upside")
 
-    def test_emerging_bias_snapshot_stays_inactive_without_ai_confirmation(self):
+    def test_emerging_bias_snapshot_allows_neutral_ai_when_4h_is_leading(self):
         snap = emerging_bias_snapshot(
             spot_snapshot=self._spot_snapshot(
                 direction="NEUTRAL",
@@ -366,9 +366,98 @@ class MarketDecisionContractTests(unittest.TestCase):
             ),
             ai_spot_snapshot=self._ai_spot_snapshot(direction="NEUTRAL", support_votes=0),
             ai_confidence_score=42.0,
+            tech_confidence_score=35.0,
+        )
+        self.assertTrue(snap.active)
+        self.assertEqual(snap.direction, "UPSIDE")
+
+    def test_emerging_bias_snapshot_flags_directional_4h_leader_even_without_breakout_label(self):
+        snap = emerging_bias_snapshot(
+            spot_snapshot=self._spot_snapshot(
+                direction="NEUTRAL",
+                one_day=self._tf_direction_snapshot(
+                    timeframe="1d",
+                    direction="NEUTRAL",
+                    score=4.0,
+                    raw_score=3.0,
+                    structure_label="RANGE",
+                    trend_score=4.0,
+                ),
+                four_hour=self._tf_direction_snapshot(
+                    timeframe="4h",
+                    direction="UPSIDE",
+                    score=16.0,
+                    raw_score=12.0,
+                    structure_label="RANGE",
+                    trend_score=8.0,
+                    momentum_score=6.0,
+                ),
+            ),
+            ai_spot_snapshot=self._ai_spot_snapshot(direction="UPSIDE", support_votes=2),
+            ai_confidence_score=64.0,
+            tech_confidence_score=35.0,
+        )
+        self.assertTrue(snap.active)
+        self.assertEqual(snap.direction, "UPSIDE")
+        self.assertEqual(snap.label, "Emerging Upside")
+
+    def test_emerging_bias_snapshot_blocks_on_strong_opposite_ai(self):
+        snap = emerging_bias_snapshot(
+            spot_snapshot=self._spot_snapshot(
+                direction="NEUTRAL",
+                one_day=self._tf_direction_snapshot(
+                    timeframe="1d",
+                    direction="NEUTRAL",
+                    score=4.0,
+                    raw_score=3.0,
+                    structure_label="RANGE",
+                    trend_score=4.0,
+                ),
+                four_hour=self._tf_direction_snapshot(
+                    timeframe="4h",
+                    direction="UPSIDE",
+                    score=16.0,
+                    raw_score=12.0,
+                    structure_label="RANGE",
+                    trend_score=8.0,
+                    momentum_score=6.0,
+                ),
+            ),
+            ai_spot_snapshot=self._ai_spot_snapshot(direction="DOWNSIDE", support_votes=3),
+            ai_confidence_score=78.0,
+            tech_confidence_score=35.0,
         )
         self.assertFalse(snap.active)
         self.assertEqual(snap.direction, "NEUTRAL")
+
+    def test_emerging_bias_snapshot_can_show_when_direction_exists_but_confidence_is_still_low(self):
+        snap = emerging_bias_snapshot(
+            spot_snapshot=self._spot_snapshot(
+                direction="UPSIDE",
+                one_day=self._tf_direction_snapshot(
+                    timeframe="1d",
+                    direction="NEUTRAL",
+                    score=4.0,
+                    raw_score=3.0,
+                    structure_label="RANGE",
+                    trend_score=4.0,
+                ),
+                four_hour=self._tf_direction_snapshot(
+                    timeframe="4h",
+                    direction="UPSIDE",
+                    score=16.0,
+                    raw_score=12.0,
+                    structure_label="RANGE",
+                    trend_score=8.0,
+                    momentum_score=6.0,
+                ),
+            ),
+            ai_spot_snapshot=self._ai_spot_snapshot(direction="NEUTRAL", support_votes=0),
+            ai_confidence_score=42.0,
+            tech_confidence_score=45.0,
+        )
+        self.assertTrue(snap.active)
+        self.assertEqual(snap.direction, "UPSIDE")
 
     def test_spot_action_requires_valid_direction(self):
         out = self._spot_decision("NEUTRAL", 80, "UPSIDE", "UPSIDE", 0.8, 25.0)

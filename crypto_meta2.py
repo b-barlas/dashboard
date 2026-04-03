@@ -87,6 +87,9 @@ def _missing_fetch_coingecko_ohlcv_by_coin_id(*_args, **_kwargs):
 
 
 _missing_fetch_coingecko_ohlcv_by_coin_id._codex_missing_dep = True
+_missing_fetch_coingecko_ohlcv_by_coin_id._codex_missing_dep_reason = (
+    "core.services helper unavailable during app bootstrap"
+)
 
 
 def _fallback_bias_score_badge(bias_score: float) -> str:

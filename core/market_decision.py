@@ -229,9 +229,12 @@ def emerging_bias_snapshot(
     spot_snapshot: SpotDirectionSnapshot,
     ai_spot_snapshot: AISpotBiasSnapshot,
     ai_confidence_score: float,
+    tech_confidence_score: float | None = None,
 ) -> EmergingBiasSnapshot:
     spot_direction = _dir_key(getattr(spot_snapshot, "direction", ""))
-    if spot_direction != "NEUTRAL":
+    tech_confidence = _clamp_100(tech_confidence_score if tech_confidence_score is not None else 100.0)
+    direction_open_for_emerging = spot_direction == "NEUTRAL" or tech_confidence < 55.0
+    if not direction_open_for_emerging:
         return EmergingBiasSnapshot(
             active=False,
             direction="NEUTRAL",
@@ -267,6 +270,7 @@ def emerging_bias_snapshot(
 
     daily_structure = str(getattr(one_day, "structure_label", "") or "").strip().upper()
     four_hour_structure = str(getattr(four_hour, "structure_label", "") or "").strip().upper()
+    four_hour_direction = _dir_key(getattr(four_hour, "direction", ""))
     daily_raw = float(getattr(one_day, "raw_score", 0.0) or 0.0)
     daily_trend = float(getattr(one_day, "trend_score", 0.0) or 0.0)
     four_hour_score = float(getattr(four_hour, "score", 0.0) or 0.0)
@@ -277,52 +281,73 @@ def emerging_bias_snapshot(
     ai_support_votes = int(max(0, min(3, int(getattr(ai_spot_snapshot, "support_votes", 0) or 0))))
     ai_confidence = _clamp_100(ai_confidence_score)
 
+    bullish_structure = four_hour_structure in {"BREAKOUT_UP", "EARLY_UP", "HH/HL"}
+    bearish_structure = four_hour_structure in {"BREAKOUT_DOWN", "EARLY_DOWN", "LH/LL"}
+
     bullish_four_hour = (
-        four_hour_structure in {"BREAKOUT_UP", "EARLY_UP", "HH/HL"}
-        and four_hour_score >= 14.0
-        and four_hour_raw >= 12.0
-        and four_hour_trend >= 8.0
+        four_hour_direction == "UPSIDE"
+        and four_hour_raw >= 8.0
+        and four_hour_trend >= 4.0
+        and (bullish_structure or four_hour_score >= 12.0)
     )
     bearish_four_hour = (
-        four_hour_structure in {"BREAKOUT_DOWN", "EARLY_DOWN", "LH/LL"}
-        and four_hour_score <= -14.0
-        and four_hour_raw <= -12.0
-        and four_hour_trend <= -8.0
+        four_hour_direction == "DOWNSIDE"
+        and four_hour_raw <= -8.0
+        and four_hour_trend <= -4.0
+        and (bearish_structure or four_hour_score <= -12.0)
     )
 
     daily_guard_up = (
         daily_structure not in {"BREAKOUT_DOWN", "EARLY_DOWN", "LH/LL"}
-        and daily_raw > -10.0
-        and daily_trend > -8.0
+        and daily_raw > -15.0
+        and daily_trend > -12.0
     )
     daily_guard_down = (
         daily_structure not in {"BREAKOUT_UP", "EARLY_UP", "HH/HL"}
-        and daily_raw < 10.0
-        and daily_trend < 8.0
+        and daily_raw < 15.0
+        and daily_trend < 12.0
     )
 
-    ai_confirms_up = ai_direction == "UPSIDE" and ai_confidence >= 68.0 and ai_support_votes >= 2
-    ai_confirms_down = ai_direction == "DOWNSIDE" and ai_confidence >= 68.0 and ai_support_votes >= 2
+    ai_strongly_opposes_up = ai_direction == "DOWNSIDE" and ai_confidence >= 70.0 and ai_support_votes >= 2
+    ai_strongly_opposes_down = ai_direction == "UPSIDE" and ai_confidence >= 70.0 and ai_support_votes >= 2
+    ai_confirms_up = ai_direction == "UPSIDE" and ai_confidence >= 55.0 and ai_support_votes >= 2
+    ai_confirms_down = ai_direction == "DOWNSIDE" and ai_confidence >= 55.0 and ai_support_votes >= 2
 
-    if bullish_four_hour and daily_guard_up and ai_confirms_up:
+    if bullish_four_hour and daily_guard_up and not ai_strongly_opposes_up:
+        if spot_direction == "DOWNSIDE":
+            return EmergingBiasSnapshot(
+                active=False,
+                direction="NEUTRAL",
+                label="",
+                note="Technical bias is still leaning down, so an upside emerging badge would be premature.",
+            )
         return EmergingBiasSnapshot(
             active=True,
             direction="UPSIDE",
             label="Emerging Upside",
             note=(
-                "4H technical structure is leading higher, AI confirms upside, "
-                "and 1D is not opposing the move yet."
+                "4H technical leadership is building higher, "
+                + ("AI confirms upside, " if ai_confirms_up else "AI is not strongly opposing, ")
+                + "and 1D is not opposing the move yet."
             ),
         )
 
-    if bearish_four_hour and daily_guard_down and ai_confirms_down:
+    if bearish_four_hour and daily_guard_down and not ai_strongly_opposes_down:
+        if spot_direction == "UPSIDE":
+            return EmergingBiasSnapshot(
+                active=False,
+                direction="NEUTRAL",
+                label="",
+                note="Technical bias is still leaning up, so a downside emerging badge would be premature.",
+            )
         return EmergingBiasSnapshot(
             active=True,
             direction="DOWNSIDE",
             label="Emerging Downside",
             note=(
-                "4H technical structure is leading lower, AI confirms downside, "
-                "and 1D is not opposing the move yet."
+                "4H technical leadership is building lower, "
+                + ("AI confirms downside, " if ai_confirms_down else "AI is not strongly opposing, ")
+                + "and 1D is not opposing the move yet."
             ),
         )
 

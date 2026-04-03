@@ -11,7 +11,9 @@ from tabs.market_tab import (
     _candidate_scan_symbols,
     _canonical_pair_base,
     _coingecko_coin_id_fallback_available,
+    _coingecko_coin_id_fallback_reason,
     _confidence_badge,
+    _coingecko_coin_id_unavailable_message,
     _custom_watchlist_fallback_coin_id,
     _custom_watchlist_enrichment_coverage,
     _custom_watchlist_missing_status,
@@ -37,6 +39,8 @@ from tabs.market_tab import (
     _queue_market_custom_clear,
     _scan_candidate_pool_size,
     _merge_market_cap_maps,
+    _market_lead_breadth_component,
+    _market_lead_snapshot,
     _market_result_priority_key,
     _scan_universe_notice,
     _prepare_scan_market_enrichment,
@@ -62,6 +66,38 @@ from threading import Lock
 
 
 class MarketTabLogicTests(unittest.TestCase):
+    def test_market_lead_breadth_component_needs_real_participation(self):
+        rows = [
+            {"__emerging_label": "Emerging Upside"},
+            {"__emerging_label": "Emerging Upside"},
+        ]
+        score, upside, downside = _market_lead_breadth_component(rows)
+        self.assertEqual((score, upside, downside), (0.0, 2, 0))
+
+        rows.append({"__emerging_label": "Emerging Downside"})
+        score, upside, downside = _market_lead_breadth_component(rows)
+        self.assertGreater(score, 0.0)
+        self.assertEqual((upside, downside), (2, 1))
+
+    def test_market_lead_snapshot_detects_upside_pressure_building(self):
+        snapshot = _market_lead_snapshot(
+            produced_rows=[
+                {"__emerging_label": "Emerging Upside"},
+                {"__emerging_label": "Emerging Upside"},
+                {"__emerging_label": "Emerging Upside"},
+                {"__emerging_label": "Emerging Downside"},
+            ],
+            delta_mcap=2.2,
+            btc_change=-0.3,
+            eth_change=0.1,
+            btc_dom=53.0,
+            eth_dom=12.2,
+            custom_mode_active=False,
+        )
+        self.assertEqual(snapshot.state, "UPSIDE")
+        self.assertEqual(snapshot.label, "Upside")
+        self.assertGreater(snapshot.score, 62.0)
+
     def test_audit_scan_summary_lines_show_attempted_vs_displayed(self):
         lines = _audit_scan_summary_lines(
             displayed_rows=50,
@@ -82,9 +118,25 @@ class MarketTabLogicTests(unittest.TestCase):
             return None
 
         _missing._codex_missing_dep = True
+        _missing._codex_missing_dep_reason = "dependency injection missing at app boot"
 
         self.assertFalse(_coingecko_coin_id_fallback_available(_missing))
         self.assertTrue(_coingecko_coin_id_fallback_available(lambda *_args, **_kwargs: None))
+        self.assertEqual(
+            _coingecko_coin_id_fallback_reason(_missing),
+            "dependency injection missing at app boot",
+        )
+        self.assertEqual(_coingecko_coin_id_fallback_reason(lambda *_args, **_kwargs: None), "")
+
+    def test_coin_id_unavailable_message_includes_reason_when_present(self):
+        self.assertEqual(
+            _coingecko_coin_id_unavailable_message("dependency injection missing at app boot"),
+            "no exchange OHLCV data; CoinGecko fallback unavailable (dependency injection missing at app boot)",
+        )
+        self.assertEqual(
+            _coingecko_coin_id_unavailable_message(""),
+            "no exchange OHLCV data; CoinGecko fallback unavailable",
+        )
 
     def test_extract_ai_verdict_strips_votes_and_degraded_marker(self):
         self.assertEqual(_extract_ai_verdict("Upside (2/3)"), "Upside")
@@ -164,8 +216,18 @@ class MarketTabLogicTests(unittest.TestCase):
             [],
             coin_id_map={"COS": "contentos"},
             coingecko_coin_id_fallback_available=False,
+            coingecko_coin_id_fallback_reason="dependency injection missing at app boot",
         )
-        self.assertEqual(out, [("COS", "no exchange OHLCV data; CoinGecko fallback unavailable")])
+        self.assertEqual(
+            out,
+            [
+                (
+                    "COS",
+                    "no exchange OHLCV data; CoinGecko fallback unavailable "
+                    "(dependency injection missing at app boot)",
+                )
+            ],
+        )
 
     def test_custom_watchlist_missing_status_marks_empty_coin_id_fallback(self):
         out = _custom_watchlist_missing_status(
