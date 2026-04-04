@@ -4008,7 +4008,7 @@ def render(ctx: dict) -> None:
             body_html=(
                 "<b>Coin</b>: asset ticker (hover shows actual candle feed pair or fallback provider).<br>"
                 "<b>Price ($)</b>: latest closed-candle price from active feed.<br>"
-                "<b>Δ (%)</b>: the move from the previous closed candle to the latest closed candle on your selected timeframe.<br><br>"
+                "<b>Δ (%)</b>: the percentage change from previous closed candle to latest closed candle on selected timeframe.<br><br>"
                 "<b>Setup Confirm</b>: final scanner verdict. It is not a direct buy/sell command; it tells you how ready the setup looks.<br>"
                 "<b>LEAD badge</b>: early warning. It means the coin is starting to lean before the main higher-timeframe Direction is fully confirmed.<br>"
                 "<b>Direction</b>: the main technical bias from 1D + 4H closed candles.<br>"
