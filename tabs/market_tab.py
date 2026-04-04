@@ -548,12 +548,10 @@ def _spot_bias_label(direction: str) -> str:
 
 def _spot_tf_summary(snapshot) -> str:
     return (
-        f"{str(snapshot.timeframe).upper()}: {_spot_bias_label(snapshot.direction)} | "
-        f"Score {float(snapshot.score):.1f} | "
-        f"Structure {snapshot.structure_label} ({float(snapshot.structure_score):.0f}) | "
+        f"{str(snapshot.timeframe).upper()}: { _spot_bias_label(snapshot.direction)} | "
+        f"Structure {snapshot.structure_label} | "
         f"Trend {float(snapshot.trend_score):.0f} | "
-        f"Regime {snapshot.regime_label} ({float(snapshot.regime_quality):.0f}) | "
-        f"Location {float(snapshot.location_quality):.0f}"
+        f"Regime {snapshot.regime_label}"
     )
 
 
@@ -566,40 +564,41 @@ def _spot_direction_note(
     tactical_bias: float,
     tactical_comment: str,
 ) -> str:
+    one_day = _spot_tf_summary(snapshot.one_day)
+    four_hour = _spot_tf_summary(snapshot.four_hour)
+    tactical = (
+        f"Selected {str(selected_timeframe).upper()}: "
+        f"{_spot_bias_label(tactical_direction)} | {tactical_signal}"
+    )
+    summary = str(snapshot.note or "").strip()
     note = (
-        f"Spot bias (1D + 4H): {_spot_bias_label(snapshot.direction)} | "
-        f"Combined score {float(snapshot.score):.1f} | {str(snapshot.note or '').strip()} | "
-        f"{_spot_tf_summary(snapshot.one_day)} | "
-        f"{_spot_tf_summary(snapshot.four_hour)} | "
-        f"Tactical ({selected_timeframe}): {_spot_bias_label(tactical_direction)} | "
-        f"Signal: {tactical_signal} | Bias {float(tactical_bias):.1f}"
+        f"Higher-timeframe direction from 1D + 4H closed candles: {_spot_bias_label(snapshot.direction)}. "
+        f"{summary} "
+        f"{one_day}. {four_hour}. {tactical}."
     )
     comment = str(tactical_comment or "").strip()
     if comment:
-        note += f" | Signal comment: {comment}"
-    return note
+        note += f" Local read: {comment}."
+    return note.strip()
 
 
 def _confidence_note(snapshot, score: float) -> str:
     caps: list[str] = []
     if str(snapshot.direction or "").strip().upper() == "NEUTRAL":
-        caps.append("neutral-direction cap <=35")
+        caps.append("neutral bias")
     if bool(snapshot.timeframe_conflict):
-        caps.append("timeframe-conflict cap <=15")
+        caps.append("timeframe conflict")
     if float(snapshot.structure_quality) < 40.0:
-        caps.append("weak-structure cap <=45")
+        caps.append("weak structure")
     if bool(snapshot.degraded_data):
-        caps.append("degraded-data cap <=55")
+        caps.append("degraded data")
     if bool(snapshot.range_regime):
-        caps.append("range-regime cap <=35")
-    cap_text = f" | Active caps: {', '.join(caps)}" if caps else ""
+        caps.append("range regime")
+    cap_text = f" Limits active: {', '.join(caps)}." if caps else ""
     return (
-        f"Spot confidence: {float(score):.1f}% ({confidence_bucket(score).title()}) | "
-        f"Timeframe alignment {float(snapshot.timeframe_alignment):.0f} | "
-        f"Structure quality {float(snapshot.structure_quality):.0f} | "
-        f"Trend quality {float(snapshot.trend_quality):.0f} | "
-        f"Regime quality {float(snapshot.regime_quality):.0f} | "
-        f"Location quality {float(snapshot.location_quality):.0f}{cap_text}"
+        f"How strong the Direction call is: {float(score):.1f}% ({confidence_bucket(score).title()}). "
+        f"Built from alignment, structure, trend, regime, and location quality."
+        f"{cap_text}"
     )
 
 
@@ -608,30 +607,24 @@ def _ai_spot_tf_summary(snapshot) -> str:
     note = str(getattr(snapshot, "note", "") or "").strip()
     suffix_parts = []
     if status:
-        suffix_parts.append(f"Status {status}")
+        suffix_parts.append(status)
     if note:
         suffix_parts.append(note)
     suffix = f" | {' | '.join(suffix_parts)}" if suffix_parts else ""
     return (
         f"{str(snapshot.timeframe).upper()}: {_spot_bias_label(snapshot.direction)} | "
-        f"Score {float(snapshot.score):.1f} | "
-        f"Prob Up {float(snapshot.probability_up) * 100:.0f}% | "
-        f"Directional agreement {float(snapshot.directional_agreement) * 100:.0f}% | "
-        f"Consensus {float(snapshot.consensus_agreement) * 100:.0f}%{suffix}"
+        f"Up probability {float(snapshot.probability_up) * 100:.0f}%{suffix}"
     )
 
 
 def _ai_spot_bias_note(snapshot) -> str:
     dots = ai_spot_bias_display_votes(snapshot)
     return (
-        f"AI spot bias (1D + 4H): {_spot_bias_label(snapshot.direction)} | "
-        f"Combined score {float(snapshot.score):.1f} | "
-        f"Conviction quality {float(snapshot.conviction_quality):.0f} | "
-        f"Timeframe alignment {float(snapshot.timeframe_alignment):.0f} | "
-        f"Displayed model-support dots {dots}/3 | "
-        f"{str(snapshot.note or '').strip()} | "
-        f"{_ai_spot_tf_summary(snapshot.one_day)} | "
-        f"{_ai_spot_tf_summary(snapshot.four_hour)}"
+        f"AI view from 1D + 4H: {_spot_bias_label(snapshot.direction)}. "
+        f"Model support: {dots}/3 dots. "
+        f"{str(snapshot.note or '').strip()} "
+        f"{_ai_spot_tf_summary(snapshot.one_day)}. "
+        f"{_ai_spot_tf_summary(snapshot.four_hour)}."
     )
 
 
@@ -639,22 +632,19 @@ def _ai_confidence_note(snapshot, score: float) -> str:
     dots = ai_spot_bias_display_votes(snapshot)
     caps: list[str] = []
     if str(snapshot.direction or "").strip().upper() == "NEUTRAL":
-        caps.append("neutral-verdict cap <=58")
+        caps.append("neutral AI verdict")
     if bool(snapshot.timeframe_conflict):
-        caps.append("timeframe-conflict cap <=30")
+        caps.append("timeframe conflict")
     if bool(snapshot.degraded_data):
-        caps.append("degraded-data cap <=35")
+        caps.append("degraded data")
     if str(snapshot.direction or "").strip().upper() != "NEUTRAL" and int(dots) <= 1:
-        caps.append("low-model-support cap <=59")
-    cap_text = f" | Active caps: {', '.join(caps)}" if caps else ""
+        caps.append("low model support")
+    cap_text = f" Limits active: {', '.join(caps)}." if caps else ""
     return (
-        f"AI confidence: {float(score):.1f}% ({ai_confidence_bucket(float(score), direction=str(snapshot.direction or ''), support_votes=int(dots), timeframe_conflict=bool(snapshot.timeframe_conflict), degraded_data=bool(snapshot.degraded_data)).title()}) | "
-        f"HTF AI verdict {_spot_bias_label(snapshot.direction)} | "
-        f"Combined score {float(snapshot.score):.1f} | "
-        f"Conviction quality {float(snapshot.conviction_quality):.0f} | "
-        f"Timeframe alignment {float(snapshot.timeframe_alignment):.0f} | "
-        f"Consensus quality {float(snapshot.consensus_quality):.0f} | "
-        f"Model support {int(dots)}/3{cap_text}"
+        f"How trustworthy the AI verdict is: {float(score):.1f}% "
+        f"({ai_confidence_bucket(float(score), direction=str(snapshot.direction or ''), support_votes=int(dots), timeframe_conflict=bool(snapshot.timeframe_conflict), degraded_data=bool(snapshot.degraded_data)).title()}). "
+        f"AI side: {_spot_bias_label(snapshot.direction)}. Model support: {int(dots)}/3."
+        f"{cap_text}"
     )
 
 
@@ -1399,8 +1389,8 @@ def render(ctx: dict) -> None:
         hero=True,
         intro_html=(
             f"Your market overview dashboard. Shows live BTC/ETH prices, total market cap, "
-            f"{_tip('Fear & Greed Index', 'A 0-100 score measuring market sentiment. 0 = Extreme Fear (potential accumulation zone), 100 = Extreme Greed (potential distribution zone). Based on volatility, volume, social media, and surveys.')} "
-            f"and {_tip('BTC Dominance', 'Percentage of total crypto market cap that belongs to Bitcoin. Rising dominance = money flowing into BTC (risk-off). Falling = altcoin season.')}. "
+            f"{_tip('Fear & Greed Index', 'Quick sentiment gauge. Lower means fear; higher means greed. Use it as background context, not as a trade trigger.')} "
+            f"and {_tip('BTC Dominance', 'Bitcoin’s share of the total crypto market. Rising dominance usually means money is hiding in BTC; falling dominance can support altcoins.')}. "
             f"The scanner runs either on the live top-liquidity universe or on your custom watchlist, then scores symbols with real-time technical signals."
         ),
     )
@@ -1487,7 +1477,7 @@ def render(ctx: dict) -> None:
         return (
             f"<div class='market-header-card market-header-card--sentiment' style='--header-accent:{fg_color};'>"
             "<div class='market-header-title'>Fear &amp; Greed "
-            "<span title='Crypto Fear &amp; Greed Index (0-100). 0-25 = Extreme Fear, 75-100 = Extreme Greed.' "
+            "<span title='Quick sentiment gauge from 0 to 100. Lower means fear; higher means greed.' "
             "class='market-header-info'>i</span></div>"
             "<div class='market-header-main market-header-main--sentiment'>"
             f"<div class='market-header-value'>{int(value):d}</div>"
@@ -2202,6 +2192,107 @@ def render(ctx: dict) -> None:
         cls_full = f"mk-chip {cls} {extra_class}".strip()
         return f"<span class='{cls_full}'{title_attr}>{html.escape(raw)}</span>"
 
+    def _strip_indicator_prefix(value: object) -> str:
+        raw = str(value or "").strip()
+        for prefix in ("▲▲ ", "▲ ", "▼ ", "→ ", "🔥 ", "– "):
+            if raw.startswith(prefix):
+                return raw[len(prefix):].strip()
+        return raw
+
+    def _column_header_tooltip(col: str) -> str:
+        return {
+            "Coin": "Asset ticker. If you hover the row value, you can also see the actual feed pair or fallback source.",
+            "Price ($)": "Latest closed-candle price from the active data feed.",
+            "Δ (%)": "Move from the previous closed candle to the latest closed candle on your selected timeframe.",
+            "Setup Confirm": "Final scanner verdict showing whether the setup looks ready, promising-but-early, or not good enough yet.",
+            "Direction": "Main higher-timeframe technical bias from the 1D and 4H closed candles.",
+            "Confidence": "How strong and trustworthy that Direction call is.",
+            "AI Ensemble": "Higher-timeframe AI view. Dots show how many models agree.",
+            "AI Confidence": "How trustworthy the AI verdict is.",
+            "R:R": "Reward-to-risk ratio from target distance versus stop distance.",
+            "Entry Price": "Suggested model entry level for the shorter-term execution plan.",
+            "Stop Loss": "Risk invalidation level for the shorter-term execution plan.",
+            "Target Price": "First take-profit level for the shorter-term execution plan.",
+            "Scalp Opportunity": "Shorter-term execution signal. It only appears when the local setup passes the execution checks.",
+            "Market Cap ($)": "Size and liquidity context for the asset.",
+            "ADX": "Trend strength indicator. It measures how strong the move is, not whether it is up or down.",
+            "SuperTrend": "ATR-based trend follower showing whether price still behaves bullish or bearish.",
+            "Ichimoku": "Cloud-based trend context that blends trend, momentum, and support-resistance structure.",
+            "VWAP": "Shows whether price is trading above, below, or near its volume-weighted average price.",
+            "PSAR": "Parabolic SAR trend indicator. It flips when short-term trend pressure changes.",
+            "Stochastic RSI": "Shows whether short-term momentum is near the top, middle, or bottom of its recent range.",
+            "Williams %R": "Momentum oscillator showing whether price is near the top or bottom of its recent range.",
+            "CCI": "Shows whether price is stretched above or below its recent average.",
+            "Candle Pattern": "Most recent candlestick pattern label from the latest candles.",
+            "Bollinger": "Shows where price sits inside its volatility bands: near the top, middle, or bottom.",
+            "Volatility": "ATR-style volatility regime. It tells you whether price movement is quiet or active.",
+            "Spike Alert": "Flags unusual volume activity compared with recent candles.",
+        }.get(col, "")
+
+    def _indicator_cell_title(col: str, row: dict, txt: str) -> str:
+        clean = _strip_indicator_prefix(txt)
+        upper = clean.upper()
+        if col == "SuperTrend":
+            if "BULLISH" in upper:
+                return "SuperTrend is bullish. Price is still holding above its trailing trend line."
+            if "BEARISH" in upper:
+                return "SuperTrend is bearish. Price is still holding below its trailing trend line."
+            return "SuperTrend is neutral. The trend follower is not leaning clearly either way."
+        if col == "Ichimoku":
+            detail = str(row.get("__ichimoku_detail", "")).strip().replace(" | ", " • ")
+            if detail:
+                return f"Ichimoku reads {clean.lower()}. {detail}."
+            return f"Ichimoku reads {clean.lower()}. This is the cloud-based trend context."
+        if col == "VWAP":
+            if "ABOVE" in upper:
+                return "Price is trading above VWAP, which usually means buyers still have intraday control."
+            if "BELOW" in upper:
+                return "Price is trading below VWAP, which usually means sellers still have intraday control."
+            return "Price is near VWAP, so intraday control looks balanced."
+        if col == "PSAR":
+            if "BULLISH" in upper:
+                return "PSAR is bullish. The trailing stop dots still support upside trend pressure."
+            if "BEARISH" in upper:
+                return "PSAR is bearish. The trailing stop dots still support downside trend pressure."
+            return "PSAR is neutral right now."
+        if col == "Bollinger":
+            if "TOP" in upper or "OVERBOUGHT" in upper:
+                return "Price is near the upper band, so the move may be stretched on the upside."
+            if "BOTTOM" in upper or "OVERSOLD" in upper:
+                return "Price is near the lower band, so the move may be stretched on the downside."
+            return "Price is sitting around the middle of its volatility bands."
+        if col == "Stochastic RSI":
+            if "HIGH" in upper or "OVERBOUGHT" in upper:
+                return "Short-term momentum is near the top of its recent range."
+            if "LOW" in upper or "OVERSOLD" in upper:
+                return "Short-term momentum is near the bottom of its recent range."
+            return "Short-term momentum is balanced in the middle of its recent range."
+        if col == "Volatility":
+            if "LOW" in upper:
+                return "Volatility is low. Price movement is relatively quiet right now."
+            if "HIGH" in upper or "EXTREME" in upper:
+                return "Volatility is high. Price movement is relatively active and fast right now."
+            return f"Volatility reads {clean.lower()}. This describes the current activity level of price movement."
+        if col == "Williams %R":
+            if "OVERBOUGHT" in upper or "HIGH" in upper:
+                return "Williams %R says price is near the top of its recent range and may be stretched."
+            if "OVERSOLD" in upper or "LOW" in upper:
+                return "Williams %R says price is near the bottom of its recent range and may be stretched."
+            return "Williams %R is neutral, so momentum is not stretched at either edge of the range."
+        if col == "CCI":
+            if "OVERBOUGHT" in upper or "HIGH" in upper:
+                return "CCI says price is stretched above its recent average."
+            if "OVERSOLD" in upper or "LOW" in upper:
+                return "CCI says price is stretched below its recent average."
+            return "CCI is neutral, so price is not far from its recent average."
+        if col == "Candle Pattern":
+            if txt.startswith("▲"):
+                return f"Latest candle pattern is bullish: {clean}."
+            if txt.startswith("▼"):
+                return f"Latest candle pattern is bearish: {clean}."
+            return f"Latest candle pattern is neutral or indecisive: {clean}."
+        return clean
+
     def _render_cell(col: str, row: dict) -> str:
         val = row.get(col, "")
         txt = "" if val is None else str(val).strip()
@@ -2365,17 +2456,17 @@ def render(ctx: dict) -> None:
             spike_vwap_ctx = str(row.get("__spike_vwap_ctx", "")).strip()
             try:
                 if pd.notna(spike_vol_ratio):
-                    detail_parts.append(f"Vol Ratio: {float(spike_vol_ratio):.2f}x")
+                    detail_parts.append(f"Volume vs recent average: {float(spike_vol_ratio):.2f}x")
             except Exception:
                 pass
             try:
                 if pd.notna(spike_candle_pct):
-                    detail_parts.append(f"Candle: {float(spike_candle_pct):+,.2f}%")
+                    detail_parts.append(f"Candle move: {float(spike_candle_pct):+,.2f}%")
             except Exception:
                 pass
             if spike_vwap_ctx:
-                detail_parts.append(f"VWAP: {spike_vwap_ctx}")
-            detail_title = " | ".join(detail_parts) if detail_parts else "Volume anomaly detected"
+                detail_parts.append(f"VWAP context: {spike_vwap_ctx}")
+            detail_title = " • ".join(detail_parts) if detail_parts else "Unusual volume activity detected"
             return _chip(spike_label, spike_tone, title=detail_title)
         if col == "Δ (%)":
             if not txt:
@@ -2416,10 +2507,16 @@ def render(ctx: dict) -> None:
             return f"<span class='mk-plain mk-num mk-level'>{html.escape(txt)}</span>"
         if col == "Ichimoku":
             ichi_title = str(row.get("__ichimoku_detail", "")).strip()
+            ichi_summary = _indicator_cell_title(col, row, txt) if txt else ""
+            ichi_full_title = (
+                f"{ichi_summary} {ichi_title.replace(' | ', ' • ')}".strip()
+                if ichi_title and ichi_summary
+                else (ichi_title or ichi_summary)
+            )
             return _chip(
                 txt,
                 _tone_for_col(col, txt),
-                title=ichi_title or None,
+                title=ichi_full_title or None,
                 extra_class="mk-chip-indicator",
             ) if txt else ""
         if col == "ADX":
@@ -2428,12 +2525,10 @@ def render(ctx: dict) -> None:
             try:
                 if pd.notna(adx_raw):
                     adx_f = float(adx_raw)
-                    gate_txt = (
-                        f"PASS (>={gate_min_adx:.0f})"
-                        if adx_f >= float(gate_min_adx)
-                        else f"LOW (<{gate_min_adx:.0f})"
-                    )
-                    adx_title = f"ADX {adx_f:.1f} | Scalp trend gate: {gate_txt}"
+                    if adx_f >= float(gate_min_adx):
+                        adx_title = f"ADX {adx_f:.1f}. Trend strength looks usable for scalp setups."
+                    else:
+                        adx_title = f"ADX {adx_f:.1f}. Trend strength still looks weak for scalp setups."
             except Exception:
                 adx_title = None
             return _chip(
@@ -2446,6 +2541,7 @@ def render(ctx: dict) -> None:
             return _chip(
                 txt,
                 _tone_for_col(col, txt),
+                title=_indicator_cell_title(col, row, txt),
                 extra_class="mk-chip-indicator",
             ) if txt else ""
         return f"<span class='mk-plain'>{html.escape(txt)}</span>"
@@ -2477,6 +2573,14 @@ def render(ctx: dict) -> None:
         core_row_html = ""
         has_advanced_cols = any(c not in primary_cols for c in cols)
         core_members = [c for c in cols if c in core_signal_cols]
+        setup_snapshot_title = (
+            "Main decision area: setup verdict, higher-timeframe direction, confidence, and AI view."
+        )
+        group_titles = {
+            "Trend Structure": "Trend-following indicators that describe structure and directional control.",
+            "Momentum Signals": "Momentum and reversal-style indicators showing whether the move is stretching or improving.",
+            "Volatility & Volume": "Context indicators showing activity level, volume anomalies, and band location.",
+        }
         if has_advanced_cols:
             first_core_idx = cols.index(core_members[0]) if core_members else 0
             last_core_idx = cols.index(core_members[-1]) if core_members else -1
@@ -2486,7 +2590,10 @@ def render(ctx: dict) -> None:
                 group_cells.append(f"<th colspan='{first_core_idx}' class='mk-core-gap'></th>")
             if core_members:
                 core_span = (last_core_idx - first_core_idx) + 1
-                group_cells.append(f"<th colspan='{core_span}' class='mk-core-cell'>Setup Snapshot</th>")
+                group_cells.append(
+                    f"<th colspan='{core_span}' class='mk-core-cell' title='{html.escape(setup_snapshot_title, quote=True)}'>"
+                    "Setup Snapshot</th>"
+                )
 
             trailing_primary = max(len(primary_cols) - (last_core_idx + 1), 0)
             if trailing_primary > 0:
@@ -2501,7 +2608,8 @@ def render(ctx: dict) -> None:
                 if not members:
                     continue
                 group_cells.append(
-                    f"<th colspan='{len(members)}' class='mk-group-{tone}'>{html.escape(label)}</th>"
+                    f"<th colspan='{len(members)}' class='mk-group-{tone}' "
+                    f"title='{html.escape(group_titles.get(label, ''), quote=True)}'>{html.escape(label)}</th>"
                 )
             if group_cells:
                 group_row_html = f"<tr class='mk-group-row'>{''.join(group_cells)}</tr>"
@@ -2514,7 +2622,10 @@ def render(ctx: dict) -> None:
             core_cells = []
             if left_span > 0:
                 core_cells.append(f"<th colspan='{left_span}' class='mk-core-gap'></th>")
-            core_cells.append(f"<th colspan='{core_span}' class='mk-core-cell'>Setup Snapshot</th>")
+            core_cells.append(
+                f"<th colspan='{core_span}' class='mk-core-cell' title='{html.escape(setup_snapshot_title, quote=True)}'>"
+                "Setup Snapshot</th>"
+            )
             if right_span > 0:
                 core_cells.append(f"<th colspan='{right_span}' class='mk-core-gap'></th>")
             core_row_html = f"<tr class='mk-core-row'>{''.join(core_cells)}</tr>"
@@ -2523,6 +2634,8 @@ def render(ctx: dict) -> None:
         for c in cols:
             sticky = ""
             width_style = ""
+            header_title = _column_header_tooltip(c)
+            title_attr = f" title='{html.escape(header_title, quote=True)}'" if header_title else ""
             if c in col_widths:
                 w = col_widths[c]
                 width_style = f"min-width:{w}px; max-width:{w}px; width:{w}px;"
@@ -2532,7 +2645,7 @@ def render(ctx: dict) -> None:
                     f"background:linear-gradient(180deg, rgba(18,24,36,0.99), rgba(12,18,30,0.99)); "
                     f"box-shadow: 1px 0 0 rgba(148,163,184,0.16);"
                 )
-            header_html.append(f"<th style='{width_style}{sticky}'>{html.escape(c)}</th>")
+            header_html.append(f"<th{title_attr} style='{width_style}{sticky}'>{html.escape(c)}</th>")
 
         rows_html = []
         for _, r in df.iterrows():
@@ -3089,7 +3202,7 @@ def render(ctx: dict) -> None:
                 # Delta source of truth: selected-timeframe closed candles.
                 # This keeps table delta aligned with tactical setup and confidence calculations.
                 price_change = None
-                delta_note = "Source: selected-timeframe closed candles."
+                delta_note = "Move between the last two closed candles on your selected timeframe."
                 try:
                     prev_close = float(df_eval["close"].iloc[-2])
                     last_closed = float(df_eval["close"].iloc[-1])
@@ -3111,8 +3224,8 @@ def render(ctx: dict) -> None:
                             )
                             if price_change is not None:
                                 delta_note = (
-                                    f"Fallback source: exchange ticker percentage ({fallback_delta_symbol}) "
-                                    "(closed-candle delta unavailable)."
+                                    f"Using exchange ticker change for {fallback_delta_symbol} "
+                                    "because the candle-based move was unavailable."
                                 )
                         except Exception as e:
                             _debug(
@@ -3339,22 +3452,20 @@ def render(ctx: dict) -> None:
                         if scalp_dir_key == "UPSIDE":
                             base_ref = max(close_ref, ema5_ref)
                             atr_used = (float(entry_s) - base_ref) / 0.20
-                            rule_txt = "max(Close, EMA5) + 0.20×ATR"
                         else:
                             base_ref = min(close_ref, ema5_ref)
                             atr_used = (base_ref - float(entry_s)) / 0.20
-                            rule_txt = "min(Close, EMA5) - 0.20×ATR"
                         entry_note = (
-                            f"{direction_label(scalp_direction)} entry model: {rule_txt} | "
-                            f"Close {_fmt_price(close_ref)} | EMA5 {_fmt_price(ema5_ref)} | "
-                            f"ATR {_fmt_price(atr_used)}"
+                            f"{direction_label(scalp_direction)} entry guide built from the latest close, "
+                            f"EMA5, and an ATR buffer. Close {_fmt_price(close_ref)} • "
+                            f"EMA5 {_fmt_price(ema5_ref)} • ATR {_fmt_price(abs(atr_used))}"
                         )
                     except Exception:
                         entry_note = ""
                 target_note = str(breakout_note or "").strip() if scalp_gate_pass else ""
                 rr_note = ""
                 if scalp_gate_pass and target_note:
-                    rr_note = f"Conditional R:R: {target_note}"
+                    rr_note = "This reward-to-risk depends on the target condition shown in the target tooltip."
 
                 ichimoku_cell = format_trend(ichimoku_trend_v)
                 ichi_detail_parts: list[str] = []
@@ -3883,12 +3994,11 @@ def render(ctx: dict) -> None:
             body_html=(
                 "<b>Reading order:</b> <b>Setup Confirm</b> -> <b>Direction + Confidence</b> -> "
                 "<b>AI Ensemble + AI Confidence</b>.<br><br>"
-                "<b>Setup Confirm classes:</b> TREND+AI (strongest confirmation), TREND-led, AI-led, WATCH, SKIP.<br>"
-                "TREND-led means the selected timeframe technicals now support the main direction. AI-led means AI support is strong enough, but it still must pass the same selected-timeframe execution and spot-risk gates.<br>"
-                "<b>Direction + Confidence:</b> spot bias from 1D + 4H closed candles and the quality of that bias.<br>"
-                "<b>AI Ensemble:</b> higher-timeframe AI bias from 1D + 4H with a 3-dot model-support meter.<br>"
-                "<b>AI Confidence:</b> quality score of that HTF AI verdict (combined score + conviction + timeframe alignment + consensus + model support).<br>"
-                "<b>Scalp Opportunity:</b> separate selected-timeframe execution gate; shown only when direction/levels/quality thresholds all pass.<br><br>"
+                "<b>Setup Confirm:</b> READY means the setup passed the bar, WATCH means promising but not ready, and SKIP means conditions are not good enough yet.<br>"
+                "<b>Direction + Confidence:</b> the main technical bias and how strong that call is.<br>"
+                "<b>AI Ensemble:</b> the higher-timeframe AI view. Dots show how many models agree.<br>"
+                "<b>AI Confidence:</b> how trustworthy that AI view is.<br>"
+                "<b>Scalp Opportunity:</b> a separate shorter-term execution check. It only appears when local direction, levels, and quality all pass.<br><br>"
                 "<b>Scan mode:</b> default Top N market scan. Custom Coins (max 10) scans only your watchlist until cleared."
             ),
         )
@@ -3898,38 +4008,35 @@ def render(ctx: dict) -> None:
             body_html=(
                 "<b>Coin</b>: asset ticker (hover shows actual candle feed pair or fallback provider).<br>"
                 "<b>Price ($)</b>: latest closed-candle price from active feed.<br>"
-                "<b>Δ (%)</b>: change from previous closed candle to latest closed candle on selected timeframe (fallback: ticker % if candle delta unavailable).<br><br>"
-                "<b>Setup Confirm</b>: final scanner confirmation class (not a direct execution order). "
-                "Calculated from spot Direction + Confidence, then evaluated by a pure technical Trend-led path and a separate pure AI AI-led path using selected-timeframe execution quality and a spot-style local risk model.<br>"
-                "<b>LEAD badge</b>: if the coin name shows <b>LEAD ↗</b> or <b>LEAD ↘</b>, 4H technical structure is already leading while confirmed HTF Direction is still Neutral or still low-confidence. AI may confirm the same side or stay neutral, but a strong opposite AI blocks the badge. 1D must not be opposing yet. This is an early-attention signal, not a confirmed bias replacement.<br>"
-                "<b>Direction</b>: spot bias from 1D + 4H closed candles (Upside / Downside / Neutral).<br>"
-                "<b>Confidence</b>: quality score of that spot Direction call (timeframe alignment + structure + trend + regime + location).<br>"
-                "<b>AI Ensemble</b>: higher-timeframe AI bias from 1D + 4H. Dots show how many of the 3 ensemble models support that final HTF AI direction. "
-                "* means one of the AI higher-timeframe contexts degraded into neutral safety output.<br>"
-                "<b>AI Confidence</b>: quality score of the HTF AI verdict (conviction + combined score + timeframe alignment + consensus + model support). "
-                "Neutral/conflict/degraded states are capped lower on purpose.<br>"
-                "<b>Advanced colors</b>: advanced columns use trend/momentum/context meaning, not always direct market direction. For example, low volatility can be supportive/green even when the main Direction is still bearish.<br>"
+                "<b>Δ (%)</b>: the move from the previous closed candle to the latest closed candle on your selected timeframe.<br><br>"
+                "<b>Setup Confirm</b>: final scanner verdict. It is not a direct buy/sell command; it tells you how ready the setup looks.<br>"
+                "<b>LEAD badge</b>: early warning. It means the coin is starting to lean before the main higher-timeframe Direction is fully confirmed.<br>"
+                "<b>Direction</b>: the main technical bias from 1D + 4H closed candles.<br>"
+                "<b>Confidence</b>: how strong that Direction call is.<br>"
+                "<b>AI Ensemble</b>: higher-timeframe AI bias from 1D + 4H. Dots show how many of the 3 models agree. "
+                "* means some AI inputs degraded, so the system stayed extra cautious.<br>"
+                "<b>AI Confidence</b>: how trustworthy the AI verdict is. Neutral, conflicting, or degraded AI states are intentionally scored lower.<br>"
+                "<b>Advanced colors</b>: advanced columns are not always direct up/down signals. Some are trend, some are momentum, and some are market context.<br>"
                 "<b>R:R</b>: reward-to-risk ratio from target distance vs stop distance.<br>"
-                "<b>Entry Price</b>: model entry level (close/EMA5 with ATR buffer).<br>"
-                "<b>Stop Loss</b>: risk invalidation level (support/resistance with ATR clamps).<br>"
-                "<b>Target Price</b>: first take-profit level (structure level with minimum ATR extension).<br>"
-                "<b>R:R marker (*)</b>: conditional plan; target may require breakout.<br>"
-                "<b>Scalp Opportunity</b>: shown only when the single execution gate passes "
-                "(selected-timeframe direction match + no CONFLICT + valid levels + timeframe-adaptive R:R/ADX/Confidence thresholds).<br>"
+                "<b>Entry Price</b>: suggested model entry level.<br>"
+                "<b>Stop Loss</b>: risk invalidation level.<br>"
+                "<b>Target Price</b>: first take-profit level.<br>"
+                "<b>R:R marker (*)</b>: conditional plan; the target may need a breakout first.<br>"
+                "<b>Scalp Opportunity</b>: only appears when the shorter-term execution check passes.<br>"
                 "<b>Market Cap ($)</b>: size/liquidity context.<br><br>"
                 "<b>Advanced columns (what they mean + short calc):</b><br>"
-                "<b>ADX</b>: trend strength (14-period directional movement strength; not side).<br>"
-                "<b>SuperTrend</b>: trend state from ATR-based trailing bands (Bullish/Bearish/Neutral).<br>"
-                "<b>Ichimoku</b>: cloud trend state from conversion/base/cloud structure.<br>"
-                "<b>VWAP</b>: price position vs Volume-Weighted Average Price (Above/Below/Near).<br>"
-                "<b>Spike Alert</b>: abnormal volume event (volume ratio vs recent average + spike candle direction).<br>"
-                "<b>Bollinger</b>: price location vs 20-period volatility bands (Overbought/Oversold/Neutral).<br>"
-                "<b>Stochastic RSI</b>: momentum position of RSI in its recent range (Low/High/Neutral).<br>"
-                "<b>Volatility</b>: ATR-based volatility regime label.<br>"
-                "<b>PSAR</b>: Parabolic SAR trend side (Bullish/Bearish).<br>"
-                "<b>Williams %R</b>: momentum oscillator showing near-top / near-bottom conditions.<br>"
-                "<b>CCI</b>: deviation of typical price from its moving average (trend pressure/mean-reversion context).<br>"
-                "<b>Candle Pattern</b>: candlestick pattern classifier with directional label (bullish/bearish/neutral)."
+                "<b>ADX</b>: trend strength, not direction.<br>"
+                "<b>SuperTrend</b>: ATR-based trend state.<br>"
+                "<b>Ichimoku</b>: cloud trend context.<br>"
+                "<b>VWAP</b>: price versus its volume-weighted average price.<br>"
+                "<b>Spike Alert</b>: unusual volume event.<br>"
+                "<b>Bollinger</b>: price location inside the volatility bands.<br>"
+                "<b>Stochastic RSI</b>: short-term momentum position.<br>"
+                "<b>Volatility</b>: ATR-style volatility regime.<br>"
+                "<b>PSAR</b>: Parabolic SAR trend side.<br>"
+                "<b>Williams %R</b>: momentum near the top or bottom of its recent range.<br>"
+                "<b>CCI</b>: mean-reversion / trend-pressure indicator.<br>"
+                "<b>Candle Pattern</b>: last candle-pattern label."
             ),
         )
         st.caption(
@@ -4060,33 +4167,26 @@ def render(ctx: dict) -> None:
             market_lead_color = TEXT_MUTED
 
         ai_direction_hover = (
-            "Composite ML bias across BTC/ETH/BNB/SOL/ADA/XRP. "
-            "Dominance-weighted when available, otherwise equal-weight fallback. "
-            f"Zones: 0-{int(AI_SHORT_THRESHOLD * 100)} downside, "
-            f"{int(AI_SHORT_THRESHOLD * 100)}-{int(AI_LONG_THRESHOLD * 100)} neutral, "
-            f"{int(AI_LONG_THRESHOLD * 100)}-100 upside."
+            "AI summary across BTC, ETH, BNB, SOL, ADA, and XRP. "
+            "Lower scores lean downside, the middle zone is neutral, and higher scores lean upside."
         )
         if behaviour_weight_mode == "equal":
-            ai_direction_hover += " Dominance feed unavailable; equal-weight fallback is active."
+            ai_direction_hover += " Dominance data is unavailable right now, so all coins are weighted equally."
         ai_direction_score = int(round(behaviour_prob * 100))
 
         setup_quality_hover = (
-            "Composite market environment quality. "
-            "35% Direction, 20% Regime, 25% Breadth, 20% Trust. "
-            "Reads setup climate, not trade direction alone."
+            "Overall market quality for finding setups. "
+            "It blends direction clarity, market health, participation, and model trust."
         )
         setup_mode_hover = {
             "Risk-On": (
-                "Risk-On: broad market conditions are favorable. "
-                "Direction, participation, and model trust are strong enough for active setup hunting."
+                "Risk-On: market conditions are supportive enough to hunt setups more actively."
             ),
             "Selective": (
-                "Selective: market quality is mixed. "
-                "Some setups can work, but confirmation standards should stay strict and risk should stay controlled."
+                "Selective: some setups can work, but confirmation should stay strict."
             ),
             "Risk-Off": (
-                "Risk-Off: market environment is weak or fragmented. "
-                "Favor capital preservation and avoid forcing setups."
+                "Risk-Off: the market is weak or fragmented, so staying defensive makes more sense."
             ),
         }.get(composite_mode, setup_quality_hover)
         d_col = _score_tone(direction_score)[1]
@@ -4096,10 +4196,10 @@ def render(ctx: dict) -> None:
 
         market_lead_hover = (
             "Early market-pressure gauge before full confirmation. "
-            "Blends lead breadth, total-market rotation versus BTC/ETH, broad flow, and dominance posture."
+            "It asks whether the market is starting to lean up or down beneath the surface."
         )
         if custom_mode_active:
-            market_lead_hover += " Custom watchlist mode reduces breadth input, so the card leans more on market internals."
+            market_lead_hover += " Custom watchlist mode uses less breadth data, so this card leans more on broad market internals."
 
         with market_signal_cards_placeholder:
             g1, g2, g3, g4, g5 = st.columns(5, gap="medium")
@@ -4108,7 +4208,7 @@ def render(ctx: dict) -> None:
                 st.markdown(
                     _render_market_orbital_card(
                         title="BTC Dominance",
-                        title_hover="Bitcoin share of total crypto market cap. Rising dominance usually means BTC-led positioning and a more defensive market tone.",
+                        title_hover="Bitcoin's share of the crypto market. Rising BTC dominance usually means the market is getting more defensive.",
                         value_text=f"{float(btc_dom_display):.1f}" if btc_dom_display is not None else "N/A",
                         unit="%",
                         chart_html=_orbital_svg_html(
@@ -4122,7 +4222,7 @@ def render(ctx: dict) -> None:
                             accent_color=btc_color,
                         ),
                         guide_labels=("Alt-heavy", "Balanced", "BTC-led"),
-                        note="Structure context only. High BTC share usually means capital is hiding in Bitcoin first.",
+                        note="Context only. High BTC share usually means money is hiding in Bitcoin first.",
                         footer_html=(
                             f"<div class='market-top-meta'><span>Current state</span><span><strong style='color:{btc_color};'>{btc_state}</strong></span></div>"
                         ),
@@ -4134,7 +4234,7 @@ def render(ctx: dict) -> None:
                 st.markdown(
                     _render_market_orbital_card(
                         title="ETH Dominance",
-                        title_hover="Ethereum share of total crypto market cap. Rising ETH dominance usually signals healthier alt participation and broader risk appetite.",
+                        title_hover="Ethereum's share of the crypto market. Rising ETH dominance usually means alt participation is improving.",
                         value_text=f"{float(eth_dom_display):.1f}" if eth_dom_display is not None else "N/A",
                         unit="%",
                         chart_html=_orbital_svg_html(
@@ -4148,7 +4248,7 @@ def render(ctx: dict) -> None:
                             accent_color=eth_color,
                         ),
                         guide_labels=("Muted", "Balanced", "ETH-led"),
-                        note="Participation context only. Rising ETH share usually means broader alt participation is starting to improve.",
+                        note="Context only. Rising ETH share usually means broader alt participation is starting to improve.",
                         footer_html=(
                             f"<div class='market-top-meta'><span>Current state</span><span><strong style='color:{eth_color};'>{eth_state}</strong></span></div>"
                         ),
@@ -4187,25 +4287,25 @@ def render(ctx: dict) -> None:
                                 "Breadth",
                                 breadth_display,
                                 breadth_color,
-                                f"Lead breadth from the produced scanner universe. Upside leads: {market_lead_snapshot.upside_leads} • Downside leads: {market_lead_snapshot.downside_leads}.",
+                                f"Count of upside vs downside LEAD signals in the produced scan set. Upside: {market_lead_snapshot.upside_leads} • Downside: {market_lead_snapshot.downside_leads}.",
                             )
                             + _stat_metric(
                                 "Rotation",
                                 rotation_display,
                                 rotation_color,
-                                "Rotation spread compares total market-cap flow with BTC/ETH flow. Positive means broad market is outperforming the majors.",
+                                "Compares total market flow with BTC and ETH flow. Positive means the broader market is doing better than the majors.",
                             )
                             + _stat_metric(
                                 "Flow",
                                 flow_display,
                                 flow_color,
-                                "Broad market flow from total market-cap change. Higher = cleaner early participation.",
+                                "Early strength from total market-cap movement. Higher usually means broader participation.",
                             )
                             + _stat_metric(
                                 "Dom",
                                 dominance_display,
                                 dominance_color,
-                                "Dominance posture favors upside when BTC share eases and ETH share holds up; the reverse leans defensive.",
+                                "Reads BTC and ETH dominance together. Lower BTC share and steadier ETH share are usually better for upside rotation.",
                             )
                             + "</div>"
                         ),
@@ -4231,8 +4331,8 @@ def render(ctx: dict) -> None:
                         ),
                         guide_labels=("Downside", "Neutral", "Upside"),
                         note=(
-                            "Composite ML direction across BTC/ETH/BNB/SOL/ADA/XRP. "
-                            + ("Dominance-weighted view is active." if behaviour_weight_mode == "dominance" else "Equal-weight fallback is active.")
+                            "AI summary across BTC/ETH/BNB/SOL/ADA/XRP. "
+                            + ("Dominance weighting is active." if behaviour_weight_mode == "dominance" else "Equal weights are active right now.")
                         ),
                         footer_html=(
                             f"<div class='market-top-meta'><span>Bias</span><span><strong style='color:{behaviour_color};'>{html.escape(behaviour_label)} Bias</strong></span></div>"
@@ -4258,7 +4358,7 @@ def render(ctx: dict) -> None:
                             accent_color=composite_color,
                         ),
                         guide_labels=("Risk-Off", "Selective", "Risk-On"),
-                        note="Composite setup climate for setup hunting, not direction alone.",
+                        note="Overall setup climate for hunting trades, not market direction on its own.",
                         top_meta_text=composite_mode,
                         top_meta_color=composite_color,
                         top_meta_hover=setup_mode_hover,
@@ -4268,26 +4368,26 @@ def render(ctx: dict) -> None:
                                 "Direction",
                                 direction_score,
                                 d_col,
-                                "Direction: confidence of directional edge from AI direction bias. Higher = clearer market direction.",
+                                "How clear the market's direction looks right now.",
                             )
                             + _stat_metric(
                                 "Regime",
                                 regime_score,
                                 r_col,
-                                "Regime: market environment quality proxy from total market-cap move behavior."
-                                + (" Market-cap feed unavailable, neutral fallback (50) active." if regime_score_fallback else ""),
+                                "How healthy the overall market environment looks."
+                                + (" Market-cap data is missing right now, so this part is using a neutral fallback." if regime_score_fallback else ""),
                             )
                             + _stat_metric(
                                 "Breadth",
                                 breadth_score,
                                 b_col,
-                                "Breadth: how many major assets align on one side. Higher breadth means stronger participation.",
+                                "How widely the move is spreading across major coins.",
                             )
                             + _stat_metric(
                                 "Trust",
                                 trust_score,
                                 t_col,
-                                "Trust: reliability from cross-major model consistency. Lower dispersion = higher trust.",
+                                "How consistent the AI readings are across the major coins.",
                             )
                             + "</div>"
                         ),
@@ -4388,22 +4488,25 @@ def render(ctx: dict) -> None:
                     "label": status_label,
                     "value": status_head,
                     "subtext": status_sub,
+                    "label_title": "Quick count of how many shown rows are READY, WATCH, or SKIP.",
                 },
                 {
                     "label": "LEAD Signals",
                     "value": emerging_head,
                     "subtext": emerging_sub,
+                    "label_title": "Quick count of LEAD signals. This shows where early pressure is starting to build.",
                 },
                 {
                     "label": "Best Scalp Opportunity",
                     "value": best_scalp_coin,
                     "subtext": best_scalp_sub,
-                    "label_title": best_scalp_sub,
+                    "label_title": "Best shorter-term execution candidate in the current table.",
                 },
                 {
                     "label": "Confidence Leader",
                     "value": confidence_head,
                     "subtext": confidence_sub,
+                    "label_title": "Coin with the strongest technical confidence score in the current table.",
                 },
             ],
             columns=4,
