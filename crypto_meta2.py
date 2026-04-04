@@ -51,18 +51,38 @@ from ui.theme import (
     tip as _tip,
 )
 from ui.app_shell import render_app
-from ui.deps_factory import (
-    build_app_deps,
-    direction_key_fallback,
-    direction_label_fallback,
-    missing_fetch_coingecko_ohlcv_by_coin_id,
-    sanitize_trading_terms_fallback,
-    signal_plain_fallback,
-    style_delta_fallback,
-    style_scalp_opp_fallback,
-    style_signal_fallback,
-)
+import ui.deps_factory as _deps_factory
 from ui.styles import app_css
+
+build_app_deps = _deps_factory.build_app_deps
+direction_key_fallback = getattr(
+    _deps_factory,
+    "direction_key_fallback",
+    lambda direction: str(direction or "").strip().upper(),
+)
+direction_label_fallback = getattr(
+    _deps_factory,
+    "direction_label_fallback",
+    lambda direction: str(direction or "Neutral"),
+)
+missing_fetch_coingecko_ohlcv_by_coin_id = getattr(
+    _deps_factory,
+    "missing_fetch_coingecko_ohlcv_by_coin_id",
+    lambda *_args, **_kwargs: None,
+)
+sanitize_trading_terms_fallback = getattr(
+    _deps_factory,
+    "sanitize_trading_terms_fallback",
+    lambda text: "" if text is None else str(text),
+)
+signal_plain_fallback = getattr(
+    _deps_factory,
+    "signal_plain_fallback",
+    lambda signal: "WAIT" if not signal else str(signal),
+)
+style_delta_fallback = getattr(_deps_factory, "style_delta_fallback", lambda *_args, **_kwargs: "")
+style_scalp_opp_fallback = getattr(_deps_factory, "style_scalp_opp_fallback", lambda *_args, **_kwargs: "")
+style_signal_fallback = getattr(_deps_factory, "style_signal_fallback", lambda *_args, **_kwargs: "")
 
 
 def _fallback_bias_score_badge(bias_score: float) -> str:

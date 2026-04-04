@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from ui.tab_registry import required_dep_keys
-
 
 def direction_key_fallback(direction: str) -> str:
     d = str(direction or "").strip().upper()
@@ -75,6 +73,8 @@ OPTIONAL_DEP_DEFAULTS: dict[str, object] = {
 
 def build_app_deps(source: Mapping[str, object], **overrides: object) -> dict:
     """Build the dependency dictionary expected by `ui.app_shell.render_app`."""
+    from ui.tab_registry import required_dep_keys
+
     required = {"st", "ACCENT", "POSITIVE"} | required_dep_keys()
     merged = dict(source)
     merged.update(overrides)
