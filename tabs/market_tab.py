@@ -133,7 +133,7 @@ def _market_result_priority_key(row: dict) -> tuple[float, float, float, float, 
         _sortable_float(row.get("__archive_guardrail_penalty", 0.0)),
         -_sortable_float(row.get("__rr_val", 0.0)),
         -_sortable_float(row.get("__ai_confidence_val", 0.0)),
-        -_sortable_float(row.get("__mcap_val", 0.0)),
+        -_sortable_float(row.get("__mcap_val", 0)),
         str(row.get("Coin", "")),
     )
 
