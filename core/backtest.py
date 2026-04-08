@@ -32,6 +32,7 @@ from core.market_decision import (
 from core.scalping import scalp_gate_thresholds
 from core.signal_contract import bias_confidence_from_bias
 from core.spot_direction import build_spot_direction_snapshot
+from core.trading_copy import setup_class_display
 
 
 class AnalysisLike(Protocol):
@@ -104,16 +105,7 @@ def _normalize_direction_signal(raw_signal: object) -> str:
 
 
 def _setup_confirm_label(action_class: str) -> str:
-    cls = str(action_class or "").strip().upper()
-    if cls == "ENTER_TREND_AI":
-        return "TREND+AI"
-    if cls == "ENTER_TREND_LED":
-        return "TREND-led"
-    if cls == "ENTER_AI_LED":
-        return "AI-led"
-    if cls == "PROBE":
-        return "PROBE"
-    return cls or "UNKNOWN"
+    return setup_class_display(action_class, audience="trader")
 
 
 def _direction_label_from_key(value: str) -> str:

@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 
 import pandas as pd
 from core.session_utils import session_bucket_for_timestamp
+from core.trading_copy import playbook_display, playbook_key, trade_gate_display, trade_gate_key
 from core.tracker_store import (
     connect_signal_tracker_db,
     mirror_signal_tracker_db_if_due,
@@ -63,6 +64,32 @@ def _direction_key(direction: object) -> str:
     if d in {"DOWNSIDE", "SHORT", "SELL", "BEARISH"}:
         return "DOWNSIDE"
     return "NEUTRAL"
+
+
+def _playbook_display_series(frame: pd.DataFrame) -> pd.Series:
+    key_series = frame.get("market_playbook_key", pd.Series(index=frame.index, dtype=object))
+    display_series = frame.get("market_playbook", pd.Series(index=frame.index, dtype=object))
+    if not isinstance(key_series, pd.Series):
+        key_series = pd.Series(key_series, index=frame.index, dtype=object)
+    if not isinstance(display_series, pd.Series):
+        display_series = pd.Series(display_series, index=frame.index, dtype=object)
+    key_series = key_series.reindex(frame.index).fillna("").astype(str).str.strip()
+    display_series = display_series.reindex(frame.index).fillna("").astype(str).str.strip()
+    mapped = key_series.map(lambda value: playbook_display(value) if str(value).strip() else "")
+    return mapped.where(key_series.ne(""), display_series)
+
+
+def _trade_gate_display_series(frame: pd.DataFrame) -> pd.Series:
+    key_series = frame.get("market_trade_gate_key", pd.Series(index=frame.index, dtype=object))
+    display_series = frame.get("market_trade_gate", pd.Series(index=frame.index, dtype=object))
+    if not isinstance(key_series, pd.Series):
+        key_series = pd.Series(key_series, index=frame.index, dtype=object)
+    if not isinstance(display_series, pd.Series):
+        display_series = pd.Series(display_series, index=frame.index, dtype=object)
+    key_series = key_series.reindex(frame.index).fillna("").astype(str).str.strip()
+    display_series = display_series.reindex(frame.index).fillna("").astype(str).str.strip()
+    mapped = key_series.map(lambda value: trade_gate_display(value) if str(value).strip() else "")
+    return mapped.where(key_series.ne(""), display_series)
 
 
 def _trade_side_key(side: object) -> str:
@@ -127,6 +154,7 @@ def _infer_alert_keys_from_event_row(row: Mapping[str, object]) -> list[str]:
     market_catalyst_blocking = bool(_float_or_none(row.get("market_catalyst_blocking")) or 0.0)
     catalyst_state = _text_or_empty(row.get("market_catalyst_state")).upper()
     trade_gate = _text_or_empty(row.get("market_trade_gate"))
+    trade_gate_value_key = trade_gate_key(row.get("market_trade_gate_key") or trade_gate)
     market_lead_label = _text_or_empty(row.get("market_lead_label")).upper()
     market_lead_score = _float_or_none(row.get("market_lead_score")) or 50.0
     flow_bias = _text_or_empty(row.get("market_flow_bias")).upper()
@@ -139,7 +167,7 @@ def _infer_alert_keys_from_event_row(row: Mapping[str, object]) -> list[str]:
     elif "CAUTION" in catalyst_state:
         keys.append("CATALYST_CAUTION")
 
-    if trade_gate in {"No-Trade", "Defensive Only"}:
+    if trade_gate_value_key in {"NO_TRADE", "DEFENSIVE_ONLY"}:
         keys.append("TRADE_GATE")
 
     if (market_lead_label == "UPSIDE" and market_lead_score >= 65.0) or (
@@ -160,11 +188,11 @@ def _infer_alert_keys_from_event_row(row: Mapping[str, object]) -> list[str]:
         keys.append("SECTOR_ROTATION")
 
     if trade_gate or adaptive_edge or archive_guardrail:
-        if trade_gate == "No-Trade" or archive_guardrail == "Archive Guardrail":
+        if trade_gate_value_key == "NO_TRADE" or archive_guardrail == "Archive Guardrail":
             keys.append("EXECUTION_STANCE")
-        elif trade_gate == "Defensive Only" or adaptive_edge == "Historically Weak":
+        elif trade_gate_value_key == "DEFENSIVE_ONLY" or adaptive_edge == "Historically Weak":
             keys.append("EXECUTION_STANCE")
-        elif trade_gate in {"Tradeable", "Selective Only"} and adaptive_edge == "Historically Favored":
+        elif trade_gate_value_key in {"TRADEABLE", "SELECTIVE_ONLY"} and adaptive_edge == "Historically Favored":
             keys.append("EXECUTION_STANCE")
 
     deduped: list[str] = []
@@ -188,8 +216,10 @@ def _ensure_signal_tracker_columns(conn: sqlite3.Connection) -> None:
         "session_bucket": "TEXT",
         "scan_focus": "TEXT",
         "market_regime": "TEXT",
+        "market_playbook_key": "TEXT",
         "market_playbook": "TEXT",
         "market_no_trade": "INTEGER",
+        "market_trade_gate_key": "TEXT",
         "market_trade_gate": "TEXT",
         "market_alert_keys": "TEXT",
         "market_primary_alert": "TEXT",
@@ -270,8 +300,10 @@ def init_signal_tracker_db(db_path: str | None = None) -> str:
                 market_lead_downside INTEGER,
                 market_lead_aligned INTEGER,
                 market_regime TEXT,
+                market_playbook_key TEXT,
                 market_playbook TEXT,
                 market_no_trade INTEGER,
+                market_trade_gate_key TEXT,
                 market_trade_gate TEXT,
                 market_alert_keys TEXT,
                 market_primary_alert TEXT,
@@ -409,8 +441,10 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                     direction in {"UPSIDE", "DOWNSIDE"} and market_lead_direction == direction
                 ),
                 "market_regime": str(event.get("market_regime") or "").strip(),
+                "market_playbook_key": str(event.get("market_playbook_key") or playbook_key(event.get("market_playbook"))).strip(),
                 "market_playbook": str(event.get("market_playbook") or "").strip(),
                 "market_no_trade": int(bool(event.get("market_no_trade"))),
+                "market_trade_gate_key": str(event.get("market_trade_gate_key") or trade_gate_key(event.get("market_trade_gate"))).strip(),
                 "market_trade_gate": str(event.get("market_trade_gate") or "").strip(),
                 "market_alert_keys": str(event.get("market_alert_keys") or "").strip(),
                 "market_primary_alert": str(event.get("market_primary_alert") or "").strip(),
@@ -460,7 +494,7 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                     confidence, ai_ensemble, ai_direction, ai_confidence, ai_aligned,
                     market_lead_label, market_lead_score, market_lead_upside, market_lead_downside,
                     market_lead_aligned, market_regime, market_playbook, market_no_trade,
-                    market_trade_gate, market_alert_keys, market_primary_alert, market_no_trade_reason,
+                    market_playbook_key, market_trade_gate_key, market_trade_gate, market_alert_keys, market_primary_alert, market_no_trade_reason,
                     risk_tier, risk_unit_fraction,
                     sector_tag, market_sector_rotation,
                     market_catalyst_state, market_catalyst_event, market_catalyst_blocking,
@@ -477,7 +511,7 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                     :confidence, :ai_ensemble, :ai_direction, :ai_confidence, :ai_aligned,
                     :market_lead_label, :market_lead_score, :market_lead_upside, :market_lead_downside,
                     :market_lead_aligned, :market_regime, :market_playbook, :market_no_trade,
-                    :market_trade_gate, :market_alert_keys, :market_primary_alert, :market_no_trade_reason,
+                    :market_playbook_key, :market_trade_gate_key, :market_trade_gate, :market_alert_keys, :market_primary_alert, :market_no_trade_reason,
                     :risk_tier, :risk_unit_fraction,
                     :sector_tag, :market_sector_rotation,
                     :market_catalyst_state, :market_catalyst_event, :market_catalyst_blocking,
@@ -508,8 +542,10 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                     market_lead_downside=excluded.market_lead_downside,
                     market_lead_aligned=excluded.market_lead_aligned,
                     market_regime=excluded.market_regime,
+                    market_playbook_key=excluded.market_playbook_key,
                     market_playbook=excluded.market_playbook,
                     market_no_trade=excluded.market_no_trade,
+                    market_trade_gate_key=excluded.market_trade_gate_key,
                     market_trade_gate=excluded.market_trade_gate,
                     market_alert_keys=excluded.market_alert_keys,
                     market_primary_alert=excluded.market_primary_alert,
@@ -909,8 +945,20 @@ def build_recent_market_context_snapshot(
         {
             "Market Lead": _dominant_text_value(recent.get("market_lead_label"), default="No Clear Lead"),
             "Market Regime": _dominant_text_value(recent.get("market_regime"), default="Unknown"),
-            "Playbook": _dominant_text_value(recent.get("market_playbook"), default="Unknown"),
-            "Trade Gate": _dominant_text_value(recent.get("market_trade_gate"), default="Unknown"),
+            "Playbook": _dominant_text_value(_playbook_display_series(recent), default="Unknown"),
+            "Playbook Key": _dominant_text_value(
+                recent.get("market_playbook_key")
+                if "market_playbook_key" in recent.columns
+                else _playbook_display_series(recent).map(playbook_key),
+                default="Unknown",
+            ),
+            "Trade Gate": _dominant_text_value(_trade_gate_display_series(recent), default="Unknown"),
+            "Trade Gate Key": _dominant_text_value(
+                recent.get("market_trade_gate_key")
+                if "market_trade_gate_key" in recent.columns
+                else _trade_gate_display_series(recent).map(trade_gate_key),
+                default="Unknown",
+            ),
             "Sector Rotation": _dominant_text_value(recent.get("market_sector_rotation"), default="Unknown"),
             "Catalyst State": _dominant_text_value(recent.get("market_catalyst_state"), default="Unknown"),
             "Catalyst Window": _dominant_text_value(recent.get("market_catalyst_window"), default="Unknown"),
@@ -1372,9 +1420,31 @@ def _narrow_actual_trade_archive(
         label=f"{str(sector_tag or '').strip()} sector",
         min_rows=3,
     )
-    d = _apply_archive_filter(d, column="market_playbook", value=playbook, label="current playbook", min_rows=3)
+    playbook_key_value = playbook_key(playbook)
+    if "market_playbook_key" in d.columns and playbook_key_value not in {"", "UNKNOWN", "OTHER"}:
+        d = _apply_archive_filter(
+            d,
+            column="market_playbook_key",
+            value=playbook_key_value,
+            label="current playbook",
+            min_rows=3,
+            normalizer=playbook_key,
+        )
+    else:
+        d = _apply_archive_filter(d, column="market_playbook", value=playbook, label="current playbook", min_rows=3)
     d = _apply_archive_filter(d, column="session_bucket", value=session_bucket, label="current session", min_rows=3)
-    d = _apply_archive_filter(d, column="market_trade_gate", value=trade_gate, label="current gate", min_rows=3)
+    trade_gate_key_value = trade_gate_key(trade_gate)
+    if "market_trade_gate_key" in d.columns and trade_gate_key_value not in {"", "UNKNOWN"}:
+        d = _apply_archive_filter(
+            d,
+            column="market_trade_gate_key",
+            value=trade_gate_key_value,
+            label="current gate",
+            min_rows=3,
+            normalizer=trade_gate_key,
+        )
+    else:
+        d = _apply_archive_filter(d, column="market_trade_gate", value=trade_gate, label="current gate", min_rows=3)
     d = _apply_archive_filter(
         d, column="market_catalyst_window", value=catalyst_window, label="current catalyst window", min_rows=3
     )

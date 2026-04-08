@@ -38,6 +38,7 @@ class RegimeEngineTests(unittest.TestCase):
             trust_score=52.0,
         )
         self.assertEqual(snap.regime_key, "ALT_ROTATION")
+        self.assertEqual(snap.playbook_key, "SELECTIVE_UPSIDE_ROTATION")
         self.assertEqual(snap.playbook, "Selective upside rotation")
 
     def test_classifies_risk_on_trend(self) -> None:

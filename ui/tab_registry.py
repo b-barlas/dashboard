@@ -26,21 +26,21 @@ from tabs.whale_tab import render as render_whale_tab_ui
 
 
 TAB_TITLES = [
-    "Market", "Spot", "Position", "Multi-TF", "Sessions",
-    "AI Workspace", "Heatmap", "Whale Tracker", "Risk Analytics", "Signal Review",
+    "Market", "Spot", "Position", "Sessions", "Signal Review",
+    "Multi-TF", "AI Workspace", "Heatmap", "Whale Tracker", "Risk Analytics",
     "Monte Carlo", "Fibonacci", "Correlation", "Portfolio Scenario",
     "Tools", "Model Lab", "Setup Backtest", "Scalp Backtest", "Analysis Guide",
 ]
 
 TAB_GROUPS = [
     (
-        "Primary Workspace",
-        ["Market", "Spot", "Position", "Multi-TF", "Sessions", "Signal Review"],
+        "Core Trading Flow",
+        ["Market", "Spot", "Position", "Sessions", "Signal Review"],
     ),
     (
         "Research & Labs",
         [
-            "AI Workspace", "Heatmap", "Whale Tracker", "Risk Analytics",
+            "Multi-TF", "AI Workspace", "Heatmap", "Whale Tracker", "Risk Analytics",
             "Monte Carlo", "Fibonacci", "Correlation", "Portfolio Scenario",
             "Model Lab", "Setup Backtest", "Scalp Backtest",
         ],
@@ -112,21 +112,32 @@ _TAB_DEPS = [
         ],
     ),
     (
-        render_multitf_tab_ui,
-        [
-            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING",
-            "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "analyse",
-            "direction_key", "direction_label", "format_delta", "format_stochrsi",
-            "ml_ensemble_predict", "_calc_conviction",
-        ],
-    ),
-    (
         render_sessions_tab_ui,
         [
             "ACCENT", "TEXT_MUTED", "WARNING", "POSITIVE", "NEGATIVE", "_normalize_coin_input",
             "_validate_coin_symbol", "fetch_ohlcv", "EXCHANGE", "readable_market_cap", "_tip",
             "get_signal_tracker_db_path", "init_signal_tracker_db", "fetch_signal_events_df",
             "build_signal_cohort_summary", "build_recent_market_context_snapshot",
+        ],
+    ),
+    (
+        render_signal_review_tab_ui,
+        [
+            *_STYLE_DEPS, "_tip", "fetch_ohlcv", "resolve_open_signal_events_via_fetch",
+            *_TRACKER_DEPS, "fetch_market_alerts_df",
+            "build_signal_review_snapshot", "build_execution_overlay_snapshot", "build_signal_cohort_summary", "build_adaptive_context_model",
+            "annotate_alert_footprint", "build_alert_effectiveness_summary",
+            "build_learning_edge_table", "save_signal_trade_overlay", "save_signal_trade_journal",
+            *_SIGNAL_REVIEW_STORAGE_DEPS,
+        ],
+    ),
+    (
+        render_multitf_tab_ui,
+        [
+            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING",
+            "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "analyse",
+            "direction_key", "direction_label", "format_delta", "format_stochrsi",
+            "ml_ensemble_predict", "_calc_conviction",
         ],
     ),
     (
@@ -160,17 +171,6 @@ _TAB_DEPS = [
             "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "NEON_BLUE", "NEON_PURPLE",
             "PRIMARY_BG", "_tip", "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv",
             "calculate_risk_metrics",
-        ],
-    ),
-    (
-        render_signal_review_tab_ui,
-        [
-            *_STYLE_DEPS, "_tip", "fetch_ohlcv", "resolve_open_signal_events_via_fetch",
-            *_TRACKER_DEPS, "fetch_market_alerts_df",
-            "build_signal_review_snapshot", "build_execution_overlay_snapshot", "build_signal_cohort_summary", "build_adaptive_context_model",
-            "annotate_alert_footprint", "build_alert_effectiveness_summary",
-            "build_learning_edge_table", "save_signal_trade_overlay", "save_signal_trade_journal",
-            *_SIGNAL_REVIEW_STORAGE_DEPS,
         ],
     ),
     (

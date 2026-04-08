@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from core.trading_copy import playbook_display
+
 
 @dataclass(frozen=True)
 class MarketRegimeSnapshot:
     regime_key: str
     label: str
+    playbook_key: str
     playbook: str
     note: str
     tradable: bool
@@ -53,7 +56,8 @@ def build_market_regime_snapshot(
         return MarketRegimeSnapshot(
             regime_key="RISK_OFF_PRESSURE",
             label="Risk-Off Pressure",
-            playbook="Defensive / downside only",
+            playbook_key="DEFENSIVE_DOWNSIDE_ONLY",
+            playbook=playbook_display("DEFENSIVE_DOWNSIDE_ONLY"),
             note="Broad conditions are weak or fragmented. Protect capital first and keep upside attempts selective.",
             tradable=False,
             no_trade=True,
@@ -70,7 +74,8 @@ def build_market_regime_snapshot(
         return MarketRegimeSnapshot(
             regime_key="RISK_ON_TREND",
             label="Risk-On Trend",
-            playbook="Trend continuation",
+            playbook_key="TREND_CONTINUATION",
+            playbook=playbook_display("TREND_CONTINUATION"),
             note="Conditions support continuation hunting. Let confirmed strength lead and avoid overthinking clean setups.",
             tradable=True,
             no_trade=False,
@@ -87,7 +92,8 @@ def build_market_regime_snapshot(
         return MarketRegimeSnapshot(
             regime_key="ALT_ROTATION",
             label="Alt Rotation",
-            playbook="Selective upside rotation",
+            playbook_key="SELECTIVE_UPSIDE_ROTATION",
+            playbook=playbook_display("SELECTIVE_UPSIDE_ROTATION"),
             note="Early upside pressure is spreading beyond the majors. Focus on leaders and require clean confirmation.",
             tradable=True,
             no_trade=False,
@@ -102,7 +108,8 @@ def build_market_regime_snapshot(
         return MarketRegimeSnapshot(
             regime_key="SELECTIVE_BREAKOUT",
             label="Selective Breakout",
-            playbook="Wait for confirmation",
+            playbook_key="WAIT_CONFIRMATION",
+            playbook=playbook_display("WAIT_CONFIRMATION"),
             note="Pressure is building, but breadth is not fully broad yet. Prioritize clean leaders and avoid forcing second-tier names.",
             tradable=True,
             no_trade=False,
@@ -113,7 +120,8 @@ def build_market_regime_snapshot(
         return MarketRegimeSnapshot(
             regime_key="RANGE_CHOP",
             label="Range / Chop",
-            playbook="Mean reversion or stand aside",
+            playbook_key="MEAN_REVERSION_OR_STAND_ASIDE",
+            playbook=playbook_display("MEAN_REVERSION_OR_STAND_ASIDE"),
             note="The market is not offering broad directional edge yet. Reduce aggression and treat breakouts with skepticism.",
             tradable=False,
             no_trade=True,
@@ -123,7 +131,8 @@ def build_market_regime_snapshot(
     return MarketRegimeSnapshot(
         regime_key="SELECTIVE_BALANCE",
         label="Selective Balance",
-        playbook="Selective only",
+        playbook_key="SELECTIVE_ONLY",
+        playbook=playbook_display("SELECTIVE_ONLY"),
         note="Some setups can work, but the market still wants filtering. Take only aligned ideas with clear structure.",
         tradable=True,
         no_trade=False,

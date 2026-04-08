@@ -13,7 +13,9 @@ from core.market_decision import (
 from core.multitf import HIGHER_TFS, TF_SEQUENCE, TF_WEIGHTS, compute_multitf_alignment, summarize_scope_bias
 from core.signal_contract import bias_confidence_from_bias
 from core.spot_direction import build_spot_direction_snapshot
+from core.trading_copy import copy_text
 from ui.primitives import render_help_details, render_page_header
+from ui.signal_formatters import setup_confirm_display as _shared_setup_confirm_display
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -95,20 +97,7 @@ def render(ctx: dict) -> None:
         return f"{float(value):.0f}% ({bucket.title()})"
 
     def _setup_confirm_display(raw_action: str) -> str:
-        cls = normalize_action_class(raw_action)
-        if cls == "ENTER_TREND_AI":
-            return "TREND+AI"
-        if cls == "ENTER_TREND_LED":
-            return "TREND-led"
-        if cls == "ENTER_AI_LED":
-            return "AI-led"
-        if cls == "PROBE":
-            return "PROBE"
-        if cls == "WATCH":
-            return "WATCH"
-        if cls == "SKIP":
-            return "SKIP"
-        return str(raw_action or "").strip() or "SKIP"
+        return _shared_setup_confirm_display(raw_action)
 
     def _ai_fallback_note(status: str) -> str:
         key = str(status or "").strip().lower()
@@ -295,25 +284,25 @@ def render(ctx: dict) -> None:
         weighted = metrics["weighted_alignment_pct"]
         if dominant == "NEUTRAL":
             return (
-                "Alignment Insight · Neutral Structure",
-                "Higher and tactical timeframes are not producing a clean directional edge. Treat this as a structure check, not an execution prompt.",
+                "Alignment Read · Mixed",
+                "Higher and shorter timeframes are not lining up cleanly. Use this as a structure check, not an execution prompt.",
                 WARNING,
             )
         if higher == dominant and tactical == dominant and weighted >= 65:
             return (
-                f"Alignment Insight · Broad {direction_label(dominant)} Agreement",
-                f"Higher timeframes and timing layers are pointing {direction_label(dominant).lower()}. This supports the same-side read already seen in Market / Spot / Position.",
+                f"Alignment Read · {direction_label(dominant)} Agreement",
+                f"Higher timeframes and short-term timing are both pointing {direction_label(dominant).lower()}. That supports the same-side read you already saw in Market, Spot, or Position.",
                 POSITIVE if dominant == "UPSIDE" else NEGATIVE,
             )
         if higher == dominant and tactical != dominant:
             return (
-                f"Alignment Insight · Higher-TF {direction_label(dominant)} Lead",
-                f"The structural layer still leans {direction_label(dominant).lower()}, but 5m/15m timing is mixed. Wait for tactical alignment before trusting execution.",
+                "Alignment Read · Structure Leads, Timing Mixed",
+                f"The higher-timeframe structure still leans {direction_label(dominant).lower()}, but short-term timing is mixed. Wait for timing to catch up before trusting execution.",
                 WARNING,
             )
         return (
-            "Alignment Insight · Cross-TF Mismatch",
-            "Lower and higher timeframes are pulling in different directions. Treat the coin as tactically noisy until the structure simplifies.",
+            "Alignment Read · Timeframes Mismatch",
+            "Higher and lower timeframes are pulling in different directions. Treat this coin as tactically noisy until the picture simplifies.",
             WARNING,
         )
 
@@ -475,13 +464,7 @@ def render(ctx: dict) -> None:
     render_page_header(
         st,
         title="Multi-Timeframe Alignment",
-        intro_html=(
-            "Single-coin timeframe alignment view across 5m, 15m, 1h, 4h, and 1d. "
-            "Use it to check whether short-term timing is aligned with higher-timeframe structure. "
-            "Higher timeframes carry more weight because they usually define the stronger structural regime. "
-            "It does not issue a standalone trade command. "
-            "The `Setup Confirm` column below is per-timeframe setup context only, and is meant to validate the same read you already see in Market, Spot, and Position."
-        ),
+        intro_html=copy_text("multitf.intro_html"),
     )
     st.markdown(
         f"""
@@ -543,70 +526,71 @@ def render(ctx: dict) -> None:
     )
 
     coin = _normalize_coin_input(st.text_input("Coin (e.g. BTC, ETH, TAO)", value="BTC", key="mtf_coin_input"))
-    run = st.button("Run Alignment Check", type="primary")
     state_key = "mtf_alignment_payload"
-
-    if run:
-        validation_error = _validate_coin_symbol(coin)
-        if validation_error:
-            st.error(validation_error)
+    sig_key = "mtf_alignment_sig"
+    validation_error = _validate_coin_symbol(coin)
+    if validation_error:
+        st.error(validation_error)
+        payload = st.session_state.get(state_key)
+        if not payload:
             return
-        with st.spinner("Checking alignment across all timeframes..."):
-            df_spot_4h = fetch_ohlcv(coin, "4h", limit=260)
-            df_spot_1d = fetch_ohlcv(coin, "1d", limit=260)
-            spot_snapshot = build_spot_direction_snapshot(
-                df_4h=_prepare_closed_frame(df_spot_4h, min_rows=81),
-                df_1d=_prepare_closed_frame(df_spot_1d, min_rows=81),
-            )
-            confidence_snapshot = build_confidence_snapshot(
-                direction=spot_snapshot.direction,
-                timeframe_alignment=spot_snapshot.timeframe_alignment,
-                structure_quality=spot_snapshot.structure_quality,
-                trend_quality=spot_snapshot.trend_quality,
-                regime_quality=spot_snapshot.regime_quality,
-                location_quality=spot_snapshot.location_quality,
-                timeframe_conflict=spot_snapshot.timeframe_conflict,
-                degraded_data=spot_snapshot.degraded_data,
-                range_regime=spot_snapshot.range_regime,
-            )
-            live_rows = _build_rows(coin, spot_snapshot.direction, float(confidence_snapshot.score))
-            valid_live = [row for row in live_rows if row["direction"] in {"UPSIDE", "DOWNSIDE", "NEUTRAL"}]
-            rows = live_rows
-            from_cache = False
-            cache_ts = None
-            if not valid_live:
-                rows, from_cache, cache_ts = live_or_snapshot(
-                    st,
-                    f"mtf_rows::{coin}",
-                    live_rows,
-                    max_age_sec=900,
-                    current_sig=(coin,),
+    else:
+        current_sig = (coin,)
+        if st.session_state.get(sig_key) != current_sig:
+            with st.spinner("Checking alignment across all timeframes..."):
+                df_spot_4h = fetch_ohlcv(coin, "4h", limit=260)
+                df_spot_1d = fetch_ohlcv(coin, "1d", limit=260)
+                spot_snapshot = build_spot_direction_snapshot(
+                    df_4h=_prepare_closed_frame(df_spot_4h, min_rows=81),
+                    df_1d=_prepare_closed_frame(df_spot_1d, min_rows=81),
                 )
-            else:
-                live_or_snapshot(
-                    st,
-                    f"mtf_rows::{coin}",
-                    live_rows,
-                    max_age_sec=900,
-                    current_sig=(coin,),
+                confidence_snapshot = build_confidence_snapshot(
+                    direction=spot_snapshot.direction,
+                    timeframe_alignment=spot_snapshot.timeframe_alignment,
+                    structure_quality=spot_snapshot.structure_quality,
+                    trend_quality=spot_snapshot.trend_quality,
+                    regime_quality=spot_snapshot.regime_quality,
+                    location_quality=spot_snapshot.location_quality,
+                    timeframe_conflict=spot_snapshot.timeframe_conflict,
+                    degraded_data=spot_snapshot.degraded_data,
+                    range_regime=spot_snapshot.range_regime,
                 )
-            metrics = compute_multitf_alignment(rows)
-            st.session_state[state_key] = {
-                "coin": coin,
-                "rows": rows,
-                "metrics": metrics,
-                "spot_direction": str(spot_snapshot.direction),
-                "spot_confidence": float(confidence_snapshot.score),
-                "from_cache": from_cache,
-                "cache_ts": cache_ts,
-            }
+                live_rows = _build_rows(coin, spot_snapshot.direction, float(confidence_snapshot.score))
+                valid_live = [row for row in live_rows if row["direction"] in {"UPSIDE", "DOWNSIDE", "NEUTRAL"}]
+                rows = live_rows
+                from_cache = False
+                cache_ts = None
+                if not valid_live:
+                    rows, from_cache, cache_ts = live_or_snapshot(
+                        st,
+                        f"mtf_rows::{coin}",
+                        live_rows,
+                        max_age_sec=900,
+                        current_sig=current_sig,
+                    )
+                else:
+                    live_or_snapshot(
+                        st,
+                        f"mtf_rows::{coin}",
+                        live_rows,
+                        max_age_sec=900,
+                        current_sig=current_sig,
+                    )
+                metrics = compute_multitf_alignment(rows)
+                st.session_state[state_key] = {
+                    "coin": coin,
+                    "rows": rows,
+                    "metrics": metrics,
+                    "spot_direction": str(spot_snapshot.direction),
+                    "spot_confidence": float(confidence_snapshot.score),
+                    "from_cache": from_cache,
+                    "cache_ts": cache_ts,
+                }
+                st.session_state[sig_key] = current_sig
 
     payload = st.session_state.get(state_key)
     if not payload:
         return
-
-    if payload.get("coin") != coin:
-        st.info(f"Showing latest alignment snapshot for {payload.get('coin')}. Press Run Alignment Check to refresh {coin}.")
 
     rows = payload["rows"]
     metrics = payload["metrics"]
@@ -695,19 +679,9 @@ def render(ctx: dict) -> None:
             "Timing read from 5m / 15m. Useful for entry timing, not structure by itself.",
         )
         + _pill(
-            f"Avg Confidence · {metrics['avg_confidence']:.0f}%",
-            ACCENT,
-            "Average selected-timeframe confidence across all usable timeframes.",
-        )
-        + _pill(
             f"Confirming Confidence · {conviction_quality_label}",
             conviction_quality_color,
             "Average confidence of only the timeframes that support the current directional bias.",
-        )
-        + _pill(
-            f"Neutral TFs · {metrics['neutral_count']}",
-            WARNING,
-            "How many usable timeframes are neutral rather than directional.",
         )
         + "</div>",
         unsafe_allow_html=True,
@@ -715,44 +689,20 @@ def render(ctx: dict) -> None:
 
     render_help_details(
         st,
-        summary="How to read quickly (?)",
-        body_html=(
-            "<b>1.</b> Start with <b>Higher-TF Bias</b>. That is the structural layer and usually matters most.<br>"
-            "<b>2.</b> Then read <b>Directional Alignment</b>. It measures weighted direction agreement, not full setup quality by itself.<br>"
-            "<b>3.</b> Check <b>Confirming Confidence</b>. That tells you how strong the supporting timeframes look on their own confidence model.<br>"
-            "<b>4.</b> Use <b>Short-TF Timing</b> as confirmation. If 5m/15m disagree with 1h/4h/1d, the structure may still be valid but entry timing is noisy.<br>"
-            "<b>5.</b> If coverage is partial, trust the result less. Missing timeframes reduce confidence even when the visible alignment looks clean.<br>"
-            "<b>6.</b> A `*` in <b>AI Ensemble</b> means the ML layer fell back to neutral for safety on that timeframe.<br>"
-            "<b>7.</b> Use this tab to confirm structure, not to replace Market / Spot / Position decisions."
-        ),
-    )
-    render_help_details(
-        st,
-        summary="Column Guide (?)",
-        body_html=(
-            "<b>Timeframe</b>: the candle interval being checked.<br>"
-            "<b>Layer</b>: 5m/15m are timing; 1h/4h/1d are structural.<br>"
-            "<b>Δ (%)</b>: last closed-candle change for that timeframe.<br>"
-            "<b>Setup Confirm</b>: per-timeframe confirmation of the global spot bias from 1D + 4H. It is not a standalone trade command.<br>"
-            "<b>Direction</b>: Upside / Downside / Neutral technical bias for that timeframe.<br>"
-            "<b>Confidence</b>: selected-timeframe confidence for that row. It is separate from the global spot-bias confidence shown in the pill above.<br>"
-            "<b>AI Ensemble</b>: ML directional read plus vote count on that timeframe. `*` and `Fallback` mean the AI model could not form a reliable view and was shown as Neutral for safety.<br>"
-            "<b>Tech vs AI Alignment</b>: conviction quality between technical structure and AI context.<br>"
-            "<b>Show advanced columns</b>: adds full technical regime fields from the Spot-style breakdown for each timeframe.<br>"
-            "<b>Advanced view</b>: filters advanced columns into Trend, Momentum, or Volatility & Volume subsets."
-        ),
+        summary="How to use this tab (?)",
+        body_html=copy_text("multitf.help.quick_html"),
     )
 
-    show_advanced_columns = st.toggle("Show advanced columns", value=False, key="mtf_show_advanced_columns")
+    show_advanced_columns = False
     base_columns = [
         "Timeframe",
-        "Layer",
+        "Role",
         "Δ (%)",
-        "Setup Confirm",
+        "Per-TF Setup",
         "Direction",
         "Confidence",
         "AI Ensemble",
-        "Tech vs AI Alignment",
+        "Tech/AI Fit",
     ]
     advanced_columns = [
         "ADX",
@@ -775,31 +725,39 @@ def render(ctx: dict) -> None:
         "Volatility & Volume": ["Spike Alert", "Bollinger", "Volatility"],
     }
     advanced_view = "All"
-    if show_advanced_columns:
-        advanced_view = st.radio(
-            "Advanced view",
-            list(advanced_column_groups.keys()),
-            index=0,
-            horizontal=True,
-            key="mtf_advanced_view",
-        )
-        render_help_details(
-            st,
-            summary=f"{advanced_view} column help (?)",
-            body_html="<br>".join(_advanced_help_items(advanced_column_groups.get(advanced_view, advanced_columns))),
-        )
+    with st.expander("Table Options & Export", expanded=False):
+        st.markdown(copy_text("multitf.table.confirmation_note"))
+        show_advanced_columns = st.toggle("Show advanced columns", value=False, key="mtf_show_advanced_columns")
+        if show_advanced_columns:
+            advanced_view = st.radio(
+                "Advanced view",
+                list(advanced_column_groups.keys()),
+                index=0,
+                horizontal=True,
+                key="mtf_advanced_view",
+            )
+            render_help_details(
+                st,
+                summary="Column guide (?)",
+                body_html=copy_text("multitf.table.column_guide_html"),
+            )
+            render_help_details(
+                st,
+                summary=f"{advanced_view} advanced help (?)",
+                body_html="<br>".join(_advanced_help_items(advanced_column_groups.get(advanced_view, advanced_columns))),
+            )
     table_rows = []
     export_rows = []
     for row in rows:
         table_row = {
             "Timeframe": row["Timeframe"],
-            "Layer": row["Layer"],
+            "Role": row["Layer"],
             "Δ (%)": row["Delta"],
-            "Setup Confirm": row["Setup Confirm"],
+            "Per-TF Setup": row["Setup Confirm"],
             "Direction": row["Direction"],
             "Confidence": row["Confidence"],
             "AI Ensemble": row["AI Ensemble"],
-            "Tech vs AI Alignment": row["Tech vs AI Alignment"],
+            "Tech/AI Fit": row["Tech vs AI Alignment"],
         }
         if show_advanced_columns:
             table_row.update(
@@ -822,13 +780,13 @@ def render(ctx: dict) -> None:
         export_rows.append(
             {
                 "Timeframe": row["Timeframe"],
-                "Layer": row["Layer"],
+                "Role": row["Layer"],
                 "Δ (%)": row["Delta"],
-                "Setup Confirm": row["Setup Confirm"],
+                "Per-TF Setup": row["Setup Confirm"],
                 "Direction": row["Direction"],
                 "Confidence": row["Confidence"],
                 "AI Ensemble": row["AI Ensemble"],
-                "Tech vs AI Alignment": row["Tech vs AI Alignment"],
+                "Tech/AI Fit": row["Tech vs AI Alignment"],
                 "ADX": row["ADX"],
                 "SuperTrend": row["SuperTrend"],
                 "Ichimoku": row["Ichimoku"],
@@ -850,10 +808,10 @@ def render(ctx: dict) -> None:
     styled = (
         df_rows.style
         .map(_style_delta, subset=["Δ (%)"])
-        .map(_style_setup_confirm, subset=["Setup Confirm"])
+        .map(_style_setup_confirm, subset=["Per-TF Setup"])
         .map(_style_indicator, subset=["Direction", "Confidence", "AI Ensemble"])
-        .map(_style_alignment, subset=["Tech vs AI Alignment"])
-        .map(_style_layer, subset=["Layer"])
+        .map(_style_alignment, subset=["Tech/AI Fit"])
+        .map(_style_layer, subset=["Role"])
     )
     if show_advanced_columns:
         if "ADX" in df_rows.columns:
@@ -888,9 +846,10 @@ def render(ctx: dict) -> None:
     export_df["Confirming Confidence"] = conviction_quality_label
     export_df["Coverage Summary"] = f"{metrics['coverage_count']}/{metrics['coverage_total']} ({metrics['coverage_read']})"
     export_csv = export_df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        "Export Multi-TF Alignment (CSV)",
-        data=export_csv,
-        file_name=f"{payload['coin'].replace('/', '_')}_multitf_alignment.csv",
-        mime="text/csv",
-    )
+    with st.expander("Export Snapshot", expanded=False):
+        st.download_button(
+            "Export Multi-TF Alignment (CSV)",
+            data=export_csv,
+            file_name=f"{payload['coin'].replace('/', '_')}_multitf_alignment.csv",
+            mime="text/csv",
+        )

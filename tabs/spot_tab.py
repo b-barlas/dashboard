@@ -3,6 +3,7 @@ from ui.ctx import get_ctx
 import pandas as pd
 import plotly.graph_objs as go
 import ta
+from core.trading_copy import copy_text, playbook_key, trade_gate_key
 from core.session_utils import session_bucket_for_timestamp
 from core.confidence import confidence_bucket
 from core.market_decision import action_reason_text, normalize_action_class
@@ -151,18 +152,18 @@ def _spot_archive_status_label(adaptive_snapshot) -> str:
     session_label = str(getattr(adaptive_snapshot, "session_fit_label", "") or "").strip()
 
     if archive_label == "Archive Guardrail":
-        return "Archive Guardrail"
+        return copy_text("spot.archive.status.guardrail")
     if archive_label == "Archive Caution":
-        return "Archive Caution"
+        return copy_text("spot.archive.status.caution")
     if adaptive_label == "Historically Favored":
-        return "History Supportive"
+        return copy_text("spot.archive.status.supportive")
     if adaptive_label == "Historically Weak":
-        return "History Fragile"
+        return copy_text("spot.archive.status.fragile")
     if session_label == "Session Supportive":
-        return "Session Supportive"
+        return copy_text("spot.archive.status.session_supportive")
     if session_label == "Session Fragile":
-        return "Session Fragile"
-    return "History Mixed"
+        return copy_text("spot.archive.status.session_fragile")
+    return copy_text("spot.archive.status.mixed")
 
 
 def _spot_archive_banner_note(
@@ -184,13 +185,14 @@ def _spot_archive_banner_note(
     adaptive_label = str(getattr(adaptive_snapshot, "label", "") or "").strip()
     history_note = str(getattr(adaptive_snapshot, "note", "") or "").strip()
     trade_gate = str(market_context.get("Trade Gate") or "").strip()
+    trade_gate_value_key = trade_gate_key(market_context.get("Trade Gate Key") or trade_gate)
     playbook = str(market_context.get("Playbook") or "").strip()
     catalyst_window = str(market_context.get("Catalyst Window") or "").strip()
     flow_proxy = str(market_context.get("Flow Proxy") or "").strip()
 
     # In defensive/no-trade reads, lead with the stance and avoid a misleading
     # "history favored" opener unless the archive verdict is actually actionable.
-    if stance in {"Stand Aside", "Defensive Only"} and adaptive_label == "Historically Favored":
+    if trade_gate_key((context_fit or {}).get("gate_key") or stance) in {"NO_TRADE", "DEFENSIVE_ONLY"} and adaptive_label == "Historically Favored":
         history_note = ""
     if session_label in {"Session Mixed", "Session Unproven"}:
         session_note = ""
@@ -198,49 +200,49 @@ def _spot_archive_banner_note(
     plain_archive_note = ""
     if archive_label := str(getattr(adaptive_snapshot, "archive_guardrail_label", "") or "").strip():
         if archive_label == "Archive Guardrail":
-            plain_archive_note = "Similar setups have struggled enough here to avoid fresh risk."
+            plain_archive_note = copy_text("spot.archive.history.guardrail")
         elif archive_label == "Archive Caution":
-            plain_archive_note = "Similar setups have been softer in this kind of market window."
+            plain_archive_note = copy_text("spot.archive.history.caution")
 
     plain_history_note = ""
     if not plain_archive_note:
         if adaptive_label == "Historically Favored":
-            plain_history_note = "Similar setups have generally held up well."
+            plain_history_note = copy_text("spot.archive.history.supportive")
         elif adaptive_label == "Historically Weak":
-            plain_history_note = "Similar setups have had weak follow-through."
+            plain_history_note = copy_text("spot.archive.history.fragile")
         elif adaptive_label == "Historically Neutral":
-            plain_history_note = "History is mixed here, so cleaner confirmation matters more."
+            plain_history_note = copy_text("spot.archive.history.neutral")
 
     plain_session_note = ""
     if session_label == "Session Supportive":
-        plain_session_note = "This session has been a cleaner trading window lately."
+        plain_session_note = copy_text("spot.archive.session.supportive")
     elif session_label == "Session Fragile":
-        plain_session_note = "This session has been less reliable lately."
+        plain_session_note = copy_text("spot.archive.session.fragile")
 
     plain_context_note = ""
     context_bits: list[str] = []
-    if trade_gate == "No-Trade":
-        context_bits.append("The market is not in a clean entry window right now")
-    elif trade_gate == "Selective Only":
-        context_bits.append("Only the cleanest setups deserve attention right now")
-    elif trade_gate == "Tradeable":
-        context_bits.append("The market is open enough for clean setups")
+    if trade_gate_value_key == "NO_TRADE":
+        context_bits.append(copy_text("spot.archive.context.trade_gate.no_trade"))
+    elif trade_gate_value_key == "SELECTIVE_ONLY":
+        context_bits.append(copy_text("spot.archive.context.trade_gate.selective"))
+    elif trade_gate_value_key == "TRADEABLE":
+        context_bits.append(copy_text("spot.archive.context.trade_gate.tradeable"))
     if catalyst_window.startswith("Far"):
-        context_bits.append("there is no strong catalyst nearby")
+        context_bits.append(copy_text("spot.archive.context.catalyst.far"))
     elif catalyst_window.startswith("Near"):
-        context_bits.append("a nearby catalyst could speed up the move")
+        context_bits.append(copy_text("spot.archive.context.catalyst.near"))
     elif catalyst_window.startswith("Blocking"):
-        context_bits.append("a nearby catalyst is adding event risk")
+        context_bits.append(copy_text("spot.archive.context.catalyst.blocking"))
     if flow_proxy == "Flow Balanced":
-        context_bits.append("positioning looks balanced rather than stretched")
+        context_bits.append(copy_text("spot.archive.context.flow.balanced"))
     elif flow_proxy in {"Shorts Crowded", "Longs Crowded"}:
-        context_bits.append("positioning looks stretched enough to watch for squeeze risk")
+        context_bits.append(copy_text("spot.archive.context.flow.crowded"))
     if context_bits:
         plain_context_note = " • ".join(
             [context_bits[0].capitalize() + "."] + [bit.capitalize() + "." for bit in context_bits[1:2]]
         )
-    elif playbook == "Wait for confirmation":
-        plain_context_note = "The market still needs cleaner confirmation before fresh risk makes sense."
+    elif playbook_key(playbook) == "WAIT_CONFIRMATION":
+        plain_context_note = copy_text("spot.archive.context.playbook.wait")
 
     return _compact_note_parts(
         [
@@ -309,15 +311,7 @@ def render(ctx: dict) -> None:
     render_help_details(
         st,
         summary="How to read quickly",
-        body_html=(
-            "<b>1.</b> Start with <b>Setup Snapshot</b>: Δ (%) + Setup Confirm + Direction + Confidence.<br>"
-            "<b>2.</b> Read <b>Setup Confirm</b> first: TREND+AI = strongest confirmation, TREND-led = technicals support the move, AI-led = AI support is strong enough, PROBE = starter-risk only, WATCH = idea is alive but early, SKIP = leave it alone for now. This uses selected-timeframe execution quality plus a local spot risk model, not the scalp planner.<br>"
-            "<b>3.</b> <b>Direction</b> = higher-timeframe spot bias (1D + 4H). <b>Confidence</b> = quality of that bias.<br>"
-            "<b>4.</b> Validate with <b>AI Ensemble</b> + <b>AI Confidence</b>. AI Ensemble is the higher-timeframe AI bias (1D + 4H); AI Confidence scores how reliable that HTF AI verdict is.<br>"
-            "<b>5.</b> <b>Market Archive Read</b> is a market-history fit check, not a coin-specific proof card. Use it to size aggression, not to override price structure.<br>"
-            "<b>6.</b> Use <b>Technical Regime Breakdown</b> only as selected-timeframe confirmation context, not as the main direction engine.<br>"
-            "<b>7.</b> If the plan is defensive or SKIP, treat the lower section as reference/reclaim levels, not as an active two-path entry map."
-        ),
+        body_html=copy_text("spot.help.quick_html"),
     )
     coin = _normalize_coin_input(st.text_input(
         "Coin (e.g. BTC, ETH, TAO)",
@@ -494,7 +488,9 @@ def render(ctx: dict) -> None:
                 "AI Alignment": "Aligned" if direction_key(spot_snapshot.direction) == ai_spot_direction_key else "Not aligned",
                 "Market Lead": str(recent_market_context.get("Market Lead") or "No Clear Lead"),
                 "Market Regime": str(recent_market_context.get("Market Regime") or "Unknown"),
+                "Playbook Key": str(recent_market_context.get("Playbook Key") or "Unknown"),
                 "Playbook": str(recent_market_context.get("Playbook") or "Unknown"),
+                "Trade Gate Key": str(recent_market_context.get("Trade Gate Key") or "Unknown"),
                 "Trade Gate": str(recent_market_context.get("Trade Gate") or "Unknown"),
                 "Sector Rotation": str(recent_market_context.get("Sector Rotation") or "Unknown"),
                 "Catalyst State": str(recent_market_context.get("Catalyst State") or "Unknown"),
@@ -731,147 +727,208 @@ def render(ctx: dict) -> None:
         setup_cls = normalize_action_class(action_raw)
         setup_label = setup_confirm
         if setup_cls == "SKIP":
-            plan_status = "No-Trade"
+            plan_status = copy_text("spot.plan.mode.no_trade")
             plan_color = NEGATIVE
-            plan_now = "Do not open a new spot position on this structure."
-            plan_entry = (
-                f"Reference only: keep {left_zone_label} ({pullback_zone_text}) and "
-                f"{trigger_label} ({_fmt_price(breakout_trigger)}) on the map."
+            plan_now = copy_text("spot.plan.skip.now")
+            plan_entry = copy_text(
+                "spot.plan.skip.entry",
+                left_zone_label=left_zone_label,
+                pullback_zone_text=pullback_zone_text,
+                trigger_label=trigger_label,
+                breakout_trigger=_fmt_price(breakout_trigger),
             )
-            plan_protection = f"If already holding, keep protection at {_fmt_price(pullback_invalidation)}."
-            plan_next = "Wait for WATCH, PROBE, or a confirmed class before treating this as active risk."
+            plan_protection = copy_text(
+                "spot.plan.skip.protection",
+                pullback_invalidation=_fmt_price(pullback_invalidation),
+            )
+            plan_next = copy_text("spot.plan.skip.next")
         elif setup_cls == "PROBE":
-            plan_status = "Probe"
+            plan_status = copy_text("spot.plan.mode.probe")
             plan_color = WARNING
             if spot_direction_key == "UPSIDE":
-                plan_now = "Starter-risk only. Keep size small."
-                plan_entry = (
-                    f"Starter entry can come from {left_zone_label} ({pullback_zone_text}) "
-                    f"or a clean close above {trigger_label} ({_fmt_price(breakout_trigger)})."
+                plan_now = copy_text("spot.plan.probe.upside.now")
+                plan_entry = copy_text(
+                    "spot.plan.probe.upside.entry",
+                    left_zone_label=left_zone_label,
+                    pullback_zone_text=pullback_zone_text,
+                    trigger_label=trigger_label,
+                    breakout_trigger=_fmt_price(breakout_trigger),
                 )
-                plan_protection = (
-                    f"Stops stay at {_fmt_price(pullback_invalidation)} / {_fmt_price(breakout_invalidation)}."
+                plan_protection = copy_text(
+                    "spot.plan.probe.upside.protection",
+                    pullback_invalidation=_fmt_price(pullback_invalidation),
+                    breakout_invalidation=_fmt_price(breakout_invalidation),
                 )
-                plan_next = (
-                    f"Add only after stronger confirmation. Targets: {left_tp_label} ({pullback_tp_text}) / "
-                    f"{right_tp_label} ({breakout_tp_text})."
+                plan_next = copy_text(
+                    "spot.plan.probe.upside.next",
+                    left_tp_label=left_tp_label,
+                    pullback_tp_text=pullback_tp_text,
+                    right_tp_label=right_tp_label,
+                    breakout_tp_text=breakout_tp_text,
                 )
             elif spot_direction_key == "DOWNSIDE":
-                plan_now = "Stay defensive. Do not add fresh spot size here."
-                plan_entry = "Treat this as an early warning, not a buy trigger."
-                plan_protection = (
-                    f"Wait for a reclaim above {trigger_label} ({_fmt_price(breakout_trigger)}) and keep "
-                    f"protection at {_fmt_price(pullback_invalidation)}."
+                plan_now = copy_text("spot.plan.probe.downside.now")
+                plan_entry = copy_text("spot.plan.probe.downside.entry")
+                plan_protection = copy_text(
+                    "spot.plan.probe.downside.protection",
+                    trigger_label=trigger_label,
+                    breakout_trigger=_fmt_price(breakout_trigger),
+                    pullback_invalidation=_fmt_price(pullback_invalidation),
                 )
-                plan_next = "Only reconsider upside risk after direction repairs."
+                plan_next = copy_text("spot.plan.probe.downside.next")
             else:
-                plan_now = "Attention only. The structure is interesting, but not ready for committed spot risk."
-                plan_entry = (
-                    f"Use it as a starter-watch zone around {left_zone_label} ({pullback_zone_text}) "
-                    f"and {trigger_label} ({_fmt_price(breakout_trigger)})."
+                plan_now = copy_text("spot.plan.probe.neutral.now")
+                plan_entry = copy_text(
+                    "spot.plan.probe.neutral.entry",
+                    left_zone_label=left_zone_label,
+                    pullback_zone_text=pullback_zone_text,
+                    trigger_label=trigger_label,
+                    breakout_trigger=_fmt_price(breakout_trigger),
                 )
-                plan_protection = "Do not commit full spot size while direction is still neutral."
-                plan_next = "Wait for one side to confirm and close with follow-through."
+                plan_protection = copy_text("spot.plan.probe.neutral.protection")
+                plan_next = copy_text("spot.plan.probe.neutral.next")
         elif setup_cls == "WATCH":
-            plan_status = "Watch"
+            plan_status = copy_text("spot.plan.mode.watch")
             plan_color = WARNING
             if spot_direction_key == "UPSIDE":
-                plan_now = "Monitor only. Confirmation is partial."
-                plan_entry = (
-                    f"Watch reaction quality in {left_zone_label} ({pullback_zone_text}) or a close above "
-                    f"{trigger_label} ({_fmt_price(breakout_trigger)})."
+                plan_now = copy_text("spot.plan.watch.upside.now")
+                plan_entry = copy_text(
+                    "spot.plan.watch.upside.entry",
+                    left_zone_label=left_zone_label,
+                    pullback_zone_text=pullback_zone_text,
+                    trigger_label=trigger_label,
+                    breakout_trigger=_fmt_price(breakout_trigger),
                 )
-                plan_protection = (
-                    f"Stops stay at {_fmt_price(pullback_invalidation)} / {_fmt_price(breakout_invalidation)}."
+                plan_protection = copy_text(
+                    "spot.plan.watch.upside.protection",
+                    pullback_invalidation=_fmt_price(pullback_invalidation),
+                    breakout_invalidation=_fmt_price(breakout_invalidation),
                 )
-                plan_next = (
-                    f"If confirmation improves, targets sit at {left_tp_label} ({pullback_tp_text}) / "
-                    f"{right_tp_label} ({breakout_tp_text})."
+                plan_next = copy_text(
+                    "spot.plan.watch.upside.next",
+                    left_tp_label=left_tp_label,
+                    pullback_tp_text=pullback_tp_text,
+                    right_tp_label=right_tp_label,
+                    breakout_tp_text=breakout_tp_text,
                 )
             elif spot_direction_key == "DOWNSIDE":
-                plan_now = "Stay defensive until reclaim confirmation appears."
-                plan_entry = f"Wait for a close back above {trigger_label} ({_fmt_price(breakout_trigger)})."
-                plan_protection = f"If already holding, protect with {_fmt_price(pullback_invalidation)}."
-                plan_next = (
-                    f"Only after reclaim confirmation should you use {_fmt_price(breakout_invalidation)} "
-                    f"and {right_tp_label} ({breakout_tp_text})."
+                plan_now = copy_text("spot.plan.watch.downside.now")
+                plan_entry = copy_text(
+                    "spot.plan.watch.downside.entry",
+                    trigger_label=trigger_label,
+                    breakout_trigger=_fmt_price(breakout_trigger),
+                )
+                plan_protection = copy_text(
+                    "spot.plan.watch.downside.protection",
+                    pullback_invalidation=_fmt_price(pullback_invalidation),
+                )
+                plan_next = copy_text(
+                    "spot.plan.watch.downside.next",
+                    breakout_invalidation=_fmt_price(breakout_invalidation),
+                    right_tp_label=right_tp_label,
+                    breakout_tp_text=breakout_tp_text,
                 )
             else:
-                plan_now = "No-force zone until one side confirms."
-                plan_entry = (
-                    f"Monitor {left_zone_label} ({pullback_zone_text}) and {trigger_label} "
-                    f"({_fmt_price(breakout_trigger)})."
+                plan_now = copy_text("spot.plan.watch.neutral.now")
+                plan_entry = copy_text(
+                    "spot.plan.watch.neutral.entry",
+                    left_zone_label=left_zone_label,
+                    pullback_zone_text=pullback_zone_text,
+                    trigger_label=trigger_label,
+                    breakout_trigger=_fmt_price(breakout_trigger),
                 )
-                plan_protection = (
-                    f"Map risk to {_fmt_price(pullback_invalidation)} / {_fmt_price(breakout_invalidation)}."
+                plan_protection = copy_text(
+                    "spot.plan.watch.neutral.protection",
+                    pullback_invalidation=_fmt_price(pullback_invalidation),
+                    breakout_invalidation=_fmt_price(breakout_invalidation),
                 )
-                plan_next = (
-                    f"Keep targets pre-defined at {left_tp_label} ({pullback_tp_text}) / "
-                    f"{right_tp_label} ({breakout_tp_text})."
+                plan_next = copy_text(
+                    "spot.plan.watch.neutral.next",
+                    left_tp_label=left_tp_label,
+                    pullback_tp_text=pullback_tp_text,
+                    right_tp_label=right_tp_label,
+                    breakout_tp_text=breakout_tp_text,
                 )
         elif spot_direction_key == "UPSIDE":
-            plan_status = "Bullish Confirmed"
+            plan_status = copy_text("spot.plan.mode.bullish_confirmed")
             plan_color = POSITIVE
-            plan_now = "Execution-ready upside setup."
-            plan_entry = (
-                f"{left_path_label}: {pullback_zone_text} or {right_path_label}: close above "
-                f"{trigger_label} ({_fmt_price(breakout_trigger)})."
+            plan_now = copy_text("spot.plan.confirmed.upside.now")
+            plan_entry = copy_text(
+                "spot.plan.confirmed.upside.entry",
+                left_path_label=left_path_label,
+                pullback_zone_text=pullback_zone_text,
+                right_path_label=right_path_label,
+                trigger_label=trigger_label,
+                breakout_trigger=_fmt_price(breakout_trigger),
             )
-            plan_protection = (
-                f"Stops stay at {_fmt_price(pullback_invalidation)} / {_fmt_price(breakout_invalidation)}."
+            plan_protection = copy_text(
+                "spot.plan.confirmed.upside.protection",
+                pullback_invalidation=_fmt_price(pullback_invalidation),
+                breakout_invalidation=_fmt_price(breakout_invalidation),
             )
-            plan_next = (
-                f"Targets: {left_tp_label} ({pullback_tp_text}) / {right_tp_label} ({breakout_tp_text}). "
-                f"Take partials at TP-low and trail the remainder."
+            plan_next = copy_text(
+                "spot.plan.confirmed.upside.next",
+                left_tp_label=left_tp_label,
+                pullback_tp_text=pullback_tp_text,
+                right_tp_label=right_tp_label,
+                breakout_tp_text=breakout_tp_text,
             )
         else:
-            plan_status = "Defensive Confirmed"
+            plan_status = copy_text("spot.plan.mode.defensive_confirmed")
             plan_color = NEGATIVE
-            plan_now = "Confirmed read, but spot stays defensive."
-            plan_entry = (
-                f"No fresh spot buy until direction recovers and reclaims {trigger_label} "
-                f"({_fmt_price(breakout_trigger)})."
+            plan_now = copy_text("spot.plan.confirmed.downside.now")
+            plan_entry = copy_text(
+                "spot.plan.confirmed.downside.entry",
+                trigger_label=trigger_label,
+                breakout_trigger=_fmt_price(breakout_trigger),
             )
-            plan_protection = (
-                f"If already holding, de-risk into rallies and protect with {_fmt_price(pullback_invalidation)}."
+            plan_protection = copy_text(
+                "spot.plan.confirmed.downside.protection",
+                pullback_invalidation=_fmt_price(pullback_invalidation),
             )
-            plan_next = (
-                f"Only after reclaim confirmation should you use {_fmt_price(breakout_invalidation)} "
-                f"and {right_tp_label} ({breakout_tp_text})."
+            plan_next = copy_text(
+                "spot.plan.confirmed.downside.next",
+                breakout_invalidation=_fmt_price(breakout_invalidation),
+                right_tp_label=right_tp_label,
+                breakout_tp_text=breakout_tp_text,
             )
 
         st.markdown(
             f"<div class='panel-box' style='border-left:4px solid {plan_color};'>"
-            f"<b style='color:{plan_color}; font-size:1rem;'>Spot Execution Plan</b>"
+            f"<b style='color:{plan_color}; font-size:1rem;'>{copy_text('spot.plan.title')}</b>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-            f"Mode: <b style='color:{plan_color};'>{plan_status}</b>"
+            f"{copy_text('spot.plan.label.mode')}: <b style='color:{plan_color};'>{plan_status}</b>"
             f"</div>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-            f"Setup Confirm: <b>{setup_label}</b>"
+            f"{copy_text('spot.plan.label.setup')}: <b>{setup_label}</b>"
             f"</div>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-            f"Market stance: <b>{context_fit['label']}</b> — {context_fit['aggression']}"
+            f"{copy_text('spot.plan.label.market_stance')}: <b>{context_fit['label']}</b> — {context_fit['aggression']}"
             f"</div>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-            f"Now: {plan_now}"
+            f"{copy_text('spot.plan.label.now')}: {plan_now}"
             f"</div>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-            f"Entry path: {plan_entry}"
+            f"{copy_text('spot.plan.label.entry')}: {plan_entry}"
             f"</div>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-            f"Protection: {plan_protection}"
+            f"{copy_text('spot.plan.label.protection')}: {plan_protection}"
             f"</div>"
             f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-            f"Next: {plan_next}"
+            f"{copy_text('spot.plan.label.next')}: {plan_next}"
             f"</div>"
-            f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:6px;'>Guide only, not financial advice. "
-            f"Always confirm with your own risk plan.</span>"
+            f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:6px;'>"
+            f"{copy_text('spot.plan.disclaimer')}</span>"
             f"</div></div>",
             unsafe_allow_html=True,
         )
 
         show_actionable_paths = not (setup_cls == "SKIP" or spot_direction_key == "DOWNSIDE")
-        levels_section_label = "Execution Levels (spot-only)" if show_actionable_paths else "Defensive Reference Levels"
+        levels_section_label = (
+            copy_text("spot.levels.actionable_title")
+            if show_actionable_paths
+            else copy_text("spot.levels.defensive_title")
+        )
 
         st.markdown(
             f"<div style='margin:0.3rem 0 0.45rem 0; text-align:center; color:{TEXT_MUTED}; font-size:0.78rem; text-transform:uppercase; letter-spacing:0.45px;'>"
@@ -934,7 +991,7 @@ def render(ctx: dict) -> None:
                 card_min_height="128px",
                 center_last_row=True,
             )
-            st.caption("Spot stays defensive here. Use these as reclaim and protection references, not as an active two-path entry map.")
+            st.caption(copy_text("spot.levels.defensive_caption"))
 
         if show_actionable_paths:
             map_levels = [

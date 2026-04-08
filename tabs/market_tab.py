@@ -51,6 +51,7 @@ from core.catalyst_engine import catalyst_signal_note, catalyst_window_label
 from core.session_utils import session_bucket_for_timestamp
 from core.signal_tracker import build_alert_effectiveness_summary
 from core.symbols import canonical_base_symbol, is_stable_base_symbol
+from core.trading_copy import copy_text
 from tabs.market_scan_helpers import (
     SCAN_MODE_ACTIONABLE as _SCAN_MODE_ACTIONABLE,
     SCAN_MODE_BROAD as _SCAN_MODE_BROAD,
@@ -68,7 +69,11 @@ from tabs.market_scan_helpers import (
     _scan_candidate_pool_size,
 )
 from ui.primitives import render_help_details, render_kpi_grid, render_page_header
-from ui.signal_formatters import trade_gate_display_label
+from ui.signal_formatters import (
+    setup_confirm_display as _shared_setup_confirm_display,
+    spot_bias_label as _shared_spot_bias_label,
+    trade_gate_display_label,
+)
 
 _LAST_GOOD_RESULTS_KEY = "market_scan_last_good_results"
 _LAST_GOOD_SIG_KEY = "market_scan_last_good_sig"
@@ -291,25 +296,30 @@ def _compact_trade_gate_note(
 
     parts: list[str] = []
     if gate_key == "TRADEABLE":
-        parts.append("The tape is open for normal-quality setups.")
+        parts.append(copy_text("market.trade_gate.summary.tradeable"))
     elif gate_key == "SELECTIVE_ONLY":
         if int(enter_count) <= 0 and int(probe_count) > 0:
-            parts.append("Nothing is fully ready yet, but probe-grade setups are live.")
+            parts.append(copy_text("market.trade_gate.summary.selective_probe"))
         else:
-            parts.append("Conditions are selective; only the cleanest setups deserve fresh risk.")
+            parts.append(copy_text("market.trade_gate.summary.selective_clean"))
     elif gate_key == "DEFENSIVE_ONLY":
-        parts.append("Conditions are defensive; fresh risk should stay small.")
+        parts.append(copy_text("market.trade_gate.summary.defensive"))
     else:
-        parts.append("Stand aside until the tape improves.")
+        parts.append(copy_text("market.trade_gate.summary.stand_aside"))
 
     if size_label:
-        parts.append(f"Size cap: {size_label}.")
+        parts.append(copy_text("market.trade_gate.summary.size_cap", size_label=size_label))
     if catalyst_label not in {"", "No Near Catalyst", "Catalyst Clear"}:
-        parts.append(f"Catalyst: {catalyst_label}.")
+        parts.append(copy_text("market.trade_gate.summary.catalyst", catalyst_label=catalyst_label))
     if flow_label not in {"", "Flow Balanced"}:
-        parts.append(f"Flow: {flow_label}.")
+        parts.append(copy_text("market.trade_gate.summary.flow", flow_label=flow_label))
     if session_label in {"Session Supportive", "Session Fragile"}:
-        parts.append(f"Session: {session_label.replace('Session ', '')}.")
+        parts.append(
+            copy_text(
+                "market.trade_gate.summary.session",
+                session_label=session_label.replace("Session ", ""),
+            )
+        )
 
     archive_brief = _adaptive_execution_brief(adaptive_model)
     if archive_brief:
@@ -407,8 +417,10 @@ def _market_signal_log_events(
                 "market_lead_upside": market_lead_snapshot.upside_leads,
                 "market_lead_downside": market_lead_snapshot.downside_leads,
                 "market_regime": str(getattr(market_regime_snapshot, "label", "") or ""),
+                "market_playbook_key": str(getattr(market_regime_snapshot, "playbook_key", "") or ""),
                 "market_playbook": str(getattr(market_regime_snapshot, "playbook", "") or ""),
                 "market_no_trade": bool(getattr(market_trade_gate_snapshot, "no_trade", False)),
+                "market_trade_gate_key": str(getattr(market_trade_gate_snapshot, "gate_key", "") or ""),
                 "market_trade_gate": str(getattr(market_trade_gate_snapshot, "label", "") or ""),
                 "market_alert_keys": alert_keys_text,
                 "market_primary_alert": primary_alert,
@@ -585,15 +597,57 @@ def _setup_status_summary(
     source = str(source_label or "").strip().upper()
     label = "Setup Status"
     if source.startswith("CACHED"):
-        head = "CACHED SETUPS" if int(enter_count) > 0 else ("CACHED PROBES" if int(probe_count) > 0 else "NO LIVE SETUP")
-        sub = f"CACHED READY: {enter_count} • PROBE: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}"
+        head = (
+            copy_text("market.status.head.cached_ready")
+            if int(enter_count) > 0
+            else (
+                copy_text("market.status.head.cached_probe")
+                if int(probe_count) > 0
+                else copy_text("market.status.head.cached_none")
+            )
+        )
+        sub = copy_text(
+            "market.status.sub.cached",
+            enter_count=enter_count,
+            probe_count=probe_count,
+            watch_count=watch_count,
+            skip_count=skip_count,
+        )
         return label, head, sub
     if "DEGRADED" in source:
-        head = "DEGRADED SETUPS" if int(enter_count) > 0 else ("PROBE-ONLY TAPE" if int(probe_count) > 0 else "NO CLEAN SETUP")
-        sub = f"DEGRADED READY: {enter_count} • PROBE: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}"
+        head = (
+            copy_text("market.status.head.degraded_ready")
+            if int(enter_count) > 0
+            else (
+                copy_text("market.status.head.degraded_probe")
+                if int(probe_count) > 0
+                else copy_text("market.status.head.degraded_none")
+            )
+        )
+        sub = copy_text(
+            "market.status.sub.degraded",
+            enter_count=enter_count,
+            probe_count=probe_count,
+            watch_count=watch_count,
+            skip_count=skip_count,
+        )
         return label, head, sub
-    head = "SETUPS READY" if int(enter_count) > 0 else ("PROBE SETUPS LIVE" if int(probe_count) > 0 else "NO SETUP READY")
-    sub = f"READY: {enter_count} • PROBE: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}"
+    head = (
+        copy_text("market.status.head.live_ready")
+        if int(enter_count) > 0
+        else (
+            copy_text("market.status.head.live_probe")
+            if int(probe_count) > 0
+            else copy_text("market.status.head.live_none")
+        )
+    )
+    sub = copy_text(
+        "market.status.sub.live",
+        enter_count=enter_count,
+        probe_count=probe_count,
+        watch_count=watch_count,
+        skip_count=skip_count,
+    )
     return label, head, sub
 
 
@@ -606,7 +660,7 @@ def _alert_lane_label(alert: object) -> str:
     severity = str(getattr(alert, "severity", "INFO") or "INFO").strip().upper()
     tone = str(getattr(alert, "tone", "") or "").strip().lower()
     if severity == "HIGH":
-        return "Stand Aside"
+        return trade_gate_display_label("NO_TRADE")
     if severity == "MEDIUM":
         if tone == "positive":
             return "Action"
@@ -1057,12 +1111,7 @@ def _audit_scan_summary_lines(
 
 
 def _spot_bias_label(direction: str) -> str:
-    raw = str(direction or "").strip().upper()
-    if raw == "UPSIDE":
-        return "Upside"
-    if raw == "DOWNSIDE":
-        return "Downside"
-    return "Neutral"
+    return _shared_spot_bias_label(direction)
 
 
 def _spot_tf_summary(snapshot) -> str:
@@ -1882,7 +1931,7 @@ def render(ctx: dict) -> None:
         hero=True,
         intro_html=(
             f"Your market overview dashboard. Shows live BTC/ETH prices, total market cap, "
-            f"{_tip('Fear & Greed Index', 'Quick sentiment gauge. Lower means fear; higher means greed. Use it as background context, not as a trade trigger.')} "
+            f"{_tip('Fear & Greed Index', copy_text('market.hero.fear_greed_tip'))} "
             f"and {_tip('BTC Dominance', 'Bitcoin’s share of the total crypto market. Rising dominance usually means money is hiding in BTC; falling dominance can support altcoins.')}. "
             f"The scanner runs either on the live top-liquidity universe or on your custom watchlist, then scores symbols with real-time technical signals."
         ),
@@ -2494,20 +2543,7 @@ def render(ctx: dict) -> None:
         return f"{rr_val:.2f}"
 
     def _setup_confirm_display(raw_action: str) -> str:
-        cls = normalize_action_class(raw_action)
-        if cls == "ENTER_TREND_AI":
-            return "TREND+AI"
-        if cls == "ENTER_TREND_LED":
-            return "TREND-led"
-        if cls == "ENTER_AI_LED":
-            return "AI-led"
-        if cls == "PROBE":
-            return "PROBE"
-        if cls == "WATCH":
-            return "WATCH"
-        if cls == "SKIP":
-            return "SKIP"
-        return str(raw_action or "").strip()
+        return _shared_setup_confirm_display(raw_action)
     def _setup_confirm_class(value: str) -> str:
         return _setup_confirm_class_key(value)
 
@@ -2716,16 +2752,16 @@ def render(ctx: dict) -> None:
             "Coin": "Asset ticker. If you hover the row value, you can also see the actual feed pair or fallback source.",
             "Price ($)": "Latest closed-candle price from the active data feed.",
             "Δ (%)": "Move from the previous closed candle to the latest closed candle on your selected timeframe.",
-            "Setup Confirm": "Final scanner verdict showing whether the setup looks fully ready, probe-worthy with starter risk only, promising-but-early, or not good enough yet.",
+            "Setup Confirm": copy_text("market.tooltip.setup_confirm"),
             "Direction": "Main higher-timeframe technical bias from the 1D and 4H closed candles.",
             "Confidence": "How strong and trustworthy that Direction call is.",
             "AI Ensemble": "Higher-timeframe AI view. Dots show how many models agree.",
             "AI Confidence": "How trustworthy the AI verdict is.",
             "R:R": "Reward-to-risk ratio from target distance versus stop distance.",
-            "Entry Price": "Suggested model entry level for the shorter-term execution plan.",
-            "Stop Loss": "Risk invalidation level for the shorter-term execution plan.",
-            "Target Price": "First take-profit level for the shorter-term execution plan.",
-            "Scalp Opportunity": "Shorter-term execution signal. It only appears when the local setup passes the execution checks.",
+            "Entry Price": copy_text("market.tooltip.entry_price"),
+            "Stop Loss": copy_text("market.tooltip.stop_loss"),
+            "Target Price": copy_text("market.tooltip.target_price"),
+            "Scalp Opportunity": copy_text("market.tooltip.scalp_opportunity"),
             "Market Cap ($)": "Size and liquidity context for the asset.",
             "ADX": "Trend strength indicator. It measures how strong the move is, not whether it is up or down.",
             "SuperTrend": "ATR-based trend follower showing whether price still behaves bullish or bearish.",
@@ -4668,13 +4704,7 @@ def render(ctx: dict) -> None:
         render_help_details(
             st,
             summary="Scanner guide (?)",
-            body_html=(
-                "<b>Read order:</b> <b>Setup Confirm</b> -> <b>Direction + Confidence</b> -> <b>AI Ensemble + AI Confidence</b>.<br>"
-                "<b>Setup Confirm:</b> ENTER = fully ready, PROBE = starter-risk only, WATCH = monitor only, SKIP = pass.<br>"
-                "Price ($) shows the latest candle close.<br>"
-                "Δ (%) shows the change from previous closed candle to latest closed candle on selected timeframe.<br>"
-                "<b>Tip:</b> use column-header and cell hovers for detailed definitions. Advanced columns are optional."
-            ),
+            body_html=copy_text("market.help.scanner_guide_html"),
         )
         controls_col, chips_col = st.columns([1.6, 2.4], gap="small")
         with controls_col:
@@ -4823,6 +4853,7 @@ def render(ctx: dict) -> None:
             signal={
                 "Market Lead": str(getattr(market_lead_snapshot, "label", "") or "No Clear Lead"),
                 "Market Regime": str(getattr(market_regime_snapshot, "label", "") or "Unknown"),
+                "Playbook Key": str(getattr(market_regime_snapshot, "playbook_key", "") or "Unknown"),
                 "Playbook": str(getattr(market_regime_snapshot, "playbook", "") or "Unknown"),
                 "Trade Gate": "Unknown",
                 "Sector Rotation": str(getattr(sector_rotation_snapshot, "label", "") or "Unknown"),
@@ -4879,7 +4910,9 @@ def render(ctx: dict) -> None:
                     ),
                     "Market Lead": str(getattr(market_lead_snapshot, "label", "") or "No Clear Lead"),
                     "Market Regime": str(getattr(market_regime_snapshot, "label", "") or "Unknown"),
+                    "Playbook Key": str(getattr(market_regime_snapshot, "playbook_key", "") or "Unknown"),
                     "Playbook": str(getattr(market_regime_snapshot, "playbook", "") or "Unknown"),
+                    "Trade Gate Key": str(getattr(market_trade_gate_snapshot, "gate_key", "") or "Unknown"),
                     "Trade Gate": str(getattr(market_trade_gate_snapshot, "label", "") or "Unknown"),
                     "Sector Rotation": str(getattr(sector_rotation_snapshot, "label", "") or "Unknown"),
                     "Catalyst State": str(getattr(market_catalyst_snapshot, "label", "") or "Unknown"),
@@ -5343,7 +5376,7 @@ def render(ctx: dict) -> None:
                     "label": status_label,
                     "value": status_head,
                     "subtext": status_sub,
-                    "label_title": "Quick count of how many shown rows are READY, PROBE, WATCH, or SKIP.",
+                    "label_title": copy_text("market.status.label_title"),
                 },
                 {
                     "label": "LEAD Signals",
@@ -5391,18 +5424,18 @@ def render(ctx: dict) -> None:
         skip_ratio = (int(audit_bundle["skip_count"]) / audit_total_rows) if audit_total_rows > 0 else 0.0
         audit_flags: list[str] = []
         if probe_ratio >= 0.35 and int(audit_bundle["enter_count"]) <= 0:
-            audit_flags.append("PROBE-heavy table: setups are close enough for starter risk, but full confirmation is still scarce.")
+            audit_flags.append(copy_text("market.audit.probe_heavy"))
         if watch_ratio >= 0.65:
-            audit_flags.append("WATCH-heavy table: selected-timeframe execution gates are filtering most names.")
+            audit_flags.append(copy_text("market.audit.watch_heavy"))
         if ai_neutral_ratio >= 0.65:
             audit_flags.append("AI is mostly Neutral: HTF AI sees limited clean edge in the current market regime.")
         if skip_ratio >= 0.65:
             if direction_neutral_ratio >= 0.65:
                 audit_flags.append(
-                    "SKIP-heavy table: most candidates are being rejected upstream because the HTF Direction is still Neutral."
+                    copy_text("market.audit.skip_neutral")
                 )
             else:
-                audit_flags.append("SKIP-heavy table: location/risk filters are rejecting most candidates.")
+                audit_flags.append(copy_text("market.audit.skip_risk"))
         if show_diagnostics:
             with st.expander("Distribution Audit", expanded=False):
                 st.caption(

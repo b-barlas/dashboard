@@ -7,6 +7,7 @@ import math
 
 import pandas as pd
 from core.session_utils import session_bucket_for_timestamp
+from core.trading_copy import playbook_display, trade_gate_display, trade_gate_key
 
 
 _LENS_WEIGHTS = {
@@ -46,6 +47,12 @@ _ARCHIVE_GUARDRAIL_LENSES = {
     "Market Regime": 0.80,
     "Catalyst Scope": 0.50,
 }
+
+
+def _text_value(value: object) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
 
 
 @dataclass(frozen=True)
@@ -103,19 +110,19 @@ def _compose_combo_value(left: object, right: object) -> str:
 
 
 def _execution_stance_value(trade_gate: object, adaptive_edge: object, archive_guardrail: object) -> str:
-    gate = str(trade_gate or "").strip()
+    gate = trade_gate_key(trade_gate)
     adaptive = str(adaptive_edge or "").strip()
     guardrail = str(archive_guardrail or "").strip()
 
-    if gate == "No-Trade" or guardrail == "Archive Guardrail":
-        return "Stand Aside"
-    if gate == "Defensive Only" or adaptive == "Historically Weak":
-        return "Defensive Only"
-    if gate == "Tradeable" and adaptive == "Historically Favored" and guardrail == "Archive Clear":
-        return "Tradeable"
-    if gate in {"Tradeable", "Selective Only"}:
-        return "Selective Only"
-    return gate or "Unknown"
+    if gate == "NO_TRADE" or guardrail == "Archive Guardrail":
+        return trade_gate_display("NO_TRADE")
+    if gate == "DEFENSIVE_ONLY" or adaptive == "Historically Weak":
+        return trade_gate_display("DEFENSIVE_ONLY")
+    if gate == "TRADEABLE" and adaptive == "Historically Favored" and guardrail == "Archive Clear":
+        return trade_gate_display("TRADEABLE")
+    if gate in {"TRADEABLE", "SELECTIVE_ONLY"}:
+        return trade_gate_display("SELECTIVE_ONLY")
+    return trade_gate_display(gate) if gate != "UNKNOWN" else "Unknown"
 
 
 _ALERT_KEY_DISPLAY = {
@@ -146,7 +153,7 @@ def _primary_alert_value(row_or_signal: dict[str, object]) -> str:
 
     catalyst_state = str(row_or_signal.get("market_catalyst_state") or row_or_signal.get("Catalyst State") or "").strip().upper()
     catalyst_window = str(row_or_signal.get("market_catalyst_window") or row_or_signal.get("Catalyst Window") or "").strip()
-    trade_gate = str(row_or_signal.get("market_trade_gate") or row_or_signal.get("Trade Gate") or "").strip()
+    trade_gate = _trade_gate_value(row_or_signal)
     market_lead = str(row_or_signal.get("market_lead_label") or row_or_signal.get("Market Lead") or "").strip()
     flow_proxy = str(row_or_signal.get("market_flow_state") or row_or_signal.get("Flow Proxy") or "").strip()
     sector_rotation = str(row_or_signal.get("market_sector_rotation") or row_or_signal.get("Sector Rotation") or "").strip()
@@ -154,7 +161,7 @@ def _primary_alert_value(row_or_signal: dict[str, object]) -> str:
 
     if catalyst_window.startswith("Blocking") or "BLOCK" in catalyst_state:
         return "Catalyst Block"
-    if trade_gate in {"No-Trade", "Defensive Only"}:
+    if trade_gate_key(trade_gate) in {"NO_TRADE", "DEFENSIVE_ONLY"}:
         return "Trade Gate"
     if market_lead in {"Upside", "Downside"}:
         return "Market Lead"
@@ -167,6 +174,20 @@ def _primary_alert_value(row_or_signal: dict[str, object]) -> str:
     if catalyst_state == "Catalyst Caution":
         return "Catalyst Caution"
     return "No Alert Footprint"
+
+
+def _playbook_value(row_or_signal: dict[str, object]) -> str:
+    key = _text_value(row_or_signal.get("market_playbook_key")) or _text_value(row_or_signal.get("Playbook Key"))
+    if key and key.upper() not in {"UNKNOWN", "NAN"}:
+        return playbook_display(key)
+    return _text_value(row_or_signal.get("market_playbook")) or _text_value(row_or_signal.get("Playbook"))
+
+
+def _trade_gate_value(row_or_signal: dict[str, object]) -> str:
+    key = _text_value(row_or_signal.get("market_trade_gate_key")) or _text_value(row_or_signal.get("Trade Gate Key"))
+    if key and key.upper() not in {"UNKNOWN", "NAN"}:
+        return trade_gate_display(key, audience="trader")
+    return _text_value(row_or_signal.get("market_trade_gate")) or _text_value(row_or_signal.get("Trade Gate"))
 
 
 def _prepare_resolved_events(df_events: pd.DataFrame) -> pd.DataFrame:
@@ -189,8 +210,10 @@ def _prepare_resolved_events(df_events: pd.DataFrame) -> pd.DataFrame:
     d["AI Alignment"] = d.get("ai_aligned", pd.Series(dtype=int)).fillna(0).astype(int).map({1: "Aligned", 0: "Not aligned"})
     d["Market Lead"] = d.get("market_lead_label", pd.Series(dtype=object)).replace("", "No Clear Lead").fillna("No Clear Lead")
     d["Market Regime"] = d.get("market_regime", pd.Series(dtype=object)).replace("", "Unknown").fillna("Unknown")
-    d["Playbook"] = d.get("market_playbook", pd.Series(dtype=object)).replace("", "Unknown").fillna("Unknown")
-    d["Trade Gate"] = d.get("market_trade_gate", pd.Series(dtype=object)).replace("", "Unknown").fillna("Unknown")
+    d["Playbook Key"] = d.get("market_playbook_key", pd.Series(dtype=object)).replace("", "Unknown").fillna("Unknown")
+    d["Trade Gate Key"] = d.get("market_trade_gate_key", pd.Series(dtype=object)).replace("", "Unknown").fillna("Unknown")
+    d["Playbook"] = d.apply(lambda row: _playbook_value(row.to_dict()) or "Unknown", axis=1)
+    d["Trade Gate"] = d.apply(lambda row: _trade_gate_value(row.to_dict()) or "Unknown", axis=1)
     d["Sector Rotation"] = d.get("market_sector_rotation", pd.Series(dtype=object)).replace("", "Unknown").fillna("Unknown")
     d["Catalyst State"] = d.get("market_catalyst_state", pd.Series(dtype=object)).replace("", "Unknown").fillna("Unknown")
     d["Catalyst Window"] = d.get("market_catalyst_window", pd.Series(dtype=object)).replace("", "Unknown").fillna("Unknown")
@@ -400,6 +423,8 @@ def build_archive_guardrail_snapshot(model: dict[str, object], *, signal: dict[s
     lenses = dict(model.get("lenses") or {})
     hits: list[tuple[float, str, str]] = []
     signal_values = dict(signal or {})
+    signal_values["Playbook"] = _playbook_value(signal_values) or str(signal_values.get("Playbook") or "Unknown")
+    signal_values["Trade Gate"] = _trade_gate_value(signal_values) or str(signal_values.get("Trade Gate") or "Unknown")
     signal_values["Playbook x Session"] = _compose_combo_value(
         signal_values.get("Playbook"),
         signal_values.get("Session"),
@@ -450,7 +475,11 @@ def build_archive_guardrail_snapshot(model: dict[str, object], *, signal: dict[s
 
     hits.sort(key=lambda item: item[0], reverse=True)
     penalty = float(min(8.0, sum(value for value, _, _ in hits)))
-    weakest = [f"{lens}: {value}" for _, lens, value in hits[:2]]
+    weakest_hits = list(hits[:2])
+    trade_gate_hit = next((item for item in hits if item[1] == "Trade Gate"), None)
+    if trade_gate_hit and all(item[1] != "Trade Gate" for item in weakest_hits):
+        weakest_hits = [trade_gate_hit, weakest_hits[0]] if weakest_hits else [trade_gate_hit]
+    weakest = [f"{lens}: {value}" for _, lens, value in weakest_hits[:2]]
     if penalty >= 5.0:
         label = "Archive Guardrail"
         note = (
@@ -477,6 +506,8 @@ def build_live_signal_adaptive_snapshot(model: dict[str, object], *, signal: dic
     session_fit_snapshot = build_session_fit_snapshot(model, str(signal.get("Session") or "Unknown"))
     archive_guardrail_snapshot = build_archive_guardrail_snapshot(model, signal=signal)
     signal_values = dict(signal or {})
+    signal_values["Playbook"] = _playbook_value(signal_values) or str(signal_values.get("Playbook") or "Unknown")
+    signal_values["Trade Gate"] = _trade_gate_value(signal_values) or str(signal_values.get("Trade Gate") or "Unknown")
     signal_values["Playbook x Session"] = _compose_combo_value(
         signal_values.get("Playbook"),
         signal_values.get("Session"),

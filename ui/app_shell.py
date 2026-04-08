@@ -6,10 +6,13 @@ from ui.ctx import get_ctx, get_ctx_callable
 from ui.primitives import render_sidebar_panel, render_sidebar_title, render_status_pill
 from ui.tab_registry import TAB_GROUPS, TAB_TITLES, build_tab_specs
 from core.telemetry import snapshot_summary
+from core.trading_copy import get_copy_audience, set_copy_audience
 
 
 def render_app(deps: dict) -> None:
     st = get_ctx(deps, "st", scope="app_shell.deps")
+    requested_audience = st.session_state.get("dashboard_copy_audience", get_copy_audience())
+    set_copy_audience(requested_audience)
 
     with st.sidebar:
         render_sidebar_title(st, "Crypto Market Intelligence Hub")
@@ -18,9 +21,10 @@ def render_app(deps: dict) -> None:
             title="Core Workflow",
             body_html=(
                 "1) Market: scan and prioritize<br>"
-                "2) Spot / Multi-TF: confirm structure<br>"
+                "2) Spot: confirm the setup<br>"
                 "3) Position: manage open risk<br>"
-                "4) Sessions: time the entry"
+                "4) Sessions: time the entry<br>"
+                "5) Signal Review: learn and calibrate"
             ),
             tone="accent",
         )
@@ -30,6 +34,15 @@ def render_app(deps: dict) -> None:
             body_html="<br>".join(
                 f"<b>{group}</b>: {', '.join(titles)}"
                 for group, titles in TAB_GROUPS
+            ),
+            tone="neutral",
+        )
+        render_sidebar_panel(
+            st,
+            title="What Is Secondary",
+            body_html=(
+                "Multi-TF and the research tabs are there to support the core flow. "
+                "You should not need them on every pass through the dashboard."
             ),
             tone="neutral",
         )

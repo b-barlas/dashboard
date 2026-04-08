@@ -1,6 +1,8 @@
 import pathlib
 import unittest
 
+from core.trading_copy import copy_text
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MARKET_TAB_PATH = ROOT / "tabs" / "market_tab.py"
@@ -60,12 +62,12 @@ class MarketTablePriceDeltaContractTests(unittest.TestCase):
     def test_ui_copy_matches_price_delta_semantics(self):
         self.assertIn(
             "Price ($) shows the latest candle close.",
-            self.text,
+            copy_text("market.help.scanner_guide_html"),
             msg="Price caption must state latest candle close.",
         )
         self.assertIn(
             "change from previous closed candle to latest closed candle on selected timeframe",
-            self.text,
+            copy_text("market.help.scanner_guide_html"),
             msg="Column guide must explain selected-timeframe closed-candle delta semantics.",
         )
 

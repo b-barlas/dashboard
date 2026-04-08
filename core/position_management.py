@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from core.trading_copy import trade_gate_key
+
+from core.trading_copy import copy_text, playbook_key
+
 
 @dataclass(frozen=True)
 class PositionManagementSnapshot:
@@ -27,8 +31,8 @@ def _is_aligned(position_bias: str, signal_bias: str) -> bool:
 
 
 def _playbook_is_hostile(playbook: str) -> bool:
-    key = str(playbook or "").strip().lower()
-    return "stand aside" in key or "mean reversion only" in key or "risk-off" in key
+    key = playbook_key(playbook)
+    return key in {"MEAN_REVERSION_OR_STAND_ASIDE", "DEFENSIVE_DOWNSIDE_ONLY"}
 
 
 def _flow_is_supportive(position_bias: str, flow_proxy: str) -> bool:
@@ -126,12 +130,14 @@ def build_position_management_snapshot(
     ai_aligned = _is_aligned(position_bias, ai_direction)
 
     context_label = str(context_fit_label or "").strip()
+    context_key = trade_gate_key(context_label)
     adaptive = str(adaptive_label or "").strip()
     execution = str(execution_fit_label or "").strip()
     session = str(session_fit_label or "").strip()
     guardrail = str(archive_guardrail_label or "").strip().upper()
     catalyst = str(catalyst_window or "").strip()
     gate = str(trade_gate or "").strip()
+    gate_key = trade_gate_key(gate)
     playbook_value = str(playbook or "").strip()
     flow_value = str(flow_proxy or "").strip()
     hold_profile = str(hold_profile_label or "").strip()
@@ -141,8 +147,8 @@ def build_position_management_snapshot(
 
     blocking_catalyst = catalyst.startswith("Blocking")
     high_impact_catalyst = catalyst.startswith("High Impact")
-    stand_aside_context = context_label == "Stand Aside" or gate == "No-Trade"
-    defensive_context = context_label == "Defensive Only"
+    stand_aside_context = context_key == "NO_TRADE" or gate_key == "NO_TRADE"
+    defensive_context = context_key == "DEFENSIVE_ONLY"
     guardrail_severe = "GUARDRAIL" in guardrail
     guardrail_caution = "CAUTION" in guardrail
     guardrailed = guardrail_severe or guardrail_caution
@@ -160,7 +166,7 @@ def build_position_management_snapshot(
         adaptive == "Historically Favored"
         and execution == "Execution Proven"
         and session == "Session Supportive"
-        and context_label == "Tradeable"
+        and context_key == "TRADEABLE"
         and spot_aligned
         and tactical_aligned
         and not guardrailed
@@ -259,13 +265,13 @@ def build_position_management_snapshot(
     if invalidated or health_label == "EXIT" or score < 20:
         return PositionManagementSnapshot(
             action_key="EXIT",
-            label="Exit Now",
+            label=copy_text("position.mgmt.exit.label"),
             score=score,
             tone="negative",
-            size_guidance="Flat or hedge immediately",
-            adds_guidance="No fresh adds",
-            risk_guidance="Close or hedge now and reset only after structure repairs.",
-            note="Hard invalidation or cluster risk is already broken. This is no longer a manageable hold.",
+            size_guidance=copy_text("position.mgmt.exit.size"),
+            adds_guidance=copy_text("position.mgmt.exit.adds"),
+            risk_guidance=copy_text("position.mgmt.exit.risk"),
+            note=copy_text("position.mgmt.exit.note"),
         )
 
     if (
@@ -303,29 +309,27 @@ def build_position_management_snapshot(
             reason = "Liquidation is too close to justify normal size"
         elif not spot_aligned and not tactical_aligned:
             reason = "Spot and tactical bias are no longer supporting the position"
-        reduce_note = f"{reason}. Treat this as protection mode, not a window to press."
-        if exit_quality_text:
-            reduce_note = f"{reduce_note} {exit_quality_text}".strip()
+        reduce_note_extra = f" {exit_quality_text.strip()}" if exit_quality_text else ""
         return PositionManagementSnapshot(
             action_key="REDUCE",
-            label="Reduce Risk",
+            label=copy_text("position.mgmt.reduce.label"),
             score=score,
             tone="warning",
-            size_guidance="Trim 25-50% and protect the core",
-            adds_guidance="No fresh adds",
-            risk_guidance="Trim size, tighten execution, and keep the hard invalidation non-negotiable.",
-            note=reduce_note,
+            size_guidance=copy_text("position.mgmt.reduce.size"),
+            adds_guidance=copy_text("position.mgmt.reduce.adds"),
+            risk_guidance=copy_text("position.mgmt.reduce.risk"),
+            note=copy_text("position.mgmt.reduce.note", reason=reason, extra=reduce_note_extra),
         )
 
     if supportive_stack and float(levered_pnl_pct) >= 0.0 and score >= 78:
         return PositionManagementSnapshot(
             action_key="PRESS",
-            label="Press on Strength",
+            label=copy_text("position.mgmt.press.label"),
             score=score,
             tone="positive",
-            size_guidance="Keep core size; add only on confirmation",
-            adds_guidance="Add only on fresh confirmation",
-            risk_guidance="Let winners work, but add only if price confirms again above your active structure.",
+            size_guidance=copy_text("position.mgmt.press.size"),
+            adds_guidance=copy_text("position.mgmt.press.adds"),
+            risk_guidance=copy_text("position.mgmt.press.risk"),
             note=(
                 "Archive, session, and live structure are aligned. "
                 + ("Crowding is supportive. " if supportive_flow else "")
@@ -350,11 +354,11 @@ def build_position_management_snapshot(
         hold_note = f"{hold_note} {exit_quality_text}".strip()
     return PositionManagementSnapshot(
         action_key="HOLD",
-        label="Hold Only",
+        label=copy_text("position.mgmt.hold.label"),
         score=score,
         tone="info",
-        size_guidance="Keep size stable",
+        size_guidance=copy_text("position.mgmt.hold.size"),
         adds_guidance=context_fit_aggression or "Selective adds only",
-        risk_guidance="Hold with discipline, trail against the hard invalidation, and avoid forcing new size.",
+        risk_guidance=copy_text("position.mgmt.hold.risk"),
         note=hold_note,
     )

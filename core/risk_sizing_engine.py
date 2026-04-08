@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from core.catalyst_engine import catalyst_signal_note, catalyst_signal_size_cap
 from core.market_decision import normalize_action_class
+from core.trading_copy import copy_text
 
 
 @dataclass(frozen=True)
@@ -30,19 +31,19 @@ def _tier_from_fraction(unit_fraction: float, *, capped_note: str | None = None)
     if fraction >= 0.99:
         label = "Full Unit"
         key = "FULL"
-        note = "Top-tier setup. Normal size is justified."
+        note = copy_text("risk_sizing.note.full")
     elif fraction >= 0.49:
         label = "Half Unit"
         key = "HALF"
-        note = "Good setup, but keep size controlled."
+        note = copy_text("risk_sizing.note.half")
     elif fraction >= 0.24:
         label = "Probe Only"
         key = "PROBE"
-        note = "Early or selective setup. Use only probe-size risk."
+        note = copy_text("risk_sizing.note.probe")
     else:
         label = "Flat"
         key = "FLAT"
-        note = "Do not allocate fresh risk to this setup."
+        note = copy_text("risk_sizing.note.flat")
     if capped_note:
         note = f"{note} {capped_note}".strip()
     return RiskSizingSnapshot(
@@ -199,30 +200,30 @@ def build_signal_risk_sizing(
     actual = min(desired, gate_cap)
     note_parts: list[str] = []
     if actual < desired and gate_key in {"SELECTIVE_ONLY", "DEFENSIVE_ONLY"}:
-        note_parts.append("Current market gate is capping size.")
-    if actual < desired and catalyst_cap < desired and "Catalyst risk is capping size." not in note_parts:
-        note_parts.append("Catalyst risk is capping size.")
+        note_parts.append(copy_text("risk_sizing.note.market_gate_cap"))
+    if actual < desired and catalyst_cap < desired and copy_text("risk_sizing.note.catalyst_cap") not in note_parts:
+        note_parts.append(copy_text("risk_sizing.note.catalyst_cap"))
     if catalyst_note and catalyst_cap < 1.0:
         note_parts.append(catalyst_note)
     if action_class == "PROBE":
-        note_parts.append("Probe setup: starter size only until full confirmation appears.")
+        note_parts.append(copy_text("risk_sizing.note.probe_only"))
     if adaptive_score >= 64.0 and action_class not in {"WATCH", "PROBE"}:
-        note_parts.append("Learned execution history is supporting size.")
+        note_parts.append(copy_text("risk_sizing.note.learned_support"))
     elif adaptive_score <= 36.0 and action_class not in {"WATCH", "PROBE"}:
-        note_parts.append("Learned execution history is trimming size.")
+        note_parts.append(copy_text("risk_sizing.note.learned_trim"))
     if session_score >= 2.5 and action_class not in {"WATCH", "PROBE"}:
-        note_parts.append("Current session archive is supporting size.")
+        note_parts.append(copy_text("risk_sizing.note.session_support"))
     elif session_score <= -2.5 and action_class not in {"WATCH", "PROBE"}:
-        note_parts.append("Current session archive is trimming size.")
+        note_parts.append(copy_text("risk_sizing.note.session_trim"))
     if weak_cluster_probe_cap:
-        note_parts.append("Historically weak alert/playbook timing cluster is forcing probe-only size.")
+        note_parts.append(copy_text("risk_sizing.note.weak_cluster_probe"))
     if guardrail_penalty >= 3.0:
         note_parts.append(
             guardrail_note_text
             or (
-                "Archive guardrail is trimming size."
+                copy_text("risk_sizing.note.archive_guardrail_trim")
                 if guardrail_label_key == "ARCHIVE GUARDRAIL"
-                else "Archive caution is keeping size smaller."
+                else copy_text("risk_sizing.note.archive_caution_trim")
             )
         )
     if action_class == "PROBE":

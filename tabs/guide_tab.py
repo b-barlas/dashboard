@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from core.trading_copy import copy_text
 from ui.ctx import get_ctx
 from ui.primitives import render_page_header
 
@@ -83,210 +84,17 @@ Ensemble AI (3 models) is used as confirmation:
         ),
         (
             "1) Market tab (Coin Setup Scanner)",
-            """
-This is the primary scan tab. Start here.
-
-Main table columns:
-- Coin, Price ($), Delta (%)
-- Setup Confirm
-- Direction
-- Confidence
-- AI Ensemble
-- AI Confidence
-- R:R, Entry/Stop/Target, Scalp Opportunity
-- Optional advanced indicator columns
-
-Scanner input modes:
-- Default mode: Top N liquidity scan (market-wide)
-- Custom mode: enter up to 10 symbols in Custom Coins, click Run Scan, and scanner analyzes only that watchlist
-- Top N control is disabled while custom mode is active
-- Custom watchlist mode does not depend on the live top-volume provider universe; it scans requested symbols directly
-- Selected timeframe controls tactical candle context, levels, scalp gating, and Delta
-- Visible `Direction` + `Confidence` come from closed `1D + 4H` spot bias
-- Visible `AI Ensemble` comes from a separate closed `1D + 4H` AI bias engine
-- Visible `AI Confidence` scores the quality of that HTF AI verdict
-
-How the 5 key columns are calculated:
-
-1. `Direction` (main spot direction)
-- Uses only closed `1D + 4H` candles
-- Technical engine builds a score for each timeframe from:
-  - structure
-  - trend
-  - momentum
-  - regime / location
-- `1D` leads and `4H` confirms
-- Final logic is intentionally strict:
-  - if `1D` is Neutral, final Direction becomes Neutral
-  - if `1D` and `4H` conflict, final Direction becomes Neutral
-  - otherwise final output is `Upside`, `Downside`, or `Neutral`
-
-2. `Confidence` (quality of Direction)
-- This is **not** a second direction column
-- It answers: “How trustworthy is the current technical Direction?”
-- Formula:
-  - 30% timeframe alignment
-  - 25% structure quality
-  - 20% trend quality
-  - 15% regime quality
-  - 10% location quality
-- Confidence is capped lower on purpose when:
-  - Direction is Neutral
-  - timeframes conflict
-  - structure is weak
-  - data is degraded
-  - regime is range/chop
-
-3. `AI Ensemble` (AI version of spot direction)
-- Uses a separate AI engine on closed `1D + 4H` candles
-- It does **not** copy the technical Direction formula
-- For each timeframe, AI quality comes from:
-  - 35% probability edge
-  - 25% agreement quality
-  - 25% persistence across recent closed bars
-  - 15% stability (not flip-flopping)
-- `1D` leads and `4H` confirms
-- Final output is again `Upside`, `Downside`, or `Neutral`
-- The 3 dots show how many of the 3 AI models support that final HTF AI verdict
-
-4. `AI Confidence` (quality of AI Ensemble)
-- This answers: “How trustworthy is the current HTF AI verdict?”
-- Formula:
-  - 40% conviction quality
-  - 25% combined HTF AI score
-  - 15% timeframe alignment
-  - 10% consensus quality
-  - 10% model support
-- AI Confidence is capped lower when:
-  - AI verdict is Neutral
-  - `1D` / `4H` AI conflict
-  - AI data degraded/fallback
-- directional call has weak model support
-
-Coin inline badge:
-- `LEAD ↗` / `LEAD ↘` can appear next to the ticker when 4H technical structure is already leading, while confirmed HTF Direction is still Neutral or still low-confidence
-- AI can confirm the same side or stay neutral; a strong opposite AI blocks the badge
-- `1D` must not be opposing yet
-- Treat this as an early-attention signal, not as a replacement for confirmed Direction
-
-5. `Setup Confirm` (final confirmation class)
-- This is **not** the main direction
-- It answers: “Given the main spot direction, is the selected timeframe good enough right now?”
-- First, spot `Direction + Confidence` must be valid
-- Then selected timeframe execution is checked from:
-  - local structure quality
-  - local trend quality
-  - local regime quality
-  - local location quality
-  - local spot-style risk/reward from support / resistance / EMA21 / ATR
-- `TREND-led` = pure technical selected-timeframe confirmation
-- `AI-led` = pure AI confirmation, but it still must pass the same execution safety gates
-- `TREND+AI` = both motors are independently strong and also elite together
-- `PROBE` = not fully confirmed yet, but clean enough for starter-risk only
-- `WATCH` = the idea is alive, but timing is not clean yet
-- `SKIP` = edge is too weak, too conflicted, or badly located right now
-
-Setup Confirm classes (final confirmation class):
-- TREND+AI: both technicals and AI agree, and both are very strong
-- TREND-led: the main direction exists, and the selected timeframe technical picture now supports it
-- AI-led: the main direction exists, and AI support is strong enough for a setup
-- PROBE: the setup is close enough for small starter risk, but not full size
-- WATCH: the idea is still alive, but timing is not clean yet
-- SKIP: the edge is too weak or the setup is not worth tracking now
-
-Scalp Opportunity is separate from Setup Confirm.
-It appears only if all execution gates pass:
-- Direction match
-- Timeframe-adaptive R:R / ADX / Confidence thresholds
-- No tech/AI conflict
-- Valid entry/stop/target
-
-Timeframe gate matrix:
-- 5m / 15m: R:R >= 1.30, ADX >= 18, Confidence >= 52
-- 1h: R:R >= 1.40, ADX >= 18, Confidence >= 52
-- 4h / 1d: R:R >= 1.70, ADX >= 22, Confidence >= 60
-
-Important consistency rule:
-- Spot Direction/Confidence and tactical plan levels are computed from **closed candles**
-- Price column also reflects closed-candle close in scanner context
-
-Mode badges:
-- FULL MARKET MODE: exchange + enrichment providers active
-- CUSTOM WATCHLIST MODE: scanner is running the requested watchlist directly
-- CUSTOM WATCHLIST MODE (PARTIAL ENRICHMENT): watchlist scan is live, but market-cap enrichment is only available for some symbols
-- CUSTOM WATCHLIST MODE (EXCHANGE-ONLY): watchlist scan is live from exchange candles, but enrichment is unavailable
-- EXCHANGE-ONLY MODE: enrichment unavailable, core trade fields still active
-            """,
+            copy_text("guide.section.market"),
             "core",
         ),
         (
             "2) Spot tab",
-            """
-Single-coin spot decision workspace (non-leverage), synchronized with Market tab decision logic.
-
-Read in this order:
-1) Setup Snapshot:
-- Delta (%)
-- Setup Confirm
-- Direction
-- Confidence
-- AI Ensemble
-- AI Confidence
-
-Meaning:
-- `Direction`: higher-timeframe technical spot bias from `1D + 4H`
-- `AI Ensemble`: higher-timeframe AI bias from `1D + 4H`; the 3 dots show how many ensemble models support that final AI direction
-- `AI Confidence`: quality score of that higher-timeframe AI verdict
-
-These 5 columns use the same core logic as Market tab:
-- `Direction`: HTF technical bias (`1D + 4H`)
-- `Confidence`: quality of that HTF technical bias
-- `AI Ensemble`: HTF AI bias (`1D + 4H`)
-- `AI Confidence`: quality of that HTF AI verdict
-- `Setup Confirm`: selected-timeframe confirmation layer built on top of those HTF reads
-
-Setup Confirm classes:
-- TREND+AI: technicals and AI both agree, and both are strong
-- TREND-led: technicals support the main direction
-- AI-led: AI support is strong enough for the main direction
-- PROBE: starter-risk only; not full confirmation yet
-- WATCH: keep it on the radar, but do not rush
-- SKIP: leave it alone for now
-
-2) Technical Regime Breakdown:
-- Trend Structure: SuperTrend, Ichimoku, VWAP, ADX, PSAR
-- Momentum Signals: StochRSI, Williams %R, CCI, Pattern
-- Volatility & Volume: Bollinger, Volatility, Volume spike context
-
-3) Execution Levels (spot-only):
-- Reference Price
-- Buy Zone + Buy Above (Breakout)
-- Stop (Buy Zone) + Stop (Breakout)
-- Take-Profit (Buy Zone) + Take-Profit (Breakout)
-
-4) Spot Execution Plan:
-- Scenario-specific action text driven by Setup Confirm + Direction context
-- Use it as execution workflow guidance, not as a guaranteed outcome
-
-Important:
-- Decision fields and levels are based on closed candles.
-- Spot tab uses the same core signal/decision engine as Market tab.
-- Visible `Direction` + `Confidence` are the same higher-timeframe spot read used in Market.
-            """,
+            copy_text("guide.section.spot"),
             "core",
         ),
         (
             "3) Position tab",
-            """
-Live position management tab.
-Main outputs:
-- Raw PnL, levered PnL, funding effect, net PnL
-- Estimated liquidation distance (simple model)
-- Direction / Confidence / AI Ensemble / AI Confidence summary
-- Technical Invalidation Line (hard risk line)
-- Position health decision block (HOLD / REDUCE / EXIT style guidance)
-- Optional scalp setup block with gate reasons when unavailable
-            """,
+            copy_text("guide.section.position"),
             "core",
         ),
         (
@@ -459,15 +267,7 @@ the engine caps that horizon and shows a warning in the tab.
         ),
         (
             "13) Sessions tab",
-            """
-Execution timing filter across Asia / Europe / US windows.
-Shows:
-- relative session quality (not an absolute signal)
-- liquidity depth by session
-- range profile and drift bias
-
-Use it to decide when execution conditions look cleaner after a setup already exists elsewhere.
-            """,
+            copy_text("guide.section.sessions"),
             "info",
         ),
         (
@@ -500,42 +300,12 @@ This mode validates the raw Direction + Confidence engine, not only the higher-t
         ),
         (
             "16) Setup Backtest tab",
-            """
-Setup outcome study for Setup Confirm:
-- TREND+AI
-- TREND-led
-- AI-led
-
-Inputs:
-- setup class filter
-- timeframe
-- lookback candles
-- forward bars (for outcome window)
-
-Outputs:
-- how many events were generated
-- event price and forward path over next N bars
-- class-level favorable rate and directional return quality
-            """,
+            copy_text("guide.section.setup_backtest"),
             "risk",
         ),
         (
             "17) Scalp Backtest tab",
-            """
-Scalp outcome study for execution-ready scalp events.
-
-Uses the same market scalp pipeline:
-- top-volume multi-coin scan (stablecoins excluded by default)
-- scalp gate (timeframe-adaptive R:R / ADX / Confidence thresholds)
-- generated scalp levels (entry / stop / target)
-
-Outputs:
-- event count and TP-hit behavior
-- direction-level and coin-level scalp outcome quality
-- forward path table with event-relative price movement
-
-Use this tab to validate scalp execution behavior before relying on scalp labels live.
-            """,
+            copy_text("guide.section.scalp_backtest"),
             "risk",
         ),
         (
@@ -594,79 +364,17 @@ If data looks stale:
         ),
         (
             "21) Practical workflow (recommended)",
-            """
-Recommended daily flow:
-1. Market tab: check regime + scanner shortlist
-2. Correlation: check whether your planned basket is over-crowded
-3. Portfolio Scenario: stress-test how your basket may react if BTC/ETH or another anchor reaches target
-4. Spot: validate setup and read the Spot Execution Plan
-5. Position: if already in trade, follow Technical Invalidation + decision model first
-6. Fibonacci/Risk: validate structure and downside risk
-7. Tools: confirm R:R and liquidation distance
-8. Setup Backtest: validate Setup Confirm class edge before using new setup live
-9. Scalp Backtest: validate scalp gate behavior and TP/SL outcome profile
-10. Model Lab: tune raw signal threshold/holding parameters
-
-Quick rule:
-- If Direction/AI conflict and Health says REDUCE or EXIT, reduce risk first.
-- If setup is aligned and Health says HOLD, manage with invalidation discipline.
-            """,
+            copy_text("guide.section.workflow"),
             "core",
         ),
         (
             "22) Limitations and responsibility",
-            """
-No model can predict news shocks, listing events, outages, or sudden regime breaks.
-Treat all outputs as probabilistic guidance.
-
-Non-negotiables:
-- Use stop-loss
-- Cap per-trade risk
-- Avoid revenge/forced trades
-- Respect invalidation levels
-
-This dashboard is **not financial advice**.
-            """,
+            copy_text("guide.section.limitations"),
             "warn",
         ),
         (
             "23) Quick Smoke Checklist (before daily use)",
-            """
-Use this 60-second checklist:
-
-1. **Market tab**
-- Scanner table loads and shows multiple rows
-- Setup Confirm / Direction / Confidence / AI Ensemble / AI Confidence are not empty
-
-2. **Spot tab**
-- Analyse runs and shows Direction + Confidence + HTF AI + AI Confidence
-- Spot Execution Plan appears
-
-3. **Position tab**
-- Raw/Levered PnL and Net PnL render correctly
-- Technical Invalidation line is visible
-- Excel report downloads without resetting analysis view
-
-4. **AI Workspace**
-- Quick Prediction mode returns Direction / Probability / Agreement in one run
-- Model & Timeframe Matrix mode fills timeframe matrix with plan source fields
-- Debug expander shows AI vs non-AI plan levels
-
-5. **Portfolio Scenario**
-- Basket editor accepts your holdings and anchor target
-- Current basket / projected basket / scenario table render in one run
-- Basket Insight card explains whether anchor response is concentrated, balanced, or loose
-
-6. **Fallback check**
-- If enrichment fails, Market shows **EXCHANGE-ONLY MODE** and core trade columns still render
-- If live endpoint fails, cached snapshot warning with UTC timestamp appears
-- Market should not reuse stale snapshot from a different timeframe/filter
-
-7. **Model Lab + Setup/Scalp Backtest**
-- Model Lab runs and returns trades/metrics for raw signal diagnostics
-- Setup Backtest returns setup-event count, forward-bar outcome table, and class breakdown
-- Scalp Backtest returns scalp-qualified event count, class outcome table, and TP/SL behavior
-            """,
+            copy_text("guide.section.smoke_checklist"),
             "info",
         ),
     ]

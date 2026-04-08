@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 from core.session_utils import session_bucket_for_timestamp
+from core.trading_copy import copy_text, playbook_display, playbook_key, trade_gate_display, trade_gate_key
 
 from ui.ctx import get_ctx
 from ui.signal_formatters import archived_execution_stance_label
@@ -716,12 +717,38 @@ def render(ctx: dict) -> None:
         df_events["Market Regime"] = df_events["market_regime"].replace("", "Unknown").fillna("Unknown")
     if "scan_focus" in df_events.columns:
         df_events["Scan Focus"] = df_events["scan_focus"].replace("", "Unknown").fillna("Unknown")
-    if "market_playbook" in df_events.columns:
-        df_events["Playbook"] = df_events["market_playbook"].replace("", "Unknown").fillna("Unknown")
-    if "market_trade_gate" in df_events.columns:
-        df_events["Trade Gate"] = df_events["market_trade_gate"].replace("", "Unknown").fillna("Unknown")
+    if "market_playbook_key" in df_events.columns or "market_playbook" in df_events.columns:
+        playbook_keys = df_events.get("market_playbook_key", pd.Series(index=df_events.index, dtype=object))
+        playbook_display_values = df_events.get("market_playbook", pd.Series(index=df_events.index, dtype=object))
+        df_events["Playbook"] = pd.Series(playbook_keys, index=df_events.index).fillna("").astype(str).str.strip().map(
+            lambda value: playbook_display(value) if value else ""
+        )
+        fallback_playbook = pd.Series(playbook_display_values, index=df_events.index).fillna("").astype(str).str.strip()
+        df_events["Playbook"] = df_events["Playbook"].where(df_events["Playbook"].ne(""), fallback_playbook)
+        df_events["Playbook"] = df_events["Playbook"].replace("", "Unknown").fillna("Unknown")
+        df_events["Playbook Key"] = pd.Series(playbook_keys, index=df_events.index).fillna("").astype(str).str.strip()
+        df_events["Playbook Key"] = df_events["Playbook Key"].where(
+            df_events["Playbook Key"].ne(""),
+            fallback_playbook.map(playbook_key),
+        )
+        df_events["Playbook Key"] = df_events["Playbook Key"].replace("", "Unknown").fillna("Unknown")
+    if "market_trade_gate_key" in df_events.columns or "market_trade_gate" in df_events.columns:
+        trade_gate_keys = df_events.get("market_trade_gate_key", pd.Series(index=df_events.index, dtype=object))
+        trade_gate_display_values = df_events.get("market_trade_gate", pd.Series(index=df_events.index, dtype=object))
+        df_events["Trade Gate"] = pd.Series(trade_gate_keys, index=df_events.index).fillna("").astype(str).str.strip().map(
+            lambda value: trade_gate_display(value) if value else ""
+        )
+        fallback_trade_gate = pd.Series(trade_gate_display_values, index=df_events.index).fillna("").astype(str).str.strip()
+        df_events["Trade Gate"] = df_events["Trade Gate"].where(df_events["Trade Gate"].ne(""), fallback_trade_gate)
+        df_events["Trade Gate"] = df_events["Trade Gate"].replace("", "Unknown").fillna("Unknown")
+        df_events["Trade Gate Key"] = pd.Series(trade_gate_keys, index=df_events.index).fillna("").astype(str).str.strip()
+        df_events["Trade Gate Key"] = df_events["Trade Gate Key"].where(
+            df_events["Trade Gate Key"].ne(""),
+            fallback_trade_gate.map(trade_gate_key),
+        )
+        df_events["Trade Gate Key"] = df_events["Trade Gate Key"].replace("", "Unknown").fillna("Unknown")
     if "market_no_trade_reason" in df_events.columns:
-        df_events["No-Trade Reason"] = (
+        df_events[copy_text("review.label.no_trade_reason")] = (
             df_events["market_no_trade_reason"]
             .replace("", "None")
             .fillna("None")
@@ -936,7 +963,9 @@ def render(ctx: dict) -> None:
                     f"({float(strongest_execution_stance['FollowThroughPct']):.1f}% follow-through across "
                     f"{int(strongest_execution_stance['Resolved'])} resolved signals)."
                 ),
-                "tone": "positive" if str(strongest_execution_stance["Execution Stance"]) == "Tradeable" else "neutral",
+                "tone": "positive"
+                if trade_gate_key(strongest_execution_stance["Execution Stance"]) == "TRADEABLE"
+                else "neutral",
             }
         )
         fail_cards.append(
@@ -1315,7 +1344,7 @@ def render(ctx: dict) -> None:
                 ("Archive Guardrail", "By Archive Guardrail"),
                 ("Archive Guardrail Severity", "By Guardrail Severity"),
                 ("Risk Tier", "By Risk Tier"),
-                ("No-Trade Reason", "By No-Trade Reason"),
+                (copy_text("review.label.no_trade_reason"), copy_text("review.group.no_trade_reason")),
                 ("Trade Decision", "By Trade Decision"),
                 ("Actual Trade Status", "By Actual Trade Status"),
                 ("Hold Style", "By Hold Style"),
@@ -1357,7 +1386,7 @@ def render(ctx: dict) -> None:
         "Exit Quality",
         "Actual Exit Reason",
         "Risk Tier",
-        "No-Trade Reason",
+        copy_text("review.label.no_trade_reason"),
         "Playbook",
         "Playbook x Session",
         "Playbook x Catalyst Window",

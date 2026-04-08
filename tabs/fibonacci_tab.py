@@ -1,4 +1,5 @@
 from ui.ctx import get_ctx
+from core.trading_copy import copy_text
 from ui.primitives import render_help_details, render_page_header
 
 import pandas as pd
@@ -198,15 +199,15 @@ def render(ctx: dict) -> None:
     if setup_quality >= 68:
         decision = "Setup quality: STRONG"
         decision_color = POSITIVE
-        action_hint = "Action: execution-ready zone. Wait only for trigger confirmation."
+        action_hint = copy_text("fib.action_hint.strong")
     elif setup_quality >= 45:
         decision = "Setup quality: MODERATE"
         decision_color = WARNING
-        action_hint = "Action: confirmation-first, smaller size, strict invalidation."
+        action_hint = copy_text("fib.action_hint.moderate")
     else:
         decision = "Setup quality: WEAK"
         decision_color = NEGATIVE
-        action_hint = "Action: stand aside until quality improves."
+        action_hint = copy_text("fib.action_hint.weak")
     decision_note = (
         f"Nearest {nearest_level} at {_fmt_price(nearest_price)} ({nearest_dist:.2f}% away) | "
         f"Regime: {regime_name} | POC distance: {poc_dist:+.2f}% | "

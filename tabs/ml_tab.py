@@ -29,6 +29,7 @@ from core.market_decision import (
 from core.metric_catalog import AI_LONG_THRESHOLD, AI_SHORT_THRESHOLD, direction_from_prob
 from core.signal_contract import bias_confidence_from_bias
 from core.spot_direction import build_spot_direction_snapshot
+from core.trading_copy import copy_text
 from ui.primitives import render_help_details, render_intro_card, render_kpi_grid, render_page_header
 from ui.signal_panels import build_indicator_groups_html, build_setup_snapshot_html
 from ui.signal_formatters import (
@@ -934,7 +935,7 @@ def render(ctx: dict) -> None:
                             "label": "Setup Confirm",
                             "value": setup_confirm,
                             "color": setup_color,
-                            "title": "Execution class from market decision policy.",
+                            "title": copy_text("ml.setup_snapshot.setup_confirm_title"),
                         },
                         {
                             "label": "Direction",

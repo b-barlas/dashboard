@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from core.trading_copy import copy_text
 import ta
 
 
@@ -273,27 +274,27 @@ def detect_market_regime(
     if adx_val > 40:
         regime = "STRONG TREND"
         color = positive_color
-        desc = "Powerful directional move. Trend-following strategies optimal."
+        desc = copy_text("advanced_analysis.regime.strong_trend")
     elif adx_val > 25:
         regime = "TRENDING"
         color = neon_blue_color
-        desc = "Clear directional bias. EMAs and MACD reliable."
+        desc = copy_text("advanced_analysis.regime.trending")
     elif bb_width < 0.03:
         regime = "COMPRESSION"
         color = neon_purple_color
-        desc = "Extreme low volatility. Breakout imminent. Watch for explosive move."
+        desc = copy_text("advanced_analysis.regime.compression")
     elif atr_pct > 0.05:
         regime = "HIGH VOLATILITY"
         color = negative_color
-        desc = "Choppy conditions. Reduce position size. Wide stops needed."
+        desc = copy_text("advanced_analysis.regime.high_volatility")
     elif adx_val < 15:
         regime = "RANGING"
         color = warning_color
-        desc = "No trend. Mean-reversion strategies may work. Avoid breakout trades."
+        desc = copy_text("advanced_analysis.regime.ranging")
     else:
         regime = "TRANSITIONING"
         color = text_muted_color
-        desc = "Market shifting between regimes. Wait for confirmation."
+        desc = copy_text("advanced_analysis.regime.transitioning")
 
     return {
         "regime": regime,

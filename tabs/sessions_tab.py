@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
 from core.session_utils import SESSION_ORDER, session_bucket_for_timestamp
+from core.trading_copy import copy_text, playbook_display, playbook_key, trade_gate_display, trade_gate_key
 
 from ui.ctx import get_ctx
 from ui.primitives import render_help_details, render_insight_card, render_kpi_grid, render_page_header
@@ -109,21 +110,40 @@ def _prepare_tracked_session_archive(df_events: pd.DataFrame) -> pd.DataFrame:
         .fillna("Unknown")
     )
     d["Playbook"] = (
-        d.get("market_playbook", pd.Series(index=d.index, dtype=object))
+        d.get("market_playbook_key", pd.Series(index=d.index, dtype=object))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .map(lambda value: playbook_display(value) if value else "")
+        .where(
+            lambda s: s.ne(""),
+            d.get("market_playbook", pd.Series(index=d.index, dtype=object)).replace("", "Unknown").fillna("Unknown"),
+        )
+    )
+    d["Playbook Key"] = (
+        d.get("market_playbook_key", pd.Series(index=d.index, dtype=object))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .where(lambda s: s.ne(""), d["Playbook"].map(playbook_key))
         .replace("", "Unknown")
         .fillna("Unknown")
     )
     return d
 
 
-def _build_playbook_session_archive(df_events: pd.DataFrame, playbook: str) -> pd.DataFrame:
+def _build_playbook_session_archive(df_events: pd.DataFrame, playbook: str, playbook_key_value: str = "") -> pd.DataFrame:
     normalized_playbook = str(playbook or "").strip()
-    if not normalized_playbook or normalized_playbook == "Unknown":
+    normalized_key = str(playbook_key_value or "").strip() or playbook_key(normalized_playbook)
+    if (not normalized_playbook or normalized_playbook == "Unknown") and normalized_key in {"", "UNKNOWN", "OTHER"}:
         return pd.DataFrame()
     archive = _prepare_tracked_session_archive(df_events)
     if archive.empty:
         return pd.DataFrame()
-    scoped = archive[archive["Playbook"].astype(str).str.strip() == normalized_playbook].copy()
+    if "Playbook Key" in archive.columns and normalized_key not in {"", "UNKNOWN", "OTHER"}:
+        scoped = archive[archive["Playbook Key"].astype(str).str.strip() == normalized_key].copy()
+    else:
+        scoped = archive[archive["Playbook"].astype(str).str.strip() == normalized_playbook].copy()
     if scoped.empty:
         return pd.DataFrame()
     scoped["directional_return_pct"] = pd.to_numeric(scoped.get("directional_return_pct"), errors="coerce")
@@ -170,8 +190,8 @@ def _playbook_timing_read(
     follow_session = str(best_follow["Session"])
     exec_session = str(best_exec["Session"])
 
-    if str(trade_gate or "").strip() == "No-Trade" or str(catalyst_window or "").startswith("Blocking"):
-        title = "Stand Aside"
+    if trade_gate_key(trade_gate) == "NO_TRADE" or str(catalyst_window or "").startswith("Blocking"):
+        title = trade_gate_display("NO_TRADE")
         tone = "negative"
     elif current_session in {follow_session, exec_session}:
         title = "Supportive"
@@ -220,12 +240,13 @@ def render(ctx: dict) -> None:
     render_page_header(
         st,
         title="Session Analysis",
-        intro_html=(
-            "Compares market behavior across 3 UTC sessions using 1h candles: Asian (00-08), European (08-16), and US (16-00). "
-            "It is an <b>execution timing filter</b>, not a standalone entry signal. "
-            f"Use it to see which session is relatively {_tip('Deeper', 'Higher average volume means cleaner fills and usually tighter spreads.')}, "
-            f"{_tip('Controlled', 'A balanced range profile is easier to execute than a session that is completely dead or overstretched.')}, "
-            "and directionally tilted. All labels here are <b>relative across these 3 sessions only</b>."
+        intro_html=copy_text(
+            "sessions.intro_html",
+            deeper=_tip("Deeper", "Higher average volume means cleaner fills and usually tighter spreads."),
+            controlled=_tip(
+                "Controlled",
+                "A balanced range profile is easier to execute than a session that is completely dead or overstretched.",
+            ),
         ),
     )
     c1, c2 = st.columns(2)
@@ -376,6 +397,7 @@ def render(ctx: dict) -> None:
     tracked_events = fetch_signal_events_df(limit=2000, source="Market", db_path=tracker_db_path)
     tracked_session_summary = pd.DataFrame()
     current_playbook = "Unknown"
+    current_playbook_key = "Unknown"
     current_trade_gate = "Unknown"
     current_catalyst_window = "Unknown"
     current_session = session_bucket_for_timestamp()
@@ -387,9 +409,10 @@ def render(ctx: dict) -> None:
         tracked_session_summary = build_signal_cohort_summary(tracked_events, "Session")
         recent_market_context = build_recent_market_context_snapshot(tracked_events)
         current_playbook = str(recent_market_context.get("Playbook") or "Unknown")
+        current_playbook_key = str(recent_market_context.get("Playbook Key") or "Unknown")
         current_trade_gate = str(recent_market_context.get("Trade Gate") or "Unknown")
         current_catalyst_window = str(recent_market_context.get("Catalyst Window") or "Unknown")
-        playbook_session_archive = _build_playbook_session_archive(tracked_events, current_playbook)
+        playbook_session_archive = _build_playbook_session_archive(tracked_events, current_playbook, current_playbook_key)
         if not playbook_session_archive.empty:
             timing_read = _playbook_timing_read(
                 playbook_session_archive,

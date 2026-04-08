@@ -6,6 +6,7 @@ import io
 import pandas as pd
 import plotly.graph_objs as go
 import ta
+from core.trading_copy import copy_text, playbook_key, trade_gate_key
 from core.session_utils import session_bucket_for_timestamp
 from core.confidence import confidence_bucket
 from core.market_decision import action_reason_text, normalize_action_class
@@ -81,18 +82,18 @@ def _position_archive_status_label(adaptive_snapshot) -> str:
     session_label = str(getattr(adaptive_snapshot, "session_fit_label", "") or "").strip()
 
     if archive_label == "Archive Guardrail":
-        return "Archive Guardrail"
+        return copy_text("position.archive.status.guardrail")
     if archive_label == "Archive Caution":
-        return "Archive Caution"
+        return copy_text("position.archive.status.caution")
     if adaptive_label == "Historically Favored":
-        return "History Supportive"
+        return copy_text("position.archive.status.supportive")
     if adaptive_label == "Historically Weak":
-        return "History Fragile"
+        return copy_text("position.archive.status.fragile")
     if session_label == "Session Supportive":
-        return "Session Supportive"
+        return copy_text("position.archive.status.session_supportive")
     if session_label == "Session Fragile":
-        return "Session Fragile"
-    return "History Mixed"
+        return copy_text("position.archive.status.session_fragile")
+    return copy_text("position.archive.status.mixed")
 
 
 def _position_archive_banner_note(
@@ -105,6 +106,7 @@ def _position_archive_banner_note(
 ) -> str:
     market_context = dict(market_context or {})
     stance = _trade_gate_display_label(str((context_fit or {}).get("label") or ""))
+    stance_key = trade_gate_key((context_fit or {}).get("gate_key") or stance)
     adaptive_label = str(getattr(adaptive_snapshot, "label", "") or "").strip()
     archive_label = str(getattr(adaptive_snapshot, "archive_guardrail_label", "") or "").strip()
     archive_note = str(getattr(adaptive_snapshot, "archive_guardrail_note", "") or "").strip()
@@ -112,66 +114,67 @@ def _position_archive_banner_note(
     session_note = str(getattr(adaptive_snapshot, "session_fit_note", "") or "").strip()
     history_note = str(getattr(adaptive_snapshot, "note", "") or "").strip()
     trade_gate = str(market_context.get("Trade Gate") or "").strip()
+    trade_gate_value_key = trade_gate_key(market_context.get("Trade Gate Key") or trade_gate)
     playbook = str(market_context.get("Playbook") or "").strip()
     catalyst_window = str(market_context.get("Catalyst Window") or "").strip()
     flow_proxy = str(market_context.get("Flow Proxy") or "").strip()
 
     stance_summary = ""
-    if stance == "Stand Aside":
-        stance_summary = "Stand Aside: avoid fresh adds or new risk here."
-    elif stance == "Defensive Only":
-        stance_summary = "Defensive Only: protect the position and avoid pressing size."
-    elif stance == "Tradeable":
-        stance_summary = "Tradeable: the backdrop is supportive enough to manage this like a normal hold."
-    elif stance == "Selective Only":
-        stance_summary = "Selective Only: keep the position clean and add only on clear confirmation."
+    if stance_key == "NO_TRADE":
+        stance_summary = copy_text("position.archive.stance.stand_aside")
+    elif stance_key == "DEFENSIVE_ONLY":
+        stance_summary = copy_text("position.archive.stance.defensive")
+    elif stance_key == "TRADEABLE":
+        stance_summary = copy_text("position.archive.stance.tradeable")
+    elif stance_key == "SELECTIVE_ONLY":
+        stance_summary = copy_text("position.archive.stance.selective")
 
     plain_archive_note = ""
     if archive_label == "Archive Guardrail":
-        plain_archive_note = "Similar setups have struggled enough here to stay defensive."
+        plain_archive_note = copy_text("position.archive.history.guardrail")
     elif archive_label == "Archive Caution":
-        plain_archive_note = "Similar setups have been softer in this kind of market window."
+        plain_archive_note = copy_text("position.archive.history.caution")
 
     plain_history_note = ""
     if not plain_archive_note:
         if adaptive_label == "Historically Favored":
-            plain_history_note = "Similar setups have generally held up better."
+            plain_history_note = copy_text("position.archive.history.supportive")
         elif adaptive_label == "Historically Weak":
-            plain_history_note = "Similar setups have had weaker follow-through."
+            plain_history_note = copy_text("position.archive.history.fragile")
         elif adaptive_label == "Historically Neutral":
-            plain_history_note = "History is mixed here, so clean confirmation matters more."
+            plain_history_note = copy_text("position.archive.history.neutral")
 
     plain_session_note = ""
     if session_label == "Session Supportive":
-        plain_session_note = "This session has been a cleaner management window lately."
+        plain_session_note = copy_text("position.archive.session.supportive")
     elif session_label == "Session Fragile":
-        plain_session_note = "This session has been less reliable lately."
+        plain_session_note = copy_text("position.archive.session.fragile")
 
     context_bits: list[str] = []
-    if trade_gate == "No-Trade":
-        context_bits.append("The market is not in a clean add window right now")
-    elif trade_gate == "Selective Only":
-        context_bits.append("Only the cleanest adds deserve attention right now")
-    elif trade_gate == "Tradeable":
-        context_bits.append("The market is open enough for cleaner management")
+    if trade_gate_value_key == "NO_TRADE":
+        context_bits.append(copy_text("position.archive.context.trade_gate.no_trade"))
+    elif trade_gate_value_key == "SELECTIVE_ONLY":
+        context_bits.append(copy_text("position.archive.context.trade_gate.selective"))
+    elif trade_gate_value_key == "TRADEABLE":
+        context_bits.append(copy_text("position.archive.context.trade_gate.tradeable"))
     if catalyst_window.startswith("Far"):
-        context_bits.append("there is no major catalyst nearby")
+        context_bits.append(copy_text("position.archive.context.catalyst.far"))
     elif catalyst_window.startswith(("Near", "High Impact")):
-        context_bits.append("a nearby catalyst could speed up the move")
+        context_bits.append(copy_text("position.archive.context.catalyst.near"))
     elif catalyst_window.startswith("Blocking"):
-        context_bits.append("a nearby event is adding risk")
+        context_bits.append(copy_text("position.archive.context.catalyst.blocking"))
     if flow_proxy == "Flow Balanced":
-        context_bits.append("positioning looks balanced rather than stretched")
+        context_bits.append(copy_text("position.archive.context.flow.balanced"))
     elif flow_proxy in {"Shorts Crowded", "Longs Crowded"}:
-        context_bits.append("positioning looks stretched enough that squeeze risk matters more")
+        context_bits.append(copy_text("position.archive.context.flow.crowded"))
 
     plain_context_note = ""
     if context_bits:
         plain_context_note = " • ".join(
             [context_bits[0].capitalize() + "."] + [bit.capitalize() + "." for bit in context_bits[1:2]]
         )
-    elif playbook == "Wait for confirmation":
-        plain_context_note = "The market still needs cleaner confirmation before pressing this position."
+    elif playbook_key(playbook) == "WAIT_CONFIRMATION":
+        plain_context_note = copy_text("position.archive.context.playbook.wait")
 
     return _compact_note_parts(
         [
@@ -586,7 +589,9 @@ def render(ctx: dict) -> None:
                         "AI Alignment": "Aligned" if direction_key(spot_snapshot.direction) == ai_spot_direction else "Not aligned",
                         "Market Lead": str(recent_market_context.get("Market Lead") or "No Clear Lead"),
                         "Market Regime": str(recent_market_context.get("Market Regime") or "Unknown"),
+                        "Playbook Key": str(recent_market_context.get("Playbook Key") or "Unknown"),
                         "Playbook": str(recent_market_context.get("Playbook") or "Unknown"),
+                        "Trade Gate Key": str(recent_market_context.get("Trade Gate Key") or "Unknown"),
                         "Trade Gate": str(recent_market_context.get("Trade Gate") or "Unknown"),
                         "Sector Rotation": str(recent_market_context.get("Sector Rotation") or "Unknown"),
                         "Catalyst State": str(recent_market_context.get("Catalyst State") or "Unknown"),
@@ -912,26 +917,26 @@ def render(ctx: dict) -> None:
                 st.markdown(
                     f"<div class='panel-box' style='padding:10px 12px; border-left:4px solid {management_color};'>"
                     f"<div style='display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; font-size:0.92rem;'>"
-                    f"<span style='color:{TEXT_MUTED};'>{tf} Position Management ({management_scope})</span> "
+                    f"<span style='color:{TEXT_MUTED};'>{tf} {copy_text('position.panel.title')} ({copy_text('position.panel.scope.anchor') if management_scope == 'Anchor' else copy_text('position.panel.scope.timing')})</span> "
                     f"<b style='color:{management_color};'>{management_snapshot.label} ({management_snapshot.score}/100)</b>"
                     f"</div>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-                    f"Now: <b>{management_snapshot.size_guidance}</b>"
+                    f"{copy_text('position.panel.label.now')}: <b>{management_snapshot.size_guidance}</b>"
                     f"</div>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-                    f"Adds: <b>{management_snapshot.adds_guidance}</b>"
+                    f"{copy_text('position.panel.label.adds')}: <b>{management_snapshot.adds_guidance}</b>"
                     f"</div>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-                    f"Market stance: <b>{_trade_gate_display_label(context_fit['label'])}</b> — {context_fit['aggression']}"
+                    f"{copy_text('position.panel.label.market_stance')}: <b>{_trade_gate_display_label(context_fit['label'])}</b> — {context_fit['aggression']}"
                     f"</div>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-                    f"Hard risk line: <b style='color:{WARNING};'>{invalidation:,.4f}</b>"
+                    f"{copy_text('position.panel.label.hard_risk_line')}: <b style='color:{WARNING};'>{invalidation:,.4f}</b>"
                     f"</div>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
                     f"{management_snapshot.note}"
                     f"</div>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:2px;'>"
-                    f"Next: {management_snapshot.risk_guidance}"
+                    f"{copy_text('position.panel.label.next')}: {management_snapshot.risk_guidance}"
                     f"</div>"
                     f"</div>",
                     unsafe_allow_html=True,

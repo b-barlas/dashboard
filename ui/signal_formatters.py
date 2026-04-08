@@ -7,6 +7,47 @@ import math
 from core.ai_spot_bias import ai_spot_bias_display_votes
 from core.confidence import ai_confidence_bucket, confidence_bucket
 from core.market_decision import normalize_action_class
+from core.trading_copy import copy_text, get_copy_audience, playbook_display, playbook_key, trade_gate_display, trade_gate_key
+
+_ACTION_PRESENTATION = {
+    "ENTER_TREND_AI": {
+        "family": "enter",
+        "trader": "TREND+AI",
+        "neutral": "High-Quality Setup",
+    },
+    "ENTER_TREND_LED": {
+        "family": "enter",
+        "trader": "TREND-led",
+        "neutral": "High-Quality Setup",
+    },
+    "ENTER_AI_LED": {
+        "family": "enter",
+        "trader": "AI-led",
+        "neutral": "High-Quality Setup",
+    },
+    "PROBE": {
+        "family": "probe",
+        "trader": "PROBE",
+        "neutral": "Early Setup",
+    },
+    "WATCH": {
+        "family": "watch",
+        "trader": "WATCH",
+        "neutral": "Developing",
+    },
+    "SKIP": {
+        "family": "skip",
+        "trader": "SKIP",
+        "neutral": "Not Aligned",
+    },
+}
+
+
+def _normalized_action_key(raw_action: str) -> str:
+    raw = str(raw_action or "").strip().upper()
+    if raw in _ACTION_PRESENTATION:
+        return raw
+    return normalize_action_class(raw_action)
 
 
 def spot_bias_label(direction: str) -> str:
@@ -110,27 +151,33 @@ def adx_bucket_only(adx_value: float) -> str:
     return "Extreme"
 
 
-def setup_confirm_display(raw_action: str) -> str:
-    cls = normalize_action_class(raw_action)
-    if cls == "ENTER_TREND_AI":
-        return "TREND+AI"
-    if cls == "ENTER_TREND_LED":
-        return "TREND-led"
-    if cls == "ENTER_AI_LED":
-        return "AI-led"
-    if cls == "PROBE":
-        return "PROBE"
-    if cls == "WATCH":
-        return "WATCH"
-    if cls == "SKIP":
-        return "SKIP"
+def action_family(raw_action: str) -> str:
+    cls = _normalized_action_key(raw_action)
+    if cls in _ACTION_PRESENTATION:
+        return str(_ACTION_PRESENTATION[cls]["family"])
+    return "unknown"
+
+
+def setup_confirm_display(raw_action: str, *, audience: str | None = None) -> str:
+    cls = _normalized_action_key(raw_action)
+    profile = _ACTION_PRESENTATION.get(cls)
+    if profile:
+        selected_audience = str(audience or get_copy_audience())
+        return str(profile.get(selected_audience) or profile.get("trader") or cls)
     return str(raw_action or "").strip() or "SKIP"
 
 
-def trade_gate_display_label(label: str) -> str:
+def trade_gate_display_label(label: str, *, audience: str | None = None) -> str:
+    key = trade_gate_key(label)
+    if key == "NO_TRADE":
+        return copy_text("stance.display.stand_aside", audience=audience)
+    if key == "DEFENSIVE_ONLY":
+        return copy_text("stance.display.defensive_only", audience=audience)
+    if key == "SELECTIVE_ONLY":
+        return copy_text("stance.display.selective_only", audience=audience)
+    if key == "TRADEABLE":
+        return copy_text("stance.display.tradeable", audience=audience)
     normalized = str(label or "").strip()
-    if normalized == "No-Trade":
-        return "Stand Aside"
     return normalized or "Unknown"
 
 
@@ -164,18 +211,18 @@ def archived_execution_stance_label(
     adaptive_edge: str = "",
     archive_guardrail_severity: str = "",
 ) -> str:
-    gate = str(trade_gate or "").strip()
+    gate = trade_gate_key(trade_gate)
     adaptive = str(adaptive_edge or "").strip()
     guardrail = str(archive_guardrail_severity or "").strip()
 
-    if gate == "No-Trade" or guardrail == "Guardrail":
-        return "Stand Aside"
-    if gate == "Defensive Only" or adaptive == "Historically Weak":
-        return "Defensive Only"
-    if gate == "Tradeable" and adaptive == "Historically Favored" and guardrail == "Clear":
-        return "Tradeable"
-    if gate in {"Tradeable", "Selective Only"}:
-        return "Selective Only"
+    if gate == "NO_TRADE" or guardrail == "Guardrail":
+        return trade_gate_display_label("NO_TRADE")
+    if gate == "DEFENSIVE_ONLY" or adaptive == "Historically Weak":
+        return trade_gate_display_label("DEFENSIVE_ONLY")
+    if gate == "TRADEABLE" and adaptive == "Historically Favored" and guardrail == "Clear":
+        return trade_gate_display_label("TRADEABLE")
+    if gate in {"TRADEABLE", "SELECTIVE_ONLY"}:
+        return trade_gate_display_label("SELECTIVE_ONLY")
     return trade_gate_display_label(gate)
 
 
@@ -193,33 +240,39 @@ def context_fit_snapshot(
     session_label = str(getattr(adaptive_snapshot, "session_fit_label", "") or "").strip()
     archive_label = str(getattr(adaptive_snapshot, "archive_guardrail_label", "") or "").strip()
 
-    playbook = str(market_context.get("Playbook") or "").strip()
-    trade_gate = str(market_context.get("Trade Gate") or "").strip()
+    playbook = playbook_display(
+        market_context.get("Playbook Key") or market_context.get("Playbook") or "",
+    ).strip()
+    trade_gate = trade_gate_display(
+        market_context.get("Trade Gate Key") or market_context.get("Trade Gate") or "",
+    ).strip()
+    trade_gate_value_key = trade_gate_key(market_context.get("Trade Gate Key") or trade_gate)
+    playbook_value_key = playbook_key(market_context.get("Playbook Key") or playbook)
     catalyst_window = str(market_context.get("Catalyst Window") or "").strip()
     flow_proxy = str(market_context.get("Flow Proxy") or "").strip()
     symbol_lead = str(recent_symbol_market_signal.get("Lead") or "").strip()
     signal_note = str(recent_symbol_market_signal.get("Signal Note") or "").strip()
 
-    if "GUARDRAIL" in archive_label.upper() or trade_gate == "No-Trade" or catalyst_window.startswith("Blocking"):
-        label = "Stand Aside"
+    if "GUARDRAIL" in archive_label.upper() or trade_gate_value_key == "NO_TRADE" or catalyst_window.startswith("Blocking"):
+        label = trade_gate_display_label("NO_TRADE")
         tone = "negative"
-        aggression = "No fresh risk"
+        aggression = copy_text("context_fit.aggression.no_fresh_risk")
     elif adaptive_label == "Historically Favored" and execution_label == "Execution Proven" and session_label == "Session Supportive":
-        label = "Tradeable"
+        label = trade_gate_display_label("TRADEABLE")
         tone = "positive"
-        aggression = "Normal aggression"
+        aggression = copy_text("context_fit.aggression.normal_aggression")
     elif adaptive_label == "Historically Favored" or execution_label == "Execution Proven" or symbol_lead == "LEAD":
-        label = "Selective Only"
+        label = trade_gate_display_label("SELECTIVE_ONLY")
         tone = "info"
-        aggression = "Selective adds only"
+        aggression = copy_text("context_fit.aggression.selective_adds_only")
     elif execution_label == "Execution Fragile" or session_label == "Session Fragile" or adaptive_label == "Historically Weak":
-        label = "Defensive Only"
+        label = trade_gate_display_label("DEFENSIVE_ONLY")
         tone = "warning"
-        aggression = "Reduced aggression"
+        aggression = copy_text("context_fit.aggression.reduced_aggression")
     else:
-        label = "Selective Only"
+        label = trade_gate_display_label("SELECTIVE_ONLY")
         tone = "neutral"
-        aggression = "Probe only"
+        aggression = copy_text("context_fit.aggression.probe_only")
 
     parts: list[str] = []
     if playbook and playbook != "Unknown":
@@ -235,6 +288,8 @@ def context_fit_snapshot(
     note = " | ".join(parts[:5]) if parts else "Context archive is still building."
 
     return {
+        "gate_key": trade_gate_key(label),
+        "playbook_key": playbook_value_key,
         "label": label,
         "tone": tone,
         "aggression": aggression,

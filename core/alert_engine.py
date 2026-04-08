@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from core.market_decision import normalize_action_class
+from core.trading_copy import copy_text, trade_gate_display
 
 
 @dataclass(frozen=True)
@@ -342,11 +343,8 @@ def _playbook_window_alert(rows: list[dict], market_regime_snapshot, market_cata
             state_signature=f"SUPPORTIVE|{playbook}|{'-'.join(names)}",
             severity="INFO",
             tone="positive",
-            title="Active playbook window is lining up",
-            note=(
-                f"{playbook} is getting support from the current session and catalyst window. "
-                f"Live names like {', '.join(names)} are lining up with that archive read."
-            ),
+            title=copy_text("alert.playbook.supportive.title"),
+            note=copy_text("alert.playbook.supportive.note", playbook=playbook, names=", ".join(names)),
         )
 
     if (session_label == "Session Fragile" or catalyst_label == "Catalyst Caution") and len(fragile) >= 2:
@@ -356,11 +354,8 @@ def _playbook_window_alert(rows: list[dict], market_regime_snapshot, market_cata
             state_signature=f"FRAGILE|{playbook}|{'-'.join(names)}",
             severity="INFO",
             tone="warning",
-            title="Active playbook window looks fragile",
-            note=(
-                f"{playbook} is active, but the current timing window has been weak for names like "
-                f"{', '.join(names)}. Stay more selective than the raw setup alone suggests."
-            ),
+            title=copy_text("alert.playbook.fragile.title"),
+            note=copy_text("alert.playbook.fragile.note", playbook=playbook, names=", ".join(names)),
         )
     return None
 
@@ -391,8 +386,8 @@ def build_market_alerts(
                 state_signature=f"{catalyst_state}|{catalyst_title}",
                 severity="HIGH",
                 tone="negative",
-                title=f"Stand aside into {catalyst_title or 'the catalyst'}",
-                note=catalyst_note or "A high-impact catalyst is too close to trust fresh risk.",
+                title=copy_text("alert.catalyst.block.title", title=catalyst_title or "the catalyst"),
+                note=catalyst_note or copy_text("alert.catalyst.block.note"),
             )
         )
     elif targeted_only and bool(getattr(market_catalyst_snapshot, "caution", False)):
@@ -403,8 +398,11 @@ def build_market_alerts(
                 state_signature=f"{catalyst_state}|{catalyst_title}|{catalyst_tag}",
                 severity="INFO",
                 tone="warning",
-                title=f"Targeted catalyst active: {target_txt}{catalyst_title}".strip(),
-                note=catalyst_note or "A targeted catalyst is active. Affected names deserve smaller size and cleaner confirmation.",
+                title=copy_text(
+                    "alert.catalyst.targeted.title",
+                    target=f"{target_txt}{catalyst_title}".strip(),
+                ),
+                note=catalyst_note or copy_text("alert.catalyst.targeted.note"),
             )
         )
     elif bool(getattr(market_catalyst_snapshot, "caution", False)):
@@ -414,8 +412,8 @@ def build_market_alerts(
                 state_signature=f"{catalyst_state}|{catalyst_title}",
                 severity="MEDIUM",
                 tone="warning",
-                title=f"Catalyst window active: {catalyst_title or 'market event'}",
-                note=catalyst_note or "A known market catalyst is close enough to justify smaller size.",
+                title=copy_text("alert.catalyst.window.title", title=catalyst_title or "market event"),
+                note=catalyst_note or copy_text("alert.catalyst.window.note"),
             )
         )
 
@@ -430,8 +428,8 @@ def build_market_alerts(
                 state_signature=f"{gate_key}|{gate_reason}",
                 severity="HIGH",
                 tone="negative",
-                title=f"{gate_label or 'No-Trade'} gate active",
-                note=gate_note or "The current market state does not justify fresh risk.",
+                title=f"{gate_label or trade_gate_display('NO_TRADE')} gate active",
+                note=gate_note or copy_text("alert.trade_gate.no_trade.note"),
             )
         )
     elif gate_key == "DEFENSIVE_ONLY":
@@ -441,8 +439,8 @@ def build_market_alerts(
                 state_signature=f"{gate_key}|{gate_reason}",
                 severity="MEDIUM",
                 tone="warning",
-                title="Defensive mode",
-                note=gate_note or "Conditions still favor smaller, more selective positioning.",
+                title=copy_text("alert.trade_gate.defensive.title"),
+                note=gate_note or copy_text("alert.trade_gate.defensive.note"),
             )
         )
 

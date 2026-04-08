@@ -14,19 +14,16 @@ from core.backtest import (
     summarize_setup_outcome_study,
 )
 from core.confidence import ai_confidence_bucket, confidence_bucket
+from core.trading_copy import setup_class_display, setup_class_key
 from ui.ctx import get_ctx
 from ui.primitives import render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
 
 def _setup_filter_key(value: str) -> str:
-    s = str(value or "").strip().upper()
-    if "TREND+AI" in s:
-        return "TREND+AI"
-    if "TREND-LED" in s:
-        return "TREND-LED"
-    if "AI-LED" in s:
-        return "AI-LED"
+    key = setup_class_key(value)
+    if key in {"ENTER_TREND_AI", "ENTER_TREND_LED", "ENTER_AI_LED"}:
+        return key
     return "ALL"
 
 
@@ -149,16 +146,19 @@ def render(ctx: dict) -> None:
             f"{html.escape(str(text))}</span>"
         )
 
+    def _setup_filter_label(value: object) -> str:
+        return setup_class_display(value)
+
     def _setup_chip(value: str) -> str:
-        v = str(value or "").strip()
-        u = v.upper()
-        if "TREND+AI" in u:
-            return _chip(v, "pos")
-        if "TREND-LED" in u:
-            return _chip(v, "info", "eb-sc-trend-led")
-        if "AI-LED" in u:
-            return _chip(v, "info", "eb-sc-ai-led")
-        return _chip(v, "warn")
+        key = setup_class_key(value)
+        label = setup_class_display(value)
+        if key == "ENTER_TREND_AI":
+            return _chip(label, "pos")
+        if key == "ENTER_TREND_LED":
+            return _chip(label, "info", "eb-sc-trend-led")
+        if key == "ENTER_AI_LED":
+            return _chip(label, "info", "eb-sc-ai-led")
+        return _chip(label, "warn")
 
     def _direction_chip(value: str) -> str:
         v = str(value or "").strip().upper()
@@ -509,7 +509,9 @@ def render(ctx: dict) -> None:
         intro_html=(
             "Forward-outcome study for setup classes. "
             "The engine scans each closed candle, records every matching setup event, and measures how that setup behaves over the next N bars. "
-            "Use it to compare occurrence frequency, forward returns, and class-level quality between TREND+AI, TREND-led, AI-led, or the full setup mix."
+            "Use it to compare occurrence frequency, forward returns, and class-level quality between "
+            f"{setup_class_display('ENTER_TREND_AI')}, {setup_class_display('ENTER_TREND_LED')}, "
+            f"{setup_class_display('ENTER_AI_LED')}, or the full setup mix."
         ),
     )
 
@@ -539,9 +541,10 @@ def render(ctx: dict) -> None:
     with c2:
         setup_filter = st.selectbox(
             "Setup Filter",
-            ["ALL Setup Confirmations", "TREND+AI", "TREND-led", "AI-led"],
+            ["ALL", "ENTER_TREND_AI", "ENTER_TREND_LED", "ENTER_AI_LED"],
             index=0,
             key="setup_bt_filter",
+            format_func=_setup_filter_label,
         )
         forward_bars = st.slider(
             "Forward Bars (Outcome Window)",
@@ -647,7 +650,7 @@ def render(ctx: dict) -> None:
         if events_df.empty:
             st.warning(
                 "No matching setup events found in this window. "
-                "Try ALL Setup Confirmations, another timeframe, or more lookback candles."
+                f"Try {_setup_filter_label('ALL')}, another timeframe, or more lookback candles."
             )
             return
 
@@ -712,7 +715,7 @@ def render(ctx: dict) -> None:
         )
 
     st.success(
-        f"Study complete. {int(summary['occurrences'])} events matched ({setup_key}) "
+        f"Study complete. {int(summary['occurrences'])} events matched ({_setup_filter_label(setup_key)}) "
         f"across {events_coin_count}/{len(coins)} coin(s)."
     )
 
@@ -829,7 +832,7 @@ def render(ctx: dict) -> None:
         )
         class_rows.append(
             {
-                "Setup Class": str(setup_class),
+                "Setup Class": setup_class_display(setup_class),
                 "Events": int(len(grp)),
                 "Quality": class_quality,
                 "Win %": f"{class_win_rate:.1f}%" if np.isfinite(class_win_rate) else "N/A",
@@ -857,7 +860,12 @@ def render(ctx: dict) -> None:
         _render_hover_table(
             class_display,
             {
-                "Setup Class": "Which Setup Confirm bucket produced the events (TREND+AI / TREND-led / AI-led).",
+                "Setup Class": (
+                    "Which setup class produced the events "
+                    f"({setup_class_display('ENTER_TREND_AI')} / "
+                    f"{setup_class_display('ENTER_TREND_LED')} / "
+                    f"{setup_class_display('ENTER_AI_LED')})."
+                ),
                 "Events": "How many times this setup class appeared in the selected sample.",
                 "Quality": "Policy grade from sample size + expectancy + payoff ratio + profit factor + win rate.",
                 "Win %": "Percent of events with positive directional return at the selected horizon (+N bars).",
@@ -874,6 +882,8 @@ def render(ctx: dict) -> None:
             st.info("No raw class-level metrics available.")
         else:
             b = by_class.copy()
+            if "Setup Confirm" in b.columns:
+                b["Setup Confirm"] = b["Setup Confirm"].map(setup_class_display)
             b["FavorableRate"] = b["FavorableRate"].map(lambda v: f"{float(v):.1f}%")
             b["MedianDirectionalReturn"] = b["MedianDirectionalReturn"].map(lambda v: f"{float(v):+.2f}%")
             b["AvgDirectionalReturn"] = b["AvgDirectionalReturn"].map(lambda v: f"{float(v):+.2f}%")
@@ -896,7 +906,7 @@ def render(ctx: dict) -> None:
             _render_hover_table(
                 b,
                 {
-                    "Setup Confirm": "Raw setup class key used in aggregation.",
+                    "Setup Confirm": "Displayed setup class label used in aggregation.",
                     "Occurrences": "Number of detected events for this class.",
                     "FavorableRate": "Percent of events with positive directional return at the selected horizon.",
                     "MedianDirectionalReturn": "Median directional return at selected horizon; robust against outliers.",
@@ -933,13 +943,15 @@ def render(ctx: dict) -> None:
                 "Above 0 means class edge is positive at that bar; below 0 means edge weakens/reverses."
             )
             class_specs = [
-                ("TREND+AI", POSITIVE, "solid", "circle"),
-                ("TREND-led", "#38BDF8", "solid", "square"),
-                ("AI-led", "#A78BFA", "dot", "diamond"),
+                ("ENTER_TREND_AI", POSITIVE, "solid", "circle"),
+                ("ENTER_TREND_LED", "#38BDF8", "solid", "square"),
+                ("ENTER_AI_LED", "#A78BFA", "dot", "diamond"),
             ]
             plotted = 0
             for cls_name, cls_color, cls_dash, cls_symbol in class_specs:
-                cls_df = events_df[events_df["Setup Confirm"].astype(str) == cls_name]
+                cls_df = events_df[
+                    events_df["Setup Confirm"].map(setup_class_key) == cls_name
+                ]
                 if cls_df.empty:
                     continue
                 path_points = _mean_path(cls_df)
@@ -951,7 +963,7 @@ def render(ctx: dict) -> None:
                         x=x_axis,
                         y=path_points,
                         mode="lines+markers",
-                        name=f"{cls_name} (n={len(cls_df)}, win {cls_win:.1f}%)",
+                        name=f"{setup_class_display(cls_name)} (n={len(cls_df)}, win {cls_win:.1f}%)",
                         line=dict(color=cls_color, width=2, dash=cls_dash),
                         marker=dict(size=5, symbol=cls_symbol),
                     )
@@ -973,7 +985,7 @@ def render(ctx: dict) -> None:
                     x=x_axis,
                     y=path_points,
                     mode="lines+markers",
-                    name=f"{setup_key} (n={len(events_df)}, win {cls_win:.1f}%)",
+                    name=f"{setup_class_display(setup_key)} (n={len(events_df)}, win {cls_win:.1f}%)",
                     line=dict(color=POSITIVE, width=2),
                     marker=dict(size=5),
                     fill="tozeroy",
