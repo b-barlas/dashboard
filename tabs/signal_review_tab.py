@@ -5,11 +5,20 @@ from core.session_utils import session_bucket_for_timestamp
 
 from ui.ctx import get_ctx
 from ui.signal_formatters import archived_execution_stance_label
-from ui.primitives import render_help_details, render_insight_card, render_kpi_grid, render_page_header
+from ui.primitives import render_insight_card, render_kpi_grid, render_page_header
 
 
 _MIN_SIGNAL_ARCHIVE_ROWS = 8
 _MIN_EXECUTION_ARCHIVE_ROWS = 3
+
+
+def _display_trade_direction(value: object) -> str:
+    side = str(value or "").strip().upper()
+    if side in {"LONG", "UPSIDE", "BUY"}:
+        return "Upside"
+    if side in {"SHORT", "DOWNSIDE", "SELL"}:
+        return "Downside"
+    return ""
 
 
 def _annotate_actual_hold_style(df_events: pd.DataFrame) -> pd.DataFrame:
@@ -116,7 +125,36 @@ def _archive_building_card(title: str, body_html: str) -> dict[str, str]:
         "title": title,
         "body_html": body_html,
         "tone": "neutral",
+        "kind": "building",
     }
+
+
+def _prepare_section_cards(
+    cards: list[dict[str, str]],
+    *,
+    max_actionable: int = 3,
+) -> list[dict[str, str]]:
+    visible_cards = [card for card in list(cards or []) if card]
+    if not visible_cards:
+        return []
+    actionable = [card for card in visible_cards if str(card.get("kind") or "").strip().lower() != "building"]
+    building = [card for card in visible_cards if str(card.get("kind") or "").strip().lower() == "building"]
+    prepared = actionable[: max(1, int(max_actionable))]
+    if building:
+        titles = [str(card.get("title") or "").strip() for card in building if str(card.get("title") or "").strip()]
+        preview = ", ".join(titles[:3])
+        extra = "" if len(titles) <= 3 else f" +{len(titles) - 3} more"
+        prepared.append(
+            {
+                "title": "Archive Status",
+                "body_html": (
+                    f"Still building: <b>{preview}</b>{extra}. "
+                    "These need more resolved signals or journaled closed trades before they become trustworthy."
+                ),
+                "tone": "neutral",
+            }
+        )
+    return prepared if prepared else visible_cards[:1]
 
 
 def _execution_vs_system_note(execution_snapshot: dict[str, float]) -> tuple[str, str]:
@@ -173,6 +211,9 @@ def _render_compact_cohort_tables(
         summary_df = build_signal_cohort_summary(df_events, group_field)
         if summary_df is None or summary_df.empty:
             continue
+        known_summary_df = _prefer_known_summary_rows(summary_df, label_field=group_field)
+        if known_summary_df is not None and not known_summary_df.empty:
+            summary_df = known_summary_df
         visible_specs.append((group_field, title, summary_df))
     if not visible_specs:
         st.caption("No cohort data is available in this slice yet.")
@@ -195,9 +236,38 @@ def _render_execution_review_section(
 ) -> None:
     st.markdown("### Execution Review")
     st.caption("Use this section after the top-level read. It separates system quality from your own execution decisions.")
-    review_cols = st.columns([1.45, 1.0], gap="medium")
+    review_cols = st.columns([1.2, 1.0], gap="medium")
+    trade_overlay_count = int(df_events.get("trade_decision", pd.Series(dtype=object)).fillna("").astype(str).str.strip().ne("").sum())
+    taken_count = int(
+        df_events.get("trade_decision", pd.Series(dtype=object))
+        .fillna("")
+        .astype(str)
+        .str.upper()
+        .eq("TAKEN")
+        .sum()
+    )
+    closed_trade_count = int(
+        df_events.get("actual_trade_status", pd.Series(dtype=object))
+        .fillna("")
+        .astype(str)
+        .str.upper()
+        .eq("CLOSED")
+        .sum()
+    )
+    with review_cols[1]:
+        st.markdown(
+            (
+                f"<div class='market-note-box' style='border:1px solid rgba(0,212,255,0.26); border-left:4px solid {positive_color};"
+                " background:rgba(0,212,255,0.04);'>"
+                f"<b style='color:{positive_color};'>Execution Overlay:</b> "
+                f"{trade_overlay_count} signals have manual execution tags. "
+                f"{taken_count} were actually taken, and {closed_trade_count} now have a full execution journal."
+                "</div>"
+            ),
+            unsafe_allow_html=True,
+        )
     signal_options: dict[str, str] = {}
-    for _, row in df_events.head(120).iterrows():
+    for _, row in df_events.iterrows():
         signal_key = str(row.get("signal_key") or "").strip()
         if not signal_key:
             continue
@@ -211,160 +281,134 @@ def _render_execution_review_section(
 
     with review_cols[0]:
         if signal_options:
-            selected_label = st.selectbox(
-                "Trade overlay",
-                list(signal_options.keys()),
-                index=0,
-                key="signal_review_trade_overlay_pick",
-                help="Use this to mark whether you actually took a tracked setup or passed on it.",
-            )
-            selected_key = signal_options[selected_label]
-            selected_row = df_events[df_events["signal_key"].astype(str) == selected_key].iloc[0]
-            current_decision = str(selected_row.get("trade_decision") or "").strip()
-            current_note = str(selected_row.get("trade_note") or "").strip()
-            current_side = str(selected_row.get("actual_trade_side") or "").strip().upper()
-            current_entry_price = selected_row.get("actual_entry_price")
-            current_entry_at = str(selected_row.get("actual_entry_at") or "").strip()
-            current_exit_price = selected_row.get("actual_exit_price")
-            current_exit_at = str(selected_row.get("actual_exit_at") or "").strip()
-            current_exit_reason = str(selected_row.get("actual_exit_reason") or "").strip()
-            current_trade_status = str(selected_row.get("actual_trade_status") or "").strip().upper()
-            decision_options = ["Taken", "Skipped", "Observed", "Clear"]
-            default_idx = decision_options.index(current_decision) if current_decision in decision_options else 0
-            with st.form("signal_trade_overlay_form", clear_on_submit=False):
-                chosen_decision = st.selectbox(
-                    "Decision",
-                    decision_options,
-                    index=default_idx,
-                    key="signal_trade_overlay_decision",
+            with st.expander("Journal a tracked setup", expanded=False):
+                selected_label = st.selectbox(
+                    "Trade overlay",
+                    list(signal_options.keys()),
+                    index=0,
+                    key="signal_review_trade_overlay_pick",
+                    help="Use this to mark whether you actually took a tracked setup or passed on it.",
                 )
-                trade_note = st.text_input(
-                    "Note",
-                    value=current_note,
-                    key="signal_trade_overlay_note",
-                    placeholder="Optional execution note",
-                )
-                submitted = st.form_submit_button("Save overlay", use_container_width=False)
-            if submitted:
-                decision_value = "" if chosen_decision == "Clear" else chosen_decision
-                saved = save_signal_trade_overlay(
-                    selected_key,
-                    trade_decision=decision_value,
-                    trade_note=trade_note,
-                    db_path=db_path,
-                )
-                if saved:
-                    st.success("Trade overlay saved.")
-                    st.rerun()
-                else:
-                    st.error("Trade overlay could not be saved for that signal.")
-
-            has_journal = any(
-                [
-                    current_side,
-                    current_entry_at,
-                    current_exit_at,
-                    pd.notna(current_entry_price),
-                    pd.notna(current_exit_price),
-                    current_exit_reason,
-                ]
-            )
-            if current_decision == "Taken" or has_journal:
-                signal_direction = str(selected_row.get("direction") or "").strip().upper()
-                suggested_side = "Long" if signal_direction == "UPSIDE" else "Short"
-                side_options = ["Long", "Short"]
-                default_side = "Long" if current_side == "LONG" else ("Short" if current_side == "SHORT" else suggested_side)
-                default_side_idx = side_options.index(default_side)
-                exit_reason_options = ["Open", "Target", "Stop", "Manual Exit", "Time Exit", "Invalidation", "Clear"]
-                mapped_exit_reason = current_exit_reason if current_exit_reason in exit_reason_options else ("Open" if current_trade_status != "CLOSED" else "Manual Exit")
-                with st.form("signal_trade_journal_form", clear_on_submit=False):
-                    st.markdown("#### Actual Trade Journal")
-                    st.caption("Use this only for trades you really took. It keeps system signal quality separate from your actual execution.")
-                    chosen_side = st.selectbox(
-                        "Trade side",
-                        side_options,
-                        index=default_side_idx,
-                        key="signal_trade_journal_side",
+                selected_key = signal_options[selected_label]
+                selected_row = df_events[df_events["signal_key"].astype(str) == selected_key].iloc[0]
+                current_decision = str(selected_row.get("trade_decision") or "").strip()
+                current_note = str(selected_row.get("trade_note") or "").strip()
+                current_side = str(selected_row.get("actual_trade_side") or "").strip().upper()
+                current_entry_price = selected_row.get("actual_entry_price")
+                current_entry_at = str(selected_row.get("actual_entry_at") or "").strip()
+                current_exit_price = selected_row.get("actual_exit_price")
+                current_exit_at = str(selected_row.get("actual_exit_at") or "").strip()
+                current_exit_reason = str(selected_row.get("actual_exit_reason") or "").strip()
+                current_trade_status = str(selected_row.get("actual_trade_status") or "").strip().upper()
+                decision_options = ["Taken", "Skipped", "Observed", "Clear"]
+                default_idx = decision_options.index(current_decision) if current_decision in decision_options else 0
+                with st.form("signal_trade_overlay_form", clear_on_submit=False):
+                    chosen_decision = st.selectbox(
+                        "Decision",
+                        decision_options,
+                        index=default_idx,
+                        key="signal_trade_overlay_decision",
                     )
-                    entry_price_text = st.text_input(
-                        "Entry price",
-                        value="" if pd.isna(current_entry_price) else f"{float(current_entry_price):.8f}".rstrip("0").rstrip("."),
-                        key="signal_trade_journal_entry_price",
-                        placeholder="Example: 102.45",
+                    trade_note = st.text_input(
+                        "Note",
+                        value=current_note,
+                        key="signal_trade_overlay_note",
+                        placeholder="Optional execution note",
                     )
-                    entry_time_text = st.text_input(
-                        "Entry time (UTC)",
-                        value=current_entry_at,
-                        key="signal_trade_journal_entry_at",
-                        placeholder="2026-04-04T12:00:00Z",
+                    submitted = st.form_submit_button("Save overlay", use_container_width=False)
+                if submitted:
+                    decision_value = "" if chosen_decision == "Clear" else chosen_decision
+                    saved = save_signal_trade_overlay(
+                        selected_key,
+                        trade_decision=decision_value,
+                        trade_note=trade_note,
+                        db_path=db_path,
                     )
-                    exit_price_text = st.text_input(
-                        "Exit price",
-                        value="" if pd.isna(current_exit_price) else f"{float(current_exit_price):.8f}".rstrip("0").rstrip("."),
-                        key="signal_trade_journal_exit_price",
-                        placeholder="Leave blank if still open",
-                    )
-                    exit_time_text = st.text_input(
-                        "Exit time (UTC)",
-                        value=current_exit_at,
-                        key="signal_trade_journal_exit_at",
-                        placeholder="Leave blank if still open",
-                    )
-                    chosen_exit_reason = st.selectbox(
-                        "Exit reason",
-                        exit_reason_options,
-                        index=exit_reason_options.index(mapped_exit_reason),
-                        key="signal_trade_journal_exit_reason",
-                    )
-                    journal_submitted = st.form_submit_button("Save journal", use_container_width=False)
-                if journal_submitted:
-                    if chosen_exit_reason == "Clear":
-                        journal_saved = save_signal_trade_journal(selected_key, db_path=db_path)
-                    else:
-                        journal_saved = save_signal_trade_journal(
-                            selected_key,
-                            actual_trade_side=chosen_side,
-                            actual_entry_price=entry_price_text,
-                            actual_entry_at=entry_time_text,
-                            actual_exit_price="" if chosen_exit_reason == "Open" else exit_price_text,
-                            actual_exit_at="" if chosen_exit_reason == "Open" else exit_time_text,
-                            actual_exit_reason="" if chosen_exit_reason == "Open" else chosen_exit_reason,
-                            db_path=db_path,
-                        )
-                    if journal_saved:
-                        st.success("Actual trade journal saved.")
+                    if saved:
+                        st.success("Trade overlay saved.")
                         st.rerun()
                     else:
-                        st.error("Trade journal could not be saved. Entry price and trade side are required.")
-    with review_cols[1]:
-        trade_overlay_count = int(df_events.get("trade_decision", pd.Series(dtype=object)).fillna("").astype(str).str.strip().ne("").sum())
-        taken_count = int(
-            df_events.get("trade_decision", pd.Series(dtype=object))
-            .fillna("")
-            .astype(str)
-            .str.upper()
-            .eq("TAKEN")
-            .sum()
-        )
-        closed_trade_count = int(
-            df_events.get("actual_trade_status", pd.Series(dtype=object))
-            .fillna("")
-            .astype(str)
-            .str.upper()
-            .eq("CLOSED")
-            .sum()
-        )
-        st.markdown(
-            (
-                f"<div class='market-note-box' style='border:1px solid rgba(0,212,255,0.26); border-left:4px solid {positive_color};"
-                " background:rgba(0,212,255,0.04);'>"
-                f"<b style='color:{positive_color};'>Execution Overlay:</b> "
-                f"{trade_overlay_count} signals have manual execution tags. "
-                f"{taken_count} were actually taken, and {closed_trade_count} now have a full execution journal."
-                "</div>"
-            ),
-            unsafe_allow_html=True,
-        )
+                        st.error("Trade overlay could not be saved for that signal.")
+
+                has_journal = any(
+                    [
+                        current_side,
+                        current_entry_at,
+                        current_exit_at,
+                        pd.notna(current_entry_price),
+                        pd.notna(current_exit_price),
+                        current_exit_reason,
+                    ]
+                )
+                if current_decision == "Taken" or has_journal:
+                    signal_direction = str(selected_row.get("direction") or "").strip().upper()
+                    suggested_side = "Upside" if signal_direction == "UPSIDE" else "Downside"
+                    side_options = ["Upside", "Downside"]
+                    default_side = _display_trade_direction(current_side) or suggested_side
+                    default_side_idx = side_options.index(default_side)
+                    exit_reason_options = ["Open", "Target", "Stop", "Manual Exit", "Time Exit", "Invalidation", "Clear"]
+                    mapped_exit_reason = current_exit_reason if current_exit_reason in exit_reason_options else ("Open" if current_trade_status != "CLOSED" else "Manual Exit")
+                    with st.form("signal_trade_journal_form", clear_on_submit=False):
+                        st.markdown("#### Actual Trade Journal")
+                        st.caption("Use this only for trades you really took. It keeps system signal quality separate from your actual execution.")
+                        chosen_side = st.selectbox(
+                            "Trade direction",
+                            side_options,
+                            index=default_side_idx,
+                            key="signal_trade_journal_side",
+                        )
+                        entry_price_text = st.text_input(
+                            "Entry price",
+                            value="" if pd.isna(current_entry_price) else f"{float(current_entry_price):.8f}".rstrip("0").rstrip("."),
+                            key="signal_trade_journal_entry_price",
+                            placeholder="Example: 102.45",
+                        )
+                        entry_time_text = st.text_input(
+                            "Entry time (UTC)",
+                            value=current_entry_at,
+                            key="signal_trade_journal_entry_at",
+                            placeholder="2026-04-04T12:00:00Z",
+                        )
+                        exit_price_text = st.text_input(
+                            "Exit price",
+                            value="" if pd.isna(current_exit_price) else f"{float(current_exit_price):.8f}".rstrip("0").rstrip("."),
+                            key="signal_trade_journal_exit_price",
+                            placeholder="Leave blank if still open",
+                        )
+                        exit_time_text = st.text_input(
+                            "Exit time (UTC)",
+                            value=current_exit_at,
+                            key="signal_trade_journal_exit_at",
+                            placeholder="Leave blank if still open",
+                        )
+                        chosen_exit_reason = st.selectbox(
+                            "Exit reason",
+                            exit_reason_options,
+                            index=exit_reason_options.index(mapped_exit_reason),
+                            key="signal_trade_journal_exit_reason",
+                        )
+                        journal_submitted = st.form_submit_button("Save journal", use_container_width=False)
+                    if journal_submitted:
+                        if chosen_exit_reason == "Clear":
+                            journal_saved = save_signal_trade_journal(selected_key, db_path=db_path)
+                        else:
+                            journal_saved = save_signal_trade_journal(
+                                selected_key,
+                                actual_trade_side=chosen_side,
+                                actual_entry_price=entry_price_text,
+                                actual_entry_at=entry_time_text,
+                                actual_exit_price="" if chosen_exit_reason == "Open" else exit_price_text,
+                                actual_exit_at="" if chosen_exit_reason == "Open" else exit_time_text,
+                                actual_exit_reason="" if chosen_exit_reason == "Open" else chosen_exit_reason,
+                                db_path=db_path,
+                            )
+                        if journal_saved:
+                            st.success("Actual trade journal saved.")
+                            st.rerun()
+                        else:
+                            st.error("Trade journal could not be saved. Entry price and trade direction are required.")
+        else:
+            st.caption("No tracked signals are available in this slice yet for journaling.")
 
 
 def _render_tracker_backup_restore(
@@ -508,16 +552,6 @@ def render(ctx: dict) -> None:
             "and whether the issue is the system or your execution, not as a live entry screen."
         ),
     )
-    render_help_details(
-        st,
-        summary="How to use this page",
-        body_html=(
-            "<b>1.</b> Start in <b>Overview</b> to see if the signal engine and your execution are improving or slipping.<br>"
-            "<b>2.</b> Read <b>What Works</b> and <b>What Fails</b> as the current playbook guide for this review slice.<br>"
-            "<b>3.</b> Use <b>Execution Review</b> to separate system quality from your own entries and exits.<br>"
-            "<b>4.</b> Open the deep dives only when you need detail; this page is meant to guide, not overwhelm."
-        ),
-    )
 
     with st.spinner("Refreshing recent signal outcomes..."):
         resolved_now = int(
@@ -561,15 +595,14 @@ def render(ctx: dict) -> None:
     with top_insight_cols[1]:
         render_insight_card(
             st,
-            title="What This Page Is For",
+            title="Tracker Memory",
             body_html=(
-                "Use this page to answer four questions:<br>"
-                "<b>1.</b> Is the system getting good follow-through?<br>"
-                "<b>2.</b> Which patterns are working best right now?<br>"
-                "<b>3.</b> Which patterns should we avoid?<br>"
-                "<b>4.</b> Am I executing the good setups well?"
+                f"<b>{storage_snapshot.durability_label}</b><br>"
+                f"{storage_snapshot.durability_note}<br><br>"
+                f"<span style='color:#8B949E;'>DB:</span> {storage_snapshot.filename}<br>"
+                f"<span style='color:#8B949E;'>Recovery:</span> {storage_snapshot.recovery_status}"
             ),
-            tone="neutral",
+            tone=str(storage_snapshot.durability_tone or "neutral"),
         )
     tracker_notice = st.session_state.pop("signal_review_tracker_notice", None)
     tracker_notice_tone = str(st.session_state.pop("signal_review_tracker_notice_tone", "info") or "info")
@@ -587,31 +620,6 @@ def render(ctx: dict) -> None:
     actual_closed = int(snapshot["actual_closed"])
     tone_follow = POSITIVE if snapshot["follow_through_rate"] >= 55.0 else (WARNING if snapshot["follow_through_rate"] >= 45.0 else NEGATIVE)
     tone_dir = POSITIVE if snapshot["avg_dir_return"] >= 0.0 else NEGATIVE
-    actual_win_display = f"{snapshot['actual_win_rate']:.1f}%" if actual_closed > 0 else "—"
-    actual_win_color = (
-        POSITIVE if snapshot["actual_win_rate"] >= 55.0
-        else (WARNING if snapshot["actual_win_rate"] >= 45.0 else NEGATIVE)
-    ) if actual_closed > 0 else TEXT_MUTED
-    actual_win_subtext = "Only closed trades from your execution journal" if actual_closed > 0 else "Journal still building"
-    execution_gap_display = (
-        f"{execution_snapshot['execution_gap_pct']:+.2f}%"
-        if actual_closed > 0 or taken_count > 0
-        else "—"
-    )
-    execution_gap_color = (
-        POSITIVE if execution_snapshot["execution_gap_pct"] >= 0 else WARNING
-    ) if actual_closed > 0 or taken_count > 0 else TEXT_MUTED
-    execution_gap_subtext = (
-        "How your real execution is tracking versus system follow-through"
-        if actual_closed > 0 or taken_count > 0
-        else "Need taken trades before comparing execution"
-    )
-    actual_pnl_display = f"{snapshot['avg_actual_pnl']:+.2f}%" if actual_closed > 0 else "—"
-    actual_pnl_color = (
-        POSITIVE if snapshot["avg_actual_pnl"] >= 0 else NEGATIVE
-    ) if actual_closed > 0 else TEXT_MUTED
-    actual_pnl_subtext = "Average realized result on closed trades" if actual_closed > 0 else "No closed journaled trades yet"
-
     st.markdown("### Overview")
     st.caption("Start here. This is the quick health read for the signal engine and your real execution.")
     render_kpi_grid(
@@ -630,18 +638,6 @@ def render(ctx: dict) -> None:
                 "subtext": "Directional move after the signal horizon",
             },
             {
-                "label": "Actual Win Rate",
-                "value": actual_win_display,
-                "value_color": actual_win_color,
-                "subtext": actual_win_subtext,
-            },
-            {
-                "label": "Execution Gap",
-                "value": execution_gap_display,
-                "value_color": execution_gap_color,
-                "subtext": execution_gap_subtext,
-            },
-            {
                 "label": "Logged Signals",
                 "value": int(snapshot["total"]),
                 "subtext": f"DB: {db_path.split('/')[-1]}",
@@ -655,7 +651,7 @@ def render(ctx: dict) -> None:
                 "badge_tone": "positive" if resolved_now > 0 else "neutral",
             },
         ],
-        columns=3,
+        columns=4,
     )
     render_kpi_grid(
         st,
@@ -684,14 +680,8 @@ def render(ctx: dict) -> None:
                 "value_color": WARNING if len(df_active_alerts) else TEXT_MUTED,
                 "subtext": "Live market alerts still active now",
             },
-            {
-                "label": "Avg Actual PnL",
-                "value": actual_pnl_display,
-                "value_color": actual_pnl_color,
-                "subtext": actual_pnl_subtext,
-            },
         ],
-        columns=5,
+        columns=4,
     )
     execution_vs_system_note, execution_vs_system_tone = _execution_vs_system_note(execution_snapshot)
     render_insight_card(
@@ -1188,6 +1178,9 @@ def render(ctx: dict) -> None:
             )
         )
 
+    works_cards = _prepare_section_cards(works_cards, max_actionable=3)
+    fail_cards = _prepare_section_cards(fail_cards, max_actionable=3)
+
     st.markdown("### What Works")
     st.caption("Read this as the current trust list for the selected review slice.")
     _render_insight_card_grid(st, works_cards, columns=3)
@@ -1322,6 +1315,8 @@ def render(ctx: dict) -> None:
         "status",
     ]
     recent_df = df_events[[c for c in recent_cols if c in df_events.columns]].copy()
+    if "actual_trade_side" in recent_df.columns:
+        recent_df["actual_trade_side"] = recent_df["actual_trade_side"].map(_display_trade_direction).replace("", "—")
     if "event_time" in recent_df.columns:
         recent_df["event_time"] = pd.to_datetime(recent_df["event_time"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
     rename_map = {
@@ -1339,7 +1334,7 @@ def render(ctx: dict) -> None:
         "status": "Status",
         "adaptive_edge_score": "Adaptive Score",
         "trade_note": "Trade Note",
-        "actual_trade_side": "Trade Side",
+        "actual_trade_side": "Trade Direction",
         "actual_entry_price": "Actual Entry",
         "actual_entry_at": "Entry Time",
         "actual_exit_price": "Actual Exit",

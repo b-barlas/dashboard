@@ -7,7 +7,10 @@ import pandas as pd
 from tabs.signal_review_tab import (
     _annotate_actual_exit_quality,
     _annotate_actual_hold_style,
+    _archive_building_card,
+    _display_trade_direction,
     _execution_vs_system_note,
+    _prepare_section_cards,
     _prefer_known_summary_rows,
     _qualified_summary_rows,
     _review_scope_note,
@@ -125,6 +128,28 @@ class SignalReviewLogicTests(unittest.TestCase):
         )
         out = _prefer_known_summary_rows(df, label_field="Session")
         self.assertEqual(list(out["Session"]), ["US (16-00 UTC)", "Asia (00-08 UTC)"])
+
+    def test_prepare_section_cards_condenses_building_cards_into_archive_status(self) -> None:
+        cards = [
+            {
+                "title": "Best Session",
+                "body_html": "Session looks healthy.",
+                "tone": "positive",
+            },
+            _archive_building_card("Hold Profile Archive", "Still building."),
+            _archive_building_card("Primary Alert Archive", "Still building."),
+        ]
+        out = _prepare_section_cards(cards, max_actionable=3)
+        self.assertEqual(out[0]["title"], "Best Session")
+        self.assertEqual(out[1]["title"], "Archive Status")
+        self.assertIn("Hold Profile Archive", out[1]["body_html"])
+        self.assertIn("Primary Alert Archive", out[1]["body_html"])
+
+    def test_display_trade_direction_uses_upside_downside_labels(self) -> None:
+        self.assertEqual(_display_trade_direction("LONG"), "Upside")
+        self.assertEqual(_display_trade_direction("Short"), "Downside")
+        self.assertEqual(_display_trade_direction("Upside"), "Upside")
+        self.assertEqual(_display_trade_direction(""), "")
 
 
 if __name__ == "__main__":
