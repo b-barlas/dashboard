@@ -1,13 +1,13 @@
 from ui.ctx import get_ctx
 
 from datetime import datetime, timezone
-import html
 import io
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
 import ta
+from core.session_utils import session_bucket_for_timestamp
 from core.ai_spot_bias import (
     ai_spot_bias_consensus_agreement,
     ai_spot_bias_directional_agreement,
@@ -17,7 +17,6 @@ from core.ai_spot_bias import (
     build_ai_spot_bias_snapshot,
 )
 from core.confidence import (
-    ai_confidence_bucket,
     build_ai_confidence_snapshot,
     build_confidence_snapshot,
     build_execution_confidence_snapshot,
@@ -42,17 +41,22 @@ from core.position_metrics import (
     compute_position_pnl,
     estimate_liquidation,
 )
+from core.position_management import build_position_management_snapshot
+from core.signal_tracker import build_actual_exit_quality_profile, build_actual_trade_hold_profile
 from core.spot_direction import build_spot_direction_snapshot
 from ui.primitives import render_help_details, render_page_header
-from ui.signal_panels import build_indicator_groups_html, build_setup_snapshot_html
+from ui.signal_panels import build_indicator_groups_html, build_learned_edge_banner_html, build_setup_snapshot_html
 from ui.signal_formatters import (
     adx_bucket_only as _adx_bucket_only,
     ai_confidence_display as _ai_confidence_display,
     ai_confidence_note as _ai_confidence_note,
     ai_spot_note as _ai_spot_note,
+    execution_read_note as _execution_read_note,
+    context_fit_snapshot as _context_fit_snapshot,
     setup_confirm_display as _setup_confirm_display,
     spot_bias_label as _spot_bias_label,
     spot_confidence_display as _confidence_display,
+    trade_gate_display_label as _trade_gate_display_label,
 )
 from ui.snapshot_cache import live_or_snapshot
 
@@ -86,6 +90,34 @@ def _spot_tf_note(snapshot) -> str:
     )
 
 
+def _learned_edge_tone(adaptive_label: str, execution_fit_label: str, archive_guardrail_label: str = "") -> str:
+    adaptive_key = str(adaptive_label or "").strip().upper()
+    execution_key = str(execution_fit_label or "").strip().upper()
+    guardrail_key = str(archive_guardrail_label or "").strip().upper()
+    if "GUARDRAIL" in guardrail_key or "CAUTION" in guardrail_key:
+        return "warning"
+    if "WEAK" in adaptive_key or "FRAGILE" in execution_key:
+        return "negative"
+    if "FAVORED" in adaptive_key and "PROVEN" in execution_key:
+        return "positive"
+    if "FAVORED" in adaptive_key:
+        return "info"
+    if "MIXED" in execution_key:
+        return "warning"
+    return "neutral"
+
+
+def _tone_color(tone: str, *, accent: str, positive: str, negative: str, warning: str) -> str:
+    key = str(tone or "").strip().lower()
+    if key == "positive":
+        return positive
+    if key == "negative":
+        return negative
+    if key == "warning":
+        return warning
+    return accent
+
+
 def render(ctx: dict) -> None:
     """Render the Position Analyser tab for evaluating open positions."""
     st = get_ctx(ctx, "st")
@@ -113,6 +145,14 @@ def render(ctx: dict) -> None:
     _debug = get_ctx(ctx, "_debug")
     get_scalping_entry_target = get_ctx(ctx, "get_scalping_entry_target")
     scalp_quality_gate = get_ctx(ctx, "scalp_quality_gate")
+    get_signal_tracker_db_path = get_ctx(ctx, "get_signal_tracker_db_path")
+    init_signal_tracker_db = get_ctx(ctx, "init_signal_tracker_db")
+    fetch_signal_events_df = get_ctx(ctx, "fetch_signal_events_df")
+    build_adaptive_context_model = get_ctx(ctx, "build_adaptive_context_model")
+    build_live_signal_adaptive_snapshot = get_ctx(ctx, "build_live_signal_adaptive_snapshot")
+    build_recent_market_context_snapshot = get_ctx(ctx, "build_recent_market_context_snapshot")
+    build_recent_symbol_market_signal_snapshot = get_ctx(ctx, "build_recent_symbol_market_signal_snapshot")
+    classify_symbol_sector = get_ctx(ctx, "classify_symbol_sector")
     render_page_header(
         st,
         title="Position Analyser",
@@ -209,6 +249,20 @@ def render(ctx: dict) -> None:
         if not selected_timeframes:
             st.error("Select at least one timeframe.")
             return
+        signal_tracker_db_path = init_signal_tracker_db(get_signal_tracker_db_path())
+        adaptive_history_df = fetch_signal_events_df(
+            limit=2000,
+            status="RESOLVED",
+            source="Market",
+            db_path=signal_tracker_db_path,
+        )
+        recent_market_events_df = fetch_signal_events_df(
+            limit=240,
+            source="Market",
+            db_path=signal_tracker_db_path,
+        )
+        recent_market_context = build_recent_market_context_snapshot(recent_market_events_df)
+        adaptive_model = build_adaptive_context_model(adaptive_history_df)
         report_rows: list[dict] = []
         tf_order = {'1m': 1, '3m': 2, '5m': 3, '15m': 4, '1h': 5, '4h': 6, '1d': 7}
         largest_tf = max(selected_timeframes, key=lambda tf: tf_order[tf])
@@ -508,10 +562,13 @@ def render(ctx: dict) -> None:
                 setup_confirm = _setup_confirm_display(action_raw)
                 setup_reason = action_reason_text(action_reason_code)
                 action_class = normalize_action_class(action_raw)
+                watch_setup_color = "#7DD3FC"
                 if action_class.startswith("ENTER_"):
                     setup_color = POSITIVE
-                elif action_class == "WATCH":
+                elif action_class == "PROBE":
                     setup_color = WARNING
+                elif action_class == "WATCH":
+                    setup_color = watch_setup_color
                 else:
                     setup_color = NEGATIVE
 
@@ -532,12 +589,78 @@ def render(ctx: dict) -> None:
                 )
                 ai_note = _ai_spot_note(ai_spot_snapshot)
                 ai_confidence_note = _ai_confidence_note(ai_spot_snapshot, float(ai_confidence_snapshot.score))
+                current_session_bucket = session_bucket_for_timestamp()
+                current_sector_tag = str(classify_symbol_sector(coin) or "").strip()
+                recent_symbol_market_signal = build_recent_symbol_market_signal_snapshot(
+                    recent_market_events_df,
+                    symbol=coin,
+                    timeframe=tf,
+                )
+                adaptive_snapshot = build_live_signal_adaptive_snapshot(
+                    adaptive_model,
+                    signal={
+                        "Setup Confirm": str(action_raw or ""),
+                        "Lead": str(recent_symbol_market_signal.get("Lead") or "No LEAD"),
+                        "AI Alignment": "Aligned" if direction_key(spot_snapshot.direction) == ai_spot_direction else "Not aligned",
+                        "Market Lead": str(recent_market_context.get("Market Lead") or "No Clear Lead"),
+                        "Market Regime": str(recent_market_context.get("Market Regime") or "Unknown"),
+                        "Playbook": str(recent_market_context.get("Playbook") or "Unknown"),
+                        "Trade Gate": str(recent_market_context.get("Trade Gate") or "Unknown"),
+                        "Sector Rotation": str(recent_market_context.get("Sector Rotation") or "Unknown"),
+                        "Catalyst State": str(recent_market_context.get("Catalyst State") or "Unknown"),
+                        "Catalyst Window": str(recent_market_context.get("Catalyst Window") or "Unknown"),
+                        "Catalyst Scope": str(recent_market_context.get("Catalyst Scope") or "Unknown"),
+                        "Catalyst Targeting": str(recent_market_context.get("Catalyst Targeting") or "Unknown"),
+                        "Flow Proxy": str(recent_market_context.get("Flow Proxy") or "Unknown"),
+                        "Session": current_session_bucket,
+                        "Timeframe": str(tf or "Unknown"),
+                    },
+                )
+                market_context_note = str(recent_market_context.get("Context Note") or "").strip()
+                scanner_signal_note = str(recent_symbol_market_signal.get("Signal Note") or "").strip()
+                context_fit = _context_fit_snapshot(
+                    adaptive_snapshot,
+                    market_context=recent_market_context,
+                    recent_symbol_market_signal=recent_symbol_market_signal,
+                )
+                hold_profile = build_actual_trade_hold_profile(
+                    adaptive_history_df,
+                    symbol=coin,
+                    timeframe=tf,
+                    direction=direction,
+                    sector_tag=current_sector_tag,
+                    playbook=str(recent_market_context.get("Playbook") or ""),
+                    session_bucket=current_session_bucket,
+                    trade_gate=str(recent_market_context.get("Trade Gate") or ""),
+                    catalyst_window=str(recent_market_context.get("Catalyst Window") or ""),
+                )
+                exit_quality = build_actual_exit_quality_profile(
+                    adaptive_history_df,
+                    symbol=coin,
+                    timeframe=tf,
+                    direction=direction,
+                    sector_tag=current_sector_tag,
+                    playbook=str(recent_market_context.get("Playbook") or ""),
+                    session_bucket=current_session_bucket,
+                    trade_gate=str(recent_market_context.get("Trade Gate") or ""),
+                    catalyst_window=str(recent_market_context.get("Catalyst Window") or ""),
+                )
+                confidence_note = (
+                    f"{confidence_note} | Historical read: {adaptive_snapshot.note} | "
+                    f"Execution fit: {adaptive_snapshot.execution_fit_note} | "
+                    f"Session fit: {adaptive_snapshot.session_fit_note}"
+                )
                 setup_snapshot_html = build_setup_snapshot_html(
                     title="Setup Snapshot",
                     text_muted=TEXT_MUTED,
                     items=[
                         {"label": "Δ (%)", "value": delta_display or "—", "color": delta_c, "title": delta_note},
-                        {"label": "Setup Confirm", "value": setup_confirm, "color": setup_color, "title": setup_reason},
+                        {
+                            "label": "Setup Confirm",
+                            "value": setup_confirm,
+                            "color": setup_color,
+                            "title": f"{setup_reason} | Execution fit: {adaptive_snapshot.execution_fit_note}",
+                        },
                         {
                             "label": "Direction",
                             "value": direction_label(spot_snapshot.direction),
@@ -565,6 +688,32 @@ def render(ctx: dict) -> None:
                     ],
                 )
                 st.markdown(setup_snapshot_html, unsafe_allow_html=True)
+                st.markdown(
+                    build_learned_edge_banner_html(
+                        title="Execution Read",
+                        label=(
+                            f"{_trade_gate_display_label(context_fit['label'])} • "
+                            f"{adaptive_snapshot.execution_fit_label}"
+                        ),
+                        note=_execution_read_note(
+                            adaptive_snapshot,
+                            context_fit=context_fit,
+                            market_context_note=market_context_note,
+                            scanner_signal_note=scanner_signal_note,
+                        ),
+                        tone=_learned_edge_tone(
+                            adaptive_snapshot.label,
+                            adaptive_snapshot.execution_fit_label,
+                            adaptive_snapshot.archive_guardrail_label,
+                        ),
+                        text_muted=TEXT_MUTED,
+                        positive=POSITIVE,
+                        negative=NEGATIVE,
+                        warning=WARNING,
+                        accent=ACCENT,
+                    ),
+                    unsafe_allow_html=True,
+                )
 
                 volume_txt = ""
                 if volume_spike:
@@ -671,6 +820,11 @@ def render(ctx: dict) -> None:
                 invalidation = float(inv_pack["level"])
                 invalidated = bool(inv_pack["invalidated"])
                 inv_buffer = float(inv_pack["buffer"])
+                invalidation_distance_pct = (
+                    abs(float(current_price) - float(invalidation)) / float(current_price) * 100.0
+                    if float(current_price) > 0
+                    else None
+                )
 
                 inv_color = NEGATIVE if invalidated else WARNING
                 inv_state = "BROKEN" if invalidated else "ACTIVE"
@@ -704,6 +858,38 @@ def render(ctx: dict) -> None:
                 health_label = str(health_pack["label"])
                 health_action = str(health_pack["action"])
                 health_notes = [str(x) for x in list(health_pack.get("notes", []))]
+                management_snapshot = build_position_management_snapshot(
+                    direction=direction,
+                    health_label=health_label,
+                    health_score=float(health_score),
+                    health_notes=health_notes,
+                    levered_pnl_pct=float(pnl_percent),
+                    liq_distance_pct=float(liq_dist_pct) if liq_dist_pct is not None else None,
+                    leverage=float(leverage),
+                    invalidated=invalidated,
+                    invalidation_distance_pct=invalidation_distance_pct,
+                    spot_direction=str(spot_snapshot.direction or ""),
+                    tactical_direction=str(signal_dir or ""),
+                    ai_direction=str(ai_spot_snapshot.direction or ""),
+                    selected_confidence=float(execution_confidence.score),
+                    context_fit_label=str(context_fit["label"] or ""),
+                    context_fit_aggression=str(context_fit["aggression"] or ""),
+                    adaptive_label=str(adaptive_snapshot.label or ""),
+                    execution_fit_label=str(adaptive_snapshot.execution_fit_label or ""),
+                    session_fit_label=str(adaptive_snapshot.session_fit_label or ""),
+                    archive_guardrail_label=str(adaptive_snapshot.archive_guardrail_label or ""),
+                    catalyst_window=str(recent_market_context.get("Catalyst Window") or ""),
+                    trade_gate=str(recent_market_context.get("Trade Gate") or ""),
+                    playbook=str(recent_market_context.get("Playbook") or ""),
+                    flow_proxy=str(recent_market_context.get("Flow Proxy") or ""),
+                    volatility_regime=str(atr_comment or ""),
+                    short_term_move_pct=float(price_change) if price_change is not None else None,
+                    volume_spike_label=str(volume_txt or ""),
+                    hold_profile_label=str(hold_profile.get("label") or ""),
+                    hold_profile_note=str(hold_profile.get("note") or ""),
+                    exit_quality_label=str(exit_quality.get("label") or ""),
+                    exit_quality_note=str(exit_quality.get("note") or ""),
+                )
                 report_rows.append(
                     {
                         "Timestamp (UTC)": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -734,6 +920,11 @@ def render(ctx: dict) -> None:
                         "Health Label": health_label,
                         "Health Score": int(health_score),
                         "Health Action": health_action,
+                        "Management Label": management_snapshot.label,
+                        "Management Score": int(management_snapshot.score),
+                        "Management Size": management_snapshot.size_guidance,
+                        "Management Adds": management_snapshot.adds_guidance,
+                        "Management Risk": management_snapshot.risk_guidance,
                     }
                 )
                 reason_map = {
@@ -750,26 +941,37 @@ def render(ctx: dict) -> None:
                 }
                 why_items = health_notes[:3] if health_notes else ["no major risk flag"]
                 why_text = ", ".join(reason_map.get(n, n) for n in why_items)
-                health_meaning_map = {
-                    "HOLD": "Meaning: structure is acceptable; hold with discipline.",
-                    "REDUCE": "Meaning: edge is weakened; reduce size and avoid adding.",
-                    "EXIT": "Meaning: risk breach is high; close or hedge immediately.",
-                }
-                health_meaning = health_meaning_map.get(health_label, "")
+                management_color = _tone_color(
+                    management_snapshot.tone,
+                    accent=ACCENT,
+                    positive=POSITIVE,
+                    negative=NEGATIVE,
+                    warning=WARNING,
+                )
                 st.markdown(
-                    f"<div class='panel-box' style='padding:10px 12px;'>"
-                    f"<div style='font-size:0.92rem;'>"
-                    f"<span style='color:{TEXT_MUTED};'>{tf} Position Risk Status:</span> "
-                    f"<b style='color:{ACCENT};'>{health_label} ({health_score}/100)</b>"
+                    f"<div class='panel-box' style='padding:10px 12px; border-left:4px solid {management_color};'>"
+                    f"<div style='display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; font-size:0.92rem;'>"
+                    f"<span style='color:{TEXT_MUTED};'>{tf} Position Management:</span> "
+                    f"<b style='color:{management_color};'>{management_snapshot.label} ({management_snapshot.score}/100)</b>"
                     f"</div>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-                    f"Why: {why_text}"
+                    f"Execution stance: <b>{context_fit['label']}</b> — {context_fit['aggression']}"
+                    f"</div>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
+                    f"Hold profile: <b>{hold_profile.get('label') or 'Archive Building'}</b>"
+                    f" • Exit quality: <b>{exit_quality.get('label') or 'Archive Building'}</b>"
+                    f"</div>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
+                    f"Size: <b>{management_snapshot.size_guidance}</b>"
+                    f"</div>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
+                    f"Adds: <b>{management_snapshot.adds_guidance}</b>"
+                    f"</div>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
+                    f"Why: {management_snapshot.note} Base health: <b>{health_label}</b> ({health_score}/100); {why_text}."
                     f"</div>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:2px;'>"
-                    f"{health_meaning}"
-                    f"</div>"
-                    f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:2px;'>"
-                    f"Next: {health_action} Keep risk line at "
+                    f"Next: {management_snapshot.risk_guidance} Hard risk line stays at "
                     f"<b style='color:{WARNING};'>{invalidation:,.4f}</b>."
                     f"</div>"
                     f"</div>",

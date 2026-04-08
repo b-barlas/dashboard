@@ -3,13 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
+from core.session_utils import SESSION_ORDER, session_bucket_for_hour, session_bucket_for_timestamp
 
 from ui.ctx import get_ctx
+from ui.signal_formatters import trade_gate_display_label
 from ui.primitives import render_help_details, render_insight_card, render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
-
-SESSION_ORDER = ["Asian (00-08 UTC)", "European (08-16 UTC)", "US (16-00 UTC)"]
 SNAPSHOT_TTL_SEC = 1800
 DRIFT_BIAS_DEADBAND_PCT = 0.02
 
@@ -26,11 +26,7 @@ def _format_volume_compact(value: float) -> str:
 
 
 def _session_bucket(hour: int) -> str:
-    if 0 <= hour < 8:
-        return SESSION_ORDER[0]
-    if 8 <= hour < 16:
-        return SESSION_ORDER[1]
-    return SESSION_ORDER[2]
+    return session_bucket_for_hour(hour)
 
 
 def _relative_quality_label(score: float) -> str:
@@ -73,7 +69,7 @@ def _compute_session_metrics(df: pd.DataFrame) -> pd.DataFrame:
     clean["range_pct"] = ((clean["high"] - clean["low"]) / clean["close"].replace(0, np.nan)) * 100.0
     clean["return_pct"] = ((clean["close"] - clean["open"]) / clean["open"].replace(0, np.nan)) * 100.0
     clean["abs_return_pct"] = clean["return_pct"].abs()
-    clean["session"] = clean["hour"].apply(_session_bucket)
+    clean["session"] = clean["timestamp"].apply(session_bucket_for_timestamp)
 
     grouped = clean.groupby("session").agg(
         avg_volume=("volume", "mean"),
@@ -111,6 +107,99 @@ def _compute_session_metrics(df: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
+def _prepare_tracked_session_archive(df_events: pd.DataFrame) -> pd.DataFrame:
+    if df_events is None or df_events.empty:
+        return pd.DataFrame()
+    d = df_events.copy()
+    d["Session"] = (
+        d.get("session_bucket", pd.Series(index=d.index, dtype=object))
+        .replace("", "Unknown")
+        .fillna("Unknown")
+    )
+    d["Playbook"] = (
+        d.get("market_playbook", pd.Series(index=d.index, dtype=object))
+        .replace("", "Unknown")
+        .fillna("Unknown")
+    )
+    return d
+
+
+def _build_playbook_session_archive(df_events: pd.DataFrame, playbook: str) -> pd.DataFrame:
+    normalized_playbook = str(playbook or "").strip()
+    if not normalized_playbook or normalized_playbook == "Unknown":
+        return pd.DataFrame()
+    archive = _prepare_tracked_session_archive(df_events)
+    if archive.empty:
+        return pd.DataFrame()
+    scoped = archive[archive["Playbook"].astype(str).str.strip() == normalized_playbook].copy()
+    if scoped.empty:
+        return pd.DataFrame()
+    scoped["directional_return_pct"] = pd.to_numeric(scoped.get("directional_return_pct"), errors="coerce")
+    scoped["actual_pnl_pct"] = pd.to_numeric(scoped.get("actual_pnl_pct"), errors="coerce")
+    scoped["status"] = scoped.get("status", pd.Series(index=scoped.index, dtype=object)).fillna("").astype(str).str.upper()
+    scoped["actual_trade_status"] = (
+        scoped.get("actual_trade_status", pd.Series(index=scoped.index, dtype=object)).fillna("").astype(str).str.upper()
+    )
+    summary = (
+        scoped.groupby("Session", dropna=False)
+        .agg(
+            Signals=("symbol", "count"),
+            Resolved=("status", lambda s: int((pd.Series(s).astype(str).str.upper() == "RESOLVED").sum())),
+            FollowThroughPct=("directional_return_pct", lambda s: float((pd.to_numeric(s, errors="coerce") > 0).mean() * 100.0) if len(pd.Series(s).dropna()) else 0.0),
+            ClosedTradeCount=("actual_trade_status", lambda s: int((pd.Series(s).astype(str).str.upper() == "CLOSED").sum())),
+            ActualWinRatePct=("actual_pnl_pct", lambda s: float((pd.to_numeric(s, errors="coerce") > 0).mean() * 100.0) if len(pd.Series(s).dropna()) else 0.0),
+            AvgActualPnlPct=("actual_pnl_pct", "mean"),
+        )
+        .reset_index()
+    )
+    if summary.empty:
+        return summary
+    return summary.sort_values(by=["FollowThroughPct", "Signals"], ascending=[False, False]).reset_index(drop=True)
+
+
+def _playbook_timing_read(
+    playbook_archive: pd.DataFrame,
+    *,
+    current_session: str,
+    trade_gate: str,
+    catalyst_window: str,
+) -> dict[str, str]:
+    if playbook_archive is None or playbook_archive.empty:
+        return {
+            "title": "Selective Only",
+            "tone": "neutral",
+            "note": "The current playbook does not have enough tracked history yet to favor a specific session window.",
+        }
+
+    best_follow = playbook_archive.sort_values(["FollowThroughPct", "Signals"], ascending=[False, False]).iloc[0]
+    best_exec = playbook_archive.sort_values(
+        ["ActualWinRatePct", "ClosedTradeCount", "Signals"], ascending=[False, False, False]
+    ).iloc[0]
+    follow_session = str(best_follow["Session"])
+    exec_session = str(best_exec["Session"])
+
+    if str(trade_gate or "").strip() == "No-Trade" or str(catalyst_window or "").startswith("Blocking"):
+        title = "Stand Aside"
+        tone = "negative"
+    elif current_session in {follow_session, exec_session}:
+        title = "Tradeable"
+        tone = "positive"
+    elif current_session == "Unknown":
+        title = "Selective Only"
+        tone = "neutral"
+    else:
+        title = "Defensive Only"
+        tone = "warning"
+
+    note = (
+        f"Current session is <b>{current_session}</b>. For this playbook, best signal follow-through has clustered in "
+        f"<b>{follow_session}</b> ({float(best_follow['FollowThroughPct']):.1f}% across {int(best_follow['Resolved'])} resolved signals), "
+        f"while best real execution has clustered in <b>{exec_session}</b> "
+        f"({float(best_exec['ActualWinRatePct']):.1f}% across {int(best_exec['ClosedTradeCount'])} closed trades)."
+    )
+    return {"title": title, "tone": tone, "note": note}
+
+
 def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
@@ -121,6 +210,11 @@ def render(ctx: dict) -> None:
     _normalize_coin_input = get_ctx(ctx, "_normalize_coin_input")
     _validate_coin_symbol = get_ctx(ctx, "_validate_coin_symbol")
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
+    get_signal_tracker_db_path = get_ctx(ctx, "get_signal_tracker_db_path")
+    init_signal_tracker_db = get_ctx(ctx, "init_signal_tracker_db")
+    fetch_signal_events_df = get_ctx(ctx, "fetch_signal_events_df")
+    build_signal_cohort_summary = get_ctx(ctx, "build_signal_cohort_summary")
+    build_recent_market_context_snapshot = get_ctx(ctx, "build_recent_market_context_snapshot")
     EXCHANGE = get_ctx(ctx, "EXCHANGE")
     _tip = get_ctx(ctx, "_tip")
 
@@ -287,6 +381,97 @@ def render(ctx: dict) -> None:
             else ("negative" if profile_color == NEGATIVE else "warning")
         ),
     )
+    tracker_db_path = init_signal_tracker_db(get_signal_tracker_db_path())
+    tracked_events = fetch_signal_events_df(limit=2000, source="Market", db_path=tracker_db_path)
+    if tracked_events is not None and not tracked_events.empty:
+        tracked_events = _prepare_tracked_session_archive(tracked_events)
+        tracked_session_summary = build_signal_cohort_summary(tracked_events, "Session")
+        if not tracked_session_summary.empty:
+            best_archive_follow = tracked_session_summary.sort_values(
+                ["FollowThroughPct", "Signals"], ascending=[False, False]
+            ).iloc[0]
+            best_archive_execution = tracked_session_summary.sort_values(
+                ["ActualWinRatePct", "ClosedTradeCount", "Signals"], ascending=[False, False, False]
+            ).iloc[0]
+            render_insight_card(
+                st,
+                title="Tracked Session Archive",
+                body_html=(
+                    f"Best system follow-through has clustered in <b>{best_archive_follow['Session']}</b> "
+                    f"({float(best_archive_follow['FollowThroughPct']):.1f}% across {int(best_archive_follow['Resolved'])} resolved signals). "
+                    f"Best real execution is currently <b>{best_archive_execution['Session']}</b> "
+                    f"({float(best_archive_execution['ActualWinRatePct']):.1f}% across {int(best_archive_execution['ClosedTradeCount'])} closed trades)."
+                ),
+                tone="positive" if float(best_archive_execution["ActualWinRatePct"]) >= 55.0 else "neutral",
+            )
+            tracked_session_view = tracked_session_summary[
+                [
+                    "Session",
+                    "Signals",
+                    "Resolved",
+                    "FollowThroughPct",
+                    "TakenPct",
+                    "ClosedTradeCount",
+                    "ActualWinRatePct",
+                    "AvgActualPnlPct",
+                ]
+            ].copy()
+            st.markdown(f"<b style='color:{ACCENT};'>Tracked Session Archive</b>", unsafe_allow_html=True)
+            st.dataframe(tracked_session_view.round(2), hide_index=True, width="stretch")
+
+        recent_market_context = build_recent_market_context_snapshot(tracked_events)
+        current_playbook = str(recent_market_context.get("Playbook") or "Unknown")
+        current_trade_gate = str(recent_market_context.get("Trade Gate") or "Unknown")
+        current_catalyst_window = str(recent_market_context.get("Catalyst Window") or "Unknown")
+        current_session = session_bucket_for_timestamp()
+        playbook_session_archive = _build_playbook_session_archive(tracked_events, current_playbook)
+        if not playbook_session_archive.empty:
+            timing_read = _playbook_timing_read(
+                playbook_session_archive,
+                current_session=current_session,
+                trade_gate=current_trade_gate,
+                catalyst_window=current_catalyst_window,
+            )
+            best_playbook_follow = playbook_session_archive.sort_values(
+                ["FollowThroughPct", "Signals"], ascending=[False, False]
+            ).iloc[0]
+            best_playbook_execution = playbook_session_archive.sort_values(
+                ["ActualWinRatePct", "ClosedTradeCount", "Signals"], ascending=[False, False, False]
+            ).iloc[0]
+            render_kpi_grid(
+                st,
+                items=[
+                    {"label": "Current Session", "value": current_session, "subtext": "UTC bucket right now"},
+                    {"label": "Current Playbook", "value": current_playbook, "subtext": f"Gate {current_trade_gate}"},
+                    {
+                        "label": "Best Follow-Through",
+                        "value": str(best_playbook_follow["Session"]),
+                        "subtext": f"{float(best_playbook_follow['FollowThroughPct']):.1f}% on matched signals",
+                    },
+                    {
+                        "label": "Best Execution",
+                        "value": str(best_playbook_execution["Session"]),
+                        "subtext": f"{float(best_playbook_execution['ActualWinRatePct']):.1f}% realized win rate",
+                    },
+                ],
+            )
+            render_insight_card(
+                st,
+                title=f"Current Playbook Timing Filter · {trade_gate_display_label(timing_read['title'])}",
+                body_html=(
+                    f"<span style='font-weight:700;'>Catalyst window:</span> {current_catalyst_window}. "
+                    f"{timing_read['note']}"
+                ),
+                tone=timing_read["tone"],
+            )
+            playbook_view = playbook_session_archive[
+                ["Session", "Signals", "Resolved", "FollowThroughPct", "ClosedTradeCount", "ActualWinRatePct", "AvgActualPnlPct"]
+            ].copy()
+            st.markdown(
+                f"<b style='color:{ACCENT};'>Playbook Timing Archive · {current_playbook}</b>",
+                unsafe_allow_html=True,
+            )
+            st.dataframe(playbook_view.round(2), hide_index=True, width="stretch")
 
     render_help_details(
         st,

@@ -194,3 +194,60 @@ def build_indicator_groups_html(
         f"{''.join(group_html)}"
         f"</div>"
     )
+
+
+def build_learned_edge_banner_html(
+    *,
+    title: str,
+    label: str,
+    note: str,
+    tone: str,
+    text_muted: str,
+    positive: str,
+    negative: str,
+    warning: str,
+    accent: str,
+) -> str:
+    tone_key = str(tone or "").strip().lower()
+    color = {
+        "positive": positive,
+        "negative": negative,
+        "warning": warning,
+        "info": accent,
+        "neutral": text_muted,
+    }.get(tone_key, accent)
+    return (
+        f"<style>"
+        f".learned-edge-banner{{"
+        f"  border:1px solid color-mix(in srgb, {color} 26%, transparent);"
+        f"  border-left:4px solid {color};"
+        f"  background:linear-gradient(135deg, rgba(4,10,18,0.96), rgba(3,7,13,0.94));"
+        f"  border-radius:12px;"
+        f"  padding:10px 12px;"
+        f"  margin:0.18rem 0 0.5rem 0;"
+        f"}}"
+        f".learned-edge-title{{"
+        f"  color:{text_muted};"
+        f"  font-size:0.70rem;"
+        f"  text-transform:uppercase;"
+        f"  letter-spacing:0.55px;"
+        f"  margin-bottom:4px;"
+        f"}}"
+        f".learned-edge-label{{"
+        f"  color:{color};"
+        f"  font-size:1.00rem;"
+        f"  font-weight:800;"
+        f"  margin-bottom:3px;"
+        f"}}"
+        f".learned-edge-note{{"
+        f"  color:#D9E7F7;"
+        f"  font-size:0.84rem;"
+        f"  line-height:1.38;"
+        f"}}"
+        f"</style>"
+        f"<div class='learned-edge-banner'>"
+        f"<div class='learned-edge-title'>{html.escape(title)}</div>"
+        f"<div class='learned-edge-label'>{html.escape(label)}</div>"
+        f"<div class='learned-edge-note'>{html.escape(note)}</div>"
+        f"</div>"
+    )

@@ -18,6 +18,7 @@ from tabs.position_tab import render as render_position_tab_ui
 from tabs.risk_tab import render as render_risk_analytics_tab_ui
 from tabs.scalp_backtest_tab import render as render_scalp_backtest_tab_ui
 from tabs.sessions_tab import render as render_sessions_tab_ui
+from tabs.signal_review_tab import render as render_signal_review_tab_ui
 from tabs.spot_tab import render as render_spot_tab_ui
 from tabs.setup_backtest_tab import render as render_setup_backtest_tab_ui
 from tabs.tools_tab import render as render_tools_tab_ui
@@ -26,9 +27,19 @@ from tabs.whale_tab import render as render_whale_tab_ui
 
 TAB_TITLES = [
     "Market", "Spot", "Position", "Multi-TF", "Sessions",
-    "AI Workspace", "Heatmap", "Whale Tracker", "Risk Analytics",
+    "AI Workspace", "Heatmap", "Whale Tracker", "Risk Analytics", "Signal Review",
     "Monte Carlo", "Fibonacci", "Correlation", "Portfolio Scenario",
     "Tools", "Model Lab", "Setup Backtest", "Scalp Backtest", "Analysis Guide",
+]
+
+_STYLE_DEPS = ["ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING"]
+_CARD_STYLE_DEPS = [*_STYLE_DEPS, "CARD_BG"]
+_TRACKER_DEPS = ["get_signal_tracker_db_path", "init_signal_tracker_db", "fetch_signal_events_df"]
+_ADAPTIVE_DEPS = ["build_adaptive_context_model", "build_live_signal_adaptive_snapshot"]
+_RECENT_MARKET_CONTEXT_DEPS = ["build_recent_market_context_snapshot", "build_recent_symbol_market_signal_snapshot"]
+_SIGNAL_REVIEW_STORAGE_DEPS = [
+    "build_tracker_storage_snapshot", "read_signal_tracker_db_bytes",
+    "backup_signal_tracker_db", "restore_signal_tracker_db_bytes",
 ]
 
 
@@ -36,37 +47,49 @@ _TAB_DEPS = [
     (
         render_market_tab_ui,
         [
-            "ACCENT", "TEXT_MUTED", "CARD_BG", "POSITIVE", "NEGATIVE", "WARNING",
+            *_CARD_STYLE_DEPS,
             "get_market_top_snapshot", "get_price_change",
             "_tip", "get_major_ohlcv_bundle", "ml_ensemble_predict", "get_top_volume_usdt_symbols",
             "get_market_cap_rows_for_symbols",
+            "build_market_regime_snapshot",
+            "build_market_trade_gate",
+            "build_signal_risk_sizing", "market_default_risk_budget",
+            "build_sector_rotation_snapshot", "classify_symbol_sector",
+            "build_market_flow_proxy_snapshot", "get_market_flow_proxy_rows",
+            "build_market_alerts", "log_market_alerts",
+            "build_market_catalyst_snapshot", "get_market_catalyst_events",
             "fetch_coingecko_ohlcv_by_coin_id",
             "fetch_ohlcv", "analyse", "get_scalping_entry_target", "scalp_quality_gate", "_calc_conviction",
             "signal_plain", "direction_key", "direction_label", "bias_score_badge", "readable_market_cap", "leverage_badge",
             "format_delta", "format_trend", "format_adx", "format_stochrsi",
             "style_signal", "style_scalp_opp", "style_delta", "sanitize_trading_terms", "_debug",
+            "log_signal_events", "resolve_open_signal_events_for_frame",
+            *_TRACKER_DEPS, *_ADAPTIVE_DEPS,
         ],
     ),
     (
         render_spot_tab_ui,
         [
-            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "CARD_BG",
+            *_CARD_STYLE_DEPS,
             "_tip", "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "analyse",
             "signal_plain", "direction_key", "direction_label", "format_delta",
             "format_stochrsi",
             "ml_ensemble_predict", "get_price_change", "_calc_conviction",
             "_wma", "_sr_lookback", "_debug",
+            *_TRACKER_DEPS, *_ADAPTIVE_DEPS, *_RECENT_MARKET_CONTEXT_DEPS,
         ],
     ),
     (
         render_position_tab_ui,
         [
-            "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "CARD_BG", "PRIMARY_BG",
+            *_CARD_STYLE_DEPS, "PRIMARY_BG",
             "_tip", "_normalize_coin_input", "_validate_coin_symbol", "_symbol_variants", "EXCHANGE",
             "fetch_ohlcv", "analyse", "signal_plain", "direction_key", "direction_label", "ml_ensemble_predict", "_calc_conviction",
             "format_delta", "format_stochrsi",
             "_sr_lookback", "_wma", "_debug", "get_scalping_entry_target", "scalp_quality_gate",
             "sanitize_trading_terms",
+            *_TRACKER_DEPS, *_ADAPTIVE_DEPS, *_RECENT_MARKET_CONTEXT_DEPS,
+            "classify_symbol_sector",
         ],
     ),
     (
@@ -83,6 +106,8 @@ _TAB_DEPS = [
         [
             "ACCENT", "TEXT_MUTED", "WARNING", "POSITIVE", "NEGATIVE", "_normalize_coin_input",
             "_validate_coin_symbol", "fetch_ohlcv", "EXCHANGE", "readable_market_cap", "_tip",
+            "get_signal_tracker_db_path", "init_signal_tracker_db", "fetch_signal_events_df",
+            "build_signal_cohort_summary", "build_recent_market_context_snapshot",
         ],
     ),
     (
@@ -116,6 +141,17 @@ _TAB_DEPS = [
             "ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING", "NEON_BLUE", "NEON_PURPLE",
             "PRIMARY_BG", "_tip", "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv",
             "calculate_risk_metrics",
+        ],
+    ),
+    (
+        render_signal_review_tab_ui,
+        [
+            *_STYLE_DEPS, "_tip", "fetch_ohlcv", "resolve_open_signal_events_via_fetch",
+            *_TRACKER_DEPS, "fetch_market_alerts_df",
+            "build_signal_review_snapshot", "build_execution_overlay_snapshot", "build_signal_cohort_summary", "build_adaptive_context_model",
+            "annotate_alert_footprint", "build_alert_effectiveness_summary",
+            "build_learning_edge_table", "save_signal_trade_overlay", "save_signal_trade_journal",
+            *_SIGNAL_REVIEW_STORAGE_DEPS,
         ],
     ),
     (

@@ -5,10 +5,13 @@ import pandas as pd
 from tabs.sessions_tab import (
     DRIFT_BIAS_DEADBAND_PCT,
     SESSION_ORDER,
+    _build_playbook_session_archive,
     _compute_session_metrics,
     _drift_bias_label,
     _format_volume_compact,
     _liquidity_label,
+    _playbook_timing_read,
+    _prepare_tracked_session_archive,
     _range_profile_label,
     _relative_quality_label,
 )
@@ -73,6 +76,54 @@ class SessionLogicTests(unittest.TestCase):
 
         self.assertTrue(((metrics["relative_quality"] >= 0) & (metrics["relative_quality"] <= 100)).all())
         self.assertEqual(int(metrics["candle_count"].sum()), 6)
+
+    def test_prepare_tracked_session_archive_adds_normalized_fields(self):
+        df = pd.DataFrame(
+            {
+                "session_bucket": ["European (08-16 UTC)", ""],
+                "market_playbook": ["Trend continuation", ""],
+            }
+        )
+        out = _prepare_tracked_session_archive(df)
+        self.assertEqual(list(out["Session"]), ["European (08-16 UTC)", "Unknown"])
+        self.assertEqual(list(out["Playbook"]), ["Trend continuation", "Unknown"])
+
+    def test_build_playbook_session_archive_filters_to_selected_playbook(self):
+        df = pd.DataFrame(
+            {
+                "symbol": ["BTC", "ETH", "SOL"],
+                "session_bucket": ["European (08-16 UTC)", "European (08-16 UTC)", "US (16-00 UTC)"],
+                "market_playbook": ["Trend continuation", "Trend continuation", "Stand aside / mean reversion only"],
+                "status": ["RESOLVED", "RESOLVED", "RESOLVED"],
+                "directional_return_pct": [2.0, 1.0, -1.0],
+                "actual_trade_status": ["CLOSED", "CLOSED", "CLOSED"],
+                "actual_pnl_pct": [1.5, 0.8, -0.5],
+            }
+        )
+        summary = _build_playbook_session_archive(df, "Trend continuation")
+        self.assertEqual(list(summary["Session"]), ["European (08-16 UTC)"])
+        self.assertEqual(int(summary.iloc[0]["Signals"]), 2)
+
+    def test_playbook_timing_read_marks_aligned_current_session(self):
+        archive = pd.DataFrame(
+            {
+                "Session": ["European (08-16 UTC)", "US (16-00 UTC)"],
+                "Signals": [8, 5],
+                "Resolved": [8, 5],
+                "FollowThroughPct": [72.0, 40.0],
+                "ClosedTradeCount": [6, 3],
+                "ActualWinRatePct": [66.0, 33.0],
+                "AvgActualPnlPct": [1.2, -0.4],
+            }
+        )
+        read = _playbook_timing_read(
+            archive,
+            current_session="European (08-16 UTC)",
+            trade_gate="Selective Only",
+            catalyst_window="Far / Clear",
+        )
+        self.assertEqual(read["title"], "Tradeable")
+        self.assertEqual(read["tone"], "positive")
 
 
 if __name__ == "__main__":

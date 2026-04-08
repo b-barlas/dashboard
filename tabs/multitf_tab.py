@@ -102,6 +102,8 @@ def render(ctx: dict) -> None:
             return "TREND-led"
         if cls == "ENTER_AI_LED":
             return "AI-led"
+        if cls == "PROBE":
+            return "PROBE"
         if cls == "WATCH":
             return "WATCH"
         if cls == "SKIP":
@@ -268,8 +270,10 @@ def render(ctx: dict) -> None:
         cls = normalize_action_class(str(value or ""))
         if cls.startswith("ENTER_"):
             return f"color:{POSITIVE}; font-weight:700;"
-        if cls == "WATCH":
+        if cls == "PROBE":
             return f"color:{WARNING}; font-weight:700;"
+        if cls == "WATCH":
+            return "color:#7DD3FC; font-weight:700;"
         if cls == "SKIP":
             return f"color:{NEGATIVE}; font-weight:700;"
         return f"color:{TEXT_MUTED}; font-weight:600;"

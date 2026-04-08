@@ -111,6 +111,8 @@ def _setup_confirm_label(action_class: str) -> str:
         return "TREND-led"
     if cls == "ENTER_AI_LED":
         return "AI-led"
+    if cls == "PROBE":
+        return "PROBE"
     return cls or "UNKNOWN"
 
 

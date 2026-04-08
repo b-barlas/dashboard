@@ -182,6 +182,7 @@ Coin inline badge:
 - `TREND-led` = pure technical selected-timeframe confirmation
 - `AI-led` = pure AI confirmation, but it still must pass the same execution safety gates
 - `TREND+AI` = both motors are independently strong and also elite together
+- `PROBE` = not fully confirmed yet, but clean enough for starter-risk only
 - `WATCH` = the idea is alive, but timing is not clean yet
 - `SKIP` = edge is too weak, too conflicted, or badly located right now
 
@@ -189,6 +190,7 @@ Setup Confirm classes (final confirmation class):
 - TREND+AI: both technicals and AI agree, and both are very strong
 - TREND-led: the main direction exists, and the selected timeframe technical picture now supports it
 - AI-led: the main direction exists, and AI support is strong enough for a setup
+- PROBE: the setup is close enough for small starter risk, but not full size
 - WATCH: the idea is still alive, but timing is not clean yet
 - SKIP: the edge is too weak or the setup is not worth tracking now
 
@@ -247,6 +249,7 @@ Setup Confirm classes:
 - TREND+AI: technicals and AI both agree, and both are strong
 - TREND-led: technicals support the main direction
 - AI-led: AI support is strong enough for the main direction
+- PROBE: starter-risk only; not full confirmation yet
 - WATCH: keep it on the radar, but do not rush
 - SKIP: leave it alone for now
 

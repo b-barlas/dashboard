@@ -1,9 +1,14 @@
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import pandas as pd
 
 from tabs.market_tab import (
+    _alert_lane_label,
+    _alert_archive_label,
+    _compress_market_alerts_for_display,
+    _rank_market_alerts_by_archive,
     _audit_scan_summary_lines,
     _ai_fallback_note,
     _build_custom_scan_universe,
@@ -66,6 +71,76 @@ from threading import Lock
 
 
 class MarketTabLogicTests(unittest.TestCase):
+    def test_alert_lane_label_uses_trader_facing_terms(self):
+        self.assertEqual(
+            _alert_lane_label(SimpleNamespace(severity="HIGH", tone="negative")),
+            "Stand Aside",
+        )
+        self.assertEqual(
+            _alert_lane_label(SimpleNamespace(severity="MEDIUM", tone="positive")),
+            "Action",
+        )
+        self.assertEqual(
+            _alert_lane_label(SimpleNamespace(severity="INFO", tone="warning")),
+            "Context",
+        )
+
+    def test_compress_market_alerts_for_display_keeps_primary_then_context_summary(self):
+        alerts = [
+            SimpleNamespace(alert_key="TRADE_GATE", severity="HIGH", tone="negative", title="No-Trade gate active", note=""),
+            SimpleNamespace(alert_key="MARKET_LEAD", severity="MEDIUM", tone="positive", title="Upside pressure is building", note=""),
+            SimpleNamespace(alert_key="SESSION_FIT", severity="INFO", tone="positive", title="Current session has been supportive", note=""),
+            SimpleNamespace(alert_key="FLOW_PROXY", severity="INFO", tone="positive", title="Shorts Crowded in BTC", note=""),
+        ]
+        display = _compress_market_alerts_for_display(alerts, max_items=2)
+        self.assertEqual(len(display), 2)
+        self.assertEqual(display[0].alert_key, "TRADE_GATE")
+        self.assertEqual(display[1].alert_key, "MARKET_LEAD")
+
+        display = _compress_market_alerts_for_display(alerts[1:], max_items=2)
+        self.assertEqual(len(display), 2)
+        self.assertEqual(display[0].alert_key, "MARKET_LEAD")
+        self.assertEqual(display[1].alert_key, "CONTEXT_STACK")
+
+    def test_rank_market_alerts_by_archive_keeps_protected_alerts_first_and_reorders_info_alerts(self):
+        alerts = [
+            SimpleNamespace(alert_key="TRADE_GATE"),
+            SimpleNamespace(alert_key="SESSION_FIT"),
+            SimpleNamespace(alert_key="MARKET_LEAD"),
+        ]
+        summary_df = pd.DataFrame(
+            [
+                {
+                    "Primary Alert": "Trade Gate",
+                    "Resolved": 8,
+                    "FollowThroughPct": 48.0,
+                    "ClosedTradeCount": 3,
+                    "ActualWinRatePct": 50.0,
+                },
+                {
+                    "Primary Alert": "Session Fit",
+                    "Resolved": 8,
+                    "FollowThroughPct": 41.0,
+                    "ClosedTradeCount": 3,
+                    "ActualWinRatePct": 42.0,
+                },
+                {
+                    "Primary Alert": "Market Lead",
+                    "Resolved": 8,
+                    "FollowThroughPct": 66.0,
+                    "ClosedTradeCount": 3,
+                    "ActualWinRatePct": 61.0,
+                },
+            ]
+        )
+        with patch("tabs.market_tab.build_alert_effectiveness_summary", return_value=summary_df):
+            ranked = _rank_market_alerts_by_archive(alerts, pd.DataFrame({"symbol": ["BTC"]}))
+        self.assertEqual([alert.alert_key for alert in ranked], ["TRADE_GATE", "MARKET_LEAD", "SESSION_FIT"])
+
+    def test_alert_archive_label_maps_known_keys(self):
+        self.assertEqual(_alert_archive_label("MARKET_LEAD"), "Market Lead")
+        self.assertEqual(_alert_archive_label("SESSION_FIT"), "Session Fit")
+
     def test_market_lead_breadth_component_needs_real_participation(self):
         rows = [
             {"__emerging_label": "Emerging Upside"},
@@ -97,6 +172,32 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertEqual(snapshot.state, "UPSIDE")
         self.assertEqual(snapshot.label, "Upside")
         self.assertGreater(snapshot.score, 62.0)
+
+    def test_market_result_priority_prefers_executable_supported_setup(self):
+        stronger = {
+            "Coin": "SOL",
+            "__action_raw": "✅ ENTER (Trend+AI)",
+            "__confidence_val": 82.0,
+            "__adaptive_edge_score": 67.0,
+            "__archive_guardrail_penalty": 0.0,
+            "__rr_val": 2.1,
+            "__ai_confidence_val": 71.0,
+            "__risk_unit_fraction": 1.0,
+            "__mcap_val": 50_000_000_000,
+        }
+        weaker = {
+            "Coin": "ADA",
+            "__action_raw": "✅ ENTER (Trend+AI)",
+            "__confidence_val": 84.0,
+            "__adaptive_edge_score": 69.0,
+            "__archive_guardrail_penalty": 5.8,
+            "__rr_val": 2.2,
+            "__ai_confidence_val": 74.0,
+            "__risk_unit_fraction": 0.25,
+            "__mcap_val": 20_000_000_000,
+        }
+        ranked = sorted([weaker, stronger], key=_market_result_priority_key)
+        self.assertEqual(ranked[0]["Coin"], "SOL")
 
     def test_audit_scan_summary_lines_show_attempted_vs_displayed(self):
         lines = _audit_scan_summary_lines(
@@ -383,7 +484,8 @@ class MarketTabLogicTests(unittest.TestCase):
     def test_setup_confirm_priority_orders_enter_classes_strictly(self):
         self.assertGreater(_setup_confirm_priority("TREND+AI"), _setup_confirm_priority("TREND-led"))
         self.assertGreater(_setup_confirm_priority("TREND-led"), _setup_confirm_priority("AI-led"))
-        self.assertGreater(_setup_confirm_priority("AI-led"), _setup_confirm_priority("WATCH"))
+        self.assertGreater(_setup_confirm_priority("AI-led"), _setup_confirm_priority("PROBE"))
+        self.assertGreater(_setup_confirm_priority("PROBE"), _setup_confirm_priority("WATCH"))
         self.assertGreater(_setup_confirm_priority("WATCH"), _setup_confirm_priority("SKIP"))
 
     def test_market_result_priority_key_prefers_trend_plus_ai_before_other_enter_classes(self):
@@ -475,7 +577,8 @@ class MarketTabLogicTests(unittest.TestCase):
         )
         self.assertEqual(label, "Setup Status")
         self.assertEqual(head, "CACHED SETUPS")
-        self.assertIn("CACHED ENTER: 2", sub)
+        self.assertIn("CACHED READY: 2", sub)
+        self.assertIn("PROBE: 0", sub)
 
         _label, degraded_head, degraded_sub = _setup_status_summary(
             enter_count=1,
@@ -484,7 +587,8 @@ class MarketTabLogicTests(unittest.TestCase):
             source_label="LIVE (DEGRADED)",
         )
         self.assertEqual(degraded_head, "DEGRADED SETUPS")
-        self.assertIn("DEGRADED ENTER: 1", degraded_sub)
+        self.assertIn("DEGRADED READY: 1", degraded_sub)
+        self.assertIn("PROBE: 0", degraded_sub)
 
     def test_market_scan_signature_ignores_top_n_in_custom_mode(self):
         first = _market_scan_signature(

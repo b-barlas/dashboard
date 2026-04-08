@@ -1,6 +1,5 @@
 from ui.ctx import get_ctx
 
-import html
 import pandas as pd
 import plotly.graph_objs as go
 from core.ai_spot_bias import (
@@ -12,7 +11,6 @@ from core.ai_spot_bias import (
     build_ai_spot_bias_snapshot,
 )
 from core.confidence import (
-    ai_confidence_bucket,
     build_ai_confidence_snapshot,
     build_confidence_snapshot,
     build_execution_confidence_snapshot,
@@ -769,7 +767,6 @@ def render(ctx: dict) -> None:
 
                 signal_side = _to_side_key(ar.signal)
                 signal_side_for_conviction = signal_side if signal_side in {"UPSIDE", "DOWNSIDE"} else "WAIT"
-                signal_side_label = _to_side_label(signal_side)
                 signal_color = (
                     POSITIVE if str(spot_snapshot.direction).upper() == "UPSIDE"
                     else (NEGATIVE if str(spot_snapshot.direction).upper() == "DOWNSIDE" else WARNING)
@@ -779,11 +776,6 @@ def render(ctx: dict) -> None:
                 ensemble_side = str(row_meta.get("__ensemble_side", "")).upper()
                 if ensemble_side not in {"UPSIDE", "DOWNSIDE", "NEUTRAL"}:
                     ensemble_side = _to_side_key(str(row_meta.get("Direction", "Neutral")))
-                ensemble_label = _to_side_label(ensemble_side)
-                ensemble_color = (
-                    POSITIVE if ensemble_side == "UPSIDE"
-                    else (NEGATIVE if ensemble_side == "DOWNSIDE" else WARNING)
-                )
                 try:
                     ai_votes = max(0, min(3, int(row_meta.get("__ai_votes", 0))))
                 except Exception:
@@ -916,9 +908,10 @@ def render(ctx: dict) -> None:
                 )
                 setup_confirm = _setup_confirm_display(action_raw)
                 action_cls = normalize_action_class(action_raw)
+                watch_setup_color = "#7DD3FC"
                 setup_color = (
                     POSITIVE if action_cls.startswith("ENTER_")
-                    else (WARNING if action_cls == "WATCH" else NEGATIVE)
+                    else (WARNING if action_cls == "PROBE" else (watch_setup_color if action_cls == "WATCH" else NEGATIVE))
                 )
                 ai_spot_label = _spot_bias_label(ai_spot_snapshot.direction)
                 ai_spot_color = (

@@ -5,6 +5,7 @@ import pandas as pd
 
 from core.market_decision import (
     ACTION_ENTER_AI_LED,
+    ACTION_PROBE,
     ACTION_ENTER_TREND_AI,
     ACTION_ENTER_TREND_LED,
     ACTION_SKIP,
@@ -301,9 +302,9 @@ class MarketDecisionContractTests(unittest.TestCase):
         out = self._decision("LONG", 74, "FULL", "HIGH", 0.8, float("nan"))
         self.assertEqual(out, "WATCH")
 
-    def test_action_watch_when_adx_is_weak_even_if_quality_is_high(self):
+    def test_action_probe_when_adx_is_just_below_enter_bar_even_if_quality_is_high(self):
         out = self._decision("LONG", 74, "FULL", "HIGH", 0.8, 19.9)
-        self.assertEqual(out, "WATCH")
+        self.assertEqual(out, ACTION_PROBE)
 
     def test_action_reason_conflict(self):
         out = self._reason("LONG", 70, "FULL", "CONFLICT", 0.8, 30.0)
@@ -508,8 +509,8 @@ class MarketDecisionContractTests(unittest.TestCase):
             16.0,
             trend_led_snapshot=trend_snap,
         )
-        self.assertEqual(action, ACTION_WATCH)
-        self.assertEqual(reason, "ADX_TOO_LOW")
+        self.assertEqual(action, ACTION_PROBE)
+        self.assertEqual(reason, "PROBE_TREND")
 
     def test_spot_action_skips_when_rr_is_too_low_for_all_paths(self):
         trend_snap = trend_led_confirmation_snapshot(
@@ -965,15 +966,22 @@ class MarketDecisionContractTests(unittest.TestCase):
         self.assertEqual(action, ACTION_ENTER_TREND_AI)
         self.assertEqual(reason, "ENTER_TREND_AI")
 
+    def test_action_decision_returns_probe_for_starter_grade_setup(self):
+        action, reason = action_decision_with_reason("LONG", 56, "TREND", "MEDIUM", 0.5, 16.5)
+        self.assertEqual(action, ACTION_PROBE)
+        self.assertEqual(reason, "PROBE_TREND")
+
     def test_action_class_normalization_contract(self):
         self.assertEqual(normalize_action_class(ACTION_ENTER_TREND_AI), "ENTER_TREND_AI")
         self.assertEqual(normalize_action_class(ACTION_ENTER_TREND_LED), "ENTER_TREND_LED")
         self.assertEqual(normalize_action_class(ACTION_ENTER_AI_LED), "ENTER_AI_LED")
+        self.assertEqual(normalize_action_class(ACTION_PROBE), "PROBE")
         self.assertEqual(normalize_action_class(ACTION_WATCH), "WATCH")
         self.assertEqual(normalize_action_class(ACTION_SKIP), "SKIP")
 
     def test_action_rank_contract(self):
-        self.assertEqual(action_rank(ACTION_ENTER_TREND_AI), 3)
+        self.assertEqual(action_rank(ACTION_ENTER_TREND_AI), 4)
+        self.assertEqual(action_rank(ACTION_PROBE), 3)
         self.assertEqual(action_rank(ACTION_WATCH), 2)
         self.assertEqual(action_rank(ACTION_SKIP), 1)
 
@@ -981,6 +989,7 @@ class MarketDecisionContractTests(unittest.TestCase):
         self.assertEqual(compact_action_label(ACTION_ENTER_TREND_AI), "ENTER T+AI")
         self.assertEqual(compact_action_label(ACTION_ENTER_TREND_LED), "ENTER Trend")
         self.assertEqual(compact_action_label(ACTION_ENTER_AI_LED), "ENTER AI")
+        self.assertEqual(compact_action_label(ACTION_PROBE), "PROBE")
         self.assertEqual(compact_action_label(ACTION_WATCH), "WATCH")
         self.assertEqual(compact_action_label(ACTION_SKIP), "SKIP")
 

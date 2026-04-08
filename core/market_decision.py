@@ -15,6 +15,7 @@ from core.spot_direction import SpotDirectionSnapshot
 
 ACTION_SKIP = "⛔ SKIP"
 ACTION_WATCH = "WATCH"
+ACTION_PROBE = "🟠 PROBE"
 ACTION_ENTER_TREND_AI = "✅ ENTER (Trend+AI)"
 ACTION_ENTER_TREND_LED = "🟡 ENTER (Trend-Led)"
 ACTION_ENTER_AI_LED = "🟡 ENTER (AI-Led)"
@@ -40,6 +41,9 @@ ACTION_REASON_TEXT = {
     "ENTER_TREND_AI": "Trend and AI align, and both pass the highest confirmation bar.",
     "ENTER_TREND_LED": "The main direction is supported by a clean technical continuation setup.",
     "ENTER_AI_LED": "AI strongly supports the main direction, and execution conditions are good enough.",
+    "PROBE_TREND": "The technical setup is close enough for a small starter position, but not strong enough for full size yet.",
+    "PROBE_AI": "AI support is early but strong enough for a small starter position, not full size yet.",
+    "PROBE_DUAL": "Trend and AI are both promising, but the setup is still just below full confirmation.",
     "NEEDS_CONFIRMATION": "The idea is alive, but it still needs more confirmation.",
     "AI_UNAVAILABLE": "AI is temporarily unavailable, so this stays on watch.",
 }
@@ -145,7 +149,7 @@ def ai_vote_metrics(
 def normalize_action_class(action: str) -> str:
     """Normalize action text to a stable class key.
 
-    Returns one of: ENTER_TREND_AI, ENTER_TREND_LED, ENTER_AI_LED, WATCH, SKIP, UNKNOWN.
+    Returns one of: ENTER_TREND_AI, ENTER_TREND_LED, ENTER_AI_LED, PROBE, WATCH, SKIP, UNKNOWN.
     """
     s = str(action or "").strip().upper()
     if not s:
@@ -156,6 +160,8 @@ def normalize_action_class(action: str) -> str:
         return "ENTER_TREND_LED"
     if "ENTER (AI-LED)" in s:
         return "ENTER_AI_LED"
+    if "PROBE" in s:
+        return "PROBE"
     if "WATCH" in s:
         return "WATCH"
     if "SKIP" in s:
@@ -166,6 +172,8 @@ def normalize_action_class(action: str) -> str:
 def action_rank(action: str) -> int:
     cls = normalize_action_class(action)
     if cls.startswith("ENTER_"):
+        return 4
+    if cls == "PROBE":
         return 3
     if cls == "WATCH":
         return 2
@@ -185,6 +193,8 @@ def compact_action_label(action: str) -> str:
         return "ENTER Trend"
     if cls == "ENTER_AI_LED":
         return "ENTER AI"
+    if cls == "PROBE":
+        return "PROBE"
     if cls == "SKIP":
         return "SKIP"
     return str(action or "").strip()
@@ -209,6 +219,14 @@ def _resolve_watch_skip_outcome(*reason_codes: str) -> tuple[str, str]:
         if code in normalized:
             return ACTION_WATCH, code
     return ACTION_WATCH, normalized[0]
+
+
+def _probe_reason(*, trend_candidate: bool, ai_candidate: bool) -> str:
+    if trend_candidate and ai_candidate:
+        return "PROBE_DUAL"
+    if ai_candidate:
+        return "PROBE_AI"
+    return "PROBE_TREND"
 
 
 def _dir_key(value: str) -> str:
@@ -1383,9 +1401,7 @@ def spot_action_decision_with_reason(
         return ACTION_SKIP, "NO_DIRECTION"
     if conf < 45.0:
         return ACTION_SKIP, "LOW_CONFIDENCE"
-    trend_confirms = tactical == spot
     trend_opposes = tactical not in {"NEUTRAL", spot}
-    ai_confirms = ai == spot and agree >= 0.67
     ai_exceptional = ai == spot and agree >= 0.78
     ai_opposes = ai not in {"NEUTRAL", spot} and agree >= 0.67
     if trend_led_snapshot is not None or ai_led_snapshot is not None:
@@ -1416,6 +1432,36 @@ def spot_action_decision_with_reason(
             return ACTION_ENTER_AI_LED, "ENTER_AI_LED"
         if trend_opposes and ai_opposes:
             return ACTION_SKIP, "SPOT_CONFIRMATION_CONFLICT"
+        trend_probe = (
+            trend_led_snapshot is not None
+            and str(trend_led_snapshot.state).upper() == "WATCH"
+            and float(trend_led_snapshot.score) >= 68.0
+            and trend_reason in {
+                "NEEDS_CONFIRMATION",
+                "TREND_SCORE_TOO_LOW",
+                "POOR_LOCATION",
+                "RISK_UNDEFINED",
+                "ADX_TOO_LOW",
+                "ADX_UNKNOWN",
+                "TACTICAL_NEUTRAL",
+            }
+        )
+        ai_probe = (
+            ai_led_snapshot is not None
+            and str(ai_led_snapshot.state).upper() == "WATCH"
+            and float(ai_led_snapshot.score) >= 68.0
+            and ai_reason in {
+                "NEEDS_CONFIRMATION",
+                "AI_EDGE_WEAK",
+                "POOR_LOCATION",
+                "RISK_UNDEFINED",
+                "ADX_TOO_LOW",
+                "ADX_UNKNOWN",
+                "AI_NEUTRAL",
+            }
+        )
+        if (trend_probe or ai_probe) and not trend_opposes and not ai_opposes:
+            return ACTION_PROBE, _probe_reason(trend_candidate=trend_probe, ai_candidate=ai_probe)
         reasons: list[str] = []
         if trend_ai_snapshot is not None and str(trend_ai_snapshot.state).upper() != "READY":
             reasons.append(str(trend_ai_snapshot.reason_code or "NEEDS_CONFIRMATION"))
@@ -1450,6 +1496,10 @@ def spot_action_decision_with_reason(
         return ACTION_ENTER_TREND_LED, "ENTER_TREND_LED"
     if structure_state_val == "EARLY" and ai_exceptional and adx_f >= 18.0:
         return ACTION_ENTER_AI_LED, "ENTER_AI_LED"
+    probe_trend = structure_state_val in {"FULL", "TREND"} and adx_f >= 16.0 and conf >= 56.0
+    probe_ai = structure_state_val in {"EARLY", "TREND", "FULL"} and ai_exceptional and adx_f >= 16.0 and conf >= 46.0
+    if probe_trend or probe_ai:
+        return ACTION_PROBE, _probe_reason(trend_candidate=probe_trend, ai_candidate=probe_ai)
     return ACTION_WATCH, "NEEDS_CONFIRMATION"
 
 
@@ -1514,4 +1564,19 @@ def _action_decision_core(
         return ACTION_ENTER_TREND_LED, "ENTER_TREND_LED"
     if enter_ai_led:
         return ACTION_ENTER_AI_LED, "ENTER_AI_LED"
+    probe_trend = (
+        structure_state_val in {"FULL", "TREND"}
+        and adx_f >= 16
+        and confidence >= 54
+        and conviction_label != "CONFLICT"
+    )
+    probe_ai = (
+        structure_state_val in {"EARLY", "TREND", "FULL"}
+        and adx_f >= 16
+        and confidence >= 46
+        and agreement >= 0.72
+        and conviction_label != "CONFLICT"
+    )
+    if probe_trend or probe_ai:
+        return ACTION_PROBE, _probe_reason(trend_candidate=probe_trend, ai_candidate=probe_ai)
     return ACTION_WATCH, "NEEDS_CONFIRMATION"

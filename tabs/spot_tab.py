@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
 import ta
+from core.session_utils import session_bucket_for_timestamp
 from core.ai_spot_bias import (
     ai_spot_bias_consensus_agreement,
     ai_spot_bias_directional_agreement,
@@ -14,7 +15,6 @@ from core.ai_spot_bias import (
     build_ai_spot_bias_snapshot,
 )
 from core.confidence import (
-    ai_confidence_bucket,
     build_ai_confidence_snapshot,
     build_confidence_snapshot,
     build_execution_confidence_snapshot,
@@ -36,6 +36,7 @@ from core.spot_direction import build_spot_direction_snapshot
 from ui.primitives import render_help_details, render_kpi_grid, render_page_header
 from ui.signal_panels import (
     build_indicator_groups_html,
+    build_learned_edge_banner_html,
     build_setup_snapshot_html,
 )
 from ui.signal_formatters import (
@@ -43,9 +44,12 @@ from ui.signal_formatters import (
     ai_confidence_display as _spot_ai_confidence_display,
     ai_confidence_note as _spot_ai_confidence_note,
     ai_spot_note as _spot_ai_bias_note,
+    execution_read_note as _execution_read_note,
+    context_fit_snapshot as _context_fit_snapshot,
     setup_confirm_display as _setup_confirm_display,
     spot_bias_label as _spot_bias_label,
     spot_confidence_display as _spot_confidence_display,
+    trade_gate_display_label as _trade_gate_display_label,
 )
 from ui.snapshot_cache import live_or_snapshot
 
@@ -164,6 +168,23 @@ def _spot_tf_note(snapshot) -> str:
     )
 
 
+def _learned_edge_tone(adaptive_label: str, execution_fit_label: str, archive_guardrail_label: str = "") -> str:
+    adaptive_key = str(adaptive_label or "").strip().upper()
+    execution_key = str(execution_fit_label or "").strip().upper()
+    guardrail_key = str(archive_guardrail_label or "").strip().upper()
+    if "GUARDRAIL" in guardrail_key or "CAUTION" in guardrail_key:
+        return "warning"
+    if "WEAK" in adaptive_key or "FRAGILE" in execution_key:
+        return "negative"
+    if "FAVORED" in adaptive_key and "PROVEN" in execution_key:
+        return "positive"
+    if "FAVORED" in adaptive_key:
+        return "info"
+    if "MIXED" in execution_key:
+        return "warning"
+    return "neutral"
+
+
 def render(ctx: dict) -> None:
     """Render the Spot Trading tab."""
     st = get_ctx(ctx, "st")
@@ -189,6 +210,13 @@ def render(ctx: dict) -> None:
     _wma = get_ctx(ctx, "_wma")
     _sr_lookback = get_ctx(ctx, "_sr_lookback")
     _debug = get_ctx(ctx, "_debug")
+    get_signal_tracker_db_path = get_ctx(ctx, "get_signal_tracker_db_path")
+    init_signal_tracker_db = get_ctx(ctx, "init_signal_tracker_db")
+    fetch_signal_events_df = get_ctx(ctx, "fetch_signal_events_df")
+    build_adaptive_context_model = get_ctx(ctx, "build_adaptive_context_model")
+    build_live_signal_adaptive_snapshot = get_ctx(ctx, "build_live_signal_adaptive_snapshot")
+    build_recent_market_context_snapshot = get_ctx(ctx, "build_recent_market_context_snapshot")
+    build_recent_symbol_market_signal_snapshot = get_ctx(ctx, "build_recent_symbol_market_signal_snapshot")
     def _spot_cache_ttl(tf: str) -> int:
         return {
             "1m": 120,
@@ -205,10 +233,10 @@ def render(ctx: dict) -> None:
         st,
         title="Spot Trading",
         intro_html=(
-            f"Spot-focused decision workspace for a single coin. "
-            f"<b>Direction</b> and <b>Confidence</b> use higher-timeframe closed candles (<b>1D + 4H</b>) to show the main spot bias. "
-            f"<b>Setup Confirm</b> then checks whether the selected timeframe trend and/or AI confirm that spot bias for execution. "
-            f"Selected-timeframe technical layers still drive entry/stop/target timing, while the headline direction stays anchored to spot context."
+            "Spot-focused decision workspace for a single coin. "
+            "<b>Direction</b> and <b>Confidence</b> use higher-timeframe closed candles (<b>1D + 4H</b>) to show the main spot bias. "
+            "<b>Setup Confirm</b> then checks whether the selected timeframe trend and/or AI confirm that spot bias for execution. "
+            "Selected-timeframe technical layers still drive entry/stop/target timing, while the headline direction stays anchored to spot context."
         ),
     )
     render_help_details(
@@ -216,7 +244,7 @@ def render(ctx: dict) -> None:
         summary="How to read quickly",
         body_html=(
             "<b>1.</b> Start with <b>Setup Snapshot</b>: Δ (%) + Setup Confirm + Direction + Confidence.<br>"
-            "<b>2.</b> Read <b>Setup Confirm</b> first: TREND+AI = strongest confirmation, TREND-led = technicals support the move, AI-led = AI support is strong enough, WATCH = idea is alive but early, SKIP = leave it alone for now. This uses selected-timeframe execution quality plus a local spot risk model, not the scalp planner.<br>"
+            "<b>2.</b> Read <b>Setup Confirm</b> first: TREND+AI = strongest confirmation, TREND-led = technicals support the move, AI-led = AI support is strong enough, PROBE = starter-risk only, WATCH = idea is alive but early, SKIP = leave it alone for now. This uses selected-timeframe execution quality plus a local spot risk model, not the scalp planner.<br>"
             "<b>3.</b> <b>Direction</b> = higher-timeframe spot bias (1D + 4H). <b>Confidence</b> = quality of that bias.<br>"
             "<b>4.</b> Validate with <b>AI Ensemble</b> + <b>AI Confidence</b>. AI Ensemble is the higher-timeframe AI bias (1D + 4H); AI Confidence scores how reliable that HTF AI verdict is.<br>"
             "<b>5.</b> Use <b>Technical Regime Breakdown</b> only as selected-timeframe confirmation context, not as the main direction engine.<br>"
@@ -256,6 +284,7 @@ def render(ctx: dict) -> None:
         if df_eval is None or len(df_eval) < 55:
             st.error("Not enough closed-candle data for a stable analysis.")
             return
+        signal_tracker_db_path = init_signal_tracker_db(get_signal_tracker_db_path())
 
         actual_symbol = str(df.attrs.get("source_symbol") or "").strip() or coin
         source_provider = str(df.attrs.get("source_provider") or "").strip() or "exchange"
@@ -334,22 +363,17 @@ def render(ctx: dict) -> None:
             directional_agree = float((_ai_details_s or {}).get("directional_agreement", agreement))
             consensus_agree = float((_ai_details_s or {}).get("consensus_agreement", 0.0))
             ai_dir_key = direction_key(ai_dir_s)
-            ai_votes, _, decision_agreement = ai_vote_metrics(
+            _, _, decision_agreement = ai_vote_metrics(
                 ai_dir_key,
                 directional_agree,
                 consensus_agree,
             )
-            ai_fallback_note = _spot_ai_fallback_note(_ai_details_s)
-            ai_status = str((_ai_details_s or {}).get("status") or "")
         except Exception:
             _ai_prob_s = float("nan")
             ai_dir_key = "NEUTRAL"
-            ai_votes = 0
             decision_agreement = 0.0
-            ai_fallback_note = "AI fallback active: ensemble model output was unavailable."
             directional_agree = 0.0
             consensus_agree = 0.0
-            ai_status = "model_exception"
 
         sig_dir_s = tactical_signal_dir if tactical_signal_dir in {"UPSIDE", "DOWNSIDE"} else "WAIT"
         base_conv_lbl_s, _ = _calc_conviction(sig_dir_s, ai_dir_key, directional_confidence, decision_agreement)
@@ -439,10 +463,14 @@ def render(ctx: dict) -> None:
         conf_c_s = POSITIVE if conf_bucket == "HIGH" else (WARNING if conf_bucket == "MEDIUM" else NEGATIVE)
         ai_conf_bucket = str(ai_confidence_snapshot.label or "LOW").upper()
         ai_conf_c_s = POSITIVE if ai_conf_bucket == "HIGH" else (WARNING if ai_conf_bucket == "MEDIUM" else NEGATIVE)
-        if normalize_action_class(action_raw).startswith("ENTER_"):
+        action_class = normalize_action_class(action_raw)
+        watch_setup_color = "#7DD3FC"
+        if action_class.startswith("ENTER_"):
             setup_c_s = POSITIVE
-        elif normalize_action_class(action_raw) == "WATCH":
+        elif action_class == "PROBE":
             setup_c_s = WARNING
+        elif action_class == "WATCH":
+            setup_c_s = watch_setup_color
         else:
             setup_c_s = NEGATIVE
         delta_display = format_delta(price_change) if price_change is not None else ""
@@ -466,12 +494,68 @@ def render(ctx: dict) -> None:
             f"Regime quality {float(spot_snapshot.regime_quality):.0f} | "
             f"Location quality {float(spot_snapshot.location_quality):.0f}"
         )
+        adaptive_history_df = fetch_signal_events_df(
+            limit=2000,
+            status="RESOLVED",
+            source="Market",
+            db_path=signal_tracker_db_path,
+        )
+        recent_market_events_df = fetch_signal_events_df(
+            limit=240,
+            source="Market",
+            db_path=signal_tracker_db_path,
+        )
+        recent_market_context = build_recent_market_context_snapshot(recent_market_events_df)
+        recent_symbol_market_signal = build_recent_symbol_market_signal_snapshot(
+            recent_market_events_df,
+            symbol=coin,
+            timeframe=timeframe,
+        )
+        adaptive_model = build_adaptive_context_model(adaptive_history_df)
+        current_session_bucket = session_bucket_for_timestamp()
+        adaptive_snapshot = build_live_signal_adaptive_snapshot(
+            adaptive_model,
+            signal={
+                "Setup Confirm": str(action_raw or ""),
+                "Lead": str(recent_symbol_market_signal.get("Lead") or "No LEAD"),
+                "AI Alignment": "Aligned" if direction_key(spot_snapshot.direction) == ai_spot_direction_key else "Not aligned",
+                "Market Lead": str(recent_market_context.get("Market Lead") or "No Clear Lead"),
+                "Market Regime": str(recent_market_context.get("Market Regime") or "Unknown"),
+                "Playbook": str(recent_market_context.get("Playbook") or "Unknown"),
+                "Trade Gate": str(recent_market_context.get("Trade Gate") or "Unknown"),
+                "Sector Rotation": str(recent_market_context.get("Sector Rotation") or "Unknown"),
+                "Catalyst State": str(recent_market_context.get("Catalyst State") or "Unknown"),
+                "Catalyst Window": str(recent_market_context.get("Catalyst Window") or "Unknown"),
+                "Catalyst Scope": str(recent_market_context.get("Catalyst Scope") or "Unknown"),
+                "Catalyst Targeting": str(recent_market_context.get("Catalyst Targeting") or "Unknown"),
+                "Flow Proxy": str(recent_market_context.get("Flow Proxy") or "Unknown"),
+                "Session": current_session_bucket,
+                "Timeframe": str(timeframe or "Unknown"),
+            },
+        )
+        market_context_note = str(recent_market_context.get("Context Note") or "").strip()
+        scanner_signal_note = str(recent_symbol_market_signal.get("Signal Note") or "").strip()
+        context_fit = _context_fit_snapshot(
+            adaptive_snapshot,
+            market_context=recent_market_context,
+            recent_symbol_market_signal=recent_symbol_market_signal,
+        )
+        confidence_note = (
+            f"{confidence_note} | Historical read: {adaptive_snapshot.note} | "
+            f"Execution fit: {adaptive_snapshot.execution_fit_note} | "
+            f"Session fit: {adaptive_snapshot.session_fit_note}"
+        )
         setup_snapshot_html = build_setup_snapshot_html(
             title="Setup Snapshot",
             text_muted=TEXT_MUTED,
             items=[
                 {"label": "Δ (%)", "value": delta_display or "—", "color": delta_c_s, "title": delta_note},
-                {"label": "Setup Confirm", "value": setup_confirm, "color": setup_c_s, "title": setup_reason},
+                {
+                    "label": "Setup Confirm",
+                    "value": setup_confirm,
+                    "color": setup_c_s,
+                    "title": f"{setup_reason} | Execution fit: {adaptive_snapshot.execution_fit_note}",
+                },
                 {"label": "Direction", "value": signal_clean, "color": sig_c_s, "title": direction_note},
                 {"label": "Confidence", "value": confidence_display, "color": conf_c_s, "title": confidence_note},
                 {
@@ -494,6 +578,32 @@ def render(ctx: dict) -> None:
             ],
         )
         st.markdown(setup_snapshot_html, unsafe_allow_html=True)
+        st.markdown(
+            build_learned_edge_banner_html(
+                title="Execution Read",
+                label=(
+                    f"{_trade_gate_display_label(context_fit['label'])} • "
+                    f"{adaptive_snapshot.execution_fit_label}"
+                ),
+                note=_execution_read_note(
+                    adaptive_snapshot,
+                    context_fit=context_fit,
+                    market_context_note=market_context_note,
+                    scanner_signal_note=scanner_signal_note,
+                ),
+                tone=_learned_edge_tone(
+                    adaptive_snapshot.label,
+                    adaptive_snapshot.execution_fit_label,
+                    adaptive_snapshot.archive_guardrail_label,
+                ),
+                text_muted=TEXT_MUTED,
+                positive=POSITIVE,
+                negative=NEGATIVE,
+                warning=WARNING,
+                accent=ACCENT,
+            ),
+            unsafe_allow_html=True,
+        )
         render_help_details(
             st,
             summary="Setup Snapshot Guide",
@@ -503,7 +613,8 @@ def render(ctx: dict) -> None:
                 "<b>Direction</b> = higher-timeframe spot bias from 1D + 4H closed candles.<br>"
                 "<b>Confidence</b> = quality score of that spot bias.<br>"
                 "<b>AI Ensemble</b> = higher-timeframe AI bias from 1D + 4H. Dots show how many of the 3 ensemble models support that final HTF AI direction; <b>*</b> means one of those AI contexts degraded into neutral safety output.<br>"
-                "<b>AI Confidence</b> = quality score of the HTF AI verdict (combined score + conviction + timeframe alignment + consensus + model support)."
+                "<b>AI Confidence</b> = quality score of the HTF AI verdict (combined score + conviction + timeframe alignment + consensus + model support).<br>"
+                "<b>Execution Read</b> = similar setup history, your own execution fit, current session fit, and the live execution stance combined into one quick decision read."
             ),
         )
 
@@ -1066,17 +1177,47 @@ def render(ctx: dict) -> None:
             plan_status = "No-Trade"
             plan_color = NEGATIVE
             plan_lines = (
+                f"0) <b>Context fit:</b> {context_fit['label']} — {context_fit['aggression']}.<br>"
                 f"1) <b>Setup Confirm is SKIP:</b> do not open a new spot position on this structure.<br>"
-                f"2) <b>Wait for regime improvement:</b> setup should move to WATCH or a confirmed class (TREND+AI / TREND-led / AI-led) before re-evaluation.<br>"
+                f"2) <b>Wait for regime improvement:</b> setup should move to WATCH, PROBE, or a confirmed class (TREND+AI / TREND-led / AI-led) before re-evaluation.<br>"
                 f"3) <b>If already holding:</b> reduce risk and keep stop ({left_stop_context}) at {_fmt_price(pullback_invalidation)}.<br>"
                 f"4) <b>Keep both paths prepared:</b> {left_zone_label} ({pullback_zone_text}) and {trigger_label} ({_fmt_price(breakout_trigger)}).<br>"
                 f"5) <b>Take-profit maps:</b> {left_tp_label} ({pullback_tp_text}) / {right_tp_label} ({breakout_tp_text})."
             )
+        elif setup_cls == "PROBE":
+            plan_status = "Probe"
+            plan_color = WARNING
+            if spot_direction_key == "UPSIDE":
+                plan_lines = (
+                    f"0) <b>Context fit:</b> {context_fit['label']} — {context_fit['aggression']}.<br>"
+                    f"1) <b>Setup Confirm is PROBE:</b> starter-risk upside setup; do not use full size yet.<br>"
+                    f"2) <b>Starter entry path:</b> react in {left_zone_label} ({pullback_zone_text}) or on a clean close above the {trigger_label} ({_fmt_price(breakout_trigger)}).<br>"
+                    f"3) <b>Risk discipline:</b> keep size small and stops tight at {_fmt_price(pullback_invalidation)} / {_fmt_price(breakout_invalidation)}.<br>"
+                    f"4) <b>Add only on confirmation:</b> wait for stronger structure and cleaner follow-through before upgrading toward confirmed size.<br>"
+                    f"5) <b>Take-profit map:</b> {left_tp_label} ({pullback_tp_text}) / {right_tp_label} ({breakout_tp_text})."
+                )
+            elif spot_direction_key == "DOWNSIDE":
+                plan_lines = (
+                    f"0) <b>Context fit:</b> {context_fit['label']} — {context_fit['aggression']}.<br>"
+                    f"1) <b>Setup Confirm is PROBE with Downside direction:</b> spot mode stays defensive; do not add fresh size here.<br>"
+                    f"2) <b>If already holding:</b> treat this as an early warning, not a buy trigger.<br>"
+                    f"3) <b>Reclaim requirement:</b> wait for a clean close back above the {trigger_label} ({_fmt_price(breakout_trigger)}).<br>"
+                    f"4) <b>Protect downside:</b> keep stop ({left_stop_context}) at {_fmt_price(pullback_invalidation)} and avoid forcing upside entries early."
+                )
+            else:
+                plan_lines = (
+                    f"0) <b>Context fit:</b> {context_fit['label']} — {context_fit['aggression']}.<br>"
+                    f"1) <b>Setup Confirm is PROBE with Neutral direction:</b> structure is promising enough for attention, but not for committed spot risk.<br>"
+                    f"2) <b>Use it as a starter-watch zone:</b> keep the levels ready, but wait for a side to confirm before sizing up.<br>"
+                    f"3) <b>Range decision levels:</b> monitor {left_zone_label} ({pullback_zone_text}) and the {trigger_label} ({_fmt_price(breakout_trigger)}).<br>"
+                    f"4) <b>Execution rule:</b> no full spot entry until direction leaves neutral and closes with follow-through."
+                )
         elif setup_cls == "WATCH":
             plan_status = "Watch"
             plan_color = WARNING
             if spot_direction_key == "UPSIDE":
                 plan_lines = (
+                    f"0) <b>Context fit:</b> {context_fit['label']} — {context_fit['aggression']}.<br>"
                     f"1) <b>Setup Confirm is WATCH:</b> confirmation is partial; monitor, do not force entry.<br>"
                     f"2) <b>Primary trigger path:</b> reaction quality in {left_zone_label} ({pullback_zone_text}).<br>"
                     f"3) <b>Momentum trigger path:</b> candle close above the {trigger_label} ({_fmt_price(breakout_trigger)}).<br>"
@@ -1085,6 +1226,7 @@ def render(ctx: dict) -> None:
                 )
             elif spot_direction_key == "DOWNSIDE":
                 plan_lines = (
+                    f"0) <b>Context fit:</b> {context_fit['label']} — {context_fit['aggression']}.<br>"
                     f"1) <b>Setup Confirm is WATCH with Downside direction:</b> avoid fresh spot buys until reclaim confirmation.<br>"
                     f"2) <b>{trigger_label}:</b> wait for a close back above the {trigger_label} ({_fmt_price(breakout_trigger)}).<br>"
                     f"3) <b>If already holding:</b> reduce risk and protect with stop ({left_stop_context}) {_fmt_price(pullback_invalidation)}.<br>"
@@ -1092,6 +1234,7 @@ def render(ctx: dict) -> None:
                 )
             else:
                 plan_lines = (
+                    f"0) <b>Context fit:</b> {context_fit['label']} — {context_fit['aggression']}.<br>"
                     f"1) <b>Setup Confirm is WATCH with Neutral direction:</b> no-force zone until a side confirms.<br>"
                     f"2) <b>Range decision levels:</b> monitor {left_zone_label} ({pullback_zone_text}) and the {trigger_label} ({_fmt_price(breakout_trigger)}).<br>"
                     f"3) <b>Execution only after side confirmation:</b> map risk to stop ({left_stop_context} / {right_stop_context}).<br>"
@@ -1101,6 +1244,7 @@ def render(ctx: dict) -> None:
             plan_status = "Bullish Confirmed"
             plan_color = POSITIVE
             plan_lines = (
+                f"0) <b>Context fit:</b> {context_fit['label']} — {context_fit['aggression']}.<br>"
                 f"1) <b>Setup Confirm is {setup_label}:</b> execution-ready upside context.<br>"
                 f"2) <b>{left_path_label}:</b> accumulate in {pullback_zone_text}, stop at {_fmt_price(pullback_invalidation)}.<br>"
                 f"3) <b>{right_path_label}:</b> execute on close above the {trigger_label} ({_fmt_price(breakout_trigger)}), stop at {_fmt_price(breakout_invalidation)}.<br>"
@@ -1111,6 +1255,7 @@ def render(ctx: dict) -> None:
             plan_status = "Defensive Confirmed"
             plan_color = NEGATIVE
             plan_lines = (
+                f"0) <b>Context fit:</b> {context_fit['label']} — {context_fit['aggression']}.<br>"
                 f"1) <b>Setup Confirm is {setup_label}, but direction is Downside:</b> spot mode stays defensive.<br>"
                 f"2) <b>No fresh spot buy</b> until direction recovers and closes above the {trigger_label} ({_fmt_price(breakout_trigger)}).<br>"
                 f"3) <b>If already holding:</b> de-risk into rallies and protect downside with stop ({left_stop_context}) {_fmt_price(pullback_invalidation)}.<br>"

@@ -3,6 +3,43 @@ import pandas as pd
 import numpy as np
 import threading
 import core.services as _services
+from core.alert_engine import build_market_alerts
+from core.adaptive_weighting import (
+    build_adaptive_context_model,
+    build_learning_edge_table,
+    build_live_signal_adaptive_snapshot,
+)
+from core.signal_tracker import (
+    annotate_alert_footprint,
+    build_alert_effectiveness_summary,
+    build_recent_market_context_snapshot,
+    build_recent_symbol_market_signal_snapshot,
+    build_signal_cohort_summary,
+    build_execution_overlay_snapshot,
+    build_signal_review_snapshot,
+    fetch_market_alerts_df,
+    fetch_signal_events_df,
+    get_signal_tracker_db_path,
+    init_signal_tracker_db,
+    log_market_alerts,
+    log_signal_events,
+    resolve_open_signal_events_for_frame,
+    resolve_open_signal_events_via_fetch,
+    save_signal_trade_journal,
+    save_signal_trade_overlay,
+)
+from core.tracker_store import (
+    backup_signal_tracker_db,
+    build_tracker_storage_snapshot,
+    read_signal_tracker_db_bytes,
+    restore_signal_tracker_db_bytes,
+)
+from core.catalyst_engine import build_market_catalyst_snapshot
+from core.flow_proxy_engine import build_market_flow_proxy_snapshot
+from core.no_trade_engine import build_market_trade_gate
+from core.regime_engine import build_market_regime_snapshot
+from core.risk_sizing_engine import build_signal_risk_sizing, market_default_risk_budget
+from core.sector_rotation import build_sector_rotation_snapshot, classify_symbol_sector
 from core.backtest import run_backtest as run_backtest_core
 from core.services import (
     EXCHANGE,
@@ -17,6 +54,8 @@ from core.services import (
     detect_divergence,
     detect_market_regime,
     fetch_ohlcv,
+    get_market_flow_proxy_rows,
+    get_market_catalyst_events,
     get_market_cap_rows_for_symbols,
     fetch_top_gainers_losers,
     fetch_trending_coins,
@@ -196,6 +235,13 @@ if 'debug_mode' not in st.session_state:
 with st.sidebar:
     with st.expander("Developer Tools", expanded=False):
         st.session_state['debug_mode'] = st.toggle('Debug mode', value=st.session_state['debug_mode'])
+        if "market_show_diagnostics" not in st.session_state:
+            st.session_state["market_show_diagnostics"] = False
+        st.toggle(
+            "Market diagnostics",
+            value=bool(st.session_state.get("market_show_diagnostics", False)),
+            key="market_show_diagnostics",
+        )
 
 def _debug(msg: str) -> None:
     """Emit a debug message only when Debug mode is enabled."""

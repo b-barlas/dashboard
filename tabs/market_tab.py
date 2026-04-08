@@ -8,6 +8,7 @@ import html
 import math
 import re
 from threading import Lock
+from types import SimpleNamespace
 
 import pandas as pd
 from core.ai_spot_bias import (
@@ -45,8 +46,13 @@ from core.metric_catalog import (
     AI_SHORT_THRESHOLD,
     direction_from_prob,
 )
+from core.adaptive_weighting import build_archive_guardrail_snapshot, build_session_fit_snapshot
+from core.catalyst_engine import catalyst_signal_note, catalyst_window_label
+from core.session_utils import session_bucket_for_timestamp
+from core.signal_tracker import build_alert_effectiveness_summary
 from core.symbols import canonical_base_symbol, is_stable_base_symbol
 from ui.primitives import render_help_details, render_kpi_grid, render_page_header
+from ui.signal_formatters import trade_gate_display_label
 
 _LAST_GOOD_RESULTS_KEY = "market_scan_last_good_results"
 _LAST_GOOD_SIG_KEY = "market_scan_last_good_sig"
@@ -60,9 +66,10 @@ _LAST_GOOD_HISTORY_LIMIT = 32
 _SCAN_REFRESH_TTL_MINUTES = 3
 _RECOVERY_RETRY_BACKOFF_SECONDS = 30
 _SETUP_CONFIRM_PRIORITY = {
-    "ENTER_TREND_AI": 5,
-    "ENTER_TREND_LED": 4,
-    "ENTER_AI_LED": 3,
+    "ENTER_TREND_AI": 6,
+    "ENTER_TREND_LED": 5,
+    "ENTER_AI_LED": 4,
+    "PROBE": 3,
     "WATCH": 2,
     "SKIP": 1,
 }
@@ -72,6 +79,21 @@ _AI_FALLBACK_STATUS_TEXT = {
     "single_class_window": "AI fallback active: one-sided training window forced neutral safety output.",
     "model_exception": "AI fallback active: model instability forced neutral safety output.",
 }
+_ALERT_ARCHIVE_DISPLAY = {
+    "CATALYST_BLOCK": "Catalyst Block",
+    "TRADE_GATE": "Trade Gate",
+    "MARKET_LEAD": "Market Lead",
+    "LEARNED_EDGE": "Learned Edge",
+    "ACTIONABLE_CLUSTER": "Actionable Cluster",
+    "ARCHIVE_GUARDRAIL": "Archive Guardrail",
+    "EXECUTION_STANCE": "Execution Stance",
+    "PLAYBOOK_WINDOW": "Playbook Window",
+    "SECTOR_ROTATION": "Sector Rotation",
+    "SESSION_FIT": "Session Fit",
+    "FLOW_PROXY": "Flow Proxy",
+    "CATALYST_CAUTION": "Catalyst Caution",
+}
+_PROTECTED_ALERT_KEYS = {"CATALYST_BLOCK", "TRADE_GATE", "CATALYST_CAUTION", "ARCHIVE_GUARDRAIL"}
 
 
 def _canonical_pair_base(symbol: str) -> str:
@@ -102,12 +124,16 @@ def _sortable_float(value: object) -> float:
         return 0.0
 
 
-def _market_result_priority_key(row: dict) -> tuple[float, float, float, float, str]:
+def _market_result_priority_key(row: dict) -> tuple[float, float, float, float, float, float, float, float, str]:
     return (
         -float(_setup_confirm_priority(str(row.get("__action_raw", row.get("Setup Confirm", ""))))),
+        -_sortable_float(row.get("__risk_unit_fraction", 0.0)),
         -_sortable_float(row.get("__confidence_val", 0.0)),
+        -_sortable_float(row.get("__adaptive_edge_score", 50.0)),
+        _sortable_float(row.get("__archive_guardrail_penalty", 0.0)),
+        -_sortable_float(row.get("__rr_val", 0.0)),
         -_sortable_float(row.get("__ai_confidence_val", 0.0)),
-        -_sortable_float(row.get("__mcap_val", 0)),
+        -_sortable_float(row.get("__mcap_val", 0.0)),
         str(row.get("Coin", "")),
     )
 
@@ -149,6 +175,230 @@ class MarketLeadSnapshot:
     dominance_component: float
     upside_leads: int
     downside_leads: int
+
+
+def _signal_tracker_direction_key(value: object) -> str:
+    d = str(value or "").strip().upper()
+    if d in {"UPSIDE", "LONG", "BUY", "BULLISH"}:
+        return "UPSIDE"
+    if d in {"DOWNSIDE", "SHORT", "SELL", "BEARISH"}:
+        return "DOWNSIDE"
+    return "NEUTRAL"
+
+
+def _confidence_value_from_badge(text: object) -> float | None:
+    match = re.search(r"(-?\d+(?:\.\d+)?)\s*%", str(text or ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except Exception:
+        return None
+
+
+def _adaptive_execution_summary(model: dict[str, object]) -> str:
+    actual_closed = int(model.get("overall_actual_closed") or 0)
+    if actual_closed < 8:
+        return "Execution archive is still building."
+    win_pct = float(model.get("overall_actual_win_pct") or 0.0)
+    avg_pnl = float(model.get("overall_avg_actual_pnl") or 0.0)
+    if win_pct >= 58.0 and avg_pnl >= 0.5:
+        tone = "Execution archive is strong"
+    elif win_pct <= 42.0 or avg_pnl <= -0.5:
+        tone = "Execution archive is weak"
+    else:
+        tone = "Execution archive is mixed"
+    return f"{tone}: {win_pct:.0f}% win rate across {actual_closed} closed trades, avg {avg_pnl:+.2f}%."
+
+
+def _adaptive_execution_brief(model: dict[str, object]) -> str:
+    actual_closed = int(model.get("overall_actual_closed") or 0)
+    if actual_closed < 8:
+        return ""
+    win_pct = float(model.get("overall_actual_win_pct") or 0.0)
+    avg_pnl = float(model.get("overall_avg_actual_pnl") or 0.0)
+    if win_pct >= 58.0 and avg_pnl >= 0.5:
+        return "Execution archive: strong."
+    if win_pct <= 42.0 or avg_pnl <= -0.5:
+        return "Execution archive: weak."
+    return ""
+
+
+def _session_archive_summary(session_fit_snapshot) -> str:
+    label = str(getattr(session_fit_snapshot, "label", "") or "").strip()
+    note = str(getattr(session_fit_snapshot, "note", "") or "").strip()
+    if not label:
+        return ""
+    return f"Session archive: {label}. {note}".strip()
+
+
+def _compact_trade_gate_note(
+    *,
+    market_trade_gate_snapshot,
+    market_catalyst_snapshot,
+    market_flow_snapshot,
+    market_default_budget_snapshot,
+    session_fit_snapshot,
+    adaptive_model: dict[str, object],
+    enter_count: int,
+    probe_count: int,
+) -> str:
+    gate_key = str(getattr(market_trade_gate_snapshot, "gate_key", "") or "").strip().upper()
+    catalyst_label = str(getattr(market_catalyst_snapshot, "label", "") or "").strip()
+    flow_label = str(getattr(market_flow_snapshot, "label", "") or "").strip()
+    session_label = str(getattr(session_fit_snapshot, "label", "") or "").strip()
+    size_label = str(getattr(market_default_budget_snapshot, "label", "") or "").strip()
+
+    parts: list[str] = []
+    if gate_key == "TRADEABLE":
+        parts.append("The tape is open for normal-quality setups.")
+    elif gate_key == "SELECTIVE_ONLY":
+        if int(enter_count) <= 0 and int(probe_count) > 0:
+            parts.append("Nothing is fully ready yet, but probe-grade setups are live.")
+        else:
+            parts.append("Conditions are selective; only the cleanest setups deserve fresh risk.")
+    elif gate_key == "DEFENSIVE_ONLY":
+        parts.append("Conditions are defensive; fresh risk should stay small.")
+    else:
+        parts.append("Stand aside until the tape improves.")
+
+    if size_label:
+        parts.append(f"Size cap: {size_label}.")
+    if catalyst_label not in {"", "No Near Catalyst", "Catalyst Clear"}:
+        parts.append(f"Catalyst: {catalyst_label}.")
+    if flow_label not in {"", "Flow Balanced"}:
+        parts.append(f"Flow: {flow_label}.")
+    if session_label in {"Session Supportive", "Session Fragile"}:
+        parts.append(f"Session: {session_label.replace('Session ', '')}.")
+
+    archive_brief = _adaptive_execution_brief(adaptive_model)
+    if archive_brief:
+        parts.append(archive_brief)
+    return " ".join(parts).strip()
+
+
+def _market_signal_log_events(
+    *,
+    rows: list[dict],
+    timeframe: str,
+    market_lead_snapshot: MarketLeadSnapshot,
+    market_regime_snapshot,
+    market_trade_gate_snapshot,
+    build_signal_risk_sizing,
+    sector_rotation_snapshot,
+    classify_symbol_sector,
+    market_catalyst_snapshot,
+    market_flow_snapshot,
+    session_fit_snapshot,
+    market_alerts,
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    alert_keys = [
+        str(getattr(alert, "alert_key", "") or "").strip().upper()
+        for alert in list(market_alerts or [])
+        if str(getattr(alert, "alert_key", "") or "").strip()
+    ]
+    alert_keys_text = "|".join(alert_keys)
+    primary_alert = alert_keys[0] if alert_keys else ""
+    for row in rows:
+        event_time = row.get("__event_time")
+        symbol = str(row.get("Coin") or "").strip().upper()
+        if not symbol or event_time is None:
+            continue
+        ai_ensemble = str(row.get("AI Ensemble") or "").strip()
+        sector_tag = classify_symbol_sector(symbol)
+        direction_raw = str(row.get("Direction") or "")
+        confidence_val = row.get("__confidence_val", _confidence_value_from_badge(row.get("Confidence")))
+        ai_conf_val = row.get("__ai_confidence_val", _confidence_value_from_badge(row.get("AI Confidence")))
+        lead_direction = str(row.get("__emerging_direction") or "")
+        market_lead_aligned = (
+            _signal_tracker_direction_key(direction_raw) in {"UPSIDE", "DOWNSIDE"}
+            and _signal_tracker_direction_key(direction_raw) == _signal_tracker_direction_key(market_lead_snapshot.label)
+        )
+        risk_sizing_snapshot = build_signal_risk_sizing(
+            market_trade_gate_snapshot=market_trade_gate_snapshot,
+            market_catalyst_snapshot=market_catalyst_snapshot,
+            direction=direction_raw,
+            setup_confirm=str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+            confidence=confidence_val,
+            ai_confidence=ai_conf_val,
+            ai_aligned=(
+                _signal_tracker_direction_key(direction_raw)
+                == _signal_tracker_direction_key(ai_ensemble.split("(", 1)[0].strip())
+            ),
+            market_lead_aligned=market_lead_aligned,
+            lead_active=_signal_tracker_direction_key(lead_direction) in {"UPSIDE", "DOWNSIDE"},
+            rr_ratio=row.get("__rr_val"),
+            adaptive_edge_score=row.get("__adaptive_edge_score"),
+            session_fit_score=float(getattr(session_fit_snapshot, "score", 0.0) or 0.0),
+            archive_guardrail_penalty=row.get("__archive_guardrail_penalty"),
+            archive_guardrail_label=row.get("__archive_guardrail_label"),
+            archive_guardrail_note=row.get("__archive_guardrail_note"),
+            symbol=symbol,
+            sector_tag=str(sector_tag or ""),
+        )
+        risk_label = str(row.get("__risk_tier_label") or getattr(risk_sizing_snapshot, "label", "") or "")
+        risk_fraction = row.get("__risk_unit_fraction")
+        risk_fraction_value = (
+            _sortable_float(risk_fraction)
+            if risk_fraction is not None
+            else float(getattr(risk_sizing_snapshot, "unit_fraction", 0.0) or 0.0)
+        )
+        events.append(
+            {
+                "source": "Market",
+                "symbol": symbol,
+                "timeframe": str(row.get("__timeframe") or timeframe),
+                "event_time": event_time,
+                "session_bucket": session_bucket_for_timestamp(event_time),
+                "direction": direction_raw,
+                "setup_confirm": str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                "action_reason": str(row.get("__action_reason") or ""),
+                "lead_label": str(row.get("__emerging_label") or ""),
+                "lead_direction": lead_direction,
+                "confidence": confidence_val,
+                "ai_ensemble": ai_ensemble,
+                "ai_direction": ai_ensemble.split("(", 1)[0].strip(),
+                "ai_confidence": ai_conf_val,
+                "market_lead_label": market_lead_snapshot.label,
+                "market_lead_score": market_lead_snapshot.score,
+                "market_lead_upside": market_lead_snapshot.upside_leads,
+                "market_lead_downside": market_lead_snapshot.downside_leads,
+                "market_regime": str(getattr(market_regime_snapshot, "label", "") or ""),
+                "market_playbook": str(getattr(market_regime_snapshot, "playbook", "") or ""),
+                "market_no_trade": bool(getattr(market_trade_gate_snapshot, "no_trade", False)),
+                "market_trade_gate": str(getattr(market_trade_gate_snapshot, "label", "") or ""),
+                "market_alert_keys": alert_keys_text,
+                "market_primary_alert": primary_alert,
+                "market_no_trade_reason": str(getattr(market_trade_gate_snapshot, "reason_code", "") or ""),
+                "risk_tier": risk_label,
+                "risk_unit_fraction": risk_fraction_value,
+                "sector_tag": str(sector_tag or "").strip(),
+                "market_sector_rotation": str(getattr(sector_rotation_snapshot, "label", "") or ""),
+                "market_catalyst_state": str(getattr(market_catalyst_snapshot, "label", "") or ""),
+                "market_catalyst_event": str(getattr(market_catalyst_snapshot, "next_event", "") or ""),
+                "market_catalyst_blocking": bool(getattr(market_catalyst_snapshot, "blocking", False)),
+                "market_catalyst_category": str(getattr(market_catalyst_snapshot, "category", "") or ""),
+                "market_catalyst_scope": str(getattr(market_catalyst_snapshot, "scope", "") or ""),
+                "market_catalyst_tag": str(getattr(market_catalyst_snapshot, "tag", "") or ""),
+                "market_catalyst_targeted": bool(getattr(market_catalyst_snapshot, "targeted_only", False)),
+                "market_catalyst_window": catalyst_window_label(market_catalyst_snapshot),
+                "market_flow_state": str(getattr(market_flow_snapshot, "label", "") or ""),
+                "market_flow_bias": str(getattr(market_flow_snapshot, "state", "") or ""),
+                "adaptive_edge_label": str(row.get("__adaptive_edge_label") or ""),
+                "adaptive_edge_score": row.get("__adaptive_edge_score"),
+                "archive_guardrail_label": str(row.get("__archive_guardrail_label") or ""),
+                "archive_guardrail_penalty": row.get("__archive_guardrail_penalty"),
+                "archive_guardrail_note": str(row.get("__archive_guardrail_note") or ""),
+                "price": row.get("__price_val"),
+                "delta_pct": row.get("__delta_pct"),
+                "entry_price": row.get("__entry_val"),
+                "stop_loss": row.get("__stop_val"),
+                "target_price": row.get("__target_val"),
+                "rr_ratio": row.get("__rr_val"),
+            }
+        )
+    return events
 
 
 def _market_lead_breadth_component(rows: list[dict]) -> tuple[float, int, int]:
@@ -281,6 +531,7 @@ def _ai_fallback_note(ai_details: dict | None) -> str:
 def _setup_status_summary(
     *,
     enter_count: int,
+    probe_count: int = 0,
     watch_count: int,
     skip_count: int,
     source_label: str | None,
@@ -288,16 +539,232 @@ def _setup_status_summary(
     source = str(source_label or "").strip().upper()
     label = "Setup Status"
     if source.startswith("CACHED"):
-        head = "CACHED SETUPS" if int(enter_count) > 0 else "NO LIVE SETUP"
-        sub = f"CACHED ENTER: {enter_count} • WATCH: {watch_count} • SKIP: {skip_count}"
+        head = "CACHED SETUPS" if int(enter_count) > 0 else ("CACHED PROBES" if int(probe_count) > 0 else "NO LIVE SETUP")
+        sub = f"CACHED READY: {enter_count} • PROBE: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}"
         return label, head, sub
     if "DEGRADED" in source:
-        head = "DEGRADED SETUPS" if int(enter_count) > 0 else "NO CLEAN SETUP"
-        sub = f"DEGRADED ENTER: {enter_count} • WATCH: {watch_count} • SKIP: {skip_count}"
+        head = "DEGRADED SETUPS" if int(enter_count) > 0 else ("PROBE-ONLY TAPE" if int(probe_count) > 0 else "NO CLEAN SETUP")
+        sub = f"DEGRADED READY: {enter_count} • PROBE: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}"
         return label, head, sub
-    head = "SETUPS READY" if int(enter_count) > 0 else "NO SETUP READY"
-    sub = f"READY: {enter_count} • WATCH: {watch_count} • SKIP: {skip_count}"
+    head = "SETUPS READY" if int(enter_count) > 0 else ("PROBE SETUPS LIVE" if int(probe_count) > 0 else "NO SETUP READY")
+    sub = f"READY: {enter_count} • PROBE: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}"
     return label, head, sub
+
+
+def _alert_archive_label(alert_key: str) -> str:
+    key = str(alert_key or "").strip().upper()
+    return _ALERT_ARCHIVE_DISPLAY.get(key, key.replace("_", " ").title() if key else "No Alert Footprint")
+
+
+def _alert_lane_label(alert: object) -> str:
+    severity = str(getattr(alert, "severity", "INFO") or "INFO").strip().upper()
+    tone = str(getattr(alert, "tone", "") or "").strip().lower()
+    if severity == "HIGH":
+        return "Stand Aside"
+    if severity == "MEDIUM":
+        if tone == "positive":
+            return "Action"
+        return "Caution"
+    if tone == "positive":
+        return "Context+"
+    return "Context"
+
+
+def _alert_is_primary(alert: object) -> bool:
+    severity = str(getattr(alert, "severity", "INFO") or "INFO").strip().upper()
+    alert_key = str(getattr(alert, "alert_key", "") or "").strip().upper()
+    if severity in {"HIGH", "MEDIUM"}:
+        return True
+    return alert_key in (_PROTECTED_ALERT_KEYS | {"MARKET_LEAD", "ACTIONABLE_CLUSTER", "LEARNED_EDGE"})
+
+
+def _compress_market_alerts_for_display(alerts: list[object], *, max_items: int = 2) -> list[object]:
+    ordered = list(alerts or [])
+    limit = max(1, int(max_items or 0))
+    if len(ordered) <= limit:
+        return ordered
+
+    primary = [alert for alert in ordered if _alert_is_primary(alert)]
+    context = [alert for alert in ordered if not _alert_is_primary(alert)]
+    display: list[object] = primary[:limit]
+
+    if len(display) >= limit:
+        return display[:limit]
+
+    slots_left = limit - len(display)
+    if not context:
+        return (display + primary[len(display):])[:limit]
+
+    if slots_left > 1:
+        display.extend(context[:slots_left])
+        return display[:limit]
+
+    positive_titles = [
+        str(getattr(alert, "title", "") or "").strip()
+        for alert in context
+        if str(getattr(alert, "tone", "") or "").strip().lower() == "positive"
+    ]
+    caution_titles = [
+        str(getattr(alert, "title", "") or "").strip()
+        for alert in context
+        if str(getattr(alert, "tone", "") or "").strip().lower() != "positive"
+    ]
+    if caution_titles:
+        summary_titles = [title for title in caution_titles[:2] if title]
+        summary = SimpleNamespace(
+            alert_key="CONTEXT_STACK",
+            severity="INFO",
+            tone="warning",
+            title="Context stack needs caution",
+            note=(
+                f"Also watching {', '.join(summary_titles)}."
+                if summary_titles
+                else "Several secondary context reads are weakening the tape."
+            ),
+        )
+    else:
+        summary_titles = [title for title in positive_titles[:3] if title]
+        summary = SimpleNamespace(
+            alert_key="CONTEXT_STACK",
+            severity="INFO",
+            tone="positive",
+            title="Supportive context stack is lining up",
+            note=(
+                f"Also watching {', '.join(summary_titles)}."
+                if summary_titles
+                else "Several secondary context reads are supporting the active tape."
+            ),
+        )
+    display.append(summary)
+    return display[:limit]
+
+
+def _rank_market_alerts_by_archive(alerts: list[object], df_events: pd.DataFrame) -> list[object]:
+    ordered_alerts = list(alerts or [])
+    if not ordered_alerts or df_events is None or df_events.empty:
+        return ordered_alerts
+    summary_df = build_alert_effectiveness_summary(df_events, primary_only=True)
+    if summary_df.empty or "Primary Alert" not in summary_df.columns:
+        return ordered_alerts
+
+    archive_rows = {
+        str(row.get("Primary Alert") or "").strip(): row
+        for _, row in summary_df.iterrows()
+    }
+    ranked: list[tuple[int, float, int, object]] = []
+    for idx, alert in enumerate(ordered_alerts):
+        alert_key = str(getattr(alert, "alert_key", "") or "").strip().upper()
+        archive_label = _alert_archive_label(alert_key)
+        row = archive_rows.get(archive_label)
+        follow_score = 50.0
+        actual_score = 50.0
+        if row is not None:
+            resolved = float(row.get("Resolved", 0.0) or 0.0)
+            closed_count = float(row.get("ClosedTradeCount", 0.0) or 0.0)
+            if resolved >= 4.0:
+                follow_score = float(row.get("FollowThroughPct", 50.0) or 50.0)
+            if closed_count >= 2.0:
+                actual_score = float(row.get("ActualWinRatePct", 50.0) or 50.0)
+        archive_score = (follow_score * 0.7) + (actual_score * 0.3)
+        protected_rank = 0 if alert_key in _PROTECTED_ALERT_KEYS else 1
+        ranked.append((protected_rank, -archive_score, idx, alert))
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+    return [alert for _, _, _, alert in ranked]
+
+
+def _trade_gate_banner_html(label: str, note: str, tone: str, reason_code: str) -> str:
+    tone_key = str(tone or "warning").strip().lower()
+    accent = {
+        "positive": "var(--positive, #3CF2A4)",
+        "negative": "var(--negative, #FF4D7A)",
+        "warning": "var(--warning, #FFD166)",
+    }.get(tone_key, "var(--warning, #FFD166)")
+    reason = str(reason_code or "").strip().replace("_", " ").title()
+    meta_html = (
+        f"<div style='font-size:0.72rem; letter-spacing:0.12em; text-transform:uppercase; color:rgba(255,255,255,0.56);'>{html.escape(reason)}</div>"
+        if reason
+        else ""
+    )
+    return (
+        "<div class='app-insight-card app-insight-card--neutral' "
+        f"style='border-color:{accent}; box-shadow:0 0 0 1px color-mix(in srgb, {accent} 20%, transparent) inset;'>"
+        "<div style='display:flex; align-items:flex-start; justify-content:space-between; gap:14px;'>"
+        "<div>"
+        "<div class='app-insight-title'>Execution Stance</div>"
+        f"<div class='app-insight-body'>{html.escape(str(note or '').strip())}</div>"
+        "</div>"
+        "<div style='display:flex; flex-direction:column; align-items:flex-end; gap:6px;'>"
+        f"<span class='app-chip app-chip--neutral' style='color:{accent}; border-color:{accent}; background:rgba(0,0,0,0.28); white-space:nowrap;'>{html.escape(str(label or '').strip())}</span>"
+        f"{meta_html}"
+        "</div>"
+        "</div>"
+        "</div>"
+    )
+
+
+def _compact_alert_note(note: str) -> str:
+    text = re.sub(r"\s+", " ", str(note or "").strip())
+    if not text:
+        return ""
+    sentence_match = re.match(r"^(.+?[.!?])(?:\s|$)", text)
+    if sentence_match:
+        first = sentence_match.group(1).strip()
+        if len(first) <= 120:
+            return first
+    if len(text) <= 120:
+        return text
+    clipped = text[:117].rstrip(" ,.;:")
+    return f"{clipped}..."
+
+
+def _market_alert_strip_html(alerts: list[object], *, total_active: int | None = None) -> str:
+    rows_html: list[str] = []
+    tone_map = {
+        "positive": "var(--positive, #3CF2A4)",
+        "negative": "var(--negative, #FF4D7A)",
+        "warning": "var(--warning, #FFD166)",
+    }
+    severity_tone = {
+        "HIGH": "negative",
+        "MEDIUM": "warning",
+        "INFO": "positive",
+    }
+    for alert in list(alerts or []):
+        severity = str(getattr(alert, "severity", "INFO") or "INFO").strip().upper()
+        tone_key = str(getattr(alert, "tone", "") or severity_tone.get(severity, "warning")).strip().lower()
+        accent = tone_map.get(tone_key, tone_map["warning"])
+        lane_label = _alert_lane_label(alert)
+        title = str(getattr(alert, "title", "") or "").strip()
+        note = _compact_alert_note(str(getattr(alert, "note", "") or "").strip())
+        rows_html.append(
+            "<div style='flex:1 1 340px; min-width:280px; border:1px solid rgba(255,255,255,0.08); "
+            "border-radius:14px; background:rgba(255,255,255,0.018); padding:10px 12px;'>"
+            "<div style='display:flex; align-items:flex-start; gap:10px;'>"
+            f"<span class='app-chip app-chip--neutral' style='white-space:nowrap; color:{accent}; border-color:{accent};"
+            " background:rgba(0,0,0,0.24); min-width:64px; justify-content:center;'>"
+            f"{html.escape(lane_label)}</span>"
+            "<div style='min-width:0;'>"
+            f"<div style='font-weight:700; color:#F5F7FB; font-size:0.90rem; line-height:1.25;'>{html.escape(title)}</div>"
+            f"<div style='color:rgba(255,255,255,0.68); font-size:0.82rem; line-height:1.38; margin-top:4px;'>{html.escape(note)}</div>"
+            "</div>"
+            "</div>"
+            "</div>"
+        )
+    if not rows_html:
+        return ""
+    total_count = int(total_active if total_active is not None else len(rows_html))
+    return (
+        "<div class='app-insight-card app-insight-card--neutral' "
+        "style='border-color:rgba(255,255,255,0.06); background:rgba(255,255,255,0.01);'>"
+        "<div style='display:flex; align-items:center; justify-content:space-between; gap:12px;'>"
+        "<div class='app-insight-title'>Live Alerts</div>"
+        f"<div style='font-size:0.72rem; letter-spacing:0.12em; text-transform:uppercase; color:rgba(255,255,255,0.56);'>{len(rows_html)} shown • {total_count} active</div>"
+        "</div>"
+        "<div style='display:flex; flex-wrap:wrap; gap:10px; margin-top:12px;'>"
+        f"{''.join(rows_html)}"
+        "</div>"
+        "</div>"
+    )
 
 
 def _queue_market_custom_clear(session_state: dict) -> None:
@@ -1296,6 +1763,17 @@ def render(ctx: dict) -> None:
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     get_top_volume_usdt_symbols = get_ctx(ctx, "get_top_volume_usdt_symbols")
     get_market_cap_rows_for_symbols = get_ctx(ctx, "get_market_cap_rows_for_symbols")
+    build_market_regime_snapshot = get_ctx(ctx, "build_market_regime_snapshot")
+    build_market_trade_gate = get_ctx(ctx, "build_market_trade_gate")
+    build_signal_risk_sizing = get_ctx(ctx, "build_signal_risk_sizing")
+    market_default_risk_budget = get_ctx(ctx, "market_default_risk_budget")
+    build_sector_rotation_snapshot = get_ctx(ctx, "build_sector_rotation_snapshot")
+    classify_symbol_sector = get_ctx(ctx, "classify_symbol_sector")
+    build_market_flow_proxy_snapshot = get_ctx(ctx, "build_market_flow_proxy_snapshot")
+    get_market_flow_proxy_rows = get_ctx(ctx, "get_market_flow_proxy_rows")
+    build_market_alerts = get_ctx(ctx, "build_market_alerts")
+    build_market_catalyst_snapshot = get_ctx(ctx, "build_market_catalyst_snapshot")
+    get_market_catalyst_events = get_ctx(ctx, "get_market_catalyst_events")
     fetch_coingecko_ohlcv_by_coin_id = get_ctx(ctx, "fetch_coingecko_ohlcv_by_coin_id")
     coingecko_coin_id_fallback_available = _coingecko_coin_id_fallback_available(fetch_coingecko_ohlcv_by_coin_id)
     coingecko_coin_id_fallback_reason = _coingecko_coin_id_fallback_reason(fetch_coingecko_ohlcv_by_coin_id)
@@ -1313,7 +1791,16 @@ def render(ctx: dict) -> None:
     format_adx = get_ctx(ctx, "format_adx")
     format_stochrsi = get_ctx(ctx, "format_stochrsi")
     sanitize_trading_terms = get_ctx(ctx, "sanitize_trading_terms")
+    get_signal_tracker_db_path = get_ctx(ctx, "get_signal_tracker_db_path")
+    init_signal_tracker_db = get_ctx(ctx, "init_signal_tracker_db")
+    fetch_signal_events_df = get_ctx(ctx, "fetch_signal_events_df")
+    build_adaptive_context_model = get_ctx(ctx, "build_adaptive_context_model")
+    build_live_signal_adaptive_snapshot = get_ctx(ctx, "build_live_signal_adaptive_snapshot")
+    log_market_alerts = get_ctx(ctx, "log_market_alerts")
+    log_signal_events = get_ctx(ctx, "log_signal_events")
+    resolve_open_signal_events_for_frame = get_ctx(ctx, "resolve_open_signal_events_for_frame")
     _debug = get_ctx(ctx, "_debug")
+    signal_tracker_db_path = init_signal_tracker_db(get_signal_tracker_db_path())
     major_fallback_symbols = [
         "BTC/USDT",
         "ETH/USDT",
@@ -1997,6 +2484,8 @@ def render(ctx: dict) -> None:
             return "TREND-led"
         if cls == "ENTER_AI_LED":
             return "AI-led"
+        if cls == "PROBE":
+            return "PROBE"
         if cls == "WATCH":
             return "WATCH"
         if cls == "SKIP":
@@ -2043,7 +2532,11 @@ def render(ctx: dict) -> None:
             ]
         ):
             return "neg"
-        if any(k in s for k in ["WATCH", "WAIT", "MIXED", "EARLY", "TREND", "NEUTRAL", "MEDIUM", "STARTING", "MODERATE", "SPIKE"]):
+        if "PROBE" in s:
+            return "warn"
+        if "WATCH" in s:
+            return "info"
+        if any(k in s for k in ["WAIT", "MIXED", "EARLY", "TREND", "NEUTRAL", "MEDIUM", "STARTING", "MODERATE", "SPIKE"]):
             return "warn"
         return neutral_tone
 
@@ -2065,8 +2558,10 @@ def render(ctx: dict) -> None:
             cls = _setup_confirm_class(s)
             if cls in {"ENTER_TREND_AI", "ENTER_TREND_LED", "ENTER_AI_LED"}:
                 return "pos"
-            if cls == "WATCH":
+            if cls == "PROBE":
                 return "warn"
+            if cls == "WATCH":
+                return "info"
             if cls == "SKIP":
                 return "neg"
             return "warn"
@@ -2204,7 +2699,7 @@ def render(ctx: dict) -> None:
             "Coin": "Asset ticker. If you hover the row value, you can also see the actual feed pair or fallback source.",
             "Price ($)": "Latest closed-candle price from the active data feed.",
             "Δ (%)": "Move from the previous closed candle to the latest closed candle on your selected timeframe.",
-            "Setup Confirm": "Final scanner verdict showing whether the setup looks ready, promising-but-early, or not good enough yet.",
+            "Setup Confirm": "Final scanner verdict showing whether the setup looks fully ready, probe-worthy with starter risk only, promising-but-early, or not good enough yet.",
             "Direction": "Main higher-timeframe technical bias from the 1D and 4H closed candles.",
             "Confidence": "How strong and trustworthy that Direction call is.",
             "AI Ensemble": "Higher-timeframe AI view. Dots show how many models agree.",
@@ -2361,7 +2856,15 @@ def render(ctx: dict) -> None:
                     extra_cls += " mk-sc-trend-led"
                 elif sc_cls == "ENTER_AI_LED":
                     extra_cls += " mk-sc-ai-led"
-                title_txt = display_txt if not reason_text else f"{display_txt} | Reason: {reason_text}"
+                elif sc_cls == "WATCH":
+                    extra_cls += " mk-sc-watch"
+                execution_fit_note = str(row.get("__execution_fit_note", "")).strip()
+                title_parts = [display_txt]
+                if reason_text:
+                    title_parts.append(f"Reason: {reason_text}")
+                if execution_fit_note:
+                    title_parts.append(f"Execution fit: {execution_fit_note}")
+                title_txt = " | ".join(title_parts)
                 return _chip(
                     display_txt,
                     _tone_for_col(col, raw_action or txt),
@@ -2926,6 +3429,11 @@ def render(ctx: dict) -> None:
               border-color:rgba(34,211,238,0.52) !important;
               background:rgba(34,211,238,0.12) !important;
             }}
+            .mk-sc-watch {{
+              color:#7DD3FC !important;
+              border-color:rgba(125,211,252,0.52) !important;
+              background:rgba(125,211,252,0.12) !important;
+            }}
             .mk-pos {{ color:{POSITIVE}; border-color:rgba(0,255,136,0.42); background:rgba(0,255,136,0.10); }}
             .mk-neg {{ color:{NEGATIVE}; border-color:rgba(255,51,102,0.44); background:rgba(255,51,102,0.10); }}
             .mk-warn {{ color:{WARNING}; border-color:rgba(255,209,102,0.46); background:rgba(255,209,102,0.10); }}
@@ -3079,6 +3587,7 @@ def render(ctx: dict) -> None:
     results: list[dict] = st.session_state.get("market_scan_results", [])
     source_label = current_source_label
     data_mode = st.session_state.get("market_data_mode", "FULL MARKET MODE")
+    scan_degraded = "DEGRADED" in current_source_label.upper()
     live_produced_rows: list[dict] = []
     live_result_count_before_limit = 0
     live_ranked_out_count = 0
@@ -3196,6 +3705,19 @@ def render(ctx: dict) -> None:
                 latest_closed = df_eval.iloc[-1]
 
                 base = _canonical_pair_base(sym)
+                try:
+                    resolve_open_signal_events_for_frame(
+                        symbol=base,
+                        timeframe=timeframe,
+                        df_ohlcv=df_eval,
+                        source="Market",
+                        db_path=signal_tracker_db_path,
+                    )
+                except Exception as e:
+                    _debug(
+                        f"Signal tracker resolve failed for {base} ({timeframe}): "
+                        f"{e.__class__.__name__}: {str(e).strip()}"
+                    )
                 mcap_val = mcap_map.get(base)
                 # Keep price semantics aligned with all decision metrics (closed-candle context).
                 price = float(latest_closed["close"])
@@ -3484,11 +4006,15 @@ def render(ctx: dict) -> None:
                 return {
                     'Coin': base,
                     '__pair': pair_label,
+                    '__event_time': latest_closed.get("timestamp"),
+                    '__timeframe': timeframe,
                     '__emerging_label': emerging_snapshot.label,
                     '__emerging_direction': emerging_snapshot.direction,
                     '__emerging_note': emerging_snapshot.note,
                     'Price ($)': _fmt_price(price),
+                    '__price_val': float(price),
                     'Δ (%)': format_delta(price_change) if price_change is not None else '',
+                    '__delta_pct': float(price_change) if price_change is not None else None,
                     '__delta_note': delta_note if price_change is not None else "",
                     'Setup Confirm': _setup_confirm_display(action),
                     '__action_raw': action,
@@ -3505,12 +4031,16 @@ def render(ctx: dict) -> None:
                     '__ai_confidence_val': float(ai_confidence_snapshot.score),
                     'Scalp Opportunity': scalp_opportunity_label,
                     'Entry Price': _fmt_price(entry_price) if entry_price else '',
+                    '__entry_val': float(entry_price) if entry_price else None,
                     '__entry_note': entry_note,
                     'Stop Loss': _fmt_price(stop_s) if stop_s else '',
+                    '__stop_val': float(stop_s) if stop_s else None,
                     'Target Price': _fmt_price(target_price) if target_price else '',
+                    '__target_val': float(target_price) if target_price else None,
                     '__target_note': target_note,
                     '__rr_note': rr_note,
                     'R:R': _rr_badge(rr_val),
+                    '__rr_val': float(rr_val) if rr_val else None,
                     'Market Cap ($)': readable_market_cap(mcap_val) if mcap_val else "—",
                     '__mcap_val': int(mcap_val) if mcap_val else 0,
                     'Spike Alert': '→ Spike' if volume_spike else '',
@@ -3990,67 +4520,19 @@ def render(ctx: dict) -> None:
             )
         render_help_details(
             st,
-            summary="How to read quickly (?)",
+            summary="Scanner guide (?)",
             body_html=(
-                "<b>Reading order:</b> <b>Setup Confirm</b> -> <b>Direction + Confidence</b> -> "
-                "<b>AI Ensemble + AI Confidence</b>.<br><br>"
-                "<b>Setup Confirm:</b> READY means the setup passed the bar, WATCH means promising but not ready, and SKIP means conditions are not good enough yet.<br>"
-                "<b>Direction + Confidence:</b> the main technical bias and how strong that call is.<br>"
-                "<b>AI Ensemble:</b> the higher-timeframe AI view. Dots show how many models agree.<br>"
-                "<b>AI Confidence:</b> how trustworthy that AI view is.<br>"
-                "<b>Scalp Opportunity:</b> a separate shorter-term execution check. It only appears when local direction, levels, and quality all pass.<br><br>"
-                "<b>Scan mode:</b> default Top N market scan. Custom Coins (max 10) scans only your watchlist until cleared."
+                "<b>Read order:</b> <b>Setup Confirm</b> -> <b>Direction + Confidence</b> -> <b>AI Ensemble + AI Confidence</b>.<br>"
+                "<b>Setup Confirm:</b> ENTER = fully ready, PROBE = starter-risk only, WATCH = monitor only, SKIP = pass.<br>"
+                "Price ($) shows the latest candle close.<br>"
+                "Δ (%) shows the change from previous closed candle to latest closed candle on selected timeframe.<br>"
+                "<b>Tip:</b> use column-header and cell hovers for detailed definitions. Advanced columns are optional."
             ),
-        )
-        render_help_details(
-            st,
-            summary="Column Guide (click to expand)",
-            body_html=(
-                "<b>Coin</b>: asset ticker (hover shows actual candle feed pair or fallback provider).<br>"
-                "<b>Price ($)</b>: latest closed-candle price from active feed.<br>"
-                "<b>Δ (%)</b>: the percentage change from previous closed candle to latest closed candle on selected timeframe.<br><br>"
-                "<b>Setup Confirm</b>: final scanner verdict. It is not a direct buy/sell command; it tells you how ready the setup looks.<br>"
-                "<b>LEAD badge</b>: early warning. It means the coin is starting to lean before the main higher-timeframe Direction is fully confirmed.<br>"
-                "<b>Direction</b>: the main technical bias from 1D + 4H closed candles.<br>"
-                "<b>Confidence</b>: how strong that Direction call is.<br>"
-                "<b>AI Ensemble</b>: higher-timeframe AI bias from 1D + 4H. Dots show how many of the 3 models agree. "
-                "* means some AI inputs degraded, so the system stayed extra cautious.<br>"
-                "<b>AI Confidence</b>: how trustworthy the AI verdict is. Neutral, conflicting, or degraded AI states are intentionally scored lower.<br>"
-                "<b>Advanced colors</b>: advanced columns are not always direct up/down signals. Some are trend, some are momentum, and some are market context.<br>"
-                "<b>R:R</b>: reward-to-risk ratio from target distance vs stop distance.<br>"
-                "<b>Entry Price</b>: suggested model entry level.<br>"
-                "<b>Stop Loss</b>: risk invalidation level.<br>"
-                "<b>Target Price</b>: first take-profit level.<br>"
-                "<b>R:R marker (*)</b>: conditional plan; the target may need a breakout first.<br>"
-                "<b>Scalp Opportunity</b>: only appears when the shorter-term execution check passes.<br>"
-                "<b>Market Cap ($)</b>: size/liquidity context.<br><br>"
-                "<b>Advanced columns (what they mean + short calc):</b><br>"
-                "<b>ADX</b>: trend strength, not direction.<br>"
-                "<b>SuperTrend</b>: ATR-based trend state.<br>"
-                "<b>Ichimoku</b>: cloud trend context.<br>"
-                "<b>VWAP</b>: price versus its volume-weighted average price.<br>"
-                "<b>Spike Alert</b>: unusual volume event.<br>"
-                "<b>Bollinger</b>: price location inside the volatility bands.<br>"
-                "<b>Stochastic RSI</b>: short-term momentum position.<br>"
-                "<b>Volatility</b>: ATR-style volatility regime.<br>"
-                "<b>PSAR</b>: Parabolic SAR trend side.<br>"
-                "<b>Williams %R</b>: momentum near the top or bottom of its recent range.<br>"
-                "<b>CCI</b>: mean-reversion / trend-pressure indicator.<br>"
-                "<b>Candle Pattern</b>: last candle-pattern label."
-            ),
-        )
-        st.caption(
-            "Price ($) shows the latest candle close. "
-            "Direction and Confidence use 4H + 1D closed candles. "
-            "Setup, scalp plan levels, and delta stay on the selected timeframe closed candles."
         )
         controls_col, chips_col = st.columns([1.6, 2.4], gap="small")
         with controls_col:
-            toggle_cols = st.columns(2, gap="small")
-            with toggle_cols[0]:
-                show_advanced = st.toggle("Show advanced columns", value=False, key="market_show_adv_cols")
-            with toggle_cols[1]:
-                show_diagnostics = st.toggle("Show diagnostics", value=False, key="market_show_diagnostics")
+            show_advanced = st.toggle("Show advanced columns", value=False, key="market_show_adv_cols")
+            show_diagnostics = bool(st.session_state.get("market_show_diagnostics", False))
         with chips_col:
             custom_fallback_chip = ""
             if custom_mode_active and not coingecko_coin_id_fallback_available:
@@ -4077,12 +4559,13 @@ def render(ctx: dict) -> None:
             if total <= 0:
                 return {
                     "total": 0,
-                    "setup_counts": {"Ready": 0, "Watch": 0, "Skip": 0},
+                    "setup_counts": {"Ready": 0, "Probe": 0, "Watch": 0, "Skip": 0},
                     "direction_counts": {},
                     "ai_ensemble_counts": {},
                     "ai_confidence_counts": {},
                     "emerging_counts": {},
                     "enter_count": 0,
+                    "probe_count": 0,
                     "watch_count": 0,
                     "skip_count": 0,
                 }
@@ -4092,6 +4575,7 @@ def render(ctx: dict) -> None:
                 action_series = df.get("Setup Confirm", pd.Series(dtype=str)).astype(str)
             action_class_series = action_series.apply(_setup_confirm_class)
             enter_count_local = int(action_class_series.str.startswith("ENTER_").sum())
+            probe_count_local = int((action_class_series == "PROBE").sum())
             watch_count_local = int((action_class_series == "WATCH").sum())
             skip_count_local = int((action_class_series == "SKIP").sum())
             direction_counts_local = (
@@ -4123,6 +4607,7 @@ def render(ctx: dict) -> None:
                 "total": total,
                 "setup_counts": {
                     "Ready": enter_count_local,
+                    "Probe": probe_count_local,
                     "Watch": watch_count_local,
                     "Skip": skip_count_local,
                 },
@@ -4131,6 +4616,7 @@ def render(ctx: dict) -> None:
                 "ai_confidence_counts": ai_confidence_counts_local,
                 "emerging_counts": emerging_counts_local,
                 "enter_count": enter_count_local,
+                "probe_count": probe_count_local,
                 "watch_count": watch_count_local,
                 "skip_count": skip_count_local,
             }
@@ -4138,6 +4624,7 @@ def render(ctx: dict) -> None:
         # Quick scan health summary (visual-first, logic unchanged)
         shown_bundle = _distribution_bundle(df_results)
         produced_bundle = _distribution_bundle(df_live_produced)
+        gate_bundle = produced_bundle if int(produced_bundle.get("total", 0) or 0) > 0 else shown_bundle
 
         def _lead_component_display(value: float) -> tuple[float, str]:
             clipped = max(-100.0, min(100.0, float(value)))
@@ -4157,6 +4644,230 @@ def render(ctx: dict) -> None:
             eth_dom=eth_dom_display,
             custom_mode_active=custom_mode_active,
         )
+        sector_rotation_snapshot = build_sector_rotation_snapshot(list(live_produced_rows or []))
+        catalyst_events = get_market_catalyst_events()
+        market_catalyst_snapshot = build_market_catalyst_snapshot(catalyst_events)
+        market_flow_rows = get_market_flow_proxy_rows()
+        market_flow_snapshot = build_market_flow_proxy_snapshot(market_flow_rows)
+        adaptive_history_df = fetch_signal_events_df(
+            limit=2000,
+            status="RESOLVED",
+            source="Market",
+            db_path=signal_tracker_db_path,
+        )
+        adaptive_model = build_adaptive_context_model(adaptive_history_df)
+        current_session_bucket = session_bucket_for_timestamp()
+        session_fit_snapshot = build_session_fit_snapshot(adaptive_model, current_session_bucket)
+        market_regime_snapshot = build_market_regime_snapshot(
+            setup_quality_score=float(composite_score),
+            setup_quality_mode=str(composite_mode),
+            market_lead_score=float(market_lead_snapshot.score),
+            market_lead_state=str(market_lead_snapshot.state),
+            lead_breadth_component=float(market_lead_snapshot.breadth_component),
+            lead_rotation_component=float(market_lead_snapshot.rotation_component),
+            lead_flow_component=float(market_lead_snapshot.flow_component),
+            lead_dominance_component=float(market_lead_snapshot.dominance_component),
+            direction_score=float(direction_score),
+            breadth_score=float(breadth_score),
+            trust_score=float(trust_score),
+        )
+        market_archive_guardrail_snapshot = build_archive_guardrail_snapshot(
+            adaptive_model,
+            signal={
+                "Market Lead": str(getattr(market_lead_snapshot, "label", "") or "No Clear Lead"),
+                "Market Regime": str(getattr(market_regime_snapshot, "label", "") or "Unknown"),
+                "Playbook": str(getattr(market_regime_snapshot, "playbook", "") or "Unknown"),
+                "Trade Gate": "Unknown",
+                "Sector Rotation": str(getattr(sector_rotation_snapshot, "label", "") or "Unknown"),
+                "Catalyst State": str(getattr(market_catalyst_snapshot, "label", "") or "Unknown"),
+                "Catalyst Window": catalyst_window_label(market_catalyst_snapshot),
+                "Catalyst Scope": str(getattr(market_catalyst_snapshot, "scope", "") or "Unknown"),
+                "Catalyst Targeting": "Targeted" if bool(getattr(market_catalyst_snapshot, "targeted_only", False)) else "Market-Wide",
+                "Flow Proxy": str(getattr(market_flow_snapshot, "label", "") or "Unknown"),
+                "Session": current_session_bucket,
+                "Timeframe": str(timeframe or "Unknown"),
+            },
+        )
+        market_trade_gate_snapshot = build_market_trade_gate(
+            market_regime_snapshot=market_regime_snapshot,
+            market_catalyst_snapshot=market_catalyst_snapshot,
+            scan_degraded=bool(scan_degraded),
+            setup_quality_score=float(composite_score),
+            setup_quality_mode=str(composite_mode),
+            market_lead_score=float(market_lead_snapshot.score),
+            market_lead_state=str(market_lead_snapshot.state),
+            direction_score=float(direction_score),
+            breadth_score=float(breadth_score),
+            trust_score=float(trust_score),
+            ready_count=int(gate_bundle["enter_count"]),
+            probe_count=int(gate_bundle["probe_count"]),
+            watch_count=int(gate_bundle["watch_count"]),
+            skip_count=int(gate_bundle["skip_count"]),
+            session_fit_score=float(getattr(session_fit_snapshot, "score", 0.0) or 0.0),
+            session_fit_label=str(getattr(session_fit_snapshot, "label", "") or ""),
+            session_fit_note=str(getattr(session_fit_snapshot, "note", "") or ""),
+            archive_guardrail_penalty=float(getattr(market_archive_guardrail_snapshot, "penalty", 0.0) or 0.0),
+            archive_guardrail_label=str(getattr(market_archive_guardrail_snapshot, "label", "") or ""),
+            archive_guardrail_note=str(getattr(market_archive_guardrail_snapshot, "note", "") or ""),
+        )
+        market_default_budget_snapshot = market_default_risk_budget(
+            market_trade_gate_snapshot,
+            market_catalyst_snapshot,
+        )
+        for row in list(results or []):
+            direction_raw = str(row.get("Direction") or "")
+            ai_ensemble = str(row.get("AI Ensemble") or "").strip()
+            ai_direction = ai_ensemble.split("(", 1)[0].strip()
+            catalyst_window = catalyst_window_label(market_catalyst_snapshot)
+            adaptive_snapshot = build_live_signal_adaptive_snapshot(
+                adaptive_model,
+                signal={
+                    "Setup Confirm": str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                    "Lead": "LEAD" if _signal_tracker_direction_key(row.get("__emerging_direction")) in {"UPSIDE", "DOWNSIDE"} else "No LEAD",
+                    "AI Alignment": (
+                        "Aligned"
+                        if _signal_tracker_direction_key(direction_raw) in {"UPSIDE", "DOWNSIDE"}
+                        and _signal_tracker_direction_key(direction_raw) == _signal_tracker_direction_key(ai_direction)
+                        else "Not aligned"
+                    ),
+                    "Market Lead": str(getattr(market_lead_snapshot, "label", "") or "No Clear Lead"),
+                    "Market Regime": str(getattr(market_regime_snapshot, "label", "") or "Unknown"),
+                    "Playbook": str(getattr(market_regime_snapshot, "playbook", "") or "Unknown"),
+                    "Trade Gate": str(getattr(market_trade_gate_snapshot, "label", "") or "Unknown"),
+                    "Sector Rotation": str(getattr(sector_rotation_snapshot, "label", "") or "Unknown"),
+                    "Catalyst State": str(getattr(market_catalyst_snapshot, "label", "") or "Unknown"),
+                    "Catalyst Window": catalyst_window,
+                    "Catalyst Scope": str(getattr(market_catalyst_snapshot, "scope", "") or "Unknown"),
+                    "Catalyst Targeting": "Targeted" if bool(getattr(market_catalyst_snapshot, "targeted_only", False)) else "Market-Wide",
+                    "Flow Proxy": str(getattr(market_flow_snapshot, "label", "") or "Unknown"),
+                    "Session": session_bucket_for_timestamp(row.get("__event_time")),
+                    "Timeframe": str(row.get("__timeframe") or timeframe or "Unknown"),
+                },
+            )
+            row["__adaptive_edge_score"] = float(getattr(adaptive_snapshot, "score", 50.0) or 50.0)
+            row["__adaptive_edge_label"] = str(getattr(adaptive_snapshot, "label", "") or "")
+            row["__adaptive_edge_note"] = str(getattr(adaptive_snapshot, "note", "") or "")
+            row["__execution_fit_label"] = str(getattr(adaptive_snapshot, "execution_fit_label", "") or "")
+            row["__execution_fit_note"] = str(getattr(adaptive_snapshot, "execution_fit_note", "") or "")
+            row["__session_fit_score"] = float(getattr(adaptive_snapshot, "session_fit_score", 0.0) or 0.0)
+            row["__session_fit_label"] = str(getattr(adaptive_snapshot, "session_fit_label", "") or "")
+            row["__session_fit_note"] = str(getattr(adaptive_snapshot, "session_fit_note", "") or "")
+            row["__archive_guardrail_penalty"] = float(getattr(adaptive_snapshot, "archive_guardrail_penalty", 0.0) or 0.0)
+            row["__archive_guardrail_label"] = str(getattr(adaptive_snapshot, "archive_guardrail_label", "") or "")
+            row["__archive_guardrail_note"] = str(getattr(adaptive_snapshot, "archive_guardrail_note", "") or "")
+            row["__catalyst_fit_note"] = catalyst_signal_note(
+                market_catalyst_snapshot,
+                symbol=str(row.get("Coin") or ""),
+                sector_tag=str(classify_symbol_sector(str(row.get("Coin") or "")) or ""),
+            )
+            if row.get("__confidence_note") and row["__adaptive_edge_note"]:
+                row["__confidence_note"] = f"{row['__confidence_note']} Historical read: {row['__adaptive_edge_note']}"
+            elif row["__adaptive_edge_note"]:
+                row["__confidence_note"] = row["__adaptive_edge_note"]
+            if row["__execution_fit_note"]:
+                row["__confidence_note"] = (
+                    f"{row['__confidence_note']} Execution fit: {row['__execution_fit_note']}".strip()
+                    if row.get("__confidence_note")
+                    else row["__execution_fit_note"]
+                )
+            if row["__session_fit_note"]:
+                row["__confidence_note"] = (
+                    f"{row['__confidence_note']} Session fit: {row['__session_fit_note']}".strip()
+                    if row.get("__confidence_note")
+                    else row["__session_fit_note"]
+                )
+            if row["__catalyst_fit_note"]:
+                row["__confidence_note"] = (
+                    f"{row['__confidence_note']} Catalyst: {row['__catalyst_fit_note']}".strip()
+                    if row.get("__confidence_note")
+                    else row["__catalyst_fit_note"]
+                )
+            live_risk_sizing_snapshot = build_signal_risk_sizing(
+                market_trade_gate_snapshot=market_trade_gate_snapshot,
+                market_catalyst_snapshot=market_catalyst_snapshot,
+                direction=direction_raw,
+                setup_confirm=str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                confidence=row.get("__confidence_val", _confidence_value_from_badge(row.get("Confidence"))),
+                ai_confidence=row.get("__ai_confidence_val", _confidence_value_from_badge(row.get("AI Confidence"))),
+                ai_aligned=(
+                    _signal_tracker_direction_key(direction_raw) in {"UPSIDE", "DOWNSIDE"}
+                    and _signal_tracker_direction_key(direction_raw) == _signal_tracker_direction_key(ai_direction)
+                ),
+                market_lead_aligned=(
+                    _signal_tracker_direction_key(direction_raw) in {"UPSIDE", "DOWNSIDE"}
+                    and _signal_tracker_direction_key(direction_raw) == _signal_tracker_direction_key(market_lead_snapshot.label)
+                ),
+                lead_active=_signal_tracker_direction_key(row.get("__emerging_direction")) in {"UPSIDE", "DOWNSIDE"},
+                rr_ratio=row.get("__rr_val"),
+                adaptive_edge_score=row.get("__adaptive_edge_score"),
+                session_fit_score=row.get("__session_fit_score"),
+                archive_guardrail_penalty=row.get("__archive_guardrail_penalty"),
+                archive_guardrail_label=row.get("__archive_guardrail_label"),
+                archive_guardrail_note=row.get("__archive_guardrail_note"),
+                symbol=str(row.get("Coin") or ""),
+                sector_tag=str(classify_symbol_sector(str(row.get("Coin") or "")) or ""),
+            )
+            row["__risk_tier_label"] = str(getattr(live_risk_sizing_snapshot, "label", "") or "")
+            row["__risk_unit_fraction"] = float(getattr(live_risk_sizing_snapshot, "unit_fraction", 0.0) or 0.0)
+            row["__risk_note"] = str(getattr(live_risk_sizing_snapshot, "note", "") or "")
+        results = sorted(list(results or []), key=_market_result_priority_key)
+        df_results = pd.DataFrame(results)
+        market_alerts = build_market_alerts(
+            market_lead_snapshot=market_lead_snapshot,
+            market_regime_snapshot=market_regime_snapshot,
+            market_trade_gate_snapshot=market_trade_gate_snapshot,
+            market_catalyst_snapshot=market_catalyst_snapshot,
+            market_flow_snapshot=market_flow_snapshot,
+            sector_rotation_snapshot=sector_rotation_snapshot,
+            session_fit_snapshot=session_fit_snapshot,
+            rows=list(results or []),
+            max_alerts=4,
+        )
+        market_alerts = _rank_market_alerts_by_archive(list(market_alerts or []), adaptive_history_df)
+        display_market_alerts = _compress_market_alerts_for_display(list(market_alerts or []), max_items=2)
+        try:
+            log_signal_events(
+                _market_signal_log_events(
+                    rows=list(results or []),
+                    timeframe=str(timeframe),
+                    market_lead_snapshot=market_lead_snapshot,
+                    market_regime_snapshot=market_regime_snapshot,
+                    market_trade_gate_snapshot=market_trade_gate_snapshot,
+                    build_signal_risk_sizing=build_signal_risk_sizing,
+                    sector_rotation_snapshot=sector_rotation_snapshot,
+                    classify_symbol_sector=classify_symbol_sector,
+                    market_catalyst_snapshot=market_catalyst_snapshot,
+                    market_flow_snapshot=market_flow_snapshot,
+                    session_fit_snapshot=session_fit_snapshot,
+                    market_alerts=market_alerts,
+                ),
+                db_path=signal_tracker_db_path,
+            )
+        except Exception as e:
+            _debug(
+                f"Signal tracker log failed for Market scan ({timeframe}): "
+                f"{e.__class__.__name__}: {str(e).strip()}"
+            )
+        try:
+            log_market_alerts(
+                [
+                    {
+                        "alert_key": getattr(alert, "alert_key", ""),
+                        "state_signature": getattr(alert, "state_signature", ""),
+                        "severity": getattr(alert, "severity", "INFO"),
+                        "title": getattr(alert, "title", ""),
+                        "note": getattr(alert, "note", ""),
+                    }
+                    for alert in list(market_alerts or [])
+                ],
+                source="Market",
+                db_path=signal_tracker_db_path,
+            )
+        except Exception as e:
+            _debug(
+                f"Market alert log failed for Market scan ({timeframe}): "
+                f"{e.__class__.__name__}: {str(e).strip()}"
+            )
         if market_lead_snapshot.state == "UPSIDE":
             market_lead_color = POSITIVE
         elif market_lead_snapshot.state == "DOWNSIDE":
@@ -4175,8 +4886,8 @@ def render(ctx: dict) -> None:
         ai_direction_score = int(round(behaviour_prob * 100))
 
         setup_quality_hover = (
-            "Overall market quality for finding setups. "
-            "It blends direction clarity, market health, participation, and model trust."
+            "Overall market regime for finding setups. "
+            "It blends direction clarity, market health, participation, and model trust, then maps that into the current playbook."
         )
         setup_mode_hover = {
             "Risk-On": (
@@ -4189,10 +4900,12 @@ def render(ctx: dict) -> None:
                 "Risk-Off: the market is weak or fragmented, so staying defensive makes more sense."
             ),
         }.get(composite_mode, setup_quality_hover)
-        d_col = _score_tone(direction_score)[1]
-        r_col = _score_tone(regime_score)[1]
-        b_col = _score_tone(breadth_score)[1]
-        t_col = _score_tone(trust_score)[1]
+        setup_quality_hover = (
+            f"{setup_mode_hover} "
+            f"Current playbook: {market_regime_snapshot.playbook}. "
+            f"Breakdown -> Direction {int(round(direction_score))}, Regime {int(round(regime_score))}, "
+            f"Breadth {int(round(breadth_score))}, Trust {int(round(trust_score))}."
+        )
 
         market_lead_hover = (
             "Early market-pressure gauge before full confirmation. "
@@ -4200,6 +4913,13 @@ def render(ctx: dict) -> None:
         )
         if custom_mode_active:
             market_lead_hover += " Custom watchlist mode uses less breadth data, so this card leans more on broad market internals."
+        market_lead_hover = (
+            f"{market_lead_hover} "
+            f"Breakdown -> Breadth {int(round(market_lead_snapshot.breadth_component))}, "
+            f"Rotation {int(round(market_lead_snapshot.rotation_component))}, "
+            f"Flow {int(round(market_lead_snapshot.flow_component))}, "
+            f"Dominance {int(round(market_lead_snapshot.dominance_component))}."
+        )
 
         with market_signal_cards_placeholder:
             g1, g2, g3, g4, g5 = st.columns(5, gap="medium")
@@ -4256,10 +4976,6 @@ def render(ctx: dict) -> None:
                     unsafe_allow_html=True,
                 )
             with g3:
-                breadth_display, breadth_color = _lead_component_display(market_lead_snapshot.breadth_component)
-                rotation_display, rotation_color = _lead_component_display(market_lead_snapshot.rotation_component)
-                flow_display, flow_color = _lead_component_display(market_lead_snapshot.flow_component)
-                dominance_display, dominance_color = _lead_component_display(market_lead_snapshot.dominance_component)
                 st.markdown(
                     _render_market_orbital_card(
                         title="Market Lead",
@@ -4278,36 +4994,9 @@ def render(ctx: dict) -> None:
                         ),
                         guide_labels=("Downside", "Balanced", "Upside"),
                         note=market_lead_snapshot.note,
-                        top_meta_text=market_lead_snapshot.label,
-                        top_meta_color=market_lead_color,
-                        top_meta_hover=market_lead_hover,
                         footer_html=(
-                            "<div class='market-statline'>"
-                            + _stat_metric(
-                                "Breadth",
-                                breadth_display,
-                                breadth_color,
-                                f"Count of upside vs downside LEAD signals in the produced scan set. Upside: {market_lead_snapshot.upside_leads} • Downside: {market_lead_snapshot.downside_leads}.",
-                            )
-                            + _stat_metric(
-                                "Rotation",
-                                rotation_display,
-                                rotation_color,
-                                "Compares total market flow with BTC and ETH flow. Positive means the broader market is doing better than the majors.",
-                            )
-                            + _stat_metric(
-                                "Flow",
-                                flow_display,
-                                flow_color,
-                                "Early strength from total market-cap movement. Higher usually means broader participation.",
-                            )
-                            + _stat_metric(
-                                "Dom",
-                                dominance_display,
-                                dominance_color,
-                                "Reads BTC and ETH dominance together. Lower BTC share and steadier ETH share are usually better for upside rotation.",
-                            )
-                            + "</div>"
+                            f"<div class='market-top-meta'><span>Current state</span>"
+                            f"<span><strong style='color:{market_lead_color};'>{html.escape(market_lead_snapshot.label)}</strong></span></div>"
                         ),
                     ),
                     unsafe_allow_html=True,
@@ -4343,7 +5032,7 @@ def render(ctx: dict) -> None:
             with g5:
                 st.markdown(
                     _render_market_orbital_card(
-                        title="Setup Quality",
+                        title="Market Regime",
                         title_hover=setup_quality_hover,
                         value_text=f"{int(round(composite_score)):d}",
                         unit="/100",
@@ -4358,46 +5047,43 @@ def render(ctx: dict) -> None:
                             accent_color=composite_color,
                         ),
                         guide_labels=("Risk-Off", "Selective", "Risk-On"),
-                        note="Overall setup climate for hunting trades, not market direction on its own.",
-                        top_meta_text=composite_mode,
-                        top_meta_color=composite_color,
-                        top_meta_hover=setup_mode_hover,
+                        note=market_regime_snapshot.note,
                         footer_html=(
-                            "<div class='market-statline'>"
-                            + _stat_metric(
-                                "Direction",
-                                direction_score,
-                                d_col,
-                                "How clear the market's direction looks right now.",
-                            )
-                            + _stat_metric(
-                                "Regime",
-                                regime_score,
-                                r_col,
-                                "How healthy the overall market environment looks."
-                                + (" Market-cap data is missing right now, so this part is using a neutral fallback." if regime_score_fallback else ""),
-                            )
-                            + _stat_metric(
-                                "Breadth",
-                                breadth_score,
-                                b_col,
-                                "How widely the move is spreading across major coins.",
-                            )
-                            + _stat_metric(
-                                "Trust",
-                                trust_score,
-                                t_col,
-                                "How consistent the AI readings are across the major coins.",
-                            )
-                            + "</div>"
+                            f"<div class='market-top-meta'><span>Regime</span>"
+                            f"<span><strong style='color:{composite_color};'>{html.escape(str(composite_mode or 'Selective'))}</strong></span></div>"
                         ),
                     ),
                     unsafe_allow_html=True,
                 )
 
         enter_count = int(shown_bundle["enter_count"])
+        probe_count = int(shown_bundle["probe_count"])
         watch_count = int(shown_bundle["watch_count"])
         skip_count = int(shown_bundle["skip_count"])
+        st.markdown(
+            _trade_gate_banner_html(
+                trade_gate_display_label(market_trade_gate_snapshot.label),
+                _compact_trade_gate_note(
+                    market_trade_gate_snapshot=market_trade_gate_snapshot,
+                    market_catalyst_snapshot=market_catalyst_snapshot,
+                    market_flow_snapshot=market_flow_snapshot,
+                    market_default_budget_snapshot=market_default_budget_snapshot,
+                    session_fit_snapshot=session_fit_snapshot,
+                    adaptive_model=adaptive_model,
+                    enter_count=enter_count,
+                    probe_count=probe_count,
+                ),
+                market_trade_gate_snapshot.tone,
+                market_trade_gate_snapshot.reason_code,
+            ),
+            unsafe_allow_html=True,
+        )
+        if display_market_alerts:
+            st.markdown(
+                _market_alert_strip_html(display_market_alerts, total_active=len(market_alerts)),
+                unsafe_allow_html=True,
+            )
+        st.markdown("<div style='height:0.55rem;'></div>", unsafe_allow_html=True)
         lead_bundle = produced_bundle if int(produced_bundle["total"]) > 0 else shown_bundle
         lead_scope_label = "Produced universe" if int(produced_bundle["total"]) > 0 else "Shown rows"
         emerging_counts = dict(lead_bundle["emerging_counts"])
@@ -4464,6 +5150,7 @@ def render(ctx: dict) -> None:
 
         status_label, status_head, status_sub = _setup_status_summary(
             enter_count=enter_count,
+            probe_count=probe_count,
             watch_count=watch_count,
             skip_count=skip_count,
             source_label=source_label,
@@ -4480,7 +5167,14 @@ def render(ctx: dict) -> None:
             )
         else:
             emerging_head = f"{emerging_total} LEAD SIGNALS"
-        emerging_sub = f"{lead_scope_label} • Upside: {emerging_up_count} • Downside: {emerging_down_count}"
+        sector_meta = (
+            f" • Sector lead: {sector_rotation_snapshot.leader_sector}"
+            if str(getattr(sector_rotation_snapshot, 'leader_sector', '')).strip() not in {"", "None", "Other"}
+            else ""
+        )
+        emerging_sub = (
+            f"{lead_scope_label} • Upside: {emerging_up_count} • Downside: {emerging_down_count}{sector_meta}"
+        )
         render_kpi_grid(
             st,
             items=[
@@ -4488,7 +5182,7 @@ def render(ctx: dict) -> None:
                     "label": status_label,
                     "value": status_head,
                     "subtext": status_sub,
-                    "label_title": "Quick count of how many shown rows are READY, WATCH, or SKIP.",
+                    "label_title": "Quick count of how many shown rows are READY, PROBE, WATCH, or SKIP.",
                 },
                 {
                     "label": "LEAD Signals",
@@ -4525,6 +5219,7 @@ def render(ctx: dict) -> None:
         audit_setup_counts = dict(audit_bundle["setup_counts"])
         audit_direction_counts = dict(audit_bundle["direction_counts"])
         audit_ai_ensemble_counts = dict(audit_bundle["ai_ensemble_counts"])
+        probe_ratio = (int(audit_bundle["probe_count"]) / audit_total_rows) if audit_total_rows > 0 else 0.0
         watch_ratio = (int(audit_bundle["watch_count"]) / audit_total_rows) if audit_total_rows > 0 else 0.0
         direction_neutral_ratio = (
             int(audit_direction_counts.get("Neutral", 0)) / audit_total_rows
@@ -4534,6 +5229,8 @@ def render(ctx: dict) -> None:
         ) if audit_total_rows > 0 else 0.0
         skip_ratio = (int(audit_bundle["skip_count"]) / audit_total_rows) if audit_total_rows > 0 else 0.0
         audit_flags: list[str] = []
+        if probe_ratio >= 0.35 and int(audit_bundle["enter_count"]) <= 0:
+            audit_flags.append("PROBE-heavy table: setups are close enough for starter risk, but full confirmation is still scarce.")
         if watch_ratio >= 0.65:
             audit_flags.append("WATCH-heavy table: selected-timeframe execution gates are filtering most names.")
         if ai_neutral_ratio >= 0.65:
@@ -4560,7 +5257,7 @@ def render(ctx: dict) -> None:
                 ):
                     st.markdown(line)
                 st.markdown("**Shown rows**")
-                st.markdown(f"Setup Confirm: {_share_line(setup_counts, ['Ready', 'Watch', 'Skip'])}")
+                st.markdown(f"Setup Confirm: {_share_line(setup_counts, ['Ready', 'Probe', 'Watch', 'Skip'])}")
                 st.markdown(f"Direction: {_share_line(direction_counts, ['Upside', 'Downside', 'Neutral'])}")
                 st.markdown(f"AI Ensemble: {_share_line(ai_ensemble_counts, ['Upside', 'Downside', 'Neutral'])}")
                 st.markdown(
@@ -4573,7 +5270,7 @@ def render(ctx: dict) -> None:
                     produced_total = int(produced_bundle["total"])
                     st.markdown("**Live produced before Top N**")
                     st.markdown(
-                        f"Setup Confirm: {_share_line(dict(produced_bundle['setup_counts']), ['Ready', 'Watch', 'Skip'])}"
+                        f"Setup Confirm: {_share_line(dict(produced_bundle['setup_counts']), ['Ready', 'Probe', 'Watch', 'Skip'])}"
                     )
                     st.markdown(
                         f"Direction: {_share_line(dict(produced_bundle['direction_counts']), ['Upside', 'Downside', 'Neutral'])}"

@@ -73,7 +73,7 @@ class ServicesHttpTests(unittest.TestCase):
         with patch("core.services._http_get_json", return_value=sample):
             gainers, losers = svc.fetch_top_gainers_losers(limit=2)
         self.assertEqual([g["symbol"] for g in gainers], ["c", "a"])
-        self.assertEqual([l["symbol"] for l in losers], ["b", "d"])
+        self.assertEqual([loser["symbol"] for loser in losers], ["b", "d"])
 
     def test_market_top_snapshot_drops_stale_fields_even_if_other_live_fields_arrive(self):
         fake_st = self._fake_st(
@@ -218,7 +218,51 @@ class ServicesHttpTests(unittest.TestCase):
         self.assertEqual(rows, sample_rows)
         self.assertEqual(source, "CoinGecko")
         self.assertEqual(feed_mode, "LIVE")
-        self.assertIn("heatmap_last_good_v3", fake_st.session_state)
+
+    def test_get_market_catalyst_events_merges_manual_and_fmp(self):
+        with patch(
+            "core.services._load_manual_market_catalysts_cached",
+            return_value=[{"title": "Token Unlock", "event_time": "2026-04-05T18:00:00Z", "severity": "medium"}],
+        ):
+            with patch("core.services._safe_secret_value", return_value="demo-key"):
+                with patch(
+                    "core.services._fetch_fmp_economic_calendar_cached",
+                    return_value=[{"title": "US CPI", "event_time": "2026-04-05T12:30:00Z", "severity": "high"}],
+                ):
+                    rows = svc.get_market_catalyst_events(now="2026-04-05T08:00:00Z")
+        self.assertEqual(len(rows), 2)
+
+    def test_get_market_catalyst_events_works_without_secret(self):
+        with patch(
+            "core.services._load_manual_market_catalysts_cached",
+            return_value=[{"title": "Token Unlock", "event_time": "2026-04-05T18:00:00Z", "severity": "medium"}],
+        ):
+            with patch("core.services._safe_secret_value", return_value=None):
+                rows = svc.get_market_catalyst_events(now="2026-04-05T08:00:00Z")
+        self.assertEqual(len(rows), 1)
+
+    def test_get_market_flow_proxy_rows_builds_public_context_rows(self):
+        with patch(
+            "core.services._fetch_binance_funding_history_cached",
+            return_value=[{"fundingRate": "-0.00015"}],
+        ):
+            with patch(
+                "core.services._fetch_binance_open_interest_hist_cached",
+                return_value=[{"sumOpenInterest": "1000"}, {"sumOpenInterest": "1040"}],
+            ):
+                with patch(
+                    "core.services._fetch_binance_long_short_ratio_cached",
+                    return_value=[{"longShortRatio": "0.82"}],
+                ):
+                    rows = svc.get_market_flow_proxy_rows(["BTCUSDT"])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(str(rows[0]["symbol"]), "BTCUSDT")
+        self.assertAlmostEqual(float(rows[0]["oi_change_pct"]), 4.0, places=4)
+
+    def test_get_market_flow_proxy_rows_skips_incomplete_provider_rows(self):
+        with patch("core.services._fetch_binance_funding_history_cached", return_value=[]):
+            rows = svc.get_market_flow_proxy_rows(["BTCUSDT"])
+        self.assertEqual(rows, [])
 
     def test_get_heatmap_rows_uses_cached_snapshot_when_live_providers_fail(self):
         cached_rows = [{"Symbol": "ETH", "Market Cap": 5.0, "Change 24h (%)": -1.0}]

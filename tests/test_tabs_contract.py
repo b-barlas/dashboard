@@ -25,6 +25,7 @@ TAB_MODULES = [
     "tabs.position_tab",
     "tabs.risk_tab",
     "tabs.sessions_tab",
+    "tabs.signal_review_tab",
     "tabs.spot_tab",
     "tabs.setup_backtest_tab",
     "tabs.scalp_backtest_tab",
