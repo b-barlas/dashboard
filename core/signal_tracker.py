@@ -186,6 +186,7 @@ def _ensure_signal_tracker_columns(conn: sqlite3.Connection) -> None:
     }
     expected = {
         "session_bucket": "TEXT",
+        "scan_focus": "TEXT",
         "market_regime": "TEXT",
         "market_playbook": "TEXT",
         "market_no_trade": "INTEGER",
@@ -209,6 +210,10 @@ def _ensure_signal_tracker_columns(conn: sqlite3.Connection) -> None:
         "market_flow_bias": "TEXT",
         "adaptive_edge_label": "TEXT",
         "adaptive_edge_score": "REAL",
+        "actionable_frame_score": "REAL",
+        "actionable_setup_score": "REAL",
+        "actionable_context_score": "REAL",
+        "actionable_tactical_score": "REAL",
         "archive_guardrail_label": "TEXT",
         "archive_guardrail_penalty": "REAL",
         "archive_guardrail_note": "TEXT",
@@ -246,6 +251,7 @@ def init_signal_tracker_db(db_path: str | None = None) -> str:
                 timeframe TEXT NOT NULL,
                 event_time TEXT NOT NULL,
                 session_bucket TEXT,
+                scan_focus TEXT,
                 horizon_bars INTEGER NOT NULL,
                 direction TEXT NOT NULL,
                 setup_confirm TEXT,
@@ -286,6 +292,10 @@ def init_signal_tracker_db(db_path: str | None = None) -> str:
                 market_flow_bias TEXT,
                 adaptive_edge_label TEXT,
                 adaptive_edge_score REAL,
+                actionable_frame_score REAL,
+                actionable_setup_score REAL,
+                actionable_context_score REAL,
+                actionable_tactical_score REAL,
                 archive_guardrail_label TEXT,
                 archive_guardrail_penalty REAL,
                 archive_guardrail_note TEXT,
@@ -378,6 +388,7 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                 "timeframe": timeframe,
                 "event_time": _utc_iso(event_time),
                 "session_bucket": session_bucket,
+                "scan_focus": str(event.get("scan_focus") or "").strip(),
                 "horizon_bars": horizon_bars,
                 "direction": direction,
                 "setup_confirm": str(event.get("setup_confirm") or "").strip(),
@@ -420,6 +431,10 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                 "market_flow_bias": str(event.get("market_flow_bias") or "").strip(),
                 "adaptive_edge_label": str(event.get("adaptive_edge_label") or "").strip(),
                 "adaptive_edge_score": _float_or_none(event.get("adaptive_edge_score")),
+                "actionable_frame_score": _float_or_none(event.get("actionable_frame_score")),
+                "actionable_setup_score": _float_or_none(event.get("actionable_setup_score")),
+                "actionable_context_score": _float_or_none(event.get("actionable_context_score")),
+                "actionable_tactical_score": _float_or_none(event.get("actionable_tactical_score")),
                 "archive_guardrail_label": str(event.get("archive_guardrail_label") or "").strip(),
                 "archive_guardrail_penalty": _float_or_none(event.get("archive_guardrail_penalty")),
                 "archive_guardrail_note": str(event.get("archive_guardrail_note") or "").strip(),
@@ -440,7 +455,7 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
             conn.execute(
                 """
                 INSERT INTO signal_events (
-                    signal_key, source, symbol, timeframe, event_time, session_bucket, horizon_bars, direction,
+                    signal_key, source, symbol, timeframe, event_time, session_bucket, scan_focus, horizon_bars, direction,
                     setup_confirm, action_reason, lead_label, lead_direction, lead_active,
                     confidence, ai_ensemble, ai_direction, ai_confidence, ai_aligned,
                     market_lead_label, market_lead_score, market_lead_upside, market_lead_downside,
@@ -451,11 +466,13 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                     market_catalyst_state, market_catalyst_event, market_catalyst_blocking,
                     market_catalyst_category, market_catalyst_scope, market_catalyst_tag, market_catalyst_targeted, market_catalyst_window,
                     market_flow_state, market_flow_bias,
-                    adaptive_edge_label, adaptive_edge_score, archive_guardrail_label, archive_guardrail_penalty, archive_guardrail_note,
+                    adaptive_edge_label, adaptive_edge_score,
+                    actionable_frame_score, actionable_setup_score, actionable_context_score, actionable_tactical_score,
+                    archive_guardrail_label, archive_guardrail_penalty, archive_guardrail_note,
                     price, delta_pct, entry_price, stop_loss, target_price,
                     rr_ratio, has_plan, created_at, updated_at
                 ) VALUES (
-                    :signal_key, :source, :symbol, :timeframe, :event_time, :session_bucket, :horizon_bars, :direction,
+                    :signal_key, :source, :symbol, :timeframe, :event_time, :session_bucket, :scan_focus, :horizon_bars, :direction,
                     :setup_confirm, :action_reason, :lead_label, :lead_direction, :lead_active,
                     :confidence, :ai_ensemble, :ai_direction, :ai_confidence, :ai_aligned,
                     :market_lead_label, :market_lead_score, :market_lead_upside, :market_lead_downside,
@@ -466,12 +483,15 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                     :market_catalyst_state, :market_catalyst_event, :market_catalyst_blocking,
                     :market_catalyst_category, :market_catalyst_scope, :market_catalyst_tag, :market_catalyst_targeted, :market_catalyst_window,
                     :market_flow_state, :market_flow_bias,
-                    :adaptive_edge_label, :adaptive_edge_score, :archive_guardrail_label, :archive_guardrail_penalty, :archive_guardrail_note,
+                    :adaptive_edge_label, :adaptive_edge_score,
+                    :actionable_frame_score, :actionable_setup_score, :actionable_context_score, :actionable_tactical_score,
+                    :archive_guardrail_label, :archive_guardrail_penalty, :archive_guardrail_note,
                     :price, :delta_pct, :entry_price, :stop_loss, :target_price,
                     :rr_ratio, :has_plan, :created_at, :updated_at
                 )
                 ON CONFLICT(signal_key) DO UPDATE SET
                     session_bucket=excluded.session_bucket,
+                    scan_focus=excluded.scan_focus,
                     setup_confirm=excluded.setup_confirm,
                     action_reason=excluded.action_reason,
                     lead_label=excluded.lead_label,
@@ -510,6 +530,10 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                     market_flow_bias=excluded.market_flow_bias,
                     adaptive_edge_label=excluded.adaptive_edge_label,
                     adaptive_edge_score=excluded.adaptive_edge_score,
+                    actionable_frame_score=excluded.actionable_frame_score,
+                    actionable_setup_score=excluded.actionable_setup_score,
+                    actionable_context_score=excluded.actionable_context_score,
+                    actionable_tactical_score=excluded.actionable_tactical_score,
                     archive_guardrail_label=excluded.archive_guardrail_label,
                     archive_guardrail_penalty=excluded.archive_guardrail_penalty,
                     archive_guardrail_note=excluded.archive_guardrail_note,
@@ -801,6 +825,7 @@ def fetch_signal_events_df(
     limit: int = 250,
     status: str | None = None,
     source: str | None = None,
+    timeframe: str | None = None,
     db_path: str | None = None,
 ) -> pd.DataFrame:
     path = init_signal_tracker_db(db_path)
@@ -812,6 +837,9 @@ def fetch_signal_events_df(
     if source:
         query += " AND source = ?"
         params.append(str(source))
+    if timeframe:
+        query += " AND LOWER(COALESCE(timeframe, '')) = ?"
+        params.append(str(timeframe).strip().lower())
     query += " ORDER BY event_time DESC LIMIT ?"
     params.append(int(limit))
     with _connect(path) as conn:

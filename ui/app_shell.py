@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import time
-
 from ui.ctx import get_ctx, get_ctx_callable
 from ui.primitives import render_sidebar_panel, render_sidebar_title, render_status_pill
-from ui.tab_registry import TAB_TITLES, build_tab_specs
+from ui.tab_registry import TAB_GROUPS, TAB_TITLES, build_tab_specs
 from core.telemetry import snapshot_summary
 
 
@@ -26,6 +24,15 @@ def render_app(deps: dict) -> None:
             ),
             tone="accent",
         )
+        render_sidebar_panel(
+            st,
+            title="Navigation Map",
+            body_html="<br>".join(
+                f"<b>{group}</b>: {', '.join(titles)}"
+                for group, titles in TAB_GROUPS
+            ),
+            tone="neutral",
+        )
         t = snapshot_summary(st)
         render_sidebar_panel(
             st,
@@ -41,14 +48,20 @@ def render_app(deps: dict) -> None:
         if auto_refresh:
             refresh_interval = st.slider("Refresh Interval (sec)", 30, 300, 60, key="refresh_interval")
             render_status_pill(st, text=f"LIVE — Refreshing every {refresh_interval}s", tone="positive")
-            time.sleep(refresh_interval)
-            st.rerun()
 
-    tabs = st.tabs(TAB_TITLES)
+    def _render_tabs_once() -> None:
+        tabs = st.tabs(TAB_TITLES)
+        tab_specs = build_tab_specs(deps)
+        for idx, (renderer, extra_ctx) in enumerate(tab_specs):
+            with tabs[idx]:
+                render_fn = get_ctx_callable({"renderer": renderer}, "renderer", scope=f"tab:{TAB_TITLES[idx]}")
+                render_fn({"st": st, **extra_ctx})
 
-    tab_specs = build_tab_specs(deps)
+    if auto_refresh:
+        @st.fragment(run_every=int(st.session_state.get("refresh_interval", 60)))
+        def _render_live_tabs() -> None:
+            _render_tabs_once()
 
-    for idx, (renderer, extra_ctx) in enumerate(tab_specs):
-        with tabs[idx]:
-            render_fn = get_ctx_callable({"renderer": renderer}, "renderer", scope=f"tab:{TAB_TITLES[idx]}")
-            render_fn({"st": st, **extra_ctx})
+        _render_live_tabs()
+    else:
+        _render_tabs_once()

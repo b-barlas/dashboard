@@ -4,16 +4,30 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+from tabs.market_scan_helpers import (
+    _actionable_analysis_batch_size,
+    _actionable_direction_include,
+    _actionable_frame_hunt_score,
+    _actionable_setup_score,
+    _actionable_tactical_candidate_score,
+    _actionable_universe_movement_score,
+    _candidate_scan_symbols,
+    _initial_scan_batch_size,
+    _initial_scan_symbols,
+    _next_refill_candidate_batch,
+    _next_scan_pool_target,
+    _scan_candidate_pool_size,
+)
 from tabs.market_tab import (
     _alert_lane_label,
     _alert_archive_label,
+    _actionable_market_result_priority_key,
     _compress_market_alerts_for_display,
     _rank_market_alerts_by_archive,
     _audit_scan_summary_lines,
     _ai_fallback_note,
     _build_custom_scan_universe,
     _build_market_cap_map,
-    _candidate_scan_symbols,
     _canonical_pair_base,
     _coingecko_coin_id_fallback_available,
     _coingecko_coin_id_fallback_reason,
@@ -34,19 +48,17 @@ from tabs.market_tab import (
     _consume_market_custom_clear,
     _market_scan_signature,
     _market_data_mode,
-    _next_refill_candidate_batch,
-    _next_scan_pool_target,
     _next_universe_fetch_n,
     _pair_provenance_label,
     _remember_display_scan_state,
     _resolve_notice_scan_state,
     _resolve_display_scan_state,
     _queue_market_custom_clear,
-    _scan_candidate_pool_size,
     _merge_market_cap_maps,
     _market_lead_breadth_component,
     _market_lead_snapshot,
     _market_result_priority_key,
+    _market_result_priority_key_for_mode,
     _scan_universe_notice,
     _prepare_scan_market_enrichment,
     _prepare_closed_frame,
@@ -555,6 +567,159 @@ class MarketTabLogicTests(unittest.TestCase):
         ordered = sorted(rows, key=_market_result_priority_key)
         self.assertEqual([row["Coin"] for row in ordered], ["ETH", "BTC"])
 
+    def test_actionable_setup_score_rewards_clean_execution_structure(self):
+        stronger = _actionable_setup_score(
+            timeframe="1h",
+            execution_structure_quality=84.0,
+            execution_trend_quality=80.0,
+            execution_regime_quality=72.0,
+            execution_location_quality=78.0,
+            trend_led_score=76.0,
+            ai_led_score=66.0,
+            rr_ratio=1.9,
+            adx_val=23.0,
+            delta_pct=1.4,
+            volatility_label="– Moderate",
+            vwap_label="🟢 Above",
+            bollinger_bias="→ Near Bottom",
+            signal_direction="UPSIDE",
+            volume_spike=True,
+            spike_dir="UP",
+        )
+        weaker = _actionable_setup_score(
+            timeframe="1h",
+            execution_structure_quality=60.0,
+            execution_trend_quality=58.0,
+            execution_regime_quality=55.0,
+            execution_location_quality=52.0,
+            trend_led_score=44.0,
+            ai_led_score=40.0,
+            rr_ratio=1.2,
+            adx_val=14.0,
+            delta_pct=4.9,
+            volatility_label="▲ High",
+            vwap_label="🔴 Below",
+            bollinger_bias="🔴 Overbought",
+            signal_direction="UPSIDE",
+            volume_spike=False,
+            spike_dir="",
+        )
+        self.assertGreater(stronger, weaker)
+
+    def test_actionable_frame_hunt_score_prefers_fresh_aligned_pressure(self):
+        def _frame(closes, volumes):
+            opens = [closes[0], *closes[:-1]]
+            highs = [max(o, c) * 1.003 for o, c in zip(opens, closes)]
+            lows = [min(o, c) * 0.997 for o, c in zip(opens, closes)]
+            return pd.DataFrame(
+                {
+                    "open": opens,
+                    "high": highs,
+                    "low": lows,
+                    "close": closes,
+                    "volume": volumes,
+                }
+            )
+
+        strong_df = _frame(
+            [
+                100.0, 101.6, 99.9, 102.2, 100.8, 103.0, 101.2, 103.4,
+                102.1, 104.0, 103.0, 104.1, 103.2, 104.0, 103.5, 104.2,
+                103.8, 104.4, 104.0, 104.6, 104.2, 104.5, 104.4, 104.7,
+                104.6, 104.8, 104.7, 104.85, 104.9, 105.0, 105.05, 105.3,
+            ],
+            [100.0] * 31 + [245.0],
+        )
+        weak_df = _frame(
+            [
+                100.0, 100.2, 100.1, 100.3, 100.0, 100.2, 100.1, 100.0,
+                99.8, 99.7, 99.6, 99.5, 99.4, 99.3, 99.2, 99.0,
+                98.9, 98.8, 98.7, 98.6, 98.55, 98.5, 98.45, 98.4,
+                98.35, 98.3, 98.25, 98.2, 98.15, 98.1, 98.0, 97.9,
+            ],
+            [100.0] * 31 + [68.0],
+        )
+        self.assertGreater(
+            _actionable_frame_hunt_score(
+                df_eval=strong_df,
+                timeframe="1h",
+                direction_filter="Upside",
+            ),
+            _actionable_frame_hunt_score(
+                df_eval=weak_df,
+                timeframe="1h",
+                direction_filter="Upside",
+            ),
+        )
+
+    def test_actionable_tactical_candidate_score_surfaces_clean_early_neutral_htf_setup(self):
+        score = _actionable_tactical_candidate_score(
+            spot_direction="Neutral",
+            signal_direction="Upside",
+            ai_direction="Neutral",
+            ai_agreement=0.42,
+            frame_hunt_score=86.0,
+            execution_structure_quality=84.0,
+            execution_trend_quality=78.0,
+            execution_location_quality=76.0,
+            rr_ratio=1.9,
+            adx_val=21.0,
+        )
+        self.assertGreaterEqual(score, 72.0)
+
+    def test_actionable_direction_include_allows_strong_tactical_candidate(self):
+        self.assertTrue(
+            _actionable_direction_include(
+                direction_filter="Upside",
+                scan_mode="Actionable Setups",
+                spot_direction="Neutral",
+                signal_direction="Upside",
+                tactical_candidate_score=77.0,
+            )
+        )
+        self.assertFalse(
+            _actionable_direction_include(
+                direction_filter="Upside",
+                scan_mode="Broad Market",
+                spot_direction="Neutral",
+                signal_direction="Upside",
+                tactical_candidate_score=77.0,
+            )
+        )
+
+    def test_actionable_market_result_priority_prefers_context_and_setup_quality(self):
+        stronger = {
+            "Coin": "DOGE",
+            "__action_raw": "PROBE",
+            "__actionable_context_score": 74.0,
+            "__actionable_setup_score": 81.0,
+            "__risk_unit_fraction": 0.25,
+            "__confidence_val": 70.0,
+            "__adaptive_edge_score": 58.0,
+            "__archive_guardrail_penalty": 8.0,
+            "__rr_val": 1.8,
+            "__ai_confidence_val": 62.0,
+        }
+        weaker = {
+            "Coin": "XRP",
+            "__action_raw": "PROBE",
+            "__actionable_context_score": 52.0,
+            "__actionable_setup_score": 63.0,
+            "__risk_unit_fraction": 0.25,
+            "__confidence_val": 72.0,
+            "__adaptive_edge_score": 60.0,
+            "__archive_guardrail_penalty": 8.0,
+            "__rr_val": 1.9,
+            "__ai_confidence_val": 65.0,
+        }
+        ordered = sorted([weaker, stronger], key=_actionable_market_result_priority_key)
+        self.assertEqual(ordered[0]["Coin"], "DOGE")
+        mode_ordered = sorted(
+            [weaker, stronger],
+            key=lambda row: _market_result_priority_key_for_mode(row, "Actionable Setups"),
+        )
+        self.assertEqual(mode_ordered[0]["Coin"], "DOGE")
+
     def test_direction_fetch_symbol_keeps_canonical_requested_symbol_for_htf_context(self):
         self.assertEqual(_direction_fetch_symbol("BTC/USDT", "XBT/USD", "exchange"), "BTC/USDT")
         self.assertEqual(_direction_fetch_symbol("BTC/USDT", "BTC/USDT", "coingecko"), "BTC/USDT")
@@ -597,6 +762,7 @@ class MarketTabLogicTests(unittest.TestCase):
             top_n=50,
             exclude_stables=True,
             custom_bases_applied=["DOGE"],
+            scan_mode="Actionable Setups",
         )
         second = _market_scan_signature(
             timeframe="1h",
@@ -604,9 +770,10 @@ class MarketTabLogicTests(unittest.TestCase):
             top_n=10,
             exclude_stables=True,
             custom_bases_applied=["DOGE"],
+            scan_mode="Broad Market",
         )
         self.assertEqual(first, second)
-        self.assertEqual(first, ("1h", "Both", 0, True, ("DOGE",)))
+        self.assertEqual(first, ("1h", "Both", 0, True, ("DOGE",), "Broad Market"))
 
     def test_market_scan_signature_is_order_and_alias_insensitive_in_custom_mode(self):
         first = _market_scan_signature(
@@ -615,6 +782,7 @@ class MarketTabLogicTests(unittest.TestCase):
             top_n=50,
             exclude_stables=True,
             custom_bases_applied=["BTC", "ETH"],
+            scan_mode="Actionable Setups",
         )
         second = _market_scan_signature(
             timeframe="1h",
@@ -622,9 +790,30 @@ class MarketTabLogicTests(unittest.TestCase):
             top_n=50,
             exclude_stables=True,
             custom_bases_applied=["ETH", "XBT"],
+            scan_mode="Broad Market",
         )
         self.assertEqual(first, second)
-        self.assertEqual(first, ("1h", "Both", 0, True, ("BTC", "ETH")))
+        self.assertEqual(first, ("1h", "Both", 0, True, ("BTC", "ETH"), "Broad Market"))
+
+    def test_market_scan_signature_tracks_scan_mode_outside_custom_mode(self):
+        broad = _market_scan_signature(
+            timeframe="1h",
+            direction_filter="Both",
+            top_n=10,
+            exclude_stables=True,
+            custom_bases_applied=[],
+            scan_mode="Broad Market",
+        )
+        hunter = _market_scan_signature(
+            timeframe="1h",
+            direction_filter="Both",
+            top_n=10,
+            exclude_stables=True,
+            custom_bases_applied=[],
+            scan_mode="Actionable Setups",
+        )
+        self.assertNotEqual(broad, hunter)
+        self.assertEqual(hunter, ("1h", "Both", 10, True, (), "Actionable Setups"))
 
     def test_normalize_custom_bases_dedupes_aliases(self):
         out = _normalize_custom_bases(["BTC", "XBT", "eth/usdt", "ETH"])
@@ -867,6 +1056,61 @@ class MarketTabLogicTests(unittest.TestCase):
             _scan_candidate_pool_size(10, custom_mode_active=True),
             10,
         )
+        self.assertEqual(
+            _scan_candidate_pool_size(10, custom_mode_active=False, scan_mode="Actionable Setups"),
+            45,
+        )
+
+    def test_initial_scan_batch_size_expands_for_actionable_focus(self):
+        self.assertEqual(
+            _initial_scan_batch_size(
+                10,
+                scan_pool_n=35,
+                custom_mode_active=False,
+                scan_mode="Actionable Setups",
+            ),
+            20,
+        )
+        self.assertEqual(
+            _initial_scan_batch_size(
+                10,
+                scan_pool_n=35,
+                custom_mode_active=False,
+                scan_mode="Broad Market",
+            ),
+            10,
+        )
+
+    def test_initial_scan_symbols_actionable_focus_mixes_ranked_and_exploratory_candidates(self):
+        out = _initial_scan_symbols(
+            candidate_pool=[f"COIN{i}/USDT" for i in range(1, 41)],
+            requested_n=10,
+            scan_pool_n=40,
+            custom_mode_active=False,
+            scan_mode="Actionable Setups",
+            timeframe="5m",
+        )
+        self.assertEqual(len(out), 20)
+        self.assertEqual(out[:10], [f"COIN{i}/USDT" for i in range(1, 11)])
+        self.assertTrue(any(symbol not in [f"COIN{i}/USDT" for i in range(11, 21)] for symbol in out[10:]))
+
+    def test_actionable_analysis_batch_size_caps_deep_scan(self):
+        self.assertEqual(
+            _actionable_analysis_batch_size(
+                10,
+                fetched_n=35,
+                scan_mode="Actionable Setups",
+            ),
+            28,
+        )
+        self.assertEqual(
+            _actionable_analysis_batch_size(
+                10,
+                fetched_n=35,
+                scan_mode="Broad Market",
+            ),
+            35,
+        )
 
     def test_next_refill_candidate_batch_uses_remaining_pool_after_attrition(self):
         out = _next_refill_candidate_batch(
@@ -878,6 +1122,65 @@ class MarketTabLogicTests(unittest.TestCase):
             used_major_fallback=False,
         )
         self.assertEqual(out, ["SOL/USDT", "XRP/USDT"])
+
+    def test_candidate_scan_symbols_actionable_focus_prefers_active_liquid_candidates(self):
+        out = _candidate_scan_symbols(
+            usdt_symbols=["BTC/USDT", "DOGE/USDT", "XRP/USDT"],
+            market_rows=[
+                {"symbol": "btc", "market_cap": 2_000_000_000_000, "price_change_percentage_24h": 0.4},
+                {"symbol": "doge", "market_cap": 25_000_000_000, "price_change_percentage_24h": 4.2},
+                {"symbol": "xrp", "market_cap": 120_000_000_000, "price_change_percentage_24h": 1.5},
+            ],
+            exclude_stables=False,
+            custom_bases_applied=[],
+            timeframe="1h",
+            direction_filter="Upside",
+            scan_mode="Actionable Setups",
+        )
+        self.assertEqual(out[0], "DOGE/USDT")
+
+    def test_candidate_scan_symbols_actionable_focus_biases_leading_sector(self):
+        out = _candidate_scan_symbols(
+            usdt_symbols=["FET/USDT", "UNI/USDT", "AAVE/USDT"],
+            market_rows=[
+                {"symbol": "fet", "market_cap": 4_000_000_000, "price_change_percentage_24h": 2.8},
+                {"symbol": "uni", "market_cap": 5_000_000_000, "price_change_percentage_24h": 2.7},
+                {"symbol": "aave", "market_cap": 4_800_000_000, "price_change_percentage_24h": 0.4},
+            ],
+            exclude_stables=False,
+            custom_bases_applied=[],
+            timeframe="1h",
+            direction_filter="Upside",
+            scan_mode="Actionable Setups",
+            classify_symbol_sector=lambda symbol: {"FET": "AI", "UNI": "DeFi", "AAVE": "DeFi"}.get(str(symbol).upper(), "Other"),
+        )
+        self.assertEqual(out[0], "FET/USDT")
+
+    def test_actionable_universe_movement_score_keeps_quiet_candidate_alive(self):
+        self.assertGreater(
+            _actionable_universe_movement_score(
+                0.35,
+                timeframe="1h",
+                direction_filter="Upside",
+            ),
+            0.0,
+        )
+
+    def test_candidate_scan_symbols_actionable_setups_respects_downside_direction(self):
+        out = _candidate_scan_symbols(
+            usdt_symbols=["BTC/USDT", "DOGE/USDT", "XRP/USDT"],
+            market_rows=[
+                {"symbol": "btc", "market_cap": 2_000_000_000_000, "price_change_percentage_24h": 0.8},
+                {"symbol": "doge", "market_cap": 25_000_000_000, "price_change_percentage_24h": -4.2},
+                {"symbol": "xrp", "market_cap": 120_000_000_000, "price_change_percentage_24h": -1.5},
+            ],
+            exclude_stables=False,
+            custom_bases_applied=[],
+            timeframe="1h",
+            direction_filter="Downside",
+            scan_mode="Actionable Setups",
+        )
+        self.assertEqual(out[0], "DOGE/USDT")
 
     def test_next_scan_pool_target_grows_after_pool_is_exhausted(self):
         self.assertEqual(

@@ -23,7 +23,9 @@ class CorrelationLogicTests(unittest.TestCase):
         self.assertEqual(_pair_regime(0.45), "Medium Co-Move")
 
     def test_custom_coin_parser_dedupes_and_limits(self):
-        normalize = lambda coin: f"{coin.upper()}/USDT"
+        def normalize(coin: str) -> str:
+            return f"{coin.upper()}/USDT"
+
         parsed = _parse_custom_coins(
             "btc, eth, btc, sol, link, doge, tao, fet, render, xrp, ada, bnb",
             normalize,

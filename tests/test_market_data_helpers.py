@@ -22,7 +22,7 @@ class MarketDataHelpersTests(unittest.TestCase):
         ]
         gainers, losers = market_data.fetch_top_gainers_losers(lambda *args, **kwargs: payload, limit=2)
         self.assertEqual([g["symbol"] for g in gainers], ["b", "c"])
-        self.assertEqual([l["symbol"] for l in losers], ["a", "c"])
+        self.assertEqual([loser["symbol"] for loser in losers], ["a", "c"])
 
     def test_get_top_volume_usdt_symbols_filters_markets(self):
         payload = [{"symbol": "btc"}, {"symbol": "eth"}, {"symbol": "btc"}]

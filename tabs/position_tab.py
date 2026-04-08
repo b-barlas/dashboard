@@ -3,38 +3,13 @@ from ui.ctx import get_ctx
 from datetime import datetime, timezone
 import io
 
-import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
 import ta
 from core.session_utils import session_bucket_for_timestamp
-from core.ai_spot_bias import (
-    ai_spot_bias_consensus_agreement,
-    ai_spot_bias_directional_agreement,
-    ai_spot_bias_display_votes,
-    ai_spot_bias_probability_up,
-    ai_spot_bias_status,
-    build_ai_spot_bias_snapshot,
-)
-from core.confidence import (
-    build_ai_confidence_snapshot,
-    build_confidence_snapshot,
-    build_execution_confidence_snapshot,
-    confidence_bucket,
-)
-from core.market_decision import (
-    ai_led_confirmation_snapshot,
-    action_reason_text,
-    normalize_action_class,
-    selected_timeframe_execution_snapshot,
-    selected_timeframe_rr_ratio,
-    spot_action_decision_with_reason,
-    structure_state,
-    trend_led_confirmation_snapshot,
-)
-from core.market_decision import ai_vote_metrics
+from core.confidence import confidence_bucket
+from core.market_decision import action_reason_text, normalize_action_class
 from core.scalping import scalp_gate_thresholds
-from core.signal_contract import bias_confidence_from_bias
 from core.position_metrics import (
     compute_hard_invalidation,
     compute_health_decision,
@@ -43,7 +18,7 @@ from core.position_metrics import (
 )
 from core.position_management import build_position_management_snapshot
 from core.signal_tracker import build_actual_exit_quality_profile, build_actual_trade_hold_profile
-from core.spot_direction import build_spot_direction_snapshot
+from core.spot_execution_pipeline import build_spot_execution_pipeline
 from ui.primitives import render_help_details, render_page_header
 from ui.signal_panels import build_indicator_groups_html, build_learned_edge_banner_html, build_setup_snapshot_html
 from ui.signal_formatters import (
@@ -51,7 +26,7 @@ from ui.signal_formatters import (
     ai_confidence_display as _ai_confidence_display,
     ai_confidence_note as _ai_confidence_note,
     ai_spot_note as _ai_spot_note,
-    execution_read_note as _execution_read_note,
+    compact_note_parts as _compact_note_parts,
     context_fit_snapshot as _context_fit_snapshot,
     setup_confirm_display as _setup_confirm_display,
     spot_bias_label as _spot_bias_label,
@@ -59,24 +34,6 @@ from ui.signal_formatters import (
     trade_gate_display_label as _trade_gate_display_label,
 )
 from ui.snapshot_cache import live_or_snapshot
-
-
-def _prepare_closed_frame(df: pd.DataFrame | None, *, min_rows: int = 55) -> pd.DataFrame | None:
-    if df is None:
-        return None
-    if len(df) <= int(min_rows):
-        return None
-    df_eval = df.iloc[:-1].copy()
-    if len(df_eval) < int(min_rows):
-        return None
-    return df_eval
-
-
-def _direction_fetch_symbol(symbol: str, actual_symbol: str, source_provider: str) -> str:
-    # Use the canonical requested symbol for HTF context fetches so spot
-    # Direction/AI semantics do not drift with selected-timeframe provider
-    # resolution.
-    return str(symbol or actual_symbol or "").strip()
 
 
 def _spot_tf_note(snapshot) -> str:
@@ -118,6 +75,116 @@ def _tone_color(tone: str, *, accent: str, positive: str, negative: str, warning
     return accent
 
 
+def _position_archive_status_label(adaptive_snapshot) -> str:
+    archive_label = str(getattr(adaptive_snapshot, "archive_guardrail_label", "") or "").strip()
+    adaptive_label = str(getattr(adaptive_snapshot, "label", "") or "").strip()
+    session_label = str(getattr(adaptive_snapshot, "session_fit_label", "") or "").strip()
+
+    if archive_label == "Archive Guardrail":
+        return "Archive Guardrail"
+    if archive_label == "Archive Caution":
+        return "Archive Caution"
+    if adaptive_label == "Historically Favored":
+        return "History Supportive"
+    if adaptive_label == "Historically Weak":
+        return "History Fragile"
+    if session_label == "Session Supportive":
+        return "Session Supportive"
+    if session_label == "Session Fragile":
+        return "Session Fragile"
+    return "History Mixed"
+
+
+def _position_archive_banner_note(
+    adaptive_snapshot,
+    *,
+    context_fit: dict[str, str],
+    market_context: dict[str, str] | None = None,
+    market_context_note: str = "",
+    scanner_signal_note: str = "",
+) -> str:
+    market_context = dict(market_context or {})
+    stance = _trade_gate_display_label(str((context_fit or {}).get("label") or ""))
+    adaptive_label = str(getattr(adaptive_snapshot, "label", "") or "").strip()
+    archive_label = str(getattr(adaptive_snapshot, "archive_guardrail_label", "") or "").strip()
+    archive_note = str(getattr(adaptive_snapshot, "archive_guardrail_note", "") or "").strip()
+    session_label = str(getattr(adaptive_snapshot, "session_fit_label", "") or "").strip()
+    session_note = str(getattr(adaptive_snapshot, "session_fit_note", "") or "").strip()
+    history_note = str(getattr(adaptive_snapshot, "note", "") or "").strip()
+    trade_gate = str(market_context.get("Trade Gate") or "").strip()
+    playbook = str(market_context.get("Playbook") or "").strip()
+    catalyst_window = str(market_context.get("Catalyst Window") or "").strip()
+    flow_proxy = str(market_context.get("Flow Proxy") or "").strip()
+
+    stance_summary = ""
+    if stance == "Stand Aside":
+        stance_summary = "Stand Aside: avoid fresh adds or new risk here."
+    elif stance == "Defensive Only":
+        stance_summary = "Defensive Only: protect the position and avoid pressing size."
+    elif stance == "Tradeable":
+        stance_summary = "Tradeable: the backdrop is supportive enough to manage this like a normal hold."
+    elif stance == "Selective Only":
+        stance_summary = "Selective Only: keep the position clean and add only on clear confirmation."
+
+    plain_archive_note = ""
+    if archive_label == "Archive Guardrail":
+        plain_archive_note = "Similar setups have struggled enough here to stay defensive."
+    elif archive_label == "Archive Caution":
+        plain_archive_note = "Similar setups have been softer in this kind of market window."
+
+    plain_history_note = ""
+    if not plain_archive_note:
+        if adaptive_label == "Historically Favored":
+            plain_history_note = "Similar setups have generally held up better."
+        elif adaptive_label == "Historically Weak":
+            plain_history_note = "Similar setups have had weaker follow-through."
+        elif adaptive_label == "Historically Neutral":
+            plain_history_note = "History is mixed here, so clean confirmation matters more."
+
+    plain_session_note = ""
+    if session_label == "Session Supportive":
+        plain_session_note = "This session has been a cleaner management window lately."
+    elif session_label == "Session Fragile":
+        plain_session_note = "This session has been less reliable lately."
+
+    context_bits: list[str] = []
+    if trade_gate == "No-Trade":
+        context_bits.append("The market is not in a clean add window right now")
+    elif trade_gate == "Selective Only":
+        context_bits.append("Only the cleanest adds deserve attention right now")
+    elif trade_gate == "Tradeable":
+        context_bits.append("The market is open enough for cleaner management")
+    if catalyst_window.startswith("Far"):
+        context_bits.append("there is no major catalyst nearby")
+    elif catalyst_window.startswith(("Near", "High Impact")):
+        context_bits.append("a nearby catalyst could speed up the move")
+    elif catalyst_window.startswith("Blocking"):
+        context_bits.append("a nearby event is adding risk")
+    if flow_proxy == "Flow Balanced":
+        context_bits.append("positioning looks balanced rather than stretched")
+    elif flow_proxy in {"Shorts Crowded", "Longs Crowded"}:
+        context_bits.append("positioning looks stretched enough that squeeze risk matters more")
+
+    plain_context_note = ""
+    if context_bits:
+        plain_context_note = " • ".join(
+            [context_bits[0].capitalize() + "."] + [bit.capitalize() + "." for bit in context_bits[1:2]]
+        )
+    elif playbook == "Wait for confirmation":
+        plain_context_note = "The market still needs cleaner confirmation before pressing this position."
+
+    return _compact_note_parts(
+        [
+            stance_summary,
+            plain_archive_note or archive_note,
+            plain_session_note or session_note,
+            plain_history_note or history_note,
+            plain_context_note or market_context_note or scanner_signal_note,
+        ],
+        limit=3,
+    )
+
+
 def render(ctx: dict) -> None:
     """Render the Position Analyser tab for evaluating open positions."""
     st = get_ctx(ctx, "st")
@@ -133,7 +200,6 @@ def render(ctx: dict) -> None:
     EXCHANGE = get_ctx(ctx, "EXCHANGE")
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     analyse = get_ctx(ctx, "analyse")
-    signal_plain = get_ctx(ctx, "signal_plain")
     direction_key = get_ctx(ctx, "direction_key")
     direction_label = get_ctx(ctx, "direction_label")
     format_delta = get_ctx(ctx, "format_delta")
@@ -169,9 +235,9 @@ def render(ctx: dict) -> None:
         summary="How to read quickly",
         body_html=(
             "1) Confirm <b>PnL + Liquidation Distance</b> first. "
-            "2) Check <b>Direction / Confidence / HTF AI / AI Confidence</b>. "
-            "3) Respect <b>Technical Invalidation</b> as hard risk line. "
-            "4) Follow the <b>Decision Model</b> action (HOLD / REDUCE / EXIT style)."
+            "2) Respect the <b>anchor timeframe</b> and its <b>Technical Invalidation</b> as your hard risk line. "
+            "3) Follow <b>Position Management</b> for the immediate action. "
+            "4) Use <b>Setup Snapshot</b> and <b>Market Archive Read</b> as context, not as reasons to ignore the risk line."
         ),
     )
 
@@ -277,6 +343,16 @@ def render(ctx: dict) -> None:
             except Exception:
                 continue
 
+        if len(selected_timeframes) > 1:
+            st.markdown(
+                f"<div class='panel-box' style='padding:10px 12px; margin-bottom:10px;'>"
+                f"<b style='color:{ACCENT};'>Anchor timeframe: {largest_tf}</b><br>"
+                f"<span style='color:{TEXT_MUTED}; font-size:0.88rem;'>"
+                f"Use {largest_tf} for the main risk line and core management call. "
+                f"Smaller frames are timing and context only.</span></div>",
+                unsafe_allow_html=True,
+            )
+
         tf_tabs = st.tabs(selected_timeframes)
 
         for idx, tf in enumerate(selected_timeframes):
@@ -303,40 +379,35 @@ def render(ctx: dict) -> None:
 
                 actual_symbol = str(df.attrs.get("source_symbol") or "").strip() or coin
                 source_provider = str(df.attrs.get("source_provider") or "").strip() or "exchange"
-                direction_fetch_symbol = _direction_fetch_symbol(coin, actual_symbol, source_provider)
-                # Keep HTF context stable across selected-timeframe changes.
-                df_4h_raw = fetch_ohlcv(direction_fetch_symbol, "4h", limit=260)
-                df_1d_raw = fetch_ohlcv(direction_fetch_symbol, "1d", limit=260)
-                df_direction_4h = _prepare_closed_frame(df_4h_raw, min_rows=81)
-                df_direction_1d = _prepare_closed_frame(df_1d_raw, min_rows=81)
-                spot_snapshot = build_spot_direction_snapshot(
-                    df_4h=df_direction_4h,
-                    df_1d=df_direction_1d,
-                )
-                confidence_snapshot = build_confidence_snapshot(
-                    direction=spot_snapshot.direction,
-                    timeframe_alignment=spot_snapshot.timeframe_alignment,
-                    structure_quality=spot_snapshot.structure_quality,
-                    trend_quality=spot_snapshot.trend_quality,
-                    regime_quality=spot_snapshot.regime_quality,
-                    location_quality=spot_snapshot.location_quality,
-                    timeframe_conflict=spot_snapshot.timeframe_conflict,
-                    degraded_data=spot_snapshot.degraded_data,
-                    range_regime=spot_snapshot.range_regime,
-                )
-                ai_spot_snapshot = build_ai_spot_bias_snapshot(
-                    df_4h=df_direction_4h,
-                    df_1d=df_direction_1d,
+                pipeline = build_spot_execution_pipeline(
+                    symbol=coin,
+                    actual_symbol=actual_symbol,
+                    source_provider=source_provider,
+                    timeframe=tf,
+                    df_eval=df_eval,
+                    fetch_ohlcv=fetch_ohlcv,
+                    analyse_fn=analyse,
                     predictor=ml_ensemble_predict,
+                    conviction_fn=_calc_conviction,
                 )
-
-                a = analyse(df_eval)
-                signal, volume_spike = a.signal, a.volume_spike
-                atr_comment, candle_pattern, bias_score = a.atr_comment, a.candle_pattern, a.bias
-                directional_confidence = float(bias_confidence_from_bias(float(bias_score)))
-                adx_val, supertrend_trend, ichimoku_trend = a.adx, a.supertrend, a.ichimoku
-                stochrsi_k_val, bollinger_bias, vwap_label = a.stochrsi_k, a.bollinger, a.vwap
-                psar_trend, williams_label, cci_label = a.psar, a.williams, a.cci
+                a = pipeline.analysis
+                spot_snapshot = pipeline.spot_snapshot
+                confidence_snapshot = pipeline.confidence_snapshot
+                ai_spot_snapshot = pipeline.ai_spot_snapshot
+                ai_confidence_snapshot = pipeline.ai_confidence_snapshot
+                volume_spike = bool(getattr(a, "volume_spike", False))
+                atr_comment = str(getattr(a, "atr_comment", "") or "")
+                candle_pattern = str(getattr(a, "candle_pattern", "") or "")
+                bias_score = float(pipeline.bias_score)
+                adx_val = float(pipeline.adx_val)
+                supertrend_trend = str(pipeline.supertrend_trend)
+                ichimoku_trend = str(pipeline.ichimoku_trend)
+                stochrsi_k_val = float(pipeline.stochrsi_k_val)
+                bollinger_bias = str(pipeline.bollinger_bias)
+                vwap_label = str(pipeline.vwap_label)
+                psar_trend = str(pipeline.psar_trend)
+                williams_label = str(pipeline.williams_label)
+                cci_label = str(pipeline.cci_label)
 
                 # Keep open-position PnL/liquidation on one live price source across TF tabs.
                 current_price = float(live_position_price) if live_position_price and live_position_price > 0 else float(df["close"].iloc[-1])
@@ -406,70 +477,28 @@ def render(ctx: dict) -> None:
                         f"<span style='color:{NEGATIVE}; font-weight:600;'>Liquidation Risk</span>"
                         f"<span style='color:{TEXT_MUTED};'> — With current settings, liquidation is only "
                         f"{liq_dist_pct:.2f}% away. Tighten risk controls.</span></div>",
-                    unsafe_allow_html=True,
-                )
+                        unsafe_allow_html=True,
+                    )
+                if len(selected_timeframes) > 1:
+                    frame_role = "Anchor timeframe" if tf == largest_tf else "Timing / context frame"
+                    frame_role_note = (
+                        "Use this frame for the main risk line and the core management call."
+                        if tf == largest_tf
+                        else f"Use this frame to fine-tune timing only. Do not let it overrule {largest_tf} on its own."
+                    )
+                    st.markdown(
+                        f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; margin:4px 0 10px 0;'>"
+                        f"<b>{frame_role}:</b> {frame_role_note}</div>",
+                        unsafe_allow_html=True,
+                    )
 
-                signal_dir = direction_key(signal_plain(signal))
+                signal_dir = pipeline.signal_direction
                 signal_clean = direction_label(signal_dir)
-                signal_dir_legacy = (
-                    "LONG" if signal_dir == "UPSIDE" else ("SHORT" if signal_dir == "DOWNSIDE" else "WAIT")
-                )
-
-                # -- AI ensemble prediction for this coin/timeframe --
-                ai_votes = 0
-                try:
-                    _ai_prob, ai_dir_raw, ai_details = ml_ensemble_predict(df_eval)
-                    ai_dir = direction_key(ai_dir_raw)
-                    directional_agreement = float(
-                        (ai_details or {}).get(
-                            "directional_agreement",
-                            (ai_details or {}).get("agreement", 0.0),
-                        )
-                    )
-                    consensus_agreement = float(
-                        (ai_details or {}).get("consensus_agreement", directional_agreement)
-                    )
-                    ai_votes, _, decision_agreement = ai_vote_metrics(
-                        ai_dir,
-                        directional_agreement,
-                        consensus_agreement,
-                    )
-                except Exception:
-                    ai_dir = "NEUTRAL"
-                    decision_agreement = 0.0
-
-                base_conviction_lbl, _ = _calc_conviction(
-                    signal_dir,
-                    ai_dir,
-                    directional_confidence,
-                    decision_agreement,
-                )
-                tactical_structure = structure_state(signal_dir, ai_dir, directional_confidence, decision_agreement)
-                execution_confidence = build_execution_confidence_snapshot(
-                    direction=signal_dir,
-                    bias_score=float(bias_score),
-                    adx_val=float(adx_val) if pd.notna(adx_val) else float("nan"),
-                    structure_state=tactical_structure,
-                    conviction_label=str(base_conviction_lbl),
-                    ai_agreement=float(decision_agreement),
-                )
-                conviction_lbl, _ = _calc_conviction(signal_dir, ai_dir, float(execution_confidence.score), decision_agreement)
-                ai_spot_direction = direction_key(ai_spot_snapshot.direction)
-                ai_spot_votes = ai_spot_bias_display_votes(ai_spot_snapshot)
-                ai_confidence_snapshot = build_ai_confidence_snapshot(
-                    direction=ai_spot_snapshot.direction,
-                    combined_score=float(ai_spot_snapshot.score),
-                    conviction_quality=float(ai_spot_snapshot.conviction_quality),
-                    timeframe_alignment=float(ai_spot_snapshot.timeframe_alignment),
-                    consensus_quality=float(ai_spot_snapshot.consensus_quality),
-                    support_votes=int(ai_spot_votes),
-                    timeframe_conflict=bool(ai_spot_snapshot.timeframe_conflict),
-                    degraded_data=bool(ai_spot_snapshot.degraded_data),
-                )
-                ai_spot_agreement = float(ai_spot_bias_directional_agreement(ai_spot_snapshot))
-                ai_spot_consensus = float(ai_spot_bias_consensus_agreement(ai_spot_snapshot))
-                ai_spot_probability_up = float(ai_spot_bias_probability_up(ai_spot_snapshot))
-                ai_spot_status = str(ai_spot_bias_status(ai_spot_snapshot) or "")
+                signal_dir_legacy = pipeline.signal_direction_legacy
+                execution_confidence = pipeline.execution_confidence_snapshot
+                conviction_lbl = pipeline.execution_conviction_label
+                ai_spot_direction = pipeline.ai_spot_direction
+                ai_spot_votes = int(pipeline.ai_spot_votes)
                 df_scalp = df_eval.tail(120).copy()
                 scalp_direction = None
                 entry_s = target_s = stop_s = rr_ratio = 0.0
@@ -488,55 +517,8 @@ def render(ctx: dict) -> None:
                         entry_s = target_s = stop_s = rr_ratio = 0.0
                         breakout_note = ""
 
-                execution_snapshot = selected_timeframe_execution_snapshot(
-                    df=df_eval,
-                    direction=spot_snapshot.direction,
-                    bias_score=float(bias_score),
-                    adx_val=float(adx_val) if pd.notna(adx_val) else float("nan"),
-                    supertrend_trend=str(supertrend_trend),
-                    ichimoku_trend=str(ichimoku_trend),
-                    vwap_label=str(vwap_label),
-                    psar_trend=str(psar_trend),
-                    bollinger_bias=str(bollinger_bias),
-                    williams_label=str(williams_label),
-                    cci_label=str(cci_label),
-                )
-                setup_rr_ratio = float(selected_timeframe_rr_ratio(execution_snapshot, direction=spot_snapshot.direction))
-                trend_led_snapshot = trend_led_confirmation_snapshot(
-                    spot_dir=spot_snapshot.direction,
-                    spot_confidence=float(confidence_snapshot.score),
-                    tactical_dir=signal_dir,
-                    adx_val=float(adx_val) if pd.notna(adx_val) else float("nan"),
-                    structure_quality=float(execution_snapshot.structure_quality),
-                    trend_quality=float(execution_snapshot.trend_quality),
-                    regime_quality=float(execution_snapshot.regime_quality),
-                    location_quality=float(execution_snapshot.location_quality),
-                    rr_ratio=setup_rr_ratio if np.isfinite(setup_rr_ratio) and setup_rr_ratio > 0.0 else None,
-                )
-                ai_led_snapshot = ai_led_confirmation_snapshot(
-                    spot_dir=spot_snapshot.direction,
-                    spot_confidence=float(confidence_snapshot.score),
-                    ai_dir=ai_spot_direction,
-                    ai_probability=float(ai_spot_probability_up),
-                    directional_agreement=float(ai_spot_agreement),
-                    consensus_agreement=float(ai_spot_consensus),
-                    adx_val=float(adx_val) if pd.notna(adx_val) else float("nan"),
-                    location_quality=float(execution_snapshot.location_quality),
-                    rr_ratio=setup_rr_ratio if np.isfinite(setup_rr_ratio) and setup_rr_ratio > 0.0 else None,
-                    ai_status=ai_spot_status,
-                )
-
                 # Setup confirm mirrors market/spot decision policy.
-                action_raw, action_reason_code = spot_action_decision_with_reason(
-                    spot_snapshot.direction,
-                    float(confidence_snapshot.score),
-                    signal_dir,
-                    ai_spot_snapshot.direction,
-                    float(ai_spot_agreement),
-                    float(adx_val),
-                    trend_led_snapshot=trend_led_snapshot,
-                    ai_led_snapshot=ai_led_snapshot,
-                )
+                action_raw, action_reason_code = pipeline.action_raw, pipeline.action_reason_code
 
                 # Spot-style setup snapshot (selected coin/timeframe).
                 price_change = None
@@ -647,7 +629,6 @@ def render(ctx: dict) -> None:
                 )
                 confidence_note = (
                     f"{confidence_note} | Historical read: {adaptive_snapshot.note} | "
-                    f"Execution fit: {adaptive_snapshot.execution_fit_note} | "
                     f"Session fit: {adaptive_snapshot.session_fit_note}"
                 )
                 setup_snapshot_html = build_setup_snapshot_html(
@@ -659,7 +640,7 @@ def render(ctx: dict) -> None:
                             "label": "Setup Confirm",
                             "value": setup_confirm,
                             "color": setup_color,
-                            "title": f"{setup_reason} | Execution fit: {adaptive_snapshot.execution_fit_note}",
+                            "title": setup_reason,
                         },
                         {
                             "label": "Direction",
@@ -687,32 +668,29 @@ def render(ctx: dict) -> None:
                         },
                     ],
                 )
-                st.markdown(setup_snapshot_html, unsafe_allow_html=True)
-                st.markdown(
-                    build_learned_edge_banner_html(
-                        title="Execution Read",
-                        label=(
-                            f"{_trade_gate_display_label(context_fit['label'])} • "
-                            f"{adaptive_snapshot.execution_fit_label}"
-                        ),
-                        note=_execution_read_note(
-                            adaptive_snapshot,
-                            context_fit=context_fit,
-                            market_context_note=market_context_note,
-                            scanner_signal_note=scanner_signal_note,
-                        ),
-                        tone=_learned_edge_tone(
-                            adaptive_snapshot.label,
-                            adaptive_snapshot.execution_fit_label,
-                            adaptive_snapshot.archive_guardrail_label,
-                        ),
-                        text_muted=TEXT_MUTED,
-                        positive=POSITIVE,
-                        negative=NEGATIVE,
-                        warning=WARNING,
-                        accent=ACCENT,
+                archive_banner_html = build_learned_edge_banner_html(
+                    title="Market Archive Read",
+                    label=(
+                        f"{_trade_gate_display_label(context_fit['label'])} • "
+                        f"{_position_archive_status_label(adaptive_snapshot)}"
                     ),
-                    unsafe_allow_html=True,
+                    note=_position_archive_banner_note(
+                        adaptive_snapshot,
+                        context_fit=context_fit,
+                        market_context=recent_market_context,
+                        market_context_note=market_context_note,
+                        scanner_signal_note=scanner_signal_note,
+                    ),
+                    tone=_learned_edge_tone(
+                        adaptive_snapshot.label,
+                        adaptive_snapshot.execution_fit_label,
+                        adaptive_snapshot.archive_guardrail_label,
+                    ),
+                    text_muted=TEXT_MUTED,
+                    positive=POSITIVE,
+                    negative=NEGATIVE,
+                    warning=WARNING,
+                    accent=ACCENT,
                 )
 
                 volume_txt = ""
@@ -781,28 +759,24 @@ def render(ctx: dict) -> None:
                         ),
                     ],
                 )
-                if indicator_groups_html:
-                    st.markdown(indicator_groups_html, unsafe_allow_html=True)
-
                 # Risk alert for position
                 pos_dir = direction_key(direction)
+                risk_alert_html = ""
                 if pos_dir == direction_key(spot_snapshot.direction) and float(confidence_snapshot.score) < 50:
-                    st.markdown(
+                    risk_alert_html = (
                         f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
                         f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
                         f"<span style='color:{NEGATIVE}; font-weight:600;'>Low Confidence</span>"
                         f"<span style='color:{TEXT_MUTED};'> — Position direction matches the spot bias but confidence "
-                        f"is only {float(confidence_snapshot.score):.0f}%. Consider tighter risk control.</span></div>",
-                        unsafe_allow_html=True,
+                        f"is only {float(confidence_snapshot.score):.0f}%. Consider tighter risk control.</span></div>"
                     )
                 elif pos_dir != direction_key(spot_snapshot.direction) and direction_key(spot_snapshot.direction) != "NEUTRAL":
-                    st.markdown(
+                    risk_alert_html = (
                         f"<div style='background:#2D0A0A; border-left:4px solid {NEGATIVE}; "
                         f"padding:6px 10px; border-radius:4px; margin:4px 0; font-size:0.82rem;'>"
                         f"<span style='color:{NEGATIVE}; font-weight:600;'>Direction Conflict</span>"
                         f"<span style='color:{TEXT_MUTED};'> — Your {direction_label(direction)} position conflicts with "
-                        f"the current spot bias {direction_label(spot_snapshot.direction)}. Review position validity.</span></div>",
-                        unsafe_allow_html=True,
+                        f"the current spot bias {direction_label(spot_snapshot.direction)}. Review position validity.</span></div>"
                     )
 
                 recent_sr = df_eval.tail(_sr_lookback(tf))
@@ -927,20 +901,6 @@ def render(ctx: dict) -> None:
                         "Management Risk": management_snapshot.risk_guidance,
                     }
                 )
-                reason_map = {
-                    "signal conflict": "signal conflict",
-                    "no clear technical edge": "no clear edge",
-                    "low confidence": "low confidence",
-                    "medium confidence": "medium confidence",
-                    "AI conflict": "AI conflict",
-                    "low conviction": "weak conviction",
-                    "liquidation too close": "liquidation too close",
-                    "liquidation moderately close": "liquidation moderately close",
-                    "hard invalidation broken": "invalidation broken",
-                    "deep drawdown": "deep drawdown",
-                }
-                why_items = health_notes[:3] if health_notes else ["no major risk flag"]
-                why_text = ", ".join(reason_map.get(n, n) for n in why_items)
                 management_color = _tone_color(
                     management_snapshot.tone,
                     accent=ACCENT,
@@ -948,104 +908,119 @@ def render(ctx: dict) -> None:
                     negative=NEGATIVE,
                     warning=WARNING,
                 )
+                management_scope = "Anchor" if tf == largest_tf else "Timing"
                 st.markdown(
                     f"<div class='panel-box' style='padding:10px 12px; border-left:4px solid {management_color};'>"
                     f"<div style='display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; font-size:0.92rem;'>"
-                    f"<span style='color:{TEXT_MUTED};'>{tf} Position Management:</span> "
+                    f"<span style='color:{TEXT_MUTED};'>{tf} Position Management ({management_scope})</span> "
                     f"<b style='color:{management_color};'>{management_snapshot.label} ({management_snapshot.score}/100)</b>"
                     f"</div>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-                    f"Execution stance: <b>{context_fit['label']}</b> — {context_fit['aggression']}"
-                    f"</div>"
-                    f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-                    f"Hold profile: <b>{hold_profile.get('label') or 'Archive Building'}</b>"
-                    f" • Exit quality: <b>{exit_quality.get('label') or 'Archive Building'}</b>"
-                    f"</div>"
-                    f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-                    f"Size: <b>{management_snapshot.size_guidance}</b>"
+                    f"Now: <b>{management_snapshot.size_guidance}</b>"
                     f"</div>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
                     f"Adds: <b>{management_snapshot.adds_guidance}</b>"
                     f"</div>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
-                    f"Why: {management_snapshot.note} Base health: <b>{health_label}</b> ({health_score}/100); {why_text}."
+                    f"Market stance: <b>{_trade_gate_display_label(context_fit['label'])}</b> — {context_fit['aggression']}"
+                    f"</div>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
+                    f"Hard risk line: <b style='color:{WARNING};'>{invalidation:,.4f}</b>"
+                    f"</div>"
+                    f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:4px;'>"
+                    f"{management_snapshot.note}"
                     f"</div>"
                     f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; margin-top:2px;'>"
-                    f"Next: {management_snapshot.risk_guidance} Hard risk line stays at "
-                    f"<b style='color:{WARNING};'>{invalidation:,.4f}</b>."
+                    f"Next: {management_snapshot.risk_guidance}"
                     f"</div>"
                     f"</div>",
                     unsafe_allow_html=True,
                 )
+                if risk_alert_html:
+                    st.markdown(risk_alert_html, unsafe_allow_html=True)
 
-                # === Scalping Setup ===
-                if df_scalp is not None and len(df_scalp) > 30:
-                    gate_min_rr, gate_min_adx, gate_min_confidence = scalp_gate_thresholds(tf)
-                    scalp_ok, scalp_reason = scalp_quality_gate(
-                        scalp_direction=scalp_direction,
-                        signal_direction=signal_dir,
-                        rr_ratio=rr_ratio,
-                        adx_val=adx_val,
-                        confidence=float(execution_confidence.score),
-                        conviction_label=conviction_lbl,
-                        entry=entry_s,
-                        stop=stop_s,
-                        target=target_s,
-                        min_rr=gate_min_rr,
-                        min_adx=gate_min_adx,
-                        min_confidence=gate_min_confidence,
-                    )
-                
-                    # === Display Scalping Result ===
-                    if scalp_ok and scalp_direction:
-                        color = POSITIVE if scalp_direction == "LONG" else NEGATIVE
+                st.markdown(setup_snapshot_html, unsafe_allow_html=True)
+                st.markdown(archive_banner_html, unsafe_allow_html=True)
+                if indicator_groups_html:
+                    st.markdown(indicator_groups_html, unsafe_allow_html=True)
+
+                if tf in {"1m", "3m", "5m", "15m", "1h"}:
+                    with st.expander("Optional Scalp Read", expanded=False):
                         st.markdown(
-                            f"""
-                            <div class='panel-box' style='border-left:4px solid {color};'>
-                              <div style='display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;'>
-                                <span style='color:{color}; font-weight:800;'>Scalping {direction_label(scalp_direction)}</span>
-                                <span style='color:{color}; font-weight:700;'>R:R {rr_ratio:.2f}</span>
-                              </div>
-                              <div style='color:{TEXT_MUTED}; font-size:0.88rem; margin-top:6px; line-height:1.65;'>
-                                Your Entry <b style='color:{ACCENT};'>${entry_price:,.4f}</b> |
-                                Model Entry <b style='color:{ACCENT};'>${entry_s:,.4f}</b><br>
-                                Stop <b style='color:{NEGATIVE};'>${stop_s:,.4f}</b> |
-                                Target <b style='color:{POSITIVE};'>${target_s:,.4f}</b><br>
-                                {'Good setup quality (R:R gate passed).' if rr_ratio >= gate_min_rr else f'R:R is below gate ({gate_min_rr:.2f}).'}
-                              </div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
-                    else:
-                        reason_map = {
-                            "NO_SCALP_DIRECTION": "No directional scalp setup on current structure.",
-                            "SIGNAL_DIRECTION_NEUTRAL": "Signal direction is neutral; scalp setup is blocked.",
-                            "DIRECTION_MISMATCH": "Scalp side does not match direction; setup filtered.",
-                            "CONFLICT": "Technical vs AI alignment is in conflict.",
-                            "RR_TOO_LOW": f"R:R below required threshold ({gate_min_rr:.2f}).",
-                            "ADX_TOO_LOW": f"ADX below required trend threshold ({gate_min_adx:.0f}).",
-                            "CONFIDENCE_TOO_LOW": f"Confidence below required threshold ({gate_min_confidence:.0f}).",
-                            "INVALID_LEVELS": "Invalid Entry/Stop/Target levels.",
-                        }
-                        msg = breakout_note or reason_map.get(scalp_reason, "No valid scalping setup with current filters.")
-                        if msg in {"Invalid plan levels", "Invalid ATR/price"}:
-                            msg = "No valid plan on current candle structure."
-                        st.markdown(
-                            f"<div class='panel-box' style='border-left:4px solid {WARNING};'>"
-                            f"<b style='color:{WARNING};'>Scalping Opportunity: Not Available</b><br>"
-                            f"<span style='color:{TEXT_MUTED}; font-size:0.86rem;'>Reason: {msg}</span>"
+                            f"<div style='color:{TEXT_MUTED}; font-size:0.84rem; margin-bottom:8px;'>"
+                            f"This is a separate short-term lens. It should not override the core position plan above."
                             f"</div>",
                             unsafe_allow_html=True,
                         )
-                else:
-                    st.markdown(
-                        f"<div class='panel-box' style='border-left:4px solid {WARNING};'>"
-                        f"<b style='color:{WARNING};'>Scalping Opportunity: Not Available</b><br>"
-                        f"<span style='color:{TEXT_MUTED}; font-size:0.86rem;'>Reason: Not enough recent candles for scalping model.</span>"
-                        f"</div>",
-                        unsafe_allow_html=True,
-                    )
+                        if df_scalp is not None and len(df_scalp) > 30:
+                            gate_min_rr, gate_min_adx, gate_min_confidence = scalp_gate_thresholds(tf)
+                            scalp_ok, scalp_reason = scalp_quality_gate(
+                                scalp_direction=scalp_direction,
+                                signal_direction=signal_dir,
+                                rr_ratio=rr_ratio,
+                                adx_val=adx_val,
+                                confidence=float(execution_confidence.score),
+                                conviction_label=conviction_lbl,
+                                entry=entry_s,
+                                stop=stop_s,
+                                target=target_s,
+                                min_rr=gate_min_rr,
+                                min_adx=gate_min_adx,
+                                min_confidence=gate_min_confidence,
+                            )
+
+                            if scalp_ok and scalp_direction:
+                                color = POSITIVE if scalp_direction == "LONG" else NEGATIVE
+                                st.markdown(
+                                    f"""
+                                    <div class='panel-box' style='border-left:4px solid {color};'>
+                                      <div style='display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;'>
+                                        <span style='color:{color}; font-weight:800;'>Scalp {direction_label(scalp_direction)}</span>
+                                        <span style='color:{color}; font-weight:700;'>R:R {rr_ratio:.2f}</span>
+                                      </div>
+                                      <div style='color:{TEXT_MUTED}; font-size:0.88rem; margin-top:6px; line-height:1.65;'>
+                                        Your Entry <b style='color:{ACCENT};'>${entry_price:,.4f}</b> |
+                                        Model Entry <b style='color:{ACCENT};'>${entry_s:,.4f}</b><br>
+                                        Stop <b style='color:{NEGATIVE};'>${stop_s:,.4f}</b> |
+                                        Target <b style='color:{POSITIVE};'>${target_s:,.4f}</b><br>
+                                        {'Good setup quality (R:R gate passed).' if rr_ratio >= gate_min_rr else f'R:R is below gate ({gate_min_rr:.2f}).'}
+                                      </div>
+                                    </div>
+                                    """,
+                                    unsafe_allow_html=True,
+                                )
+                            else:
+                                scalp_reason_map = {
+                                    "NO_SCALP_DIRECTION": "No directional scalp setup on current structure.",
+                                    "SIGNAL_DIRECTION_NEUTRAL": "Signal direction is neutral; scalp setup is blocked.",
+                                    "DIRECTION_MISMATCH": "Scalp side does not match direction; setup filtered.",
+                                    "CONFLICT": "Technical vs AI alignment is in conflict.",
+                                    "RR_TOO_LOW": f"R:R below required threshold ({gate_min_rr:.2f}).",
+                                    "ADX_TOO_LOW": f"ADX below required trend threshold ({gate_min_adx:.0f}).",
+                                    "CONFIDENCE_TOO_LOW": f"Confidence below required threshold ({gate_min_confidence:.0f}).",
+                                    "INVALID_LEVELS": "Invalid Entry/Stop/Target levels.",
+                                }
+                                msg = breakout_note or scalp_reason_map.get(
+                                    scalp_reason,
+                                    "No valid scalping setup with current filters.",
+                                )
+                                if msg in {"Invalid plan levels", "Invalid ATR/price"}:
+                                    msg = "No valid plan on current candle structure."
+                                st.markdown(
+                                    f"<div class='panel-box' style='border-left:4px solid {WARNING};'>"
+                                    f"<b style='color:{WARNING};'>Scalp Read: Not Available</b><br>"
+                                    f"<span style='color:{TEXT_MUTED}; font-size:0.86rem;'>Reason: {msg}</span>"
+                                    f"</div>",
+                                    unsafe_allow_html=True,
+                                )
+                        else:
+                            st.markdown(
+                                f"<div class='panel-box' style='border-left:4px solid {WARNING};'>"
+                                f"<b style='color:{WARNING};'>Scalp Read: Not Available</b><br>"
+                                f"<span style='color:{TEXT_MUTED}; font-size:0.86rem;'>Reason: Not enough recent candles for the scalp model.</span>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
 
         df_candle_live = fetch_ohlcv(coin, largest_tf, limit=100)
         df_candle, used_candle_cache, candle_cache_ts = live_or_snapshot(

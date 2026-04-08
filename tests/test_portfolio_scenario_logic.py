@@ -48,7 +48,9 @@ class PortfolioScenarioLogicTests(unittest.TestCase):
         self.assertGreater(long_info["horizon_bars"], short_info["horizon_bars"])
 
     def test_sanitize_holdings_rows_dedupes_and_limits(self):
-        normalize = lambda coin: f"{coin.upper()}/USDT"
+        def normalize(coin: str) -> str:
+            return f"{coin.upper()}/USDT"
+
         raw = pd.DataFrame(
             {
                 "Coin": ["btc", "eth", "btc", "sol", "xrp", "ada", "doge", "link", "fet", "tao", "render", "inj"],
@@ -62,7 +64,9 @@ class PortfolioScenarioLogicTests(unittest.TestCase):
         self.assertEqual(rows[-1]["symbol"], "RENDER/USDT")
 
     def test_sanitize_holdings_rows_returns_meta_for_dropped_rows(self):
-        normalize = lambda coin: f"{coin.upper()}/USDT"
+        def normalize(coin: str) -> str:
+            return f"{coin.upper()}/USDT"
+
         raw = pd.DataFrame(
             {
                 "Coin": ["btc", "eth", "btc", "sol", "doge"],

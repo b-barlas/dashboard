@@ -3,10 +3,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
-from core.session_utils import SESSION_ORDER, session_bucket_for_hour, session_bucket_for_timestamp
+from core.session_utils import SESSION_ORDER, session_bucket_for_timestamp
 
 from ui.ctx import get_ctx
-from ui.signal_formatters import trade_gate_display_label
 from ui.primitives import render_help_details, render_insight_card, render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
@@ -23,12 +22,6 @@ def _format_volume_compact(value: float) -> str:
     if value >= 1_000:
         return f"{value / 1_000:.2f}K"
     return f"{value:,.0f}"
-
-
-def _session_bucket(hour: int) -> str:
-    return session_bucket_for_hour(hour)
-
-
 def _relative_quality_label(score: float) -> str:
     if score >= 68:
         return "Leading"
@@ -73,7 +66,6 @@ def _compute_session_metrics(df: pd.DataFrame) -> pd.DataFrame:
 
     grouped = clean.groupby("session").agg(
         avg_volume=("volume", "mean"),
-        total_volume=("volume", "sum"),
         avg_range=("range_pct", "mean"),
         avg_return=("return_pct", "mean"),
         avg_abs_return=("abs_return_pct", "mean"),
@@ -166,7 +158,7 @@ def _playbook_timing_read(
 ) -> dict[str, str]:
     if playbook_archive is None or playbook_archive.empty:
         return {
-            "title": "Selective Only",
+            "title": "Mixed",
             "tone": "neutral",
             "note": "The current playbook does not have enough tracked history yet to favor a specific session window.",
         }
@@ -182,13 +174,13 @@ def _playbook_timing_read(
         title = "Stand Aside"
         tone = "negative"
     elif current_session in {follow_session, exec_session}:
-        title = "Tradeable"
+        title = "Supportive"
         tone = "positive"
     elif current_session == "Unknown":
-        title = "Selective Only"
+        title = "Mixed"
         tone = "neutral"
     else:
-        title = "Defensive Only"
+        title = "Cautious"
         tone = "warning"
 
     note = (
@@ -236,20 +228,19 @@ def render(ctx: dict) -> None:
             "and directionally tilted. All labels here are <b>relative across these 3 sessions only</b>."
         ),
     )
-    with st.form("sessions_analysis_form"):
-        c1, c2 = st.columns(2)
-        with c1:
-            coin_s = _normalize_coin_input(
-                st.text_input("Coin (e.g. BTC, ETH, TAO)", value="BTC", key="session_coin_input")
-            )
-        with c2:
-            lookback = st.selectbox("Lookback Candles (1h)", [240, 360, 500], index=2, key="session_lookback")
-        submitted = st.form_submit_button("Analyse Sessions", type="primary")
+    c1, c2 = st.columns(2)
+    with c1:
+        coin_s = _normalize_coin_input(
+            st.text_input("Coin (e.g. BTC, ETH, TAO)", value="BTC", key="session_coin_input")
+        )
+    with c2:
+        lookback = st.selectbox("Lookback Candles (1h)", [240, 360, 500], index=2, key="session_lookback")
 
     current_sig = (coin_s, int(lookback), "1h")
     state_key = "sessions_analysis_result"
 
-    if submitted:
+    result = st.session_state.get(state_key)
+    if not result or result.get("sig") != current_sig:
         val_err = _validate_coin_symbol(coin_s)
         if val_err:
             st.error(val_err)
@@ -284,7 +275,7 @@ def render(ctx: dict) -> None:
             }
 
     result = st.session_state.get(state_key)
-    if not result or result.get("sig") != current_sig:
+    if not result:
         return
 
     grouped = result["grouped"]
@@ -325,15 +316,15 @@ def render(ctx: dict) -> None:
     data_coverage = int(grouped["candle_count"].sum())
     leader_label = str(grouped.loc[best_score, "relative_label"])
     if leader_label == "Leading":
-        profile_title = "Leading Execution Window"
+        profile_title = "Best Relative Timing Window"
         profile_color = POSITIVE
         profile_note = "This session currently offers the cleanest relative mix of liquidity, movement and usable range."
     elif leader_label == "Balanced":
-        profile_title = "Mixed Execution Window"
+        profile_title = "Mixed Timing Window"
         profile_color = WARNING
         profile_note = "Conditions are usable, but the edge is only moderate relative to the other sessions."
     else:
-        profile_title = "Weak Relative Window"
+        profile_title = "Weak Timing Window"
         profile_color = NEGATIVE
         profile_note = "All sessions look soft; the best one is only less weak than the others."
 
@@ -341,7 +332,7 @@ def render(ctx: dict) -> None:
         st,
         items=[
             {
-                "label": "Relative Leader",
+                "label": "Best Relative Session",
                 "value": best_score,
                 "subtext": (
                     f"Quality {grouped.loc[best_score, 'relative_quality']:.1f} · "
@@ -349,7 +340,7 @@ def render(ctx: dict) -> None:
                 ),
             },
             {
-                "label": "Deepest Liquidity",
+                "label": "Cleanest Liquidity",
                 "value": best_liquidity,
                 "subtext": (
                     f"Avg Vol {_format_volume_compact(grouped.loc[best_liquidity, 'avg_volume'])} · "
@@ -357,7 +348,7 @@ def render(ctx: dict) -> None:
                 ),
             },
             {
-                "label": "Fastest Tape",
+                "label": "Most Active Tape",
                 "value": fastest_tape,
                 "subtext": (
                     f"Avg |Move| {grouped.loc[fastest_tape, 'avg_abs_return']:.2f}% · "
@@ -383,9 +374,68 @@ def render(ctx: dict) -> None:
     )
     tracker_db_path = init_signal_tracker_db(get_signal_tracker_db_path())
     tracked_events = fetch_signal_events_df(limit=2000, source="Market", db_path=tracker_db_path)
+    tracked_session_summary = pd.DataFrame()
+    current_playbook = "Unknown"
+    current_trade_gate = "Unknown"
+    current_catalyst_window = "Unknown"
+    current_session = session_bucket_for_timestamp()
+    playbook_session_archive = pd.DataFrame()
+    timing_read: dict[str, str] | None = None
+
     if tracked_events is not None and not tracked_events.empty:
         tracked_events = _prepare_tracked_session_archive(tracked_events)
         tracked_session_summary = build_signal_cohort_summary(tracked_events, "Session")
+        recent_market_context = build_recent_market_context_snapshot(tracked_events)
+        current_playbook = str(recent_market_context.get("Playbook") or "Unknown")
+        current_trade_gate = str(recent_market_context.get("Trade Gate") or "Unknown")
+        current_catalyst_window = str(recent_market_context.get("Catalyst Window") or "Unknown")
+        playbook_session_archive = _build_playbook_session_archive(tracked_events, current_playbook)
+        if not playbook_session_archive.empty:
+            timing_read = _playbook_timing_read(
+                playbook_session_archive,
+                current_session=current_session,
+                trade_gate=current_trade_gate,
+                catalyst_window=current_catalyst_window,
+            )
+            render_insight_card(
+                st,
+                title=f"Current Timing Read · {timing_read['title']}",
+                body_html=(
+                    f"<span style='font-weight:700;'>Current session:</span> {current_session}. "
+                    f"<span style='font-weight:700;'>Playbook:</span> {current_playbook}. "
+                    f"<span style='font-weight:700;'>Catalyst window:</span> {current_catalyst_window}. "
+                    f"{timing_read['note']}"
+                ),
+                tone=timing_read["tone"],
+            )
+
+    render_help_details(
+        st,
+        summary="How to read quickly (?)",
+        body_html=(
+            "<b>1.</b> Start with <b>Best Relative Session</b>: this is the best session among Asia / Europe / US <b>for this sample only</b>.<br>"
+            "<b>2.</b> Use <b>Cleanest Liquidity</b> when your setup already exists and you want cleaner fills.<br>"
+            "<b>3.</b> Use <b>Most Active Tape</b> when you want movement, but remember fast tape can also mean harder execution.<br>"
+            "<b>4.</b> <b>Up Tilt / Down Tilt</b> is timing context, not a buy/sell signal by itself.<br>"
+            "<b>5.</b> Use this tab to choose <b>when</b> to execute; use Market / Spot / Position to decide <b>what</b> to trade."
+        ),
+    )
+
+    with st.expander("Archive & Diagnostics", expanded=False):
+        st.markdown(
+            f"<div style='color:{TEXT_MUTED}; font-size:0.88rem; margin-bottom:10px;'>"
+            f"Use this section only when you want the deeper archive view or raw diagnostics."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"<div style='color:{TEXT_MUTED}; font-size:0.86rem; line-height:1.65; margin-bottom:12px;'>"
+            f"<b>Metric Guide:</b> Relative Quality is a relative timing score across the 3 sessions only. "
+            f"It blends liquidity 50%, usable range 30%, and movement quality 20%. "
+            f"Up Tilt / Down Tilt is context, not a standalone buy or sell signal."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
         if not tracked_session_summary.empty:
             best_archive_follow = tracked_session_summary.sort_values(
                 ["FollowThroughPct", "Signals"], ascending=[False, False]
@@ -419,19 +469,7 @@ def render(ctx: dict) -> None:
             st.markdown(f"<b style='color:{ACCENT};'>Tracked Session Archive</b>", unsafe_allow_html=True)
             st.dataframe(tracked_session_view.round(2), hide_index=True, width="stretch")
 
-        recent_market_context = build_recent_market_context_snapshot(tracked_events)
-        current_playbook = str(recent_market_context.get("Playbook") or "Unknown")
-        current_trade_gate = str(recent_market_context.get("Trade Gate") or "Unknown")
-        current_catalyst_window = str(recent_market_context.get("Catalyst Window") or "Unknown")
-        current_session = session_bucket_for_timestamp()
-        playbook_session_archive = _build_playbook_session_archive(tracked_events, current_playbook)
-        if not playbook_session_archive.empty:
-            timing_read = _playbook_timing_read(
-                playbook_session_archive,
-                current_session=current_session,
-                trade_gate=current_trade_gate,
-                catalyst_window=current_catalyst_window,
-            )
+        if timing_read is not None and not playbook_session_archive.empty:
             best_playbook_follow = playbook_session_archive.sort_values(
                 ["FollowThroughPct", "Signals"], ascending=[False, False]
             ).iloc[0]
@@ -455,15 +493,6 @@ def render(ctx: dict) -> None:
                     },
                 ],
             )
-            render_insight_card(
-                st,
-                title=f"Current Playbook Timing Filter · {trade_gate_display_label(timing_read['title'])}",
-                body_html=(
-                    f"<span style='font-weight:700;'>Catalyst window:</span> {current_catalyst_window}. "
-                    f"{timing_read['note']}"
-                ),
-                tone=timing_read["tone"],
-            )
             playbook_view = playbook_session_archive[
                 ["Session", "Signals", "Resolved", "FollowThroughPct", "ClosedTradeCount", "ActualWinRatePct", "AvgActualPnlPct"]
             ].copy()
@@ -473,39 +502,6 @@ def render(ctx: dict) -> None:
             )
             st.dataframe(playbook_view.round(2), hide_index=True, width="stretch")
 
-    render_help_details(
-        st,
-        summary="How to read quickly (?)",
-        body_html=(
-            "<b>1.</b> Start with <b>Relative Leader</b>: this is the best session among Asia / Europe / US <b>for this sample only</b>.<br>"
-            "<b>2.</b> Use <b>Deepest Liquidity</b> when your setup already exists and you want cleaner fills.<br>"
-            "<b>3.</b> Use <b>Fastest Tape</b> when you want movement, but remember fast tape can also mean harder execution.<br>"
-            "<b>4.</b> <b>Up Tilt / Down Tilt</b> is timing context, not a buy/sell signal by itself.<br>"
-            "<b>5.</b> Use this tab to choose <b>when</b> to execute; use Market / Spot / Position to decide <b>what</b> to trade."
-        ),
-    )
-
-    render_help_details(
-        st,
-        summary="Metric Guide",
-        body_html=(
-            "<b>Session</b>: The UTC block being evaluated (Asia / Europe / US).<br>"
-            "<b>Relative Quality (0-100)</b>: A relative timing score across the 3 sessions only. "
-            "It blends liquidity 50%, usable range 30%, and movement quality 20%. "
-            "It does <b>not</b> mean a guaranteed edge by itself.<br>"
-            "<b>Relative Read</b>: Quick label for the score band. Leading = best of the three right now, Balanced = usable, Lagging = weakest.<br>"
-            "<b>Avg Volume</b>: Average hourly traded size inside that session. Higher usually means cleaner fills.<br>"
-            "<b>Avg Range (%)</b>: Average candle high-low width. Higher means wider tape and usually bigger stop distance.<br>"
-            "<b>Avg Return (%)</b>: Average hourly drift. Positive = mild upward tilt, negative = mild downward tilt.<br>"
-            "<b>Avg |Move| (%)</b>: Average absolute candle move size. Higher means faster tape.<br>"
-            "<b>Candles</b>: Number of hourly candles in the sample for that session bucket.<br>"
-            "<b>Liquidity</b>: Deep / Average / Thin volume context <b>relative to the other 2 sessions in this sample</b>.<br>"
-            "<b>Range Profile</b>: Controlled / Tradable / Stretched range balance for execution, also <b>relative across the 3 sessions</b>.<br>"
-            f"<b>Drift Bias</b>: Up Tilt / Down Tilt / Flat hourly drift context. Tiny drift inside +/-{DRIFT_BIAS_DEADBAND_PCT:.2f}% is treated as Flat to avoid noise."
-        ),
-    )
-
-    with st.expander("Advanced Session Charts (optional diagnostics)"):
         st.caption(
             "Use these only as visual support: the first chart ranks liquidity by session; "
             "the second shows whether movement is coming from usable range expansion or just noisy tape."
@@ -557,58 +553,52 @@ def render(ctx: dict) -> None:
         )
         st.plotly_chart(fig_range_ret, width="stretch")
 
-    summary_df = grouped.reset_index().rename(
-        columns={
-            "session": "Session",
-            "avg_volume": "Avg Volume",
-            "avg_range": "Avg Range (%)",
-            "avg_return": "Avg Return (%)",
-            "avg_abs_return": "Avg |Move| (%)",
-            "candle_count": "Candles",
-            "relative_quality": "Relative Quality",
-            "relative_label": "Relative Read",
-            "liquidity_label": "Liquidity",
-            "range_profile_label": "Range Profile",
-            "drift_bias_label": "Drift Bias",
-        }
-    )
-    summary_df["Avg Volume"] = summary_df["Avg Volume"].apply(_format_volume_compact)
-
-    def _style_label(value: str) -> str:
-        color = _label_color(str(value))
-        return f"color:{color}; font-weight:700;"
-
-    st.markdown(f"<b style='color:{ACCENT};'>Session Summary Table</b>", unsafe_allow_html=True)
-    st.dataframe(
-        summary_df[
-            [
-                "Session",
-                "Relative Quality",
-                "Relative Read",
-                "Avg Volume",
-                "Avg Range (%)",
-                "Avg Return (%)",
-                "Avg |Move| (%)",
-                "Candles",
-                "Liquidity",
-                "Range Profile",
-                "Drift Bias",
-            ]
-        ].style.format(
-            {
-                "Relative Quality": "{:.1f}",
-                "Avg Range (%)": "{:.3f}",
-                "Avg Return (%)": "{:+.3f}",
-                "Avg |Move| (%)": "{:.3f}",
-                "Candles": "{:.0f}",
+        summary_df = grouped.reset_index().rename(
+            columns={
+                "session": "Session",
+                "avg_volume": "Avg Volume",
+                "avg_range": "Avg Range (%)",
+                "avg_return": "Avg Return (%)",
+                "avg_abs_return": "Avg |Move| (%)",
+                "candle_count": "Candles",
+                "relative_quality": "Relative Quality",
+                "relative_label": "Relative Read",
+                "liquidity_label": "Liquidity",
+                "range_profile_label": "Range Profile",
+                "drift_bias_label": "Drift Bias",
             }
-        ).map(_style_label, subset=["Relative Read", "Liquidity", "Range Profile", "Drift Bias"]),
-        width="stretch",
-        hide_index=True,
-    )
+        )
+        summary_df["Avg Volume"] = summary_df["Avg Volume"].apply(_format_volume_compact)
 
-    st.info(
-        f"Use **{best_score}** as the preferred execution window when your setup already exists. "
-        f"If you need clean fills, prioritize **{best_liquidity}**. "
-        f"If you need movement, monitor **{fastest_tape}**, but expect harder execution."
-    )
+        def _style_label(value: str) -> str:
+            color = _label_color(str(value))
+            return f"color:{color}; font-weight:700;"
+
+        st.markdown(f"<b style='color:{ACCENT};'>Session Summary Table</b>", unsafe_allow_html=True)
+        st.dataframe(
+            summary_df[
+                [
+                    "Session",
+                    "Relative Quality",
+                    "Relative Read",
+                    "Avg Volume",
+                    "Avg Range (%)",
+                    "Avg Return (%)",
+                    "Avg |Move| (%)",
+                    "Candles",
+                    "Liquidity",
+                    "Range Profile",
+                    "Drift Bias",
+                ]
+            ].style.format(
+                {
+                    "Relative Quality": "{:.1f}",
+                    "Avg Range (%)": "{:.3f}",
+                    "Avg Return (%)": "{:+.3f}",
+                    "Avg |Move| (%)": "{:.3f}",
+                    "Candles": "{:.0f}",
+                }
+            ).map(_style_label, subset=["Relative Read", "Liquidity", "Range Profile", "Drift Bias"]),
+            width="stretch",
+            hide_index=True,
+        )

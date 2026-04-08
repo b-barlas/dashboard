@@ -51,6 +51,22 @@ from core.catalyst_engine import catalyst_signal_note, catalyst_window_label
 from core.session_utils import session_bucket_for_timestamp
 from core.signal_tracker import build_alert_effectiveness_summary
 from core.symbols import canonical_base_symbol, is_stable_base_symbol
+from tabs.market_scan_helpers import (
+    SCAN_MODE_ACTIONABLE as _SCAN_MODE_ACTIONABLE,
+    SCAN_MODE_BROAD as _SCAN_MODE_BROAD,
+    _actionable_analysis_batch_size,
+    _actionable_context_score,
+    _actionable_direction_include,
+    _actionable_frame_hunt_score,
+    _actionable_setup_score,
+    _actionable_tactical_candidate_score,
+    _candidate_scan_symbols as _candidate_scan_symbols_impl,
+    _initial_scan_symbols,
+    _next_refill_candidate_batch,
+    _next_scan_pool_target,
+    _normalize_scan_mode,
+    _scan_candidate_pool_size,
+)
 from ui.primitives import render_help_details, render_kpi_grid, render_page_header
 from ui.signal_formatters import trade_gate_display_label
 
@@ -136,6 +152,30 @@ def _market_result_priority_key(row: dict) -> tuple[float, float, float, float, 
         -_sortable_float(row.get("__mcap_val", 0)),
         str(row.get("Coin", "")),
     )
+
+
+def _actionable_market_result_priority_key(
+    row: dict,
+) -> tuple[float, float, float, float, float, float, float, float, float, str]:
+    return (
+        -float(_setup_confirm_priority(str(row.get("__action_raw", row.get("Setup Confirm", ""))))),
+        -_sortable_float(row.get("__actionable_context_score", 0.0)),
+        -_sortable_float(row.get("__actionable_tactical_score", 0.0)),
+        -_sortable_float(row.get("__actionable_setup_score", 0.0)),
+        -_sortable_float(row.get("__risk_unit_fraction", 0.0)),
+        -_sortable_float(row.get("__confidence_val", 0.0)),
+        -_sortable_float(row.get("__adaptive_edge_score", 50.0)),
+        _sortable_float(row.get("__archive_guardrail_penalty", 0.0)),
+        -_sortable_float(row.get("__rr_val", 0.0)),
+        -_sortable_float(row.get("__ai_confidence_val", 0.0)),
+        str(row.get("Coin", "")),
+    )
+
+
+def _market_result_priority_key_for_mode(row: dict, scan_mode: str) -> tuple:
+    if _normalize_scan_mode(scan_mode) == _SCAN_MODE_ACTIONABLE:
+        return _actionable_market_result_priority_key(row)
+    return _market_result_priority_key(row)
 
 
 def _emerging_badge_tone(direction: str) -> str:
@@ -281,6 +321,7 @@ def _market_signal_log_events(
     *,
     rows: list[dict],
     timeframe: str,
+    scan_mode: str,
     market_lead_snapshot: MarketLeadSnapshot,
     market_regime_snapshot,
     market_trade_gate_snapshot,
@@ -351,6 +392,7 @@ def _market_signal_log_events(
                 "timeframe": str(row.get("__timeframe") or timeframe),
                 "event_time": event_time,
                 "session_bucket": session_bucket_for_timestamp(event_time),
+                "scan_focus": _normalize_scan_mode(scan_mode),
                 "direction": direction_raw,
                 "setup_confirm": str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
                 "action_reason": str(row.get("__action_reason") or ""),
@@ -387,6 +429,10 @@ def _market_signal_log_events(
                 "market_flow_bias": str(getattr(market_flow_snapshot, "state", "") or ""),
                 "adaptive_edge_label": str(row.get("__adaptive_edge_label") or ""),
                 "adaptive_edge_score": row.get("__adaptive_edge_score"),
+                "actionable_frame_score": row.get("__actionable_frame_score"),
+                "actionable_setup_score": row.get("__actionable_setup_score"),
+                "actionable_context_score": row.get("__actionable_context_score"),
+                "actionable_tactical_score": row.get("__actionable_tactical_score"),
                 "archive_guardrail_label": str(row.get("__archive_guardrail_label") or ""),
                 "archive_guardrail_penalty": row.get("__archive_guardrail_penalty"),
                 "archive_guardrail_note": str(row.get("__archive_guardrail_note") or ""),
@@ -988,6 +1034,9 @@ def _audit_scan_summary_lines(
     skipped_count: int,
     ranked_out_count: int,
     source_label: str,
+    scan_mode: str = _SCAN_MODE_BROAD,
+    timeframe: str = "1h",
+    direction_filter: str = "Both",
 ) -> list[str]:
     lines = [f"**Rows shown:** `{int(max(0, displayed_rows))}`"]
     if int(max(0, attempted_count)) > 0:
@@ -999,6 +1048,9 @@ def _audit_scan_summary_lines(
         if int(max(0, ranked_out_count)) > 0:
             summary += f" • ranked out `{int(max(0, ranked_out_count))}`"
         lines.append(summary)
+    lines.append(
+        f"**Scanner focus:** `{_normalize_scan_mode(scan_mode)}` • **Timeframe:** `{str(timeframe).upper()}` • **Direction:** `{direction_filter}`"
+    )
     if str(source_label or "").strip().upper().startswith("CACHED"):
         lines.append("_Current table is cached. Live attempt stats reflect the latest refresh attempt, not the cached rows._")
     return lines
@@ -1113,10 +1165,6 @@ def _ai_confidence_note(snapshot, score: float) -> str:
         f"AI side: {_spot_bias_label(snapshot.direction)}. Model support: {int(dots)}/3."
         f"{cap_text}"
     )
-
-
-def _is_stable_base(base: str) -> bool:
-    return is_stable_base_symbol(base)
 
 
 def _cache_is_fresh(cache_ts: str | None, ttl_minutes: int) -> bool:
@@ -1258,15 +1306,18 @@ def _market_scan_signature(
     top_n: int,
     exclude_stables: bool,
     custom_bases_applied: list[str],
+    scan_mode: str = _SCAN_MODE_BROAD,
 ) -> tuple:
     custom_tuple = tuple(_normalize_custom_bases(custom_bases_applied, sort_output=True))
     effective_top_n = 0 if custom_tuple else int(top_n)
+    effective_scan_mode = _SCAN_MODE_BROAD if custom_tuple else _normalize_scan_mode(scan_mode)
     return (
         timeframe,
         direction_filter,
         effective_top_n,
         bool(exclude_stables),
         custom_tuple,
+        effective_scan_mode,
     )
 
 
@@ -1593,17 +1644,31 @@ def _resolve_notice_scan_state(
     return out
 
 
+def _is_stable_base(base: str) -> bool:
+    return is_stable_base_symbol(base)
+
+
 def _candidate_scan_symbols(
     *,
     usdt_symbols: list[str],
     market_rows: list[dict],
     exclude_stables: bool,
     custom_bases_applied: list[str],
+    timeframe: str = "1h",
+    direction_filter: str = "Both",
+    scan_mode: str = _SCAN_MODE_BROAD,
+    classify_symbol_sector=None,
 ) -> list[str]:
-    if custom_bases_applied:
-        candidates = [f"{b}/USDT" for b in custom_bases_applied]
-    else:
-        candidates = _filter_scan_symbols(usdt_symbols, market_rows)
+    candidates = _candidate_scan_symbols_impl(
+        usdt_symbols=usdt_symbols,
+        market_rows=market_rows,
+        exclude_stables=False,
+        custom_bases_applied=custom_bases_applied,
+        timeframe=timeframe,
+        direction_filter=direction_filter,
+        scan_mode=scan_mode,
+        classify_symbol_sector=classify_symbol_sector,
+    )
     if exclude_stables:
         candidates = [s for s in candidates if "/" in s and not _is_stable_base(s.split("/")[0].upper())]
     return candidates
@@ -1667,65 +1732,6 @@ def _next_universe_fetch_n(
         int(current_fetch_n) + max(int(requested_n), 25),
     )
     return min(int(max_fetch_n), int(next_fetch_n))
-
-
-def _scan_candidate_pool_size(
-    requested_n: int,
-    *,
-    custom_mode_active: bool,
-    max_pool_n: int = 250,
-) -> int:
-    requested = max(1, int(requested_n))
-    if custom_mode_active:
-        return requested
-    extra = min(25, max(10, requested // 2))
-    return min(int(max_pool_n), requested + extra)
-
-
-def _next_scan_pool_target(
-    current_pool_n: int,
-    *,
-    requested_n: int,
-    produced_n: int,
-    custom_mode_active: bool,
-    used_major_fallback: bool,
-    max_pool_n: int = 250,
-) -> int:
-    if custom_mode_active or used_major_fallback:
-        return int(current_pool_n)
-    if int(produced_n) >= int(requested_n):
-        return int(current_pool_n)
-    if int(current_pool_n) >= int(max_pool_n):
-        return int(current_pool_n)
-    shortfall = max(1, int(requested_n) - int(produced_n))
-    next_pool_n = max(
-        int(current_pool_n * 1.5),
-        int(current_pool_n) + max(shortfall, 25),
-    )
-    return min(int(max_pool_n), int(next_pool_n))
-
-
-def _next_refill_candidate_batch(
-    *,
-    candidate_pool: list[str],
-    attempted_symbols: set[str],
-    requested_n: int,
-    produced_n: int,
-    custom_mode_active: bool,
-    used_major_fallback: bool,
-) -> list[str]:
-    if custom_mode_active or used_major_fallback:
-        return []
-    if int(produced_n) >= int(requested_n):
-        return []
-    remaining = [symbol for symbol in candidate_pool if symbol not in attempted_symbols]
-    if not remaining:
-        return []
-    refill_target = _scan_candidate_pool_size(
-        max(1, int(requested_n) - int(produced_n)),
-        custom_mode_active=False,
-    )
-    return remaining[:refill_target]
 
 
 def _delta_fallback_symbol(
@@ -2326,7 +2332,7 @@ def render(ctx: dict) -> None:
     custom_bases_applied = _normalize_custom_bases(list(st.session_state.get("market_custom_bases_applied", [])))
     custom_mode_active = bool(custom_bases_applied)
 
-    controls = st.columns([1.08, 1.18, 0.90, 1.52, 0.92], gap="medium")
+    controls = st.columns([1.02, 1.08, 1.08, 0.82, 1.42, 0.92], gap="medium")
     with controls[0]:
         # Persist the selected timeframe in session state so the market
         # prediction card updates when this value changes.  The key ensures
@@ -2345,6 +2351,15 @@ def render(ctx: dict) -> None:
             format_func=lambda x: "All Directions" if x == "Both" else x,
         )
     with controls[2]:
+        scan_mode = st.selectbox(
+            "Scanner Focus",
+            [_SCAN_MODE_BROAD, _SCAN_MODE_ACTIONABLE],
+            index=0,
+            key="market_scan_mode",
+            disabled=custom_mode_active,
+            help="Actionable Setups scans a wider active-liquidity pool and biases candidates toward the selected timeframe and direction.",
+        )
+    with controls[3]:
         top_n_default = int(st.session_state.get("market_top_n", 10))
         top_n = st.slider(
             "Top N",
@@ -2354,7 +2369,7 @@ def render(ctx: dict) -> None:
             key="market_top_n",
             disabled=custom_mode_active,
         )
-    with controls[3]:
+    with controls[4]:
         custom_coin_input = st.text_input(
             "Custom Coins (max 10)",
             value=st.session_state.get("market_custom_coin_input", ""),
@@ -2362,7 +2377,7 @@ def render(ctx: dict) -> None:
             placeholder="BTC, ETH, SOL",
             help="Optional watchlist mode. Enter up to 10 symbols separated by comma.",
         )
-    with controls[4]:
+    with controls[5]:
         run_scan = st.button("Run Scan", type="primary", width="stretch")
         clear_custom = st.button(
             "Clear Custom",
@@ -2393,6 +2408,8 @@ def render(ctx: dict) -> None:
         )
     elif custom_coin_input.strip() and custom_bases_draft:
         st.caption("Custom symbols are ready. Click Run Scan to apply watchlist mode.")
+    elif _normalize_scan_mode(scan_mode) == _SCAN_MODE_ACTIONABLE:
+        st.caption("Actionable Setups widens the universe first, then pre-ranks coins by liquidity, move character, timeframe, and direction fit.")
 
     exclude_stables = st.toggle(
         "Exclude stablecoins",
@@ -3570,6 +3587,7 @@ def render(ctx: dict) -> None:
         top_n=int(top_n),
         exclude_stables=bool(exclude_stables),
         custom_bases_applied=custom_bases_applied,
+        scan_mode=scan_mode,
     )
     last_sig = st.session_state.get("market_scan_sig")
     last_attempt_ts = str(st.session_state.get(_LAST_SCAN_ATTEMPT_TS_KEY) or "")
@@ -3599,13 +3617,18 @@ def render(ctx: dict) -> None:
         spinner_label = (
             f"Scanning custom watchlist ({len(custom_bases_applied)}) ({direction_filter}) [{timeframe}] ..."
             if custom_mode_active
-            else f"Scanning {top_n} coins ({direction_filter}) [{timeframe}] ..."
+            else (
+                f"Scanning actionable setup pool for {top_n} best setups ({direction_filter}) [{timeframe}] ..."
+                if _normalize_scan_mode(scan_mode) == _SCAN_MODE_ACTIONABLE
+                else f"Scanning {top_n} coins ({direction_filter}) [{timeframe}] ..."
+            )
         )
         with st.spinner(spinner_label):
             requested_n = len(custom_bases_applied) if custom_mode_active else int(top_n)
             scan_pool_n = _scan_candidate_pool_size(
                 requested_n,
                 custom_mode_active=custom_mode_active,
+                scan_mode=scan_mode,
             )
             unique_market_data: list[dict] = []
             mcap_map: dict[str, int] = {}
@@ -3619,7 +3642,10 @@ def render(ctx: dict) -> None:
                 *,
                 current_fetch_n: int | None = None,
             ) -> tuple[int, list[str], list[dict], dict[str, int], list[str]]:
-                provider_fetch_n_local = min(250, max(int(top_n), 50))
+                if _normalize_scan_mode(scan_mode) == _SCAN_MODE_ACTIONABLE:
+                    provider_fetch_n_local = min(250, max(int(top_n) * 4, 80))
+                else:
+                    provider_fetch_n_local = min(250, max(int(top_n), 50))
                 if current_fetch_n is not None:
                     provider_fetch_n_local = max(provider_fetch_n_local, int(current_fetch_n))
                 while True:
@@ -3630,6 +3656,10 @@ def render(ctx: dict) -> None:
                         market_rows=unique_market_data_local,
                         exclude_stables=bool(exclude_stables),
                         custom_bases_applied=custom_bases_applied,
+                        timeframe=timeframe,
+                        direction_filter=direction_filter,
+                        scan_mode=scan_mode,
+                        classify_symbol_sector=classify_symbol_sector,
                     )
                     next_fetch_n_local = _next_universe_fetch_n(
                         provider_fetch_n_local,
@@ -3660,7 +3690,14 @@ def render(ctx: dict) -> None:
                 provider_fetch_n, usdt_symbols, unique_market_data, mcap_map, candidate_symbol_pool = (
                     _load_noncustom_scan_universe(scan_pool_n)
                 )
-                working_symbols = candidate_symbol_pool[:requested_n]
+                working_symbols = _initial_scan_symbols(
+                    candidate_pool=candidate_symbol_pool,
+                    requested_n=requested_n,
+                    scan_pool_n=scan_pool_n,
+                    custom_mode_active=False,
+                    scan_mode=scan_mode,
+                    timeframe=timeframe,
+                )
 
             has_market_rows = bool(unique_market_data)
             coin_id_map = _build_market_coin_id_map(unique_market_data)
@@ -3695,6 +3732,7 @@ def render(ctx: dict) -> None:
                 source_provider: str,
                 df_direction_4h: pd.DataFrame | None,
                 df_direction_1d: pd.DataFrame | None,
+                frame_hunt_score: float,
             ) -> dict | None:
                 """Analyse a single symbol for the scanner. Returns a row dict or None."""
 
@@ -3821,14 +3859,6 @@ def render(ctx: dict) -> None:
                     df_1d=df_direction_1d,
                     predictor=ml_ensemble_predict,
                 )
-                spot_direction = direction_key(spot_snapshot.direction)
-                include = (
-                    (direction_filter == 'Both')
-                    or (direction_filter == 'Upside' and spot_direction == "UPSIDE")
-                    or (direction_filter == 'Downside' and spot_direction == "DOWNSIDE")
-                )
-                if not include:
-                    return None
 
                 direction_note = _spot_direction_note(
                     spot_snapshot,
@@ -3934,6 +3964,33 @@ def render(ctx: dict) -> None:
                     rr_ratio=setup_rr_val if math.isfinite(setup_rr_val) and setup_rr_val > 0.0 else None,
                     ai_status=ai_spot_status,
                 )
+                actionable_tactical_score = _actionable_tactical_candidate_score(
+                    spot_direction=spot_snapshot.direction,
+                    signal_direction=signal_direction,
+                    ai_direction=ai_spot_snapshot.direction,
+                    ai_agreement=float(ai_spot_agreement),
+                    frame_hunt_score=float(frame_hunt_score),
+                    execution_structure_quality=float(execution_snapshot.structure_quality),
+                    execution_trend_quality=float(execution_snapshot.trend_quality),
+                    execution_location_quality=float(execution_snapshot.location_quality),
+                    rr_ratio=setup_rr_val if math.isfinite(setup_rr_val) and setup_rr_val > 0.0 else None,
+                    adx_val=float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
+                )
+                include = _actionable_direction_include(
+                    direction_filter=direction_filter,
+                    scan_mode=scan_mode,
+                    spot_direction=spot_snapshot.direction,
+                    signal_direction=signal_direction,
+                    tactical_candidate_score=actionable_tactical_score,
+                )
+                if not include:
+                    return None
+                actionable_tactical_candidate = (
+                    _normalize_scan_mode(scan_mode) == _SCAN_MODE_ACTIONABLE
+                    and _signal_tracker_direction_key(spot_snapshot.direction) == "NEUTRAL"
+                    and _signal_tracker_direction_key(signal_direction) in {"UPSIDE", "DOWNSIDE"}
+                    and float(actionable_tactical_score) >= 72.0
+                )
                 action, action_reason_code = spot_action_decision_with_reason(
                     spot_snapshot.direction,
                     float(confidence_snapshot.score),
@@ -3965,6 +4022,15 @@ def render(ctx: dict) -> None:
                     stop_s = 0.0
                     target_price = 0.0
                     rr_val = 0.0
+                if actionable_tactical_candidate:
+                    tactical_note = (
+                        "Actionable tactical candidate: selected timeframe is aligned early while HTF direction is still neutral."
+                    )
+                    confidence_note = (
+                        f"{confidence_note} {tactical_note}".strip()
+                        if confidence_note
+                        else tactical_note
+                    )
                 entry_note = ""
                 scalp_dir_key = direction_key(scalp_direction)
                 if scalp_gate_pass and scalp_dir_key != "NEUTRAL" and entry_s:
@@ -4062,11 +4128,42 @@ def render(ctx: dict) -> None:
                     'Williams %R': a.williams,
                     'CCI': a.cci,
                     '__confidence_val': float(confidence_snapshot.score),
+                    '__execution_structure_quality': float(execution_snapshot.structure_quality),
+                    '__execution_trend_quality': float(execution_snapshot.trend_quality),
+                    '__execution_regime_quality': float(execution_snapshot.regime_quality),
+                    '__execution_location_quality': float(execution_snapshot.location_quality),
+                    '__trend_led_score': float(trend_led_snapshot.score),
+                    '__ai_led_score': float(ai_led_snapshot.score),
+                    '__actionable_frame_score': float(frame_hunt_score),
+                    '__actionable_tactical_score': float(actionable_tactical_score),
+                    '__actionable_tactical_candidate': bool(actionable_tactical_candidate),
+                    '__actionable_setup_score': _actionable_setup_score(
+                        timeframe=timeframe,
+                        execution_structure_quality=float(execution_snapshot.structure_quality),
+                        execution_trend_quality=float(execution_snapshot.trend_quality),
+                        execution_regime_quality=float(execution_snapshot.regime_quality),
+                        execution_location_quality=float(execution_snapshot.location_quality),
+                        trend_led_score=float(trend_led_snapshot.score),
+                        ai_led_score=float(ai_led_snapshot.score),
+                        rr_ratio=rr_val,
+                        adx_val=float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
+                        delta_pct=price_change,
+                        volatility_label=str(atr_comment_v),
+                        vwap_label=str(vwap_label_v),
+                        bollinger_bias=str(bollinger_bias_v),
+                        signal_direction=signal_direction,
+                        volume_spike=bool(volume_spike),
+                        spike_dir=spike_dir,
+                        frame_hunt_score=frame_hunt_score,
+                    ),
                 }
 
             def _scan_candidate_batch(symbol_batch: list[str]) -> tuple[list[dict], list[tuple[str, str]], int]:
-                fetched_frames: list[
-                    tuple[str, pd.DataFrame, str, str, str, pd.DataFrame | None, pd.DataFrame | None]
+                actionable_hunt_active = (
+                    _normalize_scan_mode(scan_mode) == _SCAN_MODE_ACTIONABLE and not custom_mode_active
+                )
+                selected_frames: list[
+                    tuple[str, pd.DataFrame, str, str, str, object | None, float]
                 ] = []
                 fetch_failures: list[tuple[str, str]] = []
                 for sym in symbol_batch:
@@ -4112,6 +4209,47 @@ def render(ctx: dict) -> None:
                     if df_eval is None:
                         fetch_failures.append((pair_label, "insufficient closed-candle history"))
                         continue
+                    frame_hunt_score = _actionable_frame_hunt_score(
+                        df_eval=df_eval,
+                        timeframe=timeframe,
+                        direction_filter=direction_filter,
+                    )
+                    selected_frames.append(
+                        (
+                            sym,
+                            df_eval,
+                            pair_label,
+                            actual_symbol,
+                            source_provider,
+                            fallback_coin_id,
+                            frame_hunt_score,
+                        )
+                    )
+
+                analysis_frames = list(selected_frames)
+                if actionable_hunt_active and analysis_frames:
+                    analysis_batch_n = _actionable_analysis_batch_size(
+                        requested_n=requested_n,
+                        fetched_n=len(analysis_frames),
+                        scan_mode=scan_mode,
+                    )
+                    analysis_frames = sorted(
+                        analysis_frames,
+                        key=lambda item: (-_sortable_float(item[6]), str(item[2])),
+                    )[:analysis_batch_n]
+
+                fetched_frames: list[
+                    tuple[str, pd.DataFrame, str, str, str, pd.DataFrame | None, pd.DataFrame | None, float]
+                ] = []
+                for (
+                    sym,
+                    df_eval,
+                    pair_label,
+                    actual_symbol,
+                    source_provider,
+                    fallback_coin_id,
+                    frame_hunt_score,
+                ) in analysis_frames:
                     direction_fetch_symbol = _direction_fetch_symbol(sym, actual_symbol, source_provider)
                     # Keep HTF context stable across selected-timeframe changes.
                     df_4h_raw = _fetch_market_scan_ohlcv(
@@ -4143,6 +4281,7 @@ def render(ctx: dict) -> None:
                             source_provider,
                             df_direction_4h,
                             df_direction_1d,
+                            frame_hunt_score,
                         )
                     )
 
@@ -4159,6 +4298,7 @@ def render(ctx: dict) -> None:
                             source_provider,
                             df_direction_4h,
                             df_direction_1d,
+                            frame_hunt_score,
                         ): pair_label
                         for (
                             sym,
@@ -4168,6 +4308,7 @@ def render(ctx: dict) -> None:
                             source_provider,
                             df_direction_4h,
                             df_direction_1d,
+                            frame_hunt_score,
                         ) in fetched_frames
                     }
                     for future in as_completed(futures):
@@ -4180,7 +4321,7 @@ def render(ctx: dict) -> None:
                             err = f"{e.__class__.__name__}: {str(e).strip()}".strip(": ")
                             scan_errors.append((pair_label, err))
                             _debug(f"Scanner error for {pair_label}: {err}")
-                return batch_results, [*fetch_failures, *scan_errors], len(fetched_frames)
+                return batch_results, [*fetch_failures, *scan_errors], len(selected_frames)
 
             fresh_results: list[dict] = []
             live_produced_rows: list[dict] = []
@@ -4219,6 +4360,7 @@ def render(ctx: dict) -> None:
                     produced_n=len(fresh_results),
                     custom_mode_active=custom_mode_active,
                     used_major_fallback=used_major_fallback,
+                    scan_mode=scan_mode,
                 )
                 if pending_batch:
                     continue
@@ -4229,6 +4371,7 @@ def render(ctx: dict) -> None:
                     produced_n=len(fresh_results),
                     custom_mode_active=custom_mode_active,
                     used_major_fallback=used_major_fallback,
+                    scan_mode=scan_mode,
                 )
                 if next_pool_target_n <= scan_pool_target_n:
                     break
@@ -4247,6 +4390,7 @@ def render(ctx: dict) -> None:
                     produced_n=len(fresh_results),
                     custom_mode_active=custom_mode_active,
                     used_major_fallback=used_major_fallback,
+                    scan_mode=scan_mode,
                 )
                 if not pending_batch and scan_pool_target_n >= 250:
                     break
@@ -4362,7 +4506,10 @@ def render(ctx: dict) -> None:
             live_produced_rows = list(fresh_results)
             # Sort by setup priority: TREND+AI > TREND-led > AI-led > WATCH > SKIP,
             # then structure, confidence, and market-cap tie-breakers.
-            fresh_results = sorted(fresh_results, key=_market_result_priority_key)[:limit_n]
+            fresh_results = sorted(
+                fresh_results,
+                key=lambda row: _market_result_priority_key_for_mode(row, scan_mode),
+            )[:limit_n]
             live_ranked_out_count = max(0, live_result_count_before_limit - len(fresh_results))
             if fresh_results:
                 st.session_state["market_scan_results"] = fresh_results
@@ -4810,7 +4957,20 @@ def render(ctx: dict) -> None:
             row["__risk_tier_label"] = str(getattr(live_risk_sizing_snapshot, "label", "") or "")
             row["__risk_unit_fraction"] = float(getattr(live_risk_sizing_snapshot, "unit_fraction", 0.0) or 0.0)
             row["__risk_note"] = str(getattr(live_risk_sizing_snapshot, "note", "") or "")
-        results = sorted(list(results or []), key=_market_result_priority_key)
+            row["__actionable_context_score"] = _actionable_context_score(
+                adaptive_edge_score=row.get("__adaptive_edge_score"),
+                session_fit_score=row.get("__session_fit_score"),
+                archive_guardrail_penalty=row.get("__archive_guardrail_penalty"),
+                direction=direction_raw,
+                market_lead_state=str(getattr(market_lead_snapshot, "state", "") or ""),
+                symbol=str(row.get("Coin") or ""),
+                classify_symbol_sector=classify_symbol_sector,
+                sector_rotation_snapshot=sector_rotation_snapshot,
+            )
+        results = sorted(
+            list(results or []),
+            key=lambda row: _market_result_priority_key_for_mode(row, scan_mode),
+        )
         df_results = pd.DataFrame(results)
         market_alerts = build_market_alerts(
             market_lead_snapshot=market_lead_snapshot,
@@ -4830,6 +4990,7 @@ def render(ctx: dict) -> None:
                 _market_signal_log_events(
                     rows=list(results or []),
                     timeframe=str(timeframe),
+                    scan_mode=str(scan_mode),
                     market_lead_snapshot=market_lead_snapshot,
                     market_regime_snapshot=market_regime_snapshot,
                     market_trade_gate_snapshot=market_trade_gate_snapshot,
@@ -5254,6 +5415,9 @@ def render(ctx: dict) -> None:
                     skipped_count=skipped_count_live,
                     ranked_out_count=live_ranked_out_count,
                     source_label=source_label,
+                    scan_mode=scan_mode,
+                    timeframe=timeframe,
+                    direction_filter=direction_filter,
                 ):
                     st.markdown(line)
                 st.markdown("**Shown rows**")

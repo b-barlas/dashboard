@@ -572,13 +572,11 @@ def render(ctx: dict) -> None:
         limit=int(limit),
         status=None if status_filter == "All" else status_filter.upper(),
         source="Market",
+        timeframe=None if timeframe_filter == "All" else timeframe_filter,
         db_path=db_path,
     )
     df_alerts = fetch_market_alerts_df(limit=100, source="Market", db_path=db_path)
     df_active_alerts = fetch_market_alerts_df(limit=25, active_only=True, source="Market", db_path=db_path)
-    if timeframe_filter != "All" and not df_events.empty:
-        df_events = df_events[df_events["timeframe"].astype(str).str.lower() == timeframe_filter.lower()].copy()
-
     top_insight_cols = st.columns(2, gap="medium")
     with top_insight_cols[0]:
         render_insight_card(
@@ -716,6 +714,8 @@ def render(ctx: dict) -> None:
         df_events["Market Lead"] = df_events["market_lead_label"].replace("", "No Clear Lead").fillna("No Clear Lead")
     if "market_regime" in df_events.columns:
         df_events["Market Regime"] = df_events["market_regime"].replace("", "Unknown").fillna("Unknown")
+    if "scan_focus" in df_events.columns:
+        df_events["Scan Focus"] = df_events["scan_focus"].replace("", "Unknown").fillna("Unknown")
     if "market_playbook" in df_events.columns:
         df_events["Playbook"] = df_events["market_playbook"].replace("", "Unknown").fillna("Unknown")
     if "market_trade_gate" in df_events.columns:
@@ -838,6 +838,9 @@ def render(ctx: dict) -> None:
     )
     execution_stance_summary_df = (
         build_signal_cohort_summary(df_events, "Execution Stance") if "Execution Stance" in df_events.columns else pd.DataFrame()
+    )
+    scan_focus_summary_df = (
+        build_signal_cohort_summary(df_events, "Scan Focus") if "Scan Focus" in df_events.columns else pd.DataFrame()
     )
     hold_style_summary_df = build_signal_cohort_summary(df_events, "Hold Style") if "Hold Style" in df_events.columns else pd.DataFrame()
     exit_quality_summary_df = (
@@ -991,6 +994,64 @@ def render(ctx: dict) -> None:
             _archive_building_card(
                 "Primary Alert Archive",
                 "Primary alert archive is still building. We need more resolved signals before trusting alert rankings.",
+            )
+        )
+
+    qualified_scan_focus_df = _qualified_summary_rows(
+        scan_focus_summary_df,
+        count_field="Resolved",
+        min_count=_MIN_SIGNAL_ARCHIVE_ROWS,
+    )
+    qualified_known_scan_focus_df = _prefer_known_summary_rows(
+        qualified_scan_focus_df,
+        label_field="Scan Focus",
+    )
+    if len(qualified_known_scan_focus_df) >= 2:
+        strongest_scan_focus = qualified_known_scan_focus_df.sort_values(
+            ["FollowThroughPct", "Resolved", "Signals"], ascending=[False, False, False]
+        ).iloc[0]
+        weakest_scan_focus = qualified_known_scan_focus_df.sort_values(
+            ["FollowThroughPct", "Resolved", "Signals"], ascending=[True, False, False]
+        ).iloc[0]
+        works_cards.append(
+            {
+                "title": "Best Scan Focus",
+                "body_html": (
+                    f"<b>{strongest_scan_focus['Scan Focus']}</b> is converting best in this slice "
+                    f"({float(strongest_scan_focus['FollowThroughPct']):.1f}% follow-through across "
+                    f"{int(strongest_scan_focus['Resolved'])} resolved signals)."
+                ),
+                "tone": "positive" if float(strongest_scan_focus["FollowThroughPct"]) >= 55.0 else "neutral",
+            }
+        )
+        fail_cards.append(
+            {
+                "title": "Weakest Scan Focus",
+                "body_html": (
+                    f"<b>{weakest_scan_focus['Scan Focus']}</b> is converting weakest in this slice "
+                    f"({float(weakest_scan_focus['FollowThroughPct']):.1f}% follow-through across "
+                    f"{int(weakest_scan_focus['Resolved'])} resolved signals)."
+                ),
+                "tone": "warning" if float(weakest_scan_focus["FollowThroughPct"]) < 45.0 else "neutral",
+            }
+        )
+    elif len(qualified_known_scan_focus_df) == 1:
+        only_focus = qualified_known_scan_focus_df.iloc[0]
+        works_cards.append(
+            _archive_building_card(
+                "Scan Focus Archive",
+                (
+                    f"Only <b>{only_focus['Scan Focus']}</b> has enough resolved history in this slice so far "
+                    f"({int(only_focus['Resolved'])} resolved signals). We need both Broad Market and Actionable Setups "
+                    "in the archive before comparing focus quality."
+                ),
+            )
+        )
+    else:
+        works_cards.append(
+            _archive_building_card(
+                "Scan Focus Archive",
+                "Scan-focus archive is still building. We need more resolved signals before comparing Broad Market vs Actionable Setups.",
             )
         )
 
@@ -1212,6 +1273,7 @@ def render(ctx: dict) -> None:
                 ("Session", "By Session"),
                 ("timeframe", "By Timeframe"),
                 ("Market Regime", "By Market Regime"),
+                ("Scan Focus", "By Scan Focus"),
                 ("Playbook", "By Playbook"),
                 ("Trade Gate", "By Trade Gate"),
                 ("AI Alignment", "By AI Alignment"),
@@ -1268,6 +1330,7 @@ def render(ctx: dict) -> None:
         "timeframe",
         "Primary Alert",
         "Alert Footprint",
+        "Scan Focus",
         "setup_confirm",
         "direction",
         "Lead",
@@ -1299,6 +1362,10 @@ def render(ctx: dict) -> None:
         "Playbook x Session",
         "Playbook x Catalyst Window",
         "adaptive_edge_score",
+        "actionable_frame_score",
+        "actionable_setup_score",
+        "actionable_context_score",
+        "actionable_tactical_score",
         "trade_note",
         "actual_trade_side",
         "actual_entry_price",
@@ -1333,6 +1400,10 @@ def render(ctx: dict) -> None:
         "adverse_excursion_pct": "MAE %",
         "status": "Status",
         "adaptive_edge_score": "Adaptive Score",
+        "actionable_frame_score": "Actionable Hunt Score",
+        "actionable_setup_score": "Actionable Setup Score",
+        "actionable_context_score": "Actionable Context Score",
+        "actionable_tactical_score": "Actionable Tactical Score",
         "trade_note": "Trade Note",
         "actual_trade_side": "Trade Direction",
         "actual_entry_price": "Actual Entry",

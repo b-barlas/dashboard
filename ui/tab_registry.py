@@ -32,6 +32,25 @@ TAB_TITLES = [
     "Tools", "Model Lab", "Setup Backtest", "Scalp Backtest", "Analysis Guide",
 ]
 
+TAB_GROUPS = [
+    (
+        "Primary Workspace",
+        ["Market", "Spot", "Position", "Multi-TF", "Sessions", "Signal Review"],
+    ),
+    (
+        "Research & Labs",
+        [
+            "AI Workspace", "Heatmap", "Whale Tracker", "Risk Analytics",
+            "Monte Carlo", "Fibonacci", "Correlation", "Portfolio Scenario",
+            "Model Lab", "Setup Backtest", "Scalp Backtest",
+        ],
+    ),
+    (
+        "Tools & Reference",
+        ["Tools", "Analysis Guide"],
+    ),
+]
+
 _STYLE_DEPS = ["ACCENT", "TEXT_MUTED", "POSITIVE", "NEGATIVE", "WARNING"]
 _CARD_STYLE_DEPS = [*_STYLE_DEPS, "CARD_BG"]
 _TRACKER_DEPS = ["get_signal_tracker_db_path", "init_signal_tracker_db", "fetch_signal_events_df"]

@@ -72,17 +72,58 @@ class SignalTrackerTests(unittest.TestCase):
             "symbol": "BTC",
             "timeframe": "1h",
             "event_time": "2026-04-04T12:00:00Z",
+            "scan_focus": "Actionable Setups",
             "direction": "Upside",
             "setup_confirm": "WATCH",
             "market_trade_gate": "Tradeable",
             "market_alert_keys": "MARKET_LEAD|EXECUTION_STANCE",
             "market_primary_alert": "MARKET_LEAD",
+            "actionable_frame_score": 72.5,
+            "actionable_setup_score": 81.0,
+            "actionable_context_score": 67.5,
+            "actionable_tactical_score": 74.0,
             "price": 100.0,
         }
         self.assertEqual(log_signal_events([event], self.db_path), 1)
         df = fetch_signal_events_df(limit=20, db_path=self.db_path)
         self.assertEqual(str(df.iloc[0]["market_alert_keys"]), "MARKET_LEAD|EXECUTION_STANCE")
         self.assertEqual(str(df.iloc[0]["market_primary_alert"]), "MARKET_LEAD")
+        self.assertEqual(str(df.iloc[0]["scan_focus"]), "Actionable Setups")
+        self.assertAlmostEqual(float(df.iloc[0]["actionable_frame_score"]), 72.5, places=4)
+        self.assertAlmostEqual(float(df.iloc[0]["actionable_setup_score"]), 81.0, places=4)
+        self.assertAlmostEqual(float(df.iloc[0]["actionable_context_score"]), 67.5, places=4)
+        self.assertAlmostEqual(float(df.iloc[0]["actionable_tactical_score"]), 74.0, places=4)
+
+    def test_fetch_signal_events_df_applies_timeframe_filter_before_limit(self) -> None:
+        events = []
+        for idx in range(4):
+            events.append(
+                {
+                    "source": "Market",
+                    "symbol": f"FAST{idx}",
+                    "timeframe": "15m",
+                    "event_time": f"2026-04-04T12:0{idx}:00Z",
+                    "direction": "Upside",
+                    "setup_confirm": "WATCH",
+                    "price": 100.0 + idx,
+                }
+            )
+        for idx in range(2):
+            events.append(
+                {
+                    "source": "Market",
+                    "symbol": f"SWING{idx}",
+                    "timeframe": "1d",
+                    "event_time": f"2026-04-03T12:0{idx}:00Z",
+                    "direction": "Upside",
+                    "setup_confirm": "WATCH",
+                    "price": 200.0 + idx,
+                }
+            )
+        self.assertEqual(log_signal_events(events, self.db_path), 6)
+        df = fetch_signal_events_df(limit=2, source="Market", timeframe="1d", db_path=self.db_path)
+        self.assertEqual(len(df), 2)
+        self.assertEqual(set(df["timeframe"].astype(str)), {"1d"})
 
     def test_log_signal_events_creates_mirror_snapshot_when_configured(self) -> None:
         mirror_dir = str(Path(self.temp_dir.name) / "mirror")
@@ -255,12 +296,19 @@ class SignalTrackerTests(unittest.TestCase):
             df.assign(
                 Lead=["LEAD", "No LEAD"],
                 Session=["European (08-16 UTC)", "European (08-16 UTC)"],
+                **{"Scan Focus": ["Broad Market", "Actionable Setups"]},
             ),
             "Lead",
         )
         self.assertFalse(cohort.empty)
         self.assertIn("Signals", cohort.columns)
         self.assertIn("ActualWinRatePct", cohort.columns)
+        scan_focus_cohort = build_signal_cohort_summary(
+            df.assign(**{"Scan Focus": ["Broad Market", "Actionable Setups"]}),
+            "Scan Focus",
+        )
+        self.assertFalse(scan_focus_cohort.empty)
+        self.assertIn("Scan Focus", scan_focus_cohort.columns)
 
     def test_alert_footprint_annotation_and_summary(self) -> None:
         df = pd.DataFrame(

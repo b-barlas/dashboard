@@ -8,14 +8,14 @@ from core.signals import detect_candle_pattern
 def _df_from_ohlc(rows):
     data = []
     ts = pd.Timestamp("2026-01-01")
-    for i, (o, h, l, c) in enumerate(rows):
+    for i, (open_price, high_price, low_price, close_price) in enumerate(rows):
         data.append(
             {
                 "timestamp": ts + pd.Timedelta(minutes=i),
-                "open": float(o),
-                "high": float(h),
-                "low": float(l),
-                "close": float(c),
+                "open": float(open_price),
+                "high": float(high_price),
+                "low": float(low_price),
+                "close": float(close_price),
                 "volume": 1000.0,
             }
         )

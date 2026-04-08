@@ -122,7 +122,7 @@ class SessionLogicTests(unittest.TestCase):
             trade_gate="Selective Only",
             catalyst_window="Far / Clear",
         )
-        self.assertEqual(read["title"], "Tradeable")
+        self.assertEqual(read["title"], "Supportive")
         self.assertEqual(read["tone"], "positive")
 
 
