@@ -254,6 +254,9 @@ def render(ctx: dict) -> None:
                 result = build_portfolio_scenario(holdings, anchor_symbol, float(anchor_target_price), ohlcv_map)
                 st.session_state["portfolio_scenario_result"] = {
                     "sig": current_sig,
+                    "anchor_symbol": anchor_symbol,
+                    "anchor_target_price": float(anchor_target_price),
+                    "timeframe": timeframe,
                     "data": result,
                     "cached_hits": cached_hits,
                     "missing_symbols": missing_symbols,
@@ -261,11 +264,22 @@ def render(ctx: dict) -> None:
                 }
 
     stored = st.session_state.get("portfolio_scenario_result")
-    if stored and stored.get("sig") == current_sig:
+    if stored:
         result = stored["data"]
         cached_hits = stored.get("cached_hits", [])
         missing_symbols = stored.get("missing_symbols", [])
         holdings_meta = stored.get("holdings_meta", holdings_meta)
+        stored_sig = tuple(stored.get("sig") or ())
+        stored_anchor = str(stored.get("anchor_symbol") or (stored_sig[1] if len(stored_sig) >= 2 else anchor_symbol or ""))
+        stored_target = float(stored.get("anchor_target_price") or (stored_sig[2] if len(stored_sig) >= 3 else anchor_target_price))
+        stored_timeframe = str(stored.get("timeframe") or (stored_sig[3] if len(stored_sig) >= 4 else timeframe))
+
+        if stored_sig != current_sig:
+            st.info(
+                "Showing the last portfolio scenario. "
+                f"Current view is still based on `{stored_anchor.split('/')[0]}` targeting `{_format_money(stored_target)}` on `{stored_timeframe}`. "
+                "Run Scenario again to refresh for the new inputs."
+            )
 
         if cached_hits:
             st.info("Snapshot fallback used for: " + ", ".join(cached_hits))
@@ -325,7 +339,7 @@ def render(ctx: dict) -> None:
                     "label": "Projected Basket",
                     "value": _format_money(result["projected_total"]),
                     "value_color": POSITIVE if result["projected_delta_pct"] >= 0 else NEGATIVE,
-                    "subtext": f"Base-case scenario using {result['horizon_bars']} modeled bars on {timeframe}.",
+                    "subtext": f"Base-case scenario using {result['horizon_bars']} modeled bars on {stored_timeframe}.",
                 },
                 {
                     "label": "Projected Delta",
@@ -367,5 +381,3 @@ def render(ctx: dict) -> None:
             st.plotly_chart(fig, width="stretch")
             st.markdown("#### Scenario Table")
             st.dataframe(_display_table(rows), hide_index=True, width="stretch")
-    elif stored and stored.get("sig") != current_sig:
-        st.info("Inputs changed. Run Scenario again to refresh the basket projection.")

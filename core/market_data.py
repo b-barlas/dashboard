@@ -7,6 +7,8 @@ from typing import Callable
 
 from core.symbols import base_symbol_candidates, canonical_base_symbol
 
+_PAPRIKA_PCT_SANITY_LIMIT = 500.0
+
 
 def fetch_trending_coins(http_get_json: Callable[..., object]) -> list[dict]:
     data = http_get_json("https://api.coingecko.com/api/v3/search/trending", timeout=10, retries=3)
@@ -28,44 +30,111 @@ def fetch_trending_coins(http_get_json: Callable[..., object]) -> list[dict]:
     return coins
 
 
-def fetch_top_gainers_losers(http_get_json: Callable[..., object], limit: int = 20) -> tuple[list, list]:
+def fetch_top_gainers_losers(
+    http_get_json: Callable[..., object],
+    limit: int = 20,
+    *,
+    max_pages: int = 4,
+    per_page: int = 250,
+) -> tuple[list, list]:
     url = "https://api.coingecko.com/api/v3/coins/markets"
-    params = {
-        "vs_currency": "usd",
-        "order": "market_cap_desc",
-        "per_page": 250,
-        "page": 1,
-        "sparkline": False,
-        "price_change_percentage": "24h",
-    }
-    data = http_get_json(url, params=params, timeout=15, retries=3)
-    if not isinstance(data, list):
-        return [], []
-
     valid = []
-    for coin in data:
-        pct = coin.get("price_change_percentage_24h")
-        if pct is None:
-            pct = coin.get("price_change_percentage_24h_in_currency")
-        if pct is None:
-            change_abs = coin.get("price_change_24h")
-            current_price = coin.get("current_price")
-            # Fallback when API omits percentage field.
-            if change_abs is not None and current_price not in (None, 0):
-                try:
-                    prev_price = float(current_price) - float(change_abs)
-                    if prev_price > 0:
-                        pct = (float(change_abs) / prev_price) * 100.0
-                        coin["price_change_percentage_24h"] = pct
-                except Exception:
-                    pct = None
-        if pct is not None:
+    seen_ids: set[str] = set()
+    page_limit = max(1, int(max_pages or 1))
+    page_size = max(1, min(250, int(per_page or 250)))
+
+    for page in range(1, page_limit + 1):
+        params = {
+            "vs_currency": "usd",
+            "order": "market_cap_desc",
+            "per_page": page_size,
+            "page": page,
+            "sparkline": False,
+            "price_change_percentage": "24h",
+        }
+        data = http_get_json(url, params=params, timeout=15, retries=3)
+        if not isinstance(data, list):
+            break
+        if not data:
+            break
+
+        for coin in data:
+            coin_id = str(coin.get("id") or "").strip().lower()
+            dedupe_key = coin_id or str(coin.get("symbol") or "").strip().lower()
+            if dedupe_key and dedupe_key in seen_ids:
+                continue
+
+            pct = coin.get("price_change_percentage_24h")
+            if pct is None:
+                pct = coin.get("price_change_percentage_24h_in_currency")
+            if pct is None:
+                change_abs = coin.get("price_change_24h")
+                current_price = coin.get("current_price")
+                # Fallback when API omits percentage field.
+                if change_abs is not None and current_price not in (None, 0):
+                    try:
+                        prev_price = float(current_price) - float(change_abs)
+                        if prev_price > 0:
+                            pct = (float(change_abs) / prev_price) * 100.0
+                            coin["price_change_percentage_24h"] = pct
+                    except Exception:
+                        pct = None
+            if pct is None:
+                continue
+
+            if dedupe_key:
+                seen_ids.add(dedupe_key)
             # Canonical key used by tabs.
             coin["price_change_percentage_24h"] = float(pct)
             valid.append(coin)
 
+        if len(data) < page_size:
+            break
+
     if not valid:
-        return [], []
+        paprika = http_get_json("https://api.coinpaprika.com/v1/tickers", timeout=15, retries=2)
+        if not isinstance(paprika, list):
+            return [], []
+        paprika_valid = []
+        for coin in paprika:
+            quotes = coin.get("quotes") if isinstance(coin, dict) else {}
+            usd_q = quotes.get("USD") if isinstance(quotes, dict) else {}
+            mcap = usd_q.get("market_cap")
+            pct = usd_q.get("percent_change_24h")
+            price = usd_q.get("price")
+            if mcap in (None, 0) or pct is None:
+                continue
+            try:
+                mcap_f = float(mcap)
+                pct_f = float(pct)
+                price_f = float(price) if price is not None else None
+            except Exception:
+                continue
+            if not math.isfinite(mcap_f) or mcap_f <= 0 or not math.isfinite(pct_f):
+                continue
+            if abs(pct_f) > _PAPRIKA_PCT_SANITY_LIMIT:
+                continue
+            if price_f is not None and (not math.isfinite(price_f) or price_f <= 0):
+                price_f = None
+            paprika_valid.append(
+                {
+                    "id": coin.get("id"),
+                    "symbol": str(coin.get("symbol") or "").lower(),
+                    "name": coin.get("name"),
+                    "market_cap": mcap_f,
+                    "current_price": price_f,
+                    "price_change_percentage_24h": pct_f,
+                    "provider": "CoinPaprika",
+                }
+            )
+        if not paprika_valid:
+            return [], []
+        paprika_valid.sort(key=lambda row: float(row.get("market_cap", 0.0)), reverse=True)
+        sample = paprika_valid[: max(limit * 12, 120)]
+        sorted_coins = sorted(sample, key=lambda x: x.get("price_change_percentage_24h", 0), reverse=True)
+        gainers = sorted_coins[:limit]
+        losers = sorted_coins[-limit:][::-1]
+        return gainers, losers
     sorted_coins = sorted(valid, key=lambda x: x.get("price_change_percentage_24h", 0), reverse=True)
     gainers = sorted_coins[:limit]
     losers = sorted_coins[-limit:][::-1]

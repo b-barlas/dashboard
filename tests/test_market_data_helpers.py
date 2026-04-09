@@ -24,6 +24,149 @@ class MarketDataHelpersTests(unittest.TestCase):
         self.assertEqual([g["symbol"] for g in gainers], ["b", "c"])
         self.assertEqual([loser["symbol"] for loser in losers], ["a", "c"])
 
+    def test_fetch_top_gainers_losers_combines_multiple_pages(self):
+        def _http_get_json(_url, **kwargs):
+            page = kwargs["params"]["page"]
+            if page == 1:
+                return [
+                    {"id": "alpha", "symbol": "a", "price_change_percentage_24h": 4.0},
+                    {"id": "beta", "symbol": "b", "price_change_percentage_24h": -3.0},
+                ]
+            if page == 2:
+                return [
+                    {"id": "gamma", "symbol": "g", "price_change_percentage_24h": 18.0},
+                    {"id": "delta", "symbol": "d", "price_change_percentage_24h": -12.0},
+                ]
+            return []
+
+        gainers, losers = market_data.fetch_top_gainers_losers(
+            _http_get_json,
+            limit=2,
+            max_pages=4,
+            per_page=2,
+        )
+        self.assertEqual([g["symbol"] for g in gainers], ["g", "a"])
+        self.assertEqual([loser["symbol"] for loser in losers], ["d", "b"])
+
+    def test_fetch_top_gainers_losers_dedupes_repeated_ids_across_pages(self):
+        def _http_get_json(_url, **kwargs):
+            page = kwargs["params"]["page"]
+            if page == 1:
+                return [
+                    {"id": "alpha", "symbol": "a", "price_change_percentage_24h": 4.0},
+                    {"id": "beta", "symbol": "b", "price_change_percentage_24h": 7.0},
+                ]
+            if page == 2:
+                return [
+                    {"id": "alpha", "symbol": "a", "price_change_percentage_24h": 40.0},
+                    {"id": "gamma", "symbol": "g", "price_change_percentage_24h": -9.0},
+                ]
+            return []
+
+        gainers, losers = market_data.fetch_top_gainers_losers(
+            _http_get_json,
+            limit=3,
+            max_pages=3,
+            per_page=2,
+        )
+        self.assertEqual([g["id"] for g in gainers], ["beta", "alpha", "gamma"])
+        self.assertEqual([loser["id"] for loser in losers], ["gamma", "alpha", "beta"])
+
+    def test_fetch_top_gainers_losers_uses_coinpaprika_when_coingecko_empty(self):
+        def _http_get_json(url, **kwargs):
+            if "coingecko" in url:
+                return []
+            if "coinpaprika" in url:
+                return [
+                    {
+                        "id": "btc-bitcoin",
+                        "symbol": "btc",
+                        "name": "Bitcoin",
+                        "quotes": {"USD": {"market_cap": 1_000_000.0, "price": 95_000.0, "percent_change_24h": 3.0}},
+                    },
+                    {
+                        "id": "eth-ethereum",
+                        "symbol": "eth",
+                        "name": "Ethereum",
+                        "quotes": {"USD": {"market_cap": 800_000.0, "price": 3_000.0, "percent_change_24h": -2.0}},
+                    },
+                    {
+                        "id": "sol-solana",
+                        "symbol": "sol",
+                        "name": "Solana",
+                        "quotes": {"USD": {"market_cap": 500_000.0, "price": 150.0, "percent_change_24h": 9.0}},
+                    },
+                ]
+            return []
+
+        gainers, losers = market_data.fetch_top_gainers_losers(_http_get_json, limit=2)
+        self.assertEqual([g["symbol"] for g in gainers], ["sol", "btc"])
+        self.assertEqual([loser["symbol"] for loser in losers], ["eth", "btc"])
+        self.assertEqual(gainers[0]["current_price"], 150.0)
+
+    def test_fetch_top_gainers_losers_uses_coinpaprika_when_first_coingecko_page_fails(self):
+        def _http_get_json(url, **kwargs):
+            if "coingecko" in url:
+                return None
+            if "coinpaprika" in url:
+                return [
+                    {
+                        "id": "btc-bitcoin",
+                        "symbol": "btc",
+                        "name": "Bitcoin",
+                        "quotes": {"USD": {"market_cap": 1_000_000.0, "price": 95_000.0, "percent_change_24h": 3.0}},
+                    },
+                    {
+                        "id": "eth-ethereum",
+                        "symbol": "eth",
+                        "name": "Ethereum",
+                        "quotes": {"USD": {"market_cap": 800_000.0, "price": 3_000.0, "percent_change_24h": -2.0}},
+                    },
+                    {
+                        "id": "sol-solana",
+                        "symbol": "sol",
+                        "name": "Solana",
+                        "quotes": {"USD": {"market_cap": 500_000.0, "price": 150.0, "percent_change_24h": 9.0}},
+                    },
+                ]
+            return []
+
+        gainers, losers = market_data.fetch_top_gainers_losers(_http_get_json, limit=2)
+        self.assertEqual([g["symbol"] for g in gainers], ["sol", "btc"])
+        self.assertEqual([loser["symbol"] for loser in losers], ["eth", "btc"])
+
+    def test_fetch_top_gainers_losers_filters_coinpaprika_outlier_pct(self):
+        def _http_get_json(url, **kwargs):
+            if "coingecko" in url:
+                return None
+            if "coinpaprika" in url:
+                return [
+                    {
+                        "id": "rise-everrise",
+                        "symbol": "rise",
+                        "name": "EverRise",
+                        "quotes": {"USD": {"market_cap": 900_000.0, "price": 0.0035, "percent_change_24h": 20_000.0}},
+                    },
+                    {
+                        "id": "btc-bitcoin",
+                        "symbol": "btc",
+                        "name": "Bitcoin",
+                        "quotes": {"USD": {"market_cap": 1_000_000.0, "price": 95_000.0, "percent_change_24h": 3.0}},
+                    },
+                    {
+                        "id": "eth-ethereum",
+                        "symbol": "eth",
+                        "name": "Ethereum",
+                        "quotes": {"USD": {"market_cap": 800_000.0, "price": 3_000.0, "percent_change_24h": -2.0}},
+                    },
+                ]
+            return []
+
+        gainers, losers = market_data.fetch_top_gainers_losers(_http_get_json, limit=3)
+        self.assertNotIn("rise", [g["symbol"] for g in gainers])
+        self.assertEqual([g["symbol"] for g in gainers], ["btc", "eth"])
+        self.assertEqual([loser["symbol"] for loser in losers], ["eth", "btc"])
+
     def test_get_top_volume_usdt_symbols_filters_markets(self):
         payload = [{"symbol": "btc"}, {"symbol": "eth"}, {"symbol": "btc"}]
         pairs, raw = market_data.get_top_volume_usdt_symbols(

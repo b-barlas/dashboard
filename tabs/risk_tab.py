@@ -8,6 +8,104 @@ import plotly.graph_objs as go
 from ui.primitives import render_help_details, render_insight_card, render_kpi_grid, render_page_header
 
 
+def _closed_close_series(frame: pd.DataFrame) -> pd.Series:
+    close = pd.to_numeric(frame.get("close"), errors="coerce")
+    close = close.replace([np.inf, -np.inf], np.nan).dropna()
+    close = close[close > 0]
+    # Risk analytics should run on closed candles only.
+    if len(close) >= 2:
+        close = close.iloc[:-1]
+    return close
+
+
+def _closed_timestamp_series(frame: pd.DataFrame, close_series: pd.Series):
+    if "timestamp" not in frame.columns:
+        return None
+    ts = pd.to_datetime(frame["timestamp"], errors="coerce")
+    ts = ts.reindex(close_series.index)
+    ts = ts.dropna()
+    return ts
+
+
+def _tf_thresholds(tf: str) -> dict[str, float]:
+    profile = (tf or "").lower().strip()
+    if profile == "1h":
+        return {
+            "regime_dd_high": 45.0,
+            "regime_dd_med": 28.0,
+            "regime_var_high": -3.2,
+            "regime_var_med": -2.0,
+            "regime_sharpe_high": 0.2,
+            "regime_sharpe_med": 0.8,
+            "dd_good": 22.0,
+            "dd_neutral": 35.0,
+            "var_good": 1.8,
+            "var_neutral": 3.0,
+            "cvar_good": 2.6,
+            "cvar_neutral": 4.5,
+        }
+    if profile == "4h":
+        return {
+            "regime_dd_high": 38.0,
+            "regime_dd_med": 24.0,
+            "regime_var_high": -4.2,
+            "regime_var_med": -2.8,
+            "regime_sharpe_high": 0.1,
+            "regime_sharpe_med": 0.8,
+            "dd_good": 18.0,
+            "dd_neutral": 30.0,
+            "var_good": 2.3,
+            "var_neutral": 3.8,
+            "cvar_good": 3.2,
+            "cvar_neutral": 5.0,
+        }
+    return {
+        "regime_dd_high": 32.0,
+        "regime_dd_med": 20.0,
+        "regime_var_high": -5.0,
+        "regime_var_med": -3.5,
+        "regime_sharpe_high": 0.0,
+        "regime_sharpe_med": 0.8,
+        "dd_good": 15.0,
+        "dd_neutral": 27.0,
+        "var_good": 3.0,
+        "var_neutral": 4.8,
+        "cvar_good": 4.2,
+        "cvar_neutral": 6.2,
+    }
+
+
+def _metric_status(
+    value: float,
+    *,
+    good: float,
+    neutral: float,
+    lower_better: bool = False,
+    positive: str,
+    warning: str,
+    negative: str,
+) -> tuple[str, str]:
+    if lower_better:
+        if value <= good:
+            return "Healthy", positive
+        if value <= neutral:
+            return "Watch", warning
+        return "Risky", negative
+    if value >= good:
+        return "Healthy", positive
+    if value >= neutral:
+        return "Watch", warning
+    return "Risky", negative
+
+
+def _risk_profile_summary(*, regime: str, sharpe: float, cvar95: float, positive: str, warning: str, negative: str) -> tuple[str, str]:
+    if regime == "Lower Risk" and sharpe >= 1.0 and cvar95 > -5.0:
+        return "Favourable risk profile for selective participation.", positive
+    if regime == "High Risk" or cvar95 <= -8.0:
+        return "Defensive profile: prioritize capital protection.", negative
+    return "Mixed profile: keep position size controlled.", warning
+
+
 def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
@@ -46,77 +144,12 @@ def render(ctx: dict) -> None:
     with c3:
         lookback = st.selectbox("Lookback Candles", [300, 500, 800], index=1, key="risk_lookback")
 
-    if not st.button("Analyze Risk", type="primary", key="risk_run"):
-        return
+    st.caption("Auto-runs when coin, timeframe, or lookback changes.")
 
     _val_err = _validate_coin_symbol(risk_coin)
     if _val_err:
         st.error(_val_err)
         return
-
-    def _closed_close_series(frame: pd.DataFrame) -> pd.Series:
-        close = pd.to_numeric(frame.get("close"), errors="coerce")
-        close = close.replace([np.inf, -np.inf], np.nan).dropna()
-        close = close[close > 0]
-        # Risk analytics should run on closed candles only.
-        if len(close) >= 2:
-            close = close.iloc[:-1]
-        return close
-
-    def _closed_timestamp_series(frame: pd.DataFrame, close_series: pd.Series):
-        if "timestamp" not in frame.columns:
-            return None
-        ts = pd.to_datetime(frame["timestamp"], errors="coerce")
-        ts = ts.reindex(close_series.index)
-        ts = ts.dropna()
-        return ts
-
-    def _tf_thresholds(tf: str) -> dict[str, float]:
-        profile = (tf or "").lower().strip()
-        if profile == "1h":
-            return {
-                "regime_dd_high": 45.0,
-                "regime_dd_med": 28.0,
-                "regime_var_high": -3.2,
-                "regime_var_med": -2.0,
-                "regime_sharpe_high": 0.2,
-                "regime_sharpe_med": 0.8,
-                "dd_good": 22.0,
-                "dd_neutral": 35.0,
-                "var_good": 1.8,
-                "var_neutral": 3.0,
-                "cvar_good": 2.6,
-                "cvar_neutral": 4.5,
-            }
-        if profile == "4h":
-            return {
-                "regime_dd_high": 38.0,
-                "regime_dd_med": 24.0,
-                "regime_var_high": -4.2,
-                "regime_var_med": -2.8,
-                "regime_sharpe_high": 0.1,
-                "regime_sharpe_med": 0.8,
-                "dd_good": 18.0,
-                "dd_neutral": 30.0,
-                "var_good": 2.3,
-                "var_neutral": 3.8,
-                "cvar_good": 3.2,
-                "cvar_neutral": 5.0,
-            }
-        return {
-            "regime_dd_high": 32.0,
-            "regime_dd_med": 20.0,
-            "regime_var_high": -5.0,
-            "regime_var_med": -3.5,
-            "regime_sharpe_high": 0.0,
-            "regime_sharpe_med": 0.8,
-            "dd_good": 15.0,
-            "dd_neutral": 27.0,
-            "var_good": 3.0,
-            "var_neutral": 4.8,
-            "cvar_good": 4.2,
-            "cvar_neutral": 6.2,
-        }
 
     with st.spinner("Calculating risk metrics..."):
         df = fetch_ohlcv(risk_coin, risk_tf, limit=int(lookback))
@@ -145,19 +178,6 @@ def render(ctx: dict) -> None:
     calmar = float(metrics["calmar"])
     ann_vol = float(metrics["ann_volatility"])
 
-    def _status(value: float, good: float, neutral: float, lower_better: bool = False) -> tuple[str, str]:
-        if lower_better:
-            if value <= good:
-                return "Healthy", POSITIVE
-            if value <= neutral:
-                return "Watch", WARNING
-            return "Risky", NEGATIVE
-        if value >= good:
-            return "Healthy", POSITIVE
-        if value >= neutral:
-            return "Watch", WARNING
-        return "Risky", NEGATIVE
-
     tf_thresholds = _tf_thresholds(risk_tf)
 
     # Timeframe-aware regime classifier for beginner readability.
@@ -179,23 +199,54 @@ def render(ctx: dict) -> None:
         regime = "Lower Risk"
         regime_color = POSITIVE
 
-    sharpe_s, sharpe_c = _status(sharpe, good=1.2, neutral=0.4)
-    sortino_s, sortino_c = _status(sortino, good=1.6, neutral=0.6)
-    dd_s, dd_c = _status(dd_abs, good=tf_thresholds["dd_good"], neutral=tf_thresholds["dd_neutral"], lower_better=True)
-    var_s, var_c = _status(abs(var95), good=tf_thresholds["var_good"], neutral=tf_thresholds["var_neutral"], lower_better=True)
-    cvar_s, cvar_c = _status(abs(cvar95), good=tf_thresholds["cvar_good"], neutral=tf_thresholds["cvar_neutral"], lower_better=True)
-    cal_s, cal_c = _status(calmar, good=1.2, neutral=0.6)
-    vol_s, vol_c = _status(ann_vol, good=45.0, neutral=80.0, lower_better=True)
+    sharpe_s, sharpe_c = _metric_status(sharpe, good=1.2, neutral=0.4, positive=POSITIVE, warning=WARNING, negative=NEGATIVE)
+    sortino_s, sortino_c = _metric_status(sortino, good=1.6, neutral=0.6, positive=POSITIVE, warning=WARNING, negative=NEGATIVE)
+    dd_s, dd_c = _metric_status(
+        dd_abs,
+        good=tf_thresholds["dd_good"],
+        neutral=tf_thresholds["dd_neutral"],
+        lower_better=True,
+        positive=POSITIVE,
+        warning=WARNING,
+        negative=NEGATIVE,
+    )
+    var_s, var_c = _metric_status(
+        abs(var95),
+        good=tf_thresholds["var_good"],
+        neutral=tf_thresholds["var_neutral"],
+        lower_better=True,
+        positive=POSITIVE,
+        warning=WARNING,
+        negative=NEGATIVE,
+    )
+    cvar_s, cvar_c = _metric_status(
+        abs(cvar95),
+        good=tf_thresholds["cvar_good"],
+        neutral=tf_thresholds["cvar_neutral"],
+        lower_better=True,
+        positive=POSITIVE,
+        warning=WARNING,
+        negative=NEGATIVE,
+    )
+    cal_s, cal_c = _metric_status(calmar, good=1.2, neutral=0.6, positive=POSITIVE, warning=WARNING, negative=NEGATIVE)
+    vol_s, vol_c = _metric_status(
+        ann_vol,
+        good=45.0,
+        neutral=80.0,
+        lower_better=True,
+        positive=POSITIVE,
+        warning=WARNING,
+        negative=NEGATIVE,
+    )
 
-    if regime == "Lower Risk" and sharpe >= 1.0 and cvar95 > -5.0:
-        profile_text = "Favourable risk profile for selective participation."
-        profile_color = POSITIVE
-    elif regime == "High Risk" or cvar95 <= -8.0:
-        profile_text = "Defensive profile: prioritize capital protection."
-        profile_color = NEGATIVE
-    else:
-        profile_text = "Mixed profile: keep position size controlled."
-        profile_color = WARNING
+    profile_text, profile_color = _risk_profile_summary(
+        regime=regime,
+        sharpe=sharpe,
+        cvar95=cvar95,
+        positive=POSITIVE,
+        warning=WARNING,
+        negative=NEGATIVE,
+    )
 
     render_kpi_grid(
         st,

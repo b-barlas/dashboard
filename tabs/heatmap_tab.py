@@ -21,6 +21,47 @@ def _is_stablecoin(symbol: str) -> bool:
     return is_stable_base_symbol(symbol)
 
 
+def _prepare_heatmap_frames(
+    rows: list[dict],
+    *,
+    exclude_stablecoins: bool,
+    map_limit: int = 100,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    df_all = pd.DataFrame(rows)
+    if df_all.empty:
+        return df_all, df_all
+    if "Stablecoin" not in df_all.columns:
+        df_all["Stablecoin"] = df_all["Symbol"].apply(_is_stablecoin)
+    if "TreemapKey" not in df_all.columns:
+        df_all["TreemapKey"] = [
+            f"legacy:{sym}:{i}" for i, sym in enumerate(df_all["Symbol"].astype(str), start=1)
+        ]
+    if exclude_stablecoins:
+        df_all = df_all[~df_all["Stablecoin"]].copy()
+    if df_all.empty:
+        return df_all, df_all
+    df_all = df_all.sort_values("Market Cap", ascending=False).copy()
+    df_map = df_all.head(map_limit).copy()
+    return df_all, df_map
+
+
+def _build_top_movers_tables(df_sample: pd.DataFrame, top_n: int = 10) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if df_sample.empty:
+        return df_sample.copy(), df_sample.copy()
+    df_sorted = df_sample.sort_values("Change 24h (%)", ascending=False).copy()
+    top_g = df_sorted.head(top_n).copy()
+    top_l = df_sorted.tail(top_n).iloc[::-1].copy()
+    top_g["Status"] = top_g["Change 24h (%)"].apply(
+        lambda x: "▲ Strong" if x >= 8 else ("■ Moderate" if x >= 3 else "• Mild")
+    )
+    top_l["Status"] = top_l["Change 24h (%)"].apply(
+        lambda x: "▼ Heavy" if x <= -8 else ("■ Moderate" if x <= -3 else "• Mild")
+    )
+    top_g["Move"] = top_g["Change 24h (%)"]
+    top_l["Move"] = top_l["Change 24h (%)"]
+    return top_g, top_l
+
+
 def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
@@ -37,7 +78,7 @@ def render(ctx: dict) -> None:
         st,
         title="Market Heatmap",
         intro_html=(
-            "Top market-cap coins in one map. "
+            "Top market-cap coins in one map, with breadth and movers read from the broader tracked sample. "
             f"{_tip('Tile Size', 'Bigger tile means larger market cap.')} "
             f"{_tip('Tile Color', 'Green = positive 24h return, red = negative. Intensity shows move strength.')} "
             "Use this tab to read breadth and leadership quickly."
@@ -79,33 +120,28 @@ def render(ctx: dict) -> None:
     elif source == "CoinPaprika":
         st.info("CoinGecko fallback active: data is currently sourced from CoinPaprika.")
 
-    df_hm = pd.DataFrame(rows)
-    if df_hm.empty:
+    df_all, df_map = _prepare_heatmap_frames(
+        rows,
+        exclude_stablecoins=exclude_stablecoins,
+        map_limit=100,
+    )
+    if df_all.empty:
         st.warning("No valid data for heatmap.")
         return
-    if "Stablecoin" not in df_hm.columns:
-        df_hm["Stablecoin"] = df_hm["Symbol"].apply(_is_stablecoin)
-    if "TreemapKey" not in df_hm.columns:
-        df_hm["TreemapKey"] = [
-            f"legacy:{sym}:{i}" for i, sym in enumerate(df_hm["Symbol"].astype(str), start=1)
-        ]
-    if exclude_stablecoins:
-        df_hm = df_hm[~df_hm["Stablecoin"]].copy()
-    if df_hm.empty:
+    if df_map.empty:
         st.warning("No non-stablecoin rows left after filter. Disable stablecoin exclusion to view full map.")
         return
-    df_hm = df_hm.sort_values("Market Cap", ascending=False).head(100).copy()
 
     flat_eps = 0.05
-    chg = df_hm["Change 24h (%)"]
+    chg = df_all["Change 24h (%)"]
     adv = int((chg > flat_eps).sum())
     dec = int((chg < -flat_eps).sum())
-    flat = int(len(df_hm) - adv - dec)
-    total = max(len(df_hm), 1)
-    avg_chg = float(df_hm["Change 24h (%)"].mean())
-    mcap_sum = float(df_hm["Market Cap"].sum())
+    flat = int(len(df_all) - adv - dec)
+    total = max(len(df_all), 1)
+    avg_chg = float(df_all["Change 24h (%)"].mean())
+    mcap_sum = float(df_all["Market Cap"].sum())
     cap_weighted = float(
-        (df_hm["Change 24h (%)"] * df_hm["Market Cap"]).sum() / mcap_sum
+        (df_all["Change 24h (%)"] * df_all["Market Cap"]).sum() / mcap_sum
     ) if mcap_sum > 0 else 0.0
     breadth = (adv / total) * 100.0
 
@@ -210,10 +246,10 @@ def render(ctx: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    max_abs = float(df_hm["Change 24h (%)"].abs().quantile(0.95))
+    max_abs = float(df_map["Change 24h (%)"].abs().quantile(0.95))
     color_bound = max(3.0, min(15.0, max_abs))
     fig = px.treemap(
-        df_hm,
+        df_map,
         path=["Sector", "TreemapKey"],
         values="Market Cap",
         color="Change 24h (%)",
@@ -241,22 +277,15 @@ def render(ctx: dict) -> None:
         font=dict(size=12),
     )
     st.plotly_chart(fig, width="stretch")
+    st.caption(
+        f"Treemap shows the top {len(df_map)} names by market cap. Breadth and movers use the broader tracked sample of {len(df_all)} coins."
+    )
 
     st.markdown(
-        f"<div class='god-header'><b style='color:{NEON_BLUE};'>Top Movers (24h)</b></div>",
+        f"<div class='god-header'><b style='color:{NEON_BLUE};'>Tracked-Sample Movers (24h)</b></div>",
         unsafe_allow_html=True,
     )
-    df_sorted = df_hm.sort_values("Change 24h (%)", ascending=False).copy()
-    top_g = df_sorted.head(10).copy()
-    top_l = df_sorted.tail(10).iloc[::-1].copy()
-    top_g["Status"] = top_g["Change 24h (%)"].apply(
-        lambda x: "▲ Strong" if x >= 8 else ("■ Moderate" if x >= 3 else "• Mild")
-    )
-    top_l["Status"] = top_l["Change 24h (%)"].apply(
-        lambda x: "▼ Heavy" if x <= -8 else ("■ Moderate" if x <= -3 else "• Mild")
-    )
-    top_g["Move"] = top_g["Change 24h (%)"]
-    top_l["Move"] = top_l["Change 24h (%)"]
+    top_g, top_l = _build_top_movers_tables(df_all, top_n=10)
 
     def _status_style(v: str) -> str:
         s = str(v)
@@ -289,5 +318,5 @@ def render(ctx: dict) -> None:
         )
 
     st.caption(
-        f"Coverage: {len(df_hm)} coins | Advancers: {adv} | Decliners: {dec} | Flat: {flat} (|move| < {flat_eps:.2f}%)"
+        f"Tracked sample: {len(df_all)} coins | Treemap: top {len(df_map)} by market cap | Advancers: {adv} | Decliners: {dec} | Flat: {flat} (|move| < {flat_eps:.2f}%)"
     )

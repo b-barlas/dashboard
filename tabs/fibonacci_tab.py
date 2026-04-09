@@ -6,6 +6,102 @@ import pandas as pd
 import plotly.graph_objs as go
 
 
+def _fmt_price(v: float) -> str:
+    p = float(v)
+    ap = abs(p)
+    if ap >= 100:
+        d = 2
+    elif ap >= 1:
+        d = 4
+    elif ap >= 0.1:
+        d = 5
+    elif ap >= 0.01:
+        d = 6
+    elif ap >= 0.001:
+        d = 7
+    else:
+        d = 8
+    return f"${p:,.{d}f}"
+
+
+def _distance_points(dist_pct: float) -> int:
+    d = abs(float(dist_pct))
+    if d <= 0.80:
+        return 34
+    if d <= 1.50:
+        return 26
+    if d <= 2.50:
+        return 16
+    if d <= 4.00:
+        return 8
+    return 2
+
+
+def _poc_points(poc_dist_pct: float) -> int:
+    d = abs(float(poc_dist_pct))
+    if d <= 1.00:
+        return 18
+    if d <= 3.00:
+        return 10
+    if d <= 5.00:
+        return 4
+    return 0
+
+
+def _regime_points(regime_name: str) -> int:
+    m = {
+        "STRONG TREND": 22,
+        "TRENDING": 16,
+        "TRANSITIONING": 10,
+        "RANGING": 8,
+        "COMPRESSION": 8,
+        "HIGH VOLATILITY": 4,
+        "UNKNOWN": 6,
+    }
+    return int(m.get(str(regime_name or "UNKNOWN").upper().strip(), 6))
+
+
+def _divergence_impact(rows: list[dict], *, is_uptrend: bool) -> tuple[int, int, int]:
+    """Return (net_penalty, conflict_count, supportive_count)."""
+    if not rows:
+        return 0, 0, 0
+    conflict_penalty = 0
+    supportive_bonus = 0
+    conflict_count = 0
+    supportive_count = 0
+    for row in rows:
+        row_type = str((row or {}).get("type", "")).upper().strip()
+        strength = str((row or {}).get("strength", "MODERATE")).upper().strip()
+        if strength == "STRONG":
+            w_pen, w_bonus = 14, 4
+        elif strength == "MODERATE":
+            w_pen, w_bonus = 8, 2
+        else:
+            w_pen, w_bonus = 4, 1
+        is_bull = "BULLISH" in row_type
+        is_bear = "BEARISH" in row_type
+        supportive = (is_uptrend and is_bull) or ((not is_uptrend) and is_bear)
+        conflict = (is_uptrend and is_bear) or ((not is_uptrend) and is_bull)
+        if supportive:
+            supportive_count += 1
+            supportive_bonus += w_bonus
+        elif conflict:
+            conflict_count += 1
+            conflict_penalty += w_pen
+        else:
+            conflict_penalty += int(round(w_pen * 0.35))
+    net_penalty = max(0, min(28, conflict_penalty - supportive_bonus))
+    return net_penalty, conflict_count, supportive_count
+
+
+def _trend_bias_row(is_uptrend: bool) -> dict[str, str]:
+    return {
+        "Metric": "Trend Bias",
+        "Value": "▲ Bullish" if is_uptrend else "▼ Bearish",
+        "Status": "● Supportive",
+    }
+
+
 def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
@@ -23,89 +119,6 @@ def render(ctx: dict) -> None:
     detect_divergence = get_ctx(ctx, "detect_divergence")
     calculate_volume_profile = get_ctx(ctx, "calculate_volume_profile")
     detect_market_regime = get_ctx(ctx, "detect_market_regime")
-
-    def _fmt_price(v: float) -> str:
-        p = float(v)
-        ap = abs(p)
-        if ap >= 100:
-            d = 2
-        elif ap >= 1:
-            d = 4
-        elif ap >= 0.1:
-            d = 5
-        elif ap >= 0.01:
-            d = 6
-        elif ap >= 0.001:
-            d = 7
-        else:
-            d = 8
-        return f"${p:,.{d}f}"
-
-    def _distance_points(dist_pct: float) -> int:
-        d = abs(float(dist_pct))
-        if d <= 0.80:
-            return 34
-        if d <= 1.50:
-            return 26
-        if d <= 2.50:
-            return 16
-        if d <= 4.00:
-            return 8
-        return 2
-
-    def _poc_points(poc_dist_pct: float) -> int:
-        d = abs(float(poc_dist_pct))
-        if d <= 1.00:
-            return 18
-        if d <= 3.00:
-            return 10
-        if d <= 5.00:
-            return 4
-        return 0
-
-    def _regime_points(regime_name: str) -> int:
-        m = {
-            "STRONG TREND": 22,
-            "TRENDING": 16,
-            "TRANSITIONING": 10,
-            "RANGING": 8,
-            "COMPRESSION": 8,
-            "HIGH VOLATILITY": 4,
-            "UNKNOWN": 6,
-        }
-        return int(m.get(str(regime_name or "UNKNOWN").upper().strip(), 6))
-
-    def _divergence_impact(rows: list[dict], *, is_uptrend: bool) -> tuple[int, int, int]:
-        """Return (net_penalty, conflict_count, supportive_count)."""
-        if not rows:
-            return 0, 0, 0
-        conflict_penalty = 0
-        supportive_bonus = 0
-        conflict_count = 0
-        supportive_count = 0
-        for row in rows:
-            row_type = str((row or {}).get("type", "")).upper().strip()
-            strength = str((row or {}).get("strength", "MODERATE")).upper().strip()
-            if strength == "STRONG":
-                w_pen, w_bonus = 14, 4
-            elif strength == "MODERATE":
-                w_pen, w_bonus = 8, 2
-            else:
-                w_pen, w_bonus = 4, 1
-            is_bull = "BULLISH" in row_type
-            is_bear = "BEARISH" in row_type
-            supportive = (is_uptrend and is_bull) or ((not is_uptrend) and is_bear)
-            conflict = (is_uptrend and is_bear) or ((not is_uptrend) and is_bull)
-            if supportive:
-                supportive_count += 1
-                supportive_bonus += w_bonus
-            elif conflict:
-                conflict_count += 1
-                conflict_penalty += w_pen
-            else:
-                conflict_penalty += int(round(w_pen * 0.35))
-        net_penalty = max(0, min(28, conflict_penalty - supportive_bonus))
-        return net_penalty, conflict_count, supportive_count
 
     render_page_header(
         st,
@@ -137,8 +150,7 @@ def render(ctx: dict) -> None:
     with c3:
         fib_lookback = st.slider("Lookback Bars", 30, 500, 120, key="fib_lookback")
 
-    if not st.button("Build Fib Decision Map", type="primary", key="fib_run"):
-        return
+    st.caption("Auto-runs when coin, timeframe, or lookback changes.")
 
     _val_err = _validate_coin_symbol(fib_coin)
     if _val_err:
@@ -309,7 +321,7 @@ def render(ctx: dict) -> None:
     regime_icon = "▲" if "TREND" in regime_name else ("■" if regime_name in {"RANGING", "COMPRESSION"} else "▼")
     context_df = pd.DataFrame(
         [
-            {"Metric": "Trend Bias", "Value": ("▲ Bullish" if is_uptrend else "▼ Bearish"), "Status": ("● Supportive" if is_uptrend else "▼ Caution")},
+            _trend_bias_row(is_uptrend),
             {"Metric": "Regime", "Value": f"{regime_icon} {regime_name}", "Status": ("● Trend-Friendly" if "TREND" in regime_name else ("■ Neutral" if regime_name in {"RANGING", "COMPRESSION"} else "▼ Risky"))},
             {"Metric": "POC Distance", "Value": f"{poc_dist:+.2f}%", "Status": poc_status},
             {"Metric": "Divergence Alerts", "Value": str(div_count), "Status": div_status},

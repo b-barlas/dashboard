@@ -6,6 +6,189 @@ import numpy as np
 import pandas as pd
 
 
+_DEFAULT_MOMENTUM_FALLBACK_SYMBOLS = [
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
+    "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "DOT/USDT", "LINK/USDT",
+    "TRX/USDT", "LTC/USDT", "BCH/USDT", "SUI/USDT", "ATOM/USDT",
+]
+_WHALE_MOMENTUM_SNAPSHOT_VERSION = "v2"
+
+
+def _fmt_momentum_price(value: object) -> str:
+    try:
+        price = float(value)
+    except Exception:
+        return "N/A"
+    if not np.isfinite(price) or price <= 0:
+        return "N/A"
+    if price >= 1000:
+        return f"${price:,.0f}"
+    if price >= 1:
+        return f"${price:,.2f}"
+    if price >= 0.01:
+        return f"${price:,.4f}"
+    if price >= 0.0001:
+        return f"${price:,.6f}"
+    return f"${price:,.8f}"
+
+
+def _compute_scan_thresholds(scan_tf: str, ratio_th: float, z_th: float) -> tuple[float, float, float, float]:
+    tf_ratio_base = {"5m": 1.7, "15m": 1.6, "1h": 1.5, "4h": 1.4}.get(scan_tf, 1.5)
+    tf_z_base = {"5m": 2.2, "15m": 2.0, "1h": 1.8, "4h": 1.6}.get(scan_tf, 1.8)
+    ratio_gate = max(float(ratio_th), float(tf_ratio_base))
+    z_gate = max(float(z_th), float(tf_z_base))
+    extreme_ratio_gate = ratio_gate + 0.70
+    extreme_z_gate = z_gate + 0.90
+    return ratio_gate, z_gate, extreme_ratio_gate, extreme_z_gate
+
+
+def _run_volume_anomaly_scan(
+    symbols: list[str],
+    *,
+    fetch_ohlcv,
+    scan_tf: str,
+    ratio_gate: float,
+    z_gate: float,
+    extreme_ratio_gate: float,
+    extreme_z_gate: float,
+) -> tuple[list[dict], dict[str, int]]:
+    surges: list[dict] = []
+    lookback = 20
+    bars_per_24h = {"5m": 288, "15m": 96, "1h": 24, "4h": 6}.get(scan_tf, 24)
+    diag = {
+        "symbols": len(symbols),
+        "with_data": 0,
+        "no_data": 0,
+        "errors": 0,
+        "gate_reject": 0,
+        "passed": 0,
+    }
+    for sym in list(symbols or []):
+        try:
+            df_s = fetch_ohlcv(sym, scan_tf, limit=max(lookback + 5, bars_per_24h + 2, 80))
+            if df_s is None or len(df_s) <= lookback + 1:
+                diag["no_data"] += 1
+                continue
+            # Evaluate anomalies on closed candles to avoid partial-candle volume noise.
+            df_eval = df_s.iloc[:-1].copy() if len(df_s) > (lookback + 2) else df_s.copy()
+            if df_eval is None or len(df_eval) <= lookback + 1:
+                diag["no_data"] += 1
+                continue
+            diag["with_data"] += 1
+
+            vol_window = df_eval["volume"].iloc[-(lookback + 1):-1]
+            avg_vol = float(vol_window.mean())
+            std_vol = float(vol_window.std(ddof=0))
+            last_vol = float(df_eval["volume"].iloc[-1])
+            if avg_vol <= 0:
+                diag["gate_reject"] += 1
+                continue
+
+            ratio = last_vol / avg_vol
+            z_score = (last_vol - avg_vol) / std_vol if std_vol > 1e-9 else 0.0
+            if ratio < ratio_gate and z_score < z_gate:
+                diag["gate_reject"] += 1
+                continue
+
+            ret_1 = ((df_eval["close"].iloc[-1] / df_eval["close"].iloc[-2]) - 1) * 100
+            if len(df_eval) > bars_per_24h:
+                ret_24h = ((df_eval["close"].iloc[-1] / df_eval["close"].iloc[-(bars_per_24h + 1)]) - 1) * 100
+            else:
+                ret_24h = np.nan
+
+            is_extreme = ratio >= extreme_ratio_gate and z_score >= extreme_z_gate
+            is_high = (
+                (ratio >= ratio_gate and z_score >= z_gate)
+                or ratio >= (ratio_gate + 0.35)
+                or z_score >= (z_gate + 0.50)
+            )
+            if is_extreme:
+                level = "EXTREME"
+            elif is_high:
+                level = "HIGH"
+            else:
+                level = "MODERATE"
+
+            ratio_norm = (ratio - ratio_gate) / max(extreme_ratio_gate - ratio_gate, 1e-9)
+            z_norm = (z_score - z_gate) / max(extreme_z_gate - z_gate, 1e-9)
+            ratio_norm = float(min(max(ratio_norm, 0.0), 1.0))
+            z_norm = float(min(max(z_norm, 0.0), 1.0))
+            base_score = 0.55 * ratio_norm + 0.45 * z_norm
+            if level == "EXTREME":
+                score = 0.85 + 0.15 * base_score
+            elif level == "HIGH":
+                score = 0.60 + 0.25 * base_score
+            else:
+                score = 0.35 + 0.20 * base_score
+            score = float(min(max(score, 0.0), 1.0))
+            diag["passed"] += 1
+            surges.append(
+                {
+                    "Symbol": sym.split("/")[0],
+                    "Level": level,
+                    "Vol Ratio": ratio,
+                    "Z-Score": z_score,
+                    "Last Vol": last_vol,
+                    "Avg20 Vol": avg_vol,
+                    "1-Candle %": ret_1,
+                    "24h %": ret_24h,
+                    "Score": score,
+                }
+            )
+        except Exception:
+            diag["errors"] += 1
+            continue
+    return sorted(surges, key=lambda x: x["Score"], reverse=True), diag
+
+
+def _build_exchange_momentum_fallback(
+    *,
+    fetch_ohlcv,
+    get_top_volume_usdt_symbols,
+    limit: int = 10,
+) -> tuple[list[dict], list[dict]]:
+    try:
+        universe, _raw = get_top_volume_usdt_symbols(top_n=max(limit * 2, 20))
+    except Exception:
+        universe = []
+    candidates = list(universe or _DEFAULT_MOMENTUM_FALLBACK_SYMBOLS)
+
+    rows: list[dict] = []
+    seen: set[str] = set()
+    for sym in candidates:
+        if sym in seen:
+            continue
+        seen.add(sym)
+        try:
+            df = fetch_ohlcv(sym, "1h", limit=30)
+            if df is None or len(df) < 26:
+                continue
+            df_eval = df.iloc[:-1].copy() if len(df) > 26 else df.copy()
+            if df_eval is None or len(df_eval) < 25:
+                continue
+            last_close = float(df_eval["close"].iloc[-1])
+            ref_close = float(df_eval["close"].iloc[-25])
+            if ref_close <= 0:
+                continue
+            pct = ((last_close / ref_close) - 1.0) * 100.0
+            rows.append(
+                {
+                    "symbol": sym.split("/")[0].lower(),
+                    "name": sym.split("/")[0],
+                    "price_change_percentage_24h": float(pct),
+                    "current_price": last_close,
+                    "provider": "Exchange OHLCV",
+                }
+            )
+        except Exception:
+            continue
+
+    if not rows:
+        return [], []
+    ranked = sorted(rows, key=lambda row: float(row.get("price_change_percentage_24h", 0.0)), reverse=True)
+    return ranked[:limit], ranked[-limit:][::-1]
+
+
 def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
@@ -29,7 +212,7 @@ def render(ctx: dict) -> None:
             "This tab is a <b>whale proxy</b> (not on-chain whale wallet tracking). "
             "It combines search trends, 24h movers, and abnormal volume detection."
             "<br><br><b>1. Trending Coins</b> — CoinGecko search trend leaders.<br>"
-            "<b>2. Top Gainers / Losers</b> — 24h momentum leaders/laggards from CoinGecko markets feed.<br>"
+            "<b>2. Broad 24h Movers</b> — 24h momentum leaders/laggards from a broader liquid CoinGecko market sample.<br>"
             "<b>3. Volume Anomaly Scanner</b> — dynamic high-volume universe from exchange-available pairs.<br>"
             "Scanner uses two checks: "
             f"{_tip('Volume Ratio', 'Latest candle volume divided by previous 20-candle average.')} and "
@@ -98,11 +281,19 @@ def render(ctx: dict) -> None:
         st, "whale_trending", trending_new, max_age_sec=900, current_sig=("trending",)
     )
     gainers, used_gainers_cache, gainers_ts = live_or_snapshot(
-        st, "whale_gainers", gainers_new, max_age_sec=900, current_sig=("gainers",)
+        st, "whale_gainers", gainers_new, max_age_sec=900, current_sig=("gainers", _WHALE_MOMENTUM_SNAPSHOT_VERSION)
     )
     losers, used_losers_cache, losers_ts = live_or_snapshot(
-        st, "whale_losers", losers_new, max_age_sec=900, current_sig=("losers",)
+        st, "whale_losers", losers_new, max_age_sec=900, current_sig=("losers", _WHALE_MOMENTUM_SNAPSHOT_VERSION)
     )
+    used_exchange_momentum_fallback = False
+    if not gainers and not losers:
+        gainers, losers = _build_exchange_momentum_fallback(
+            fetch_ohlcv=fetch_ohlcv,
+            get_top_volume_usdt_symbols=get_top_volume_usdt_symbols,
+            limit=15,
+        )
+        used_exchange_momentum_fallback = bool(gainers or losers)
 
     def _fmt_ts(ts_obj) -> str:
         return str(ts_obj) if ts_obj else "N/A"
@@ -123,8 +314,8 @@ def render(ctx: dict) -> None:
         st,
         items=[
             {"label": "Trending Count", "value": len(trending or [])},
-            {"label": "Top Gainer Avg (24h)", "value": avg_g_text, "value_color": POSITIVE},
-            {"label": "Top Loser Avg (24h)", "value": avg_l_text, "value_color": NEGATIVE},
+            {"label": "Broad Gainer Avg (24h)", "value": avg_g_text, "value_color": POSITIVE},
+            {"label": "Broad Loser Avg (24h)", "value": avg_l_text, "value_color": NEGATIVE},
             {"label": "Data Source", "value": "CoinGecko + Exchange OHLCV"},
         ],
     )
@@ -149,39 +340,42 @@ def render(ctx: dict) -> None:
         st.info("Trending data unavailable.")
 
     # Gainers / losers
-    st.markdown(f"<div class='god-header'><b style='color:{NEON_BLUE};'>Market Momentum (24h)</b></div>",
+    st.markdown(f"<div class='god-header'><b style='color:{NEON_BLUE};'>Broad Market Momentum (24h)</b></div>",
                 unsafe_allow_html=True)
+    st.caption("Uses a broader liquid market sample, not just the biggest majors and not the full long-tail universe.")
     if used_gainers_cache or used_losers_cache:
         st.caption(
             f"Live momentum fetch unavailable. Showing cached snapshot "
             f"(gainers: {_fmt_ts(gainers_ts)}, losers: {_fmt_ts(losers_ts)})."
         )
+    elif used_exchange_momentum_fallback:
+        st.caption("CoinGecko momentum providers were unavailable. Showing an exchange-OHLCV fallback snapshot instead.")
     col_g, col_l = st.columns(2)
     with col_g:
-        st.markdown(f"<b style='color:{POSITIVE};'>TOP GAINERS</b>", unsafe_allow_html=True)
+        st.markdown(f"<b style='color:{POSITIVE};'>BROAD GAINERS</b>", unsafe_allow_html=True)
         if top_gainers:
             for c in top_gainers:
                 change = _pct24(c)
                 symbol = (c.get('symbol', '') or '').upper()
-                price = c.get('current_price', 0)
+                price_text = _fmt_momentum_price(c.get('current_price'))
                 st.markdown(
                     f"<div class='whale-momentum-row' style='border-left:2px solid {POSITIVE}; background:rgba(0,255,136,0.05);'>"
-                    f"<span style='color:{ACCENT}; font-weight:600;'>{symbol} <span style='color:{TEXT_MUTED}; font-size:0.75rem;'>${price:,.4f}</span></span>"
+                    f"<span style='color:{ACCENT}; font-weight:600;'>{symbol} <span style='color:{TEXT_MUTED}; font-size:0.75rem;'>{price_text}</span></span>"
                     f"<span style='color:{POSITIVE}; font-weight:700;'>+{change:.2f}%</span></div>",
                     unsafe_allow_html=True,
                 )
         else:
             st.info("Top gainers data temporarily unavailable.")
     with col_l:
-        st.markdown(f"<b style='color:{NEGATIVE};'>TOP LOSERS</b>", unsafe_allow_html=True)
+        st.markdown(f"<b style='color:{NEGATIVE};'>BROAD LOSERS</b>", unsafe_allow_html=True)
         if top_losers:
             for c in top_losers:
                 change = _pct24(c)
                 symbol = (c.get('symbol', '') or '').upper()
-                price = c.get('current_price', 0)
+                price_text = _fmt_momentum_price(c.get('current_price'))
                 st.markdown(
                     f"<div class='whale-momentum-row' style='border-left:2px solid {NEGATIVE}; background:rgba(255,51,102,0.05);'>"
-                    f"<span style='color:{ACCENT}; font-weight:600;'>{symbol} <span style='color:{TEXT_MUTED}; font-size:0.75rem;'>${price:,.4f}</span></span>"
+                    f"<span style='color:{ACCENT}; font-weight:600;'>{symbol} <span style='color:{TEXT_MUTED}; font-size:0.75rem;'>{price_text}</span></span>"
                     f"<span style='color:{NEGATIVE}; font-weight:700;'>{change:.2f}%</span></div>",
                     unsafe_allow_html=True,
                 )
@@ -201,12 +395,11 @@ def render(ctx: dict) -> None:
     with c4:
         z_th = st.slider("Min Z-Score", min_value=1.0, max_value=4.0, value=2.0, step=0.1, key="whale_z_th")
 
-    tf_ratio_base = {"5m": 1.7, "15m": 1.6, "1h": 1.5, "4h": 1.4}.get(scan_tf, 1.5)
-    tf_z_base = {"5m": 2.2, "15m": 2.0, "1h": 1.8, "4h": 1.6}.get(scan_tf, 1.8)
-    ratio_gate = max(float(ratio_th), float(tf_ratio_base))
-    z_gate = max(float(z_th), float(tf_z_base))
-    extreme_ratio_gate = ratio_gate + 0.70
-    extreme_z_gate = z_gate + 0.90
+    ratio_gate, z_gate, extreme_ratio_gate, extreme_z_gate = _compute_scan_thresholds(
+        scan_tf,
+        ratio_th,
+        z_th,
+    )
 
     st.markdown(
         f"<p style='color:{TEXT_MUTED}; font-size:0.82rem; margin-top:4px;'>"
@@ -258,98 +451,25 @@ def render(ctx: dict) -> None:
                     "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
                     "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "DOT/USDT", "LINK/USDT",
                 ]
-            surges = []
-            lookback = 20
-            bars_per_24h = {"5m": 288, "15m": 96, "1h": 24, "4h": 6}.get(scan_tf, 24)
-            diag = {
-                "symbols": len(symbols),
-                "with_data": 0,
-                "no_data": 0,
-                "errors": 0,
-                "gate_reject": 0,
-                "passed": 0,
-            }
-            for sym in symbols:
-                try:
-                    df_s = fetch_ohlcv(sym, scan_tf, limit=max(lookback + 5, bars_per_24h + 2, 80))
-                    if df_s is None or len(df_s) <= lookback + 1:
-                        diag["no_data"] += 1
-                        continue
-                    # Evaluate anomalies on closed candles to avoid partial-candle volume noise.
-                    df_eval = df_s.iloc[:-1].copy() if len(df_s) > (lookback + 2) else df_s.copy()
-                    if df_eval is None or len(df_eval) <= lookback + 1:
-                        diag["no_data"] += 1
-                        continue
-                    diag["with_data"] += 1
-
-                    vol_window = df_eval["volume"].iloc[-(lookback + 1):-1]
-                    avg_vol = float(vol_window.mean())
-                    std_vol = float(vol_window.std(ddof=0))
-                    last_vol = float(df_eval["volume"].iloc[-1])
-                    if avg_vol <= 0:
-                        diag["gate_reject"] += 1
-                        continue
-
-                    ratio = last_vol / avg_vol
-                    z_score = (last_vol - avg_vol) / std_vol if std_vol > 1e-9 else 0.0
-                    if ratio < ratio_gate and z_score < z_gate:
-                        diag["gate_reject"] += 1
-                        continue
-
-                    ret_1 = ((df_eval["close"].iloc[-1] / df_eval["close"].iloc[-2]) - 1) * 100
-                    if len(df_eval) > bars_per_24h:
-                        ret_24h = ((df_eval["close"].iloc[-1] / df_eval["close"].iloc[-(bars_per_24h + 1)]) - 1) * 100
-                    else:
-                        ret_24h = np.nan
-
-                    is_extreme = ratio >= extreme_ratio_gate and z_score >= extreme_z_gate
-                    is_high = (
-                        (ratio >= ratio_gate and z_score >= z_gate)
-                        or ratio >= (ratio_gate + 0.35)
-                        or z_score >= (z_gate + 0.50)
-                    )
-                    if is_extreme:
-                        level = "EXTREME"
-                    elif is_high:
-                        level = "HIGH"
-                    else:
-                        level = "MODERATE"
-
-                    ratio_norm = (ratio - ratio_gate) / max(extreme_ratio_gate - ratio_gate, 1e-9)
-                    z_norm = (z_score - z_gate) / max(extreme_z_gate - z_gate, 1e-9)
-                    ratio_norm = float(min(max(ratio_norm, 0.0), 1.0))
-                    z_norm = float(min(max(z_norm, 0.0), 1.0))
-                    base_score = 0.55 * ratio_norm + 0.45 * z_norm
-                    if level == "EXTREME":
-                        score = 0.85 + 0.15 * base_score
-                    elif level == "HIGH":
-                        score = 0.60 + 0.25 * base_score
-                    else:
-                        score = 0.35 + 0.20 * base_score
-                    score = float(min(max(score, 0.0), 1.0))
-                    diag["passed"] += 1
-                    surges.append(
-                        {
-                            "Symbol": sym.split("/")[0],
-                            "Level": level,
-                            "Vol Ratio": ratio,
-                            "Z-Score": z_score,
-                            "Last Vol": last_vol,
-                            "Avg20 Vol": avg_vol,
-                            "1-Candle %": ret_1,
-                            "24h %": ret_24h,
-                            "Score": score,
-                        }
-                    )
-                except Exception:
-                    diag["errors"] += 1
-                    continue
+            surges, diag = _run_volume_anomaly_scan(
+                symbols,
+                fetch_ohlcv=fetch_ohlcv,
+                scan_tf=scan_tf,
+                ratio_gate=ratio_gate,
+                z_gate=z_gate,
+                extreme_ratio_gate=extreme_ratio_gate,
+                extreme_z_gate=extreme_z_gate,
+            )
 
             st.session_state[state_key] = {
                 "sig": scan_sig,
-                "surges": sorted(surges, key=lambda x: x["Score"], reverse=True),
+                "surges": surges,
                 "diag": diag,
                 "scan_ts": pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "scan_tf": str(scan_tf),
+                "universe_n": int(universe_n),
+                "ratio_gate": float(ratio_gate),
+                "z_gate": float(z_gate),
             }
 
     state = st.session_state.get(state_key)
@@ -357,14 +477,22 @@ def render(ctx: dict) -> None:
         st.info("Run Volume Scan to build the anomaly table.")
         return
     if state.get("sig") != scan_sig:
-        st.info("Settings changed. Run Volume Scan again to refresh anomaly results for the current configuration.")
-        return
+        st.warning(
+            "Settings changed. Showing the last completed scan until you run Volume Scan again for the new configuration."
+        )
 
     surges = state.get("surges", [])
     diag = state.get("diag", {})
     scan_ts = state.get("scan_ts")
     if scan_ts:
-        st.caption(f"Last scan: {scan_ts} | symbols={diag.get('symbols', 0)} | with data={diag.get('with_data', 0)}")
+        state_tf = str(state.get("scan_tf") or scan_tf)
+        state_universe = int(state.get("universe_n") or universe_n)
+        state_ratio_gate = float(state.get("ratio_gate") or ratio_gate)
+        state_z_gate = float(state.get("z_gate") or z_gate)
+        st.caption(
+            f"Last scan: {scan_ts} | tf={state_tf} | universe={state_universe} | "
+            f"gates: ratio ≥ {state_ratio_gate:.2f}, z ≥ {state_z_gate:.2f} | with data={diag.get('with_data', 0)}"
+        )
 
     if not surges:
         if diag.get("with_data", 0) == 0:
@@ -387,7 +515,7 @@ def render(ctx: dict) -> None:
             "<b>Z-Score</b>: standardized volume shock size.<br>"
             "<b>1-Candle %</b>: last closed candle return.<br>"
             "<b>24h %</b>: rolling 24h return approximation by selected timeframe.<br>"
-            "<b>Score</b>: blended anomaly strength from ratio and z-score."
+            "<b>Local Score</b>: blended anomaly strength from ratio and z-score, only comparable inside the same timeframe setup."
         ),
     )
     render_insight_card(
@@ -395,9 +523,10 @@ def render(ctx: dict) -> None:
         title="How to read this quickly",
         body_html=(
             "<ul style='margin:8px 0 0 18px; line-height:1.7;'>"
-            "<li>Prioritize rows with <b>Level = EXTREME</b> and <b>Score >= 0.85</b> (dual-confirmed ratio + z-score).</li>"
+            "<li>Prioritize rows with <b>Level = EXTREME</b> and <b>Local Score >= 0.85</b> (dual-confirmed ratio + z-score).</li>"
             "<li>Prefer anomalies where <b>1-Candle %</b> and <b>24h %</b> point the same direction.</li>"
             "<li>Rows with Ratio/Z status = <b>Supporting</b> passed mainly because the other metric carried the trigger.</li>"
+            "<li><b>Local Score</b> is timeframe-local; compare 5m rows to 5m rows, not directly against 1h or 4h scans.</li>"
             "<li>Use Spot/Position tabs for execution confirmation before acting.</li>"
             "</ul>"
         ),
@@ -414,7 +543,8 @@ def render(ctx: dict) -> None:
     df_show["Avg20 Vol"] = df_show["Avg20 Vol"].map(lambda x: f"{x:,.0f}")
     df_show["1-Candle %"] = df_show["1-Candle %"].map(lambda x: f"{x:+.2f}%")
     df_show["24h %"] = df_show["24h %"].map(lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A")
-    df_show["Score"] = df_show["Score"].map(lambda x: f"{x:.2f}")
+    df_show["Local Score"] = df_show["Score"].map(lambda x: f"{x:.2f}")
+    df_show = df_show.drop(columns=["Score"])
 
     st.markdown(
         f"<div style='color:{TEXT_MUTED}; font-size:0.83rem; margin:2px 0 8px 0; line-height:1.6;'>"
@@ -435,7 +565,7 @@ def render(ctx: dict) -> None:
         f"{_tip('Level', 'Anomaly class: MODERATE / HIGH / EXTREME. EXTREME requires dual confirmation.')} "
         f"{_tip('Vol Ratio', 'Latest closed-candle volume divided by previous 20-candle average.')} "
         f"{_tip('Z-Score', 'How far latest closed-candle volume is from recent mean in std units.')} "
-        f"{_tip('Score', 'Blended anomaly strength (0-1) from ratio + z-score.')} "
+        f"{_tip('Local Score', 'Timeframe-local anomaly strength (0-1) from ratio + z-score. Compare inside the same timeframe only.')} "
         f"{_tip('1-Candle %', 'Latest closed candle return.')} "
         f"{_tip('24h %', 'Approx rolling 24h return at selected timeframe.')}"
         f"</div>",
@@ -449,7 +579,7 @@ def render(ctx: dict) -> None:
         help="Enable this if you need deeper diagnostics. Keep OFF for cleaner scanning view.",
     )
 
-    base_cols = ["Symbol", "Level", "Vol Ratio", "Z-Score", "Score", "1-Candle %", "24h %"]
+    base_cols = ["Symbol", "Level", "Vol Ratio", "Z-Score", "Local Score", "1-Candle %", "24h %"]
     diag_cols = ["Ratio Status", "Z-Status", "Last Vol", "Avg20 Vol"]
     selected_cols = base_cols + diag_cols if show_diag_cols else base_cols
     df_view = df_show[selected_cols]

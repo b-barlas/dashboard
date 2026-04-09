@@ -73,6 +73,75 @@ def _prepare_closed_frame(df: pd.DataFrame | None, *, min_rows: int = 55) -> pd.
     return df_eval
 
 
+def _empty_matrix_row(tf: str) -> dict:
+    return {
+        "Timeframe": tf,
+        "Direction": "NO DATA",
+        "DirectionKey": "NO_DATA",
+        "Selected Model Prob %": 0.0,
+        "Ensemble Agree": "N/A",
+        "Ensemble Agree %": 0.0,
+        "AI Direction Bias %": 50.0,
+        "AI Direction Bias": "Neutral (50.0%)",
+        "AI Direction Bias Key": "NEUTRAL",
+        "Reference Entry": "N/A",
+        "Reference Target": "N/A",
+        "Reference Source": "N/A",
+        "AI Reference Entry": "N/A",
+        "AI Reference Target": "N/A",
+        "Technical Reference Entry": "N/A",
+        "Technical Reference Target": "N/A",
+    }
+
+
+def _reference_plan_fields(
+    ai_entry_txt: str,
+    ai_target_txt: str,
+    ta_entry_txt: str,
+    ta_target_txt: str,
+) -> dict:
+    reference_entry = ai_entry_txt if ai_entry_txt != "N/A" else ta_entry_txt
+    reference_target = ai_target_txt if ai_target_txt != "N/A" else ta_target_txt
+    if ai_entry_txt != "N/A":
+        reference_source = "AI-Aligned"
+    elif ta_entry_txt != "N/A":
+        reference_source = "Technical Context"
+    else:
+        reference_source = "No Reference"
+    return {
+        "Reference Entry": reference_entry,
+        "Reference Target": reference_target,
+        "Reference Source": reference_source,
+        "AI Reference Entry": ai_entry_txt,
+        "AI Reference Target": ai_target_txt,
+        "Technical Reference Entry": ta_entry_txt,
+        "Technical Reference Target": ta_target_txt,
+    }
+
+
+def _summarize_workspace_rows(rows: list[dict]) -> dict[str, float | str | int]:
+    df_out = pd.DataFrame(rows)
+    df_valid = df_out[df_out["DirectionKey"].isin(["LONG", "SHORT", "NEUTRAL"])].copy()
+    dominant = "NEUTRAL"
+    if not df_valid.empty:
+        dominant = str(df_valid["DirectionKey"].mode().iloc[0])
+    avg_prob = float(df_valid["Selected Model Prob %"].mean()) if not df_valid.empty else 0.0
+    avg_agree = float(df_valid["Ensemble Agree %"].mean()) if not df_valid.empty else 0.0
+    consistency = (
+        (float((df_valid["DirectionKey"] == dominant).sum()) / float(len(df_valid))) * 100.0
+        if not df_valid.empty
+        else 0.0
+    )
+    tf_valid_count = int(df_valid["Timeframe"].nunique()) if not df_valid.empty else 0
+    return {
+        "dominant": dominant,
+        "avg_prob": avg_prob,
+        "avg_agree": avg_agree,
+        "consistency": consistency,
+        "tf_valid_count": tf_valid_count,
+    }
+
+
 def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
@@ -138,7 +207,7 @@ def render(ctx: dict) -> None:
         intro_html=(
             "AI-focused diagnostics workspace with two modes. "
             "<b>Quick Prediction</b> gives a one-shot ensemble read for a single coin and timeframe. "
-            "<b>Model & Timeframe Matrix</b> compares agreement, probability, and plan context across selected frames."
+            "<b>Model & Timeframe Matrix</b> compares agreement, probability, and reference-level context across selected frames."
         ),
     )
     mode = st.radio(
@@ -154,7 +223,8 @@ def render(ctx: dict) -> None:
             title="Quick Prediction Mode",
             body_html=(
                 "Fast one-shot ensemble read for a single coin/timeframe. "
-                "Use this mode to see immediate AI direction, probability, and model agreement."
+                "Use this mode to see immediate AI direction, probability, and model agreement. "
+                "Treat it as a diagnostic bias read, not a stand-alone execution decision."
                 f"<br><br>{_tip('Direction', 'Mapped to Upside / Downside / Neutral from ensemble probability thresholds.')} | "
                 f"{_tip('Agreement', 'Effective agreement: directional agreement for Upside/Downside, consensus agreement for Neutral.')} | "
                 f"{_tip('Signal Certainty', 'Quick confidence class from probability distance to neutral band.')}"
@@ -263,7 +333,7 @@ def render(ctx: dict) -> None:
         title="Model & Timeframe Matrix",
         body_html=(
             "Multi-timeframe model diagnostics for one coin. Compare direction consistency, probability, "
-            "agreement quality, and plan source across selected frames."
+            "agreement quality, and reference-level context across selected frames."
             f"<br><br>{_tip('Selected Model Prob', 'Upward probability from selected model. Higher implies Upside bias; lower implies Downside bias.')} | "
             f"{_tip('Agreement', 'Effective agreement: directional agreement for Upside/Downside, consensus agreement for Neutral.')} | "
             f"{_tip('AI Direction Bias', 'Market-wide AI bias: dominance-weighted ensemble probability over major coins for same timeframe.')}"
@@ -295,12 +365,12 @@ def render(ctx: dict) -> None:
         body_html=(
             "<b>1.</b> Prefer setups where direction is consistent across timeframes.<br>"
             "<b>2.</b> If Upward Probability is near the middle band and Agreement is low, treat as fragile signal.<br>"
-            "<b>3.</b> Use plan levels only as drafts; always validate in Spot/Position tabs."
+            "<b>3.</b> Treat reference levels as context only; always validate in Spot/Position tabs."
         ),
     )
     st.markdown(
         f"<div style='margin:-2px 0 10px 0; color:{TEXT_MUTED}; font-size:0.84rem; line-height:1.6;'>"
-        f"{_tip('Plan Entry / Plan Target', 'Primary plan shown in table. If AI and technical direction align, AI-filtered plan is used; otherwise technical fallback is shown.')}"
+        f"{_tip('Reference Entry / Reference Target', 'Primary reference levels shown in the table. If AI and technical direction align, AI-aligned levels are preferred; otherwise technical context levels are shown.')}"
         f"</div>",
         unsafe_allow_html=True,
     )
@@ -380,51 +450,13 @@ def render(ctx: dict) -> None:
             df = fetch_ohlcv(coin, tf, limit=500)
             if df is None or len(df) < 60:
                 tf_eval_cache[tf] = None
-                rows.append(
-                    {
-                        "Timeframe": tf,
-                        "Direction": "NO DATA",
-                        "DirectionKey": "NO_DATA",
-                        "Selected Model Prob %": 0.0,
-                        "Ensemble Agree": "N/A",
-                        "Ensemble Agree %": 0.0,
-                        "AI Direction Bias %": 50.0,
-                        "AI Direction Bias": "Neutral (50.0%)",
-                        "AI Direction Bias Key": "NEUTRAL",
-                        "Plan Entry": "N/A",
-                        "Plan Target": "N/A",
-                        "Plan Source": "N/A",
-                        "AI Entry": "N/A",
-                        "AI Target": "N/A",
-                        "Non-AI Entry": "N/A",
-                        "Non-AI Target": "N/A",
-                    }
-                )
+                rows.append(_empty_matrix_row(tf))
                 continue
 
             df_eval = df.iloc[:-1].copy() if len(df) > 60 else df.copy()
             if df_eval is None or len(df_eval) < 55:
                 tf_eval_cache[tf] = None
-                rows.append(
-                    {
-                        "Timeframe": tf,
-                        "Direction": "NO DATA",
-                        "DirectionKey": "NO_DATA",
-                        "Selected Model Prob %": 0.0,
-                        "Ensemble Agree": "N/A",
-                        "Ensemble Agree %": 0.0,
-                        "AI Direction Bias %": 50.0,
-                        "AI Direction Bias": "Neutral (50.0%)",
-                        "AI Direction Bias Key": "NEUTRAL",
-                        "Plan Entry": "N/A",
-                        "Plan Target": "N/A",
-                        "Plan Source": "N/A",
-                        "AI Entry": "N/A",
-                        "AI Target": "N/A",
-                        "Non-AI Entry": "N/A",
-                        "Non-AI Target": "N/A",
-                    }
-                )
+                rows.append(_empty_matrix_row(tf))
                 continue
 
             tf_eval_cache[tf] = df_eval
@@ -524,16 +556,10 @@ def render(ctx: dict) -> None:
                     "AI Direction Bias %": round(mkt_prob * 100.0, 1),
                     "AI Direction Bias": f"{_dir_label(mkt_dir)} ({mkt_prob * 100.0:.1f}%)",
                     "AI Direction Bias Key": _dir_color_key(mkt_dir),
-                    "Plan Entry": ai_entry_txt if ai_entry_txt != "N/A" else ta_entry_txt,
-                    "Plan Target": ai_target_txt if ai_target_txt != "N/A" else ta_target_txt,
-                    "Plan Source": ("AI-Filtered" if ai_entry_txt != "N/A" else ("Technical Fallback" if ta_entry_txt != "N/A" else "No Plan")),
-                    "AI Entry": ai_entry_txt,
-                    "AI Target": ai_target_txt,
-                    "Non-AI Entry": ta_entry_txt,
-                    "Non-AI Target": ta_target_txt,
                     "__ensemble_side": ensemble_side,
                     "__ai_votes": int(ai_votes_for_decision),
                     "__decision_agreement": round(float(decision_agreement_for_decision), 4),
+                    **_reference_plan_fields(ai_entry_txt, ai_target_txt, ta_entry_txt, ta_target_txt),
                 }
             )
 
@@ -550,18 +576,12 @@ def render(ctx: dict) -> None:
         live_or_snapshot(st, snapshot_key, rows, max_age_sec=900, current_sig=snapshot_sig)
 
     df_out = pd.DataFrame(rows)
-    df_valid = df_out[df_out["DirectionKey"].isin(["LONG", "SHORT", "NEUTRAL"])].copy()
-    dominant = "NEUTRAL"
-    if not df_valid.empty:
-        dominant = str(df_valid["DirectionKey"].mode().iloc[0])
-    avg_prob = float(df_valid["Selected Model Prob %"].mean()) if not df_valid.empty else 0.0
-    avg_agree = float(df_valid["Ensemble Agree %"].mean()) if not df_valid.empty else 0.0
-    consistency = (
-        (float((df_valid["DirectionKey"] == dominant).sum()) / float(len(df_valid))) * 100.0
-        if not df_valid.empty
-        else 0.0
-    )
-    tf_valid_count = int(df_valid["Timeframe"].nunique()) if not df_valid.empty else 0
+    summary = _summarize_workspace_rows(rows)
+    dominant = str(summary["dominant"])
+    avg_prob = float(summary["avg_prob"])
+    avg_agree = float(summary["avg_agree"])
+    consistency = float(summary["consistency"])
+    tf_valid_count = int(summary["tf_valid_count"])
 
     dominant_label = _dir_label(dominant)
     dom_color = POSITIVE if dominant == "LONG" else (NEGATIVE if dominant == "SHORT" else WARNING)
@@ -625,9 +645,9 @@ def render(ctx: dict) -> None:
 
     def _plan_source_style(v: str) -> str:
         s = str(v)
-        if "AI-Filtered" in s:
+        if "AI-Aligned" in s:
             return f"color:{POSITIVE}; font-weight:700;"
-        if "Technical Fallback" in s:
+        if "Technical Context" in s:
             return f"color:{WARNING}; font-weight:700;"
         return f"color:{TEXT_MUTED};"
 
@@ -640,8 +660,8 @@ def render(ctx: dict) -> None:
             "<b>Selected Model Prob %</b>: upward probability from selected model; lower values imply Downside bias.<br>"
             "<b>Ensemble Agree</b>: effective ensemble agreement (x/3): directional for Upside/Downside, consensus for Neutral.<br>"
             "<b>AI Direction Bias</b>: same market-wide bias logic as Market tab (dominance-weighted Ensemble), shown as direction + percent.<br>"
-            "<b>Plan Entry/Plan Target</b>: primary plan to watch.<br>"
-            "<b>Plan Source</b>: AI-Filtered or Technical Fallback."
+            "<b>Reference Entry/Reference Target</b>: context levels only, not a stand-alone execution instruction.<br>"
+            "<b>Reference Source</b>: AI-Aligned or Technical Context."
         ),
     )
     st.dataframe(
@@ -652,29 +672,29 @@ def render(ctx: dict) -> None:
                 "Selected Model Prob %",
                 "Ensemble Agree",
                 "AI Direction Bias",
-                "Plan Entry",
-                "Plan Target",
-                "Plan Source",
+                "Reference Entry",
+                "Reference Target",
+                "Reference Source",
             ]
         ].style.format({"Selected Model Prob %": "{:.1f}%"})
         .map(_dir_style, subset=["Direction"])
         .map(_prob_style, subset=["Selected Model Prob %"])
         .map(_dir_style, subset=["AI Direction Bias"])
         .map(_agree_style, subset=["Ensemble Agree"])
-        .map(_plan_source_style, subset=["Plan Source"]),
+        .map(_plan_source_style, subset=["Reference Source"]),
         width="stretch",
         hide_index=True,
     )
 
-    with st.expander("Show Plan Debug Columns (AI vs Technical)"):
+    with st.expander("Show Reference Debug Columns (AI vs Technical)"):
         st.dataframe(
             df_out[
                 [
                     "Timeframe",
-                    "AI Entry",
-                    "AI Target",
-                    "Non-AI Entry",
-                    "Non-AI Target",
+                    "AI Reference Entry",
+                    "AI Reference Target",
+                    "Technical Reference Entry",
+                    "Technical Reference Target",
                 ]
             ],
             width="stretch",
@@ -726,6 +746,8 @@ def render(ctx: dict) -> None:
 
     # Detailed indicator panel per timeframe (optional, collapse by default).
     tf_row_map = {str(r.get("Timeframe")): r for r in rows if r.get("Direction") != "NO DATA"}
+    htf_4h = _prepare_closed_frame(fetch_ohlcv(coin, "4h", limit=260), min_rows=81)
+    htf_1d = _prepare_closed_frame(fetch_ohlcv(coin, "1d", limit=260), min_rows=81)
     with st.expander("Show Technical Indicator Panels"):
         for tf in selected_timeframes:
             df_eval = tf_eval_cache.get(tf)
@@ -734,9 +756,7 @@ def render(ctx: dict) -> None:
                 continue
             try:
                 # Keep HTF context stable across selected-timeframe changes.
-                df_4h = _prepare_closed_frame(fetch_ohlcv(coin, "4h", limit=260), min_rows=81)
-                df_1d = _prepare_closed_frame(fetch_ohlcv(coin, "1d", limit=260), min_rows=81)
-                spot_snapshot = build_spot_direction_snapshot(df_4h=df_4h, df_1d=df_1d)
+                spot_snapshot = build_spot_direction_snapshot(df_4h=htf_4h, df_1d=htf_1d)
                 confidence_snapshot = build_confidence_snapshot(
                     direction=spot_snapshot.direction,
                     timeframe_alignment=spot_snapshot.timeframe_alignment,
@@ -749,8 +769,8 @@ def render(ctx: dict) -> None:
                     range_regime=spot_snapshot.range_regime,
                 )
                 ai_spot_snapshot = build_ai_spot_bias_snapshot(
-                    df_4h=df_4h,
-                    df_1d=df_1d,
+                    df_4h=htf_4h,
+                    df_1d=htf_1d,
                     predictor=ml_ensemble_predict,
                 )
                 ar = analyse(df_eval)

@@ -56,6 +56,24 @@ def _history_limit(horizon_steps: int) -> int:
     return int(min(4000, max(700, round(horizon_steps * 1.8))))
 
 
+def _mc_decision_profile(
+    statuses: list[tuple[str, str]],
+    *,
+    positive_color: str,
+    warning_color: str,
+    negative_color: str,
+) -> tuple[str, str, str]:
+    risky_count = sum(x[0] == "Risky" for x in statuses)
+    healthy_count = sum(x[0] == "Healthy" for x in statuses)
+    cvar_status = statuses[3] if len(statuses) >= 4 else ("Watch", warning_color)
+    prob_status = statuses[0] if len(statuses) >= 1 else ("Watch", warning_color)
+    if risky_count >= 2 or cvar_status[0] == "Risky":
+        return "Defensive", negative_color, "Tail-risk profile is heavy. Reduce size and avoid aggressive exposure."
+    if healthy_count >= 3 and prob_status[0] == "Healthy":
+        return "Favourable", positive_color, "Probability and tail-risk profile are constructive for selective risk-on plans."
+    return "Selective", warning_color, "Mixed profile. Keep sizing disciplined and require stronger confluence."
+
+
 def render(ctx: dict) -> None:
     st = get_ctx(ctx, "st")
     ACCENT = get_ctx(ctx, "ACCENT")
@@ -94,8 +112,7 @@ def render(ctx: dict) -> None:
     with c4:
         mc_days = st.slider("Forecast Days", 7, 120, 30, key="mc_days")
 
-    if not st.button("Run Simulation", type="primary", key="mc_run"):
-        return
+    st.caption("Auto-runs when coin, timeframe, simulations, or horizon changes.")
 
     validation_error = _validate_coin_symbol(mc_coin)
     if validation_error:
@@ -180,20 +197,12 @@ def render(ctx: dict) -> None:
         negative_color=NEGATIVE,
     )
 
-    risky_count = sum(x[0] == "Risky" for x in [prob_status, ret_status, var_status, cvar_status, med_status])
-    healthy_count = sum(x[0] == "Healthy" for x in [prob_status, ret_status, var_status, cvar_status, med_status])
-    if risky_count >= 2 or cvar_status[0] == "Risky":
-        decision_tone = "Defensive"
-        decision_color = NEGATIVE
-        decision_note = "Tail-risk profile is heavy. Reduce size and avoid aggressive exposure."
-    elif healthy_count >= 3 and prob_status[0] == "Healthy":
-        decision_tone = "Favourable"
-        decision_color = POSITIVE
-        decision_note = "Probability and tail-risk profile are constructive for selective risk-on plans."
-    else:
-        decision_tone = "Selective"
-        decision_color = WARNING
-        decision_note = "Mixed profile. Keep sizing disciplined and require stronger confluence."
+    decision_tone, decision_color, decision_note = _mc_decision_profile(
+        [prob_status, ret_status, var_status, cvar_status, med_status],
+        positive_color=POSITIVE,
+        warning_color=WARNING,
+        negative_color=NEGATIVE,
+    )
 
     render_kpi_grid(
         st,

@@ -1030,20 +1030,33 @@ def fetch_trending_coins() -> list[dict]:
     _debug("fetch_trending_coins cache returned empty; retrying uncached fetch.")
     return fetch_trending_coins_core(_http_get_json)
 
+_TOP_GAINERS_LOSERS_CACHE_VERSION = 2
+
 
 @st.cache_data(ttl=120, show_spinner=False)
-def _fetch_top_gainers_losers_cached(limit: int = 20) -> tuple[list, list]:
+def _fetch_top_gainers_losers_cached(
+    limit: int = 20,
+    cache_version: int = _TOP_GAINERS_LOSERS_CACHE_VERSION,
+) -> tuple[list, list]:
+    _ = cache_version
     return fetch_top_gainers_losers_core(_http_get_json, limit=limit)
 
 
 def fetch_top_gainers_losers(limit: int = 20) -> tuple[list, list]:
-    gainers, losers = _fetch_top_gainers_losers_cached(limit=limit)
+    gainers, losers = _fetch_top_gainers_losers_cached(
+        limit=limit,
+        cache_version=_TOP_GAINERS_LOSERS_CACHE_VERSION,
+    )
     if gainers or losers:
         return gainers, losers
     # Avoid serving cached empty payloads for the full TTL when CoinGecko has
     # transient 429/timeout responses.
     _debug("fetch_top_gainers_losers cache returned empty; retrying uncached fetch.")
-    return fetch_top_gainers_losers_core(_http_get_json, limit=limit)
+    gainers, losers = fetch_top_gainers_losers_core(_http_get_json, limit=limit)
+    if gainers or losers:
+        return gainers, losers
+    _debug("broad gainers/losers fetch returned empty; retrying with narrower single-page fallback.")
+    return fetch_top_gainers_losers_core(_http_get_json, limit=limit, max_pages=1, per_page=100)
 
 
 def _fetch_exchange_tickers_snapshot_uncached() -> dict:

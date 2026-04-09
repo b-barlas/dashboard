@@ -322,6 +322,9 @@ def render(ctx: dict) -> None:
 
             st.session_state[state_key] = {
                 "sig": current_sig,
+                "tf_corr": tf_corr,
+                "corr_method": corr_method,
+                "custom_coins_raw": custom_coins_raw,
                 "corr": corr,
                 "pair_df": pair_df,
                 "summary_df": summary_df,
@@ -341,8 +344,20 @@ def render(ctx: dict) -> None:
             }
 
     result = st.session_state.get(state_key)
-    if not result or result.get("sig") != current_sig:
+    if not result:
         return
+
+    result_sig = tuple(result.get("sig") or ())
+    result_tf = str(result.get("tf_corr") or (result_sig[0] if len(result_sig) >= 1 else tf_corr))
+    result_method = str(result.get("corr_method") or (result_sig[1] if len(result_sig) >= 2 else corr_method))
+    result_custom_raw = str(result.get("custom_coins_raw") or (result_sig[2] if len(result_sig) >= 3 else ""))
+    if result_sig != current_sig:
+        basket_preview = result_custom_raw or ", ".join(result.get("symbols", []))
+        st.info(
+            "Showing the last correlation matrix. "
+            f"Current view is still based on `{result_method.title()} / {result_tf}` for `{basket_preview}`. "
+            "Click `Generate Correlation Matrix` to refresh for the new inputs."
+        )
 
     corr = result["corr"]
     pair_df = result["pair_df"]
@@ -371,7 +386,7 @@ def render(ctx: dict) -> None:
     if failed_coins:
         st.warning(
             f"No usable aligned return series for: **{', '.join(failed_coins)}**. "
-            f"These symbols were excluded from the matrix on **{EXCHANGE.id.title()} ({tf_corr})**."
+            f"These symbols were excluded from the matrix on **{EXCHANGE.id.title()} ({result_tf})**."
         )
 
     fig_corr = go.Figure(
@@ -393,7 +408,7 @@ def render(ctx: dict) -> None:
         template="plotly_dark",
         margin=dict(l=60, r=20, t=45, b=60),
         xaxis=dict(side="bottom"),
-        title=f"{corr_method.title()} Correlation ({tf_corr})",
+        title=f"{result_method.title()} Correlation ({result_tf})",
     )
     st.plotly_chart(fig_corr, width="stretch")
 

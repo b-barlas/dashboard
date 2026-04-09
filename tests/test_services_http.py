@@ -75,6 +75,24 @@ class ServicesHttpTests(unittest.TestCase):
         self.assertEqual([g["symbol"] for g in gainers], ["c", "a"])
         self.assertEqual([loser["symbol"] for loser in losers], ["b", "d"])
 
+    def test_fetch_top_gainers_losers_uses_narrow_fallback_when_broad_fetch_empty(self):
+        with patch("core.services._fetch_top_gainers_losers_cached", return_value=([], [])):
+            with patch(
+                "core.services.fetch_top_gainers_losers_core",
+                side_effect=[
+                    ([], []),
+                    ([{"symbol": "btc", "price_change_percentage_24h": 3.0}], [{"symbol": "eth", "price_change_percentage_24h": -2.0}]),
+                ],
+            ) as mocked_core:
+                gainers, losers = svc.fetch_top_gainers_losers(limit=2)
+        self.assertEqual([g["symbol"] for g in gainers], ["btc"])
+        self.assertEqual([loser["symbol"] for loser in losers], ["eth"])
+        self.assertEqual(mocked_core.call_count, 2)
+        first_kwargs = mocked_core.call_args_list[0].kwargs
+        second_kwargs = mocked_core.call_args_list[1].kwargs
+        self.assertEqual(first_kwargs, {"limit": 2})
+        self.assertEqual(second_kwargs, {"limit": 2, "max_pages": 1, "per_page": 100})
+
     def test_market_top_snapshot_drops_stale_fields_even_if_other_live_fields_arrive(self):
         fake_st = self._fake_st(
             {
