@@ -8,6 +8,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 
 import pandas as pd
+from core.decision_version import current_decision_version
 from core.session_utils import session_bucket_for_timestamp
 from core.trading_copy import playbook_display, playbook_key, trade_gate_display, trade_gate_key
 from core.tracker_store import (
@@ -215,6 +216,8 @@ def _ensure_signal_tracker_columns(conn: sqlite3.Connection) -> None:
     expected = {
         "session_bucket": "TEXT",
         "scan_focus": "TEXT",
+        "created_decision_version": "TEXT",
+        "decision_version": "TEXT",
         "market_regime": "TEXT",
         "market_playbook_key": "TEXT",
         "market_playbook": "TEXT",
@@ -282,6 +285,8 @@ def init_signal_tracker_db(db_path: str | None = None) -> str:
                 event_time TEXT NOT NULL,
                 session_bucket TEXT,
                 scan_focus TEXT,
+                created_decision_version TEXT,
+                decision_version TEXT,
                 horizon_bars INTEGER NOT NULL,
                 direction TEXT NOT NULL,
                 setup_confirm TEXT,
@@ -413,6 +418,14 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
             market_lead_direction = _direction_key(market_lead_label)
             horizon_bars = int(event.get("horizon_bars") or _timeframe_horizon_bars(timeframe))
             session_bucket = str(event.get("session_bucket") or session_bucket_for_timestamp(event_time)).strip()
+            decision_version = str(
+                event.get("decision_version")
+                or current_decision_version(source)
+                or ""
+            ).strip()
+            created_decision_version = str(
+                event.get("created_decision_version") or decision_version or ""
+            ).strip()
             payload = {
                 "signal_key": signal_key,
                 "source": source,
@@ -421,6 +434,8 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                 "event_time": _utc_iso(event_time),
                 "session_bucket": session_bucket,
                 "scan_focus": str(event.get("scan_focus") or "").strip(),
+                "created_decision_version": created_decision_version,
+                "decision_version": decision_version,
                 "horizon_bars": horizon_bars,
                 "direction": direction,
                 "setup_confirm": str(event.get("setup_confirm") or "").strip(),
@@ -489,7 +504,8 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
             conn.execute(
                 """
                 INSERT INTO signal_events (
-                    signal_key, source, symbol, timeframe, event_time, session_bucket, scan_focus, horizon_bars, direction,
+                    signal_key, source, symbol, timeframe, event_time, session_bucket, scan_focus,
+                    created_decision_version, decision_version, horizon_bars, direction,
                     setup_confirm, action_reason, lead_label, lead_direction, lead_active,
                     confidence, ai_ensemble, ai_direction, ai_confidence, ai_aligned,
                     market_lead_label, market_lead_score, market_lead_upside, market_lead_downside,
@@ -506,7 +522,8 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                     price, delta_pct, entry_price, stop_loss, target_price,
                     rr_ratio, has_plan, created_at, updated_at
                 ) VALUES (
-                    :signal_key, :source, :symbol, :timeframe, :event_time, :session_bucket, :scan_focus, :horizon_bars, :direction,
+                    :signal_key, :source, :symbol, :timeframe, :event_time, :session_bucket, :scan_focus,
+                    :created_decision_version, :decision_version, :horizon_bars, :direction,
                     :setup_confirm, :action_reason, :lead_label, :lead_direction, :lead_active,
                     :confidence, :ai_ensemble, :ai_direction, :ai_confidence, :ai_aligned,
                     :market_lead_label, :market_lead_score, :market_lead_upside, :market_lead_downside,
@@ -526,6 +543,12 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                 ON CONFLICT(signal_key) DO UPDATE SET
                     session_bucket=excluded.session_bucket,
                     scan_focus=excluded.scan_focus,
+                    created_decision_version=CASE
+                        WHEN COALESCE(signal_events.created_decision_version, '') = ''
+                        THEN excluded.created_decision_version
+                        ELSE signal_events.created_decision_version
+                    END,
+                    decision_version=excluded.decision_version,
                     setup_confirm=excluded.setup_confirm,
                     action_reason=excluded.action_reason,
                     lead_label=excluded.lead_label,
@@ -880,6 +903,45 @@ def fetch_signal_events_df(
     params.append(int(limit))
     with _connect(path) as conn:
         return pd.read_sql_query(query, conn, params=params)
+
+
+def prefer_current_decision_version_slice(
+    df_events: pd.DataFrame,
+    *,
+    source: str | None = None,
+    min_rows: int = 80,
+) -> pd.DataFrame:
+    if df_events is None or df_events.empty:
+        out = pd.DataFrame()
+        out.attrs["decision_version_mode"] = "empty"
+        out.attrs["decision_version_target"] = current_decision_version(source)
+        return out
+    target_version = str(current_decision_version(source) or "").strip()
+    d = df_events.copy()
+    if not target_version or "decision_version" not in d.columns:
+        d.attrs["decision_version_mode"] = "unversioned_fallback"
+        d.attrs["decision_version_target"] = target_version
+        d.attrs["decision_version_rows"] = 0
+        d.attrs["decision_version_total_rows"] = int(len(d))
+        return d
+    version_series = (
+        d["decision_version"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    current_df = d.loc[version_series.eq(target_version)].copy()
+    if len(current_df) >= int(max(1, min_rows)):
+        current_df.attrs["decision_version_mode"] = "current_only"
+        current_df.attrs["decision_version_target"] = target_version
+        current_df.attrs["decision_version_rows"] = int(len(current_df))
+        current_df.attrs["decision_version_total_rows"] = int(len(d))
+        return current_df
+    d.attrs["decision_version_mode"] = "mixed_fallback"
+    d.attrs["decision_version_target"] = target_version
+    d.attrs["decision_version_rows"] = int(len(current_df))
+    d.attrs["decision_version_total_rows"] = int(len(d))
+    return d
 
 
 def _dominant_text_value(series: pd.Series | None, *, default: str) -> str:

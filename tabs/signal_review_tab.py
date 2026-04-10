@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import pandas as pd
+from core.decision_version import current_decision_version
 from core.session_utils import session_bucket_for_timestamp
+from core.signal_tracker import prefer_current_decision_version_slice
 from core.trading_copy import copy_text, playbook_display, playbook_key, trade_gate_display, trade_gate_key
 
 from ui.ctx import get_ctx
@@ -87,13 +89,61 @@ def _annotate_actual_exit_quality(df_events: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
-def _review_scope_note(status_filter: str, timeframe_filter: str, limit: int, rows_in_slice: int) -> str:
+def _review_scope_note(
+    status_filter: str,
+    timeframe_filter: str,
+    version_filter: str,
+    limit: int,
+    rows_in_slice: int,
+) -> str:
     status_text = "all statuses" if str(status_filter) == "All" else f"{str(status_filter).lower()} signals"
     timeframe_text = "all timeframes" if str(timeframe_filter) == "All" else f"{str(timeframe_filter).upper()} only"
+    version_text = "all decision versions" if str(version_filter) == "All" else str(version_filter)
     return (
         f"Current review slice: {rows_in_slice} rows shown from the latest up to {int(limit)} Market signals, "
-        f"filtered to {status_text} and {timeframe_text}. Archive cards and cohorts below are computed from this slice, "
+        f"filtered to {status_text}, {timeframe_text}, and {version_text}. Archive cards and cohorts below are computed from this slice, "
         "not the full tracker history."
+    )
+
+
+def _decision_cohort_note(*, mode: str, target_version: str, current_rows: int, total_rows: int) -> tuple[str, str]:
+    target_label = str(target_version or "Current Version").strip() or "Current Version"
+    if mode == "current_only":
+        return (
+            (
+                f"<b>{target_label}</b> now has enough resolved archive depth to drive adaptive calibration directly "
+                f"({int(current_rows)} resolved rows, out of {int(total_rows)} recent resolved rows loaded)."
+            ),
+            "positive",
+        )
+    if mode == "mixed_fallback":
+        return (
+            (
+                f"<b>{target_label}</b> has started building ({int(current_rows)} resolved rows), but adaptive calibration "
+                f"is still falling back to the mixed archive until the current-version cohort is deep enough. "
+                f"Current loaded resolved pool: {int(total_rows)} rows."
+            ),
+            "warning",
+        )
+    if mode == "unversioned_fallback":
+        return (
+            (
+                "This review slice still includes legacy or unversioned archive rows, so adaptive calibration cannot isolate "
+                "the current scanner logic yet."
+            ),
+            "warning",
+        )
+    if mode == "empty":
+        return (
+            "No resolved archive rows are available yet for decision-version calibration.",
+            "neutral",
+        )
+    return (
+        (
+            f"Adaptive calibration is currently reading a mixed archive slice. Current version: <b>{target_label}</b>. "
+            f"Resolved current rows: {int(current_rows)} of {int(total_rows)} loaded."
+        ),
+        "neutral",
     )
 
 
@@ -576,9 +626,60 @@ def render(ctx: dict) -> None:
         timeframe=None if timeframe_filter == "All" else timeframe_filter,
         db_path=db_path,
     )
+    current_market_version = current_decision_version("Market")
+    version_series = (
+        df_events.get("decision_version", pd.Series(index=df_events.index, dtype=object))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", "Legacy / Unversioned")
+    )
+    explicit_versions = [
+        value
+        for value in version_series.drop_duplicates().tolist()
+        if str(value).strip() and str(value).strip() != current_market_version
+    ]
+    version_options = ["All", "Current Version Only", "Legacy / Unversioned", *explicit_versions]
+    deduped_version_options: list[str] = []
+    for option in version_options:
+        if option not in deduped_version_options:
+            deduped_version_options.append(option)
+    version_filter = st.selectbox(
+        "Decision Version",
+        deduped_version_options,
+        index=0,
+        key="signal_review_decision_version",
+    )
+    if version_filter == "Current Version Only":
+        df_events = df_events.loc[version_series == current_market_version].copy()
+    elif version_filter == "Legacy / Unversioned":
+        df_events = df_events.loc[version_series == "Legacy / Unversioned"].copy()
+    elif version_filter != "All":
+        df_events = df_events.loc[version_series == version_filter].copy()
     df_alerts = fetch_market_alerts_df(limit=100, source="Market", db_path=db_path)
     df_active_alerts = fetch_market_alerts_df(limit=25, active_only=True, source="Market", db_path=db_path)
-    top_insight_cols = st.columns(2, gap="medium")
+    adaptive_archive_df = fetch_signal_events_df(
+        limit=2000,
+        status="RESOLVED",
+        source="Market",
+        db_path=db_path,
+    )
+    adaptive_archive_df = prefer_current_decision_version_slice(
+        adaptive_archive_df,
+        source="Market",
+    )
+    adaptive_mode = str(adaptive_archive_df.attrs.get("decision_version_mode") or "mixed_fallback")
+    adaptive_target = str(adaptive_archive_df.attrs.get("decision_version_target") or current_market_version)
+    adaptive_rows = int(adaptive_archive_df.attrs.get("decision_version_rows") or 0)
+    adaptive_total_rows = int(adaptive_archive_df.attrs.get("decision_version_total_rows") or len(adaptive_archive_df))
+    adaptive_note, adaptive_tone = _decision_cohort_note(
+        mode=adaptive_mode,
+        target_version=adaptive_target,
+        current_rows=adaptive_rows,
+        total_rows=adaptive_total_rows,
+    )
+
+    top_insight_cols = st.columns(3, gap="medium")
     with top_insight_cols[0]:
         render_insight_card(
             st,
@@ -586,6 +687,7 @@ def render(ctx: dict) -> None:
             body_html=_review_scope_note(
                 status_filter=status_filter,
                 timeframe_filter=timeframe_filter,
+                version_filter=version_filter,
                 limit=int(limit),
                 rows_in_slice=int(len(df_events)),
             ),
@@ -602,6 +704,13 @@ def render(ctx: dict) -> None:
                 f"<span style='color:#8B949E;'>Recovery:</span> {storage_snapshot.recovery_status}"
             ),
             tone=str(storage_snapshot.durability_tone or "neutral"),
+        )
+    with top_insight_cols[2]:
+        render_insight_card(
+            st,
+            title="Calibration Cohort",
+            body_html=adaptive_note,
+            tone=adaptive_tone,
         )
     tracker_notice = st.session_state.pop("signal_review_tracker_notice", None)
     tracker_notice_tone = str(st.session_state.pop("signal_review_tracker_notice_tone", "info") or "info")
@@ -717,6 +826,14 @@ def render(ctx: dict) -> None:
         df_events["Market Regime"] = df_events["market_regime"].replace("", "Unknown").fillna("Unknown")
     if "scan_focus" in df_events.columns:
         df_events["Scan Focus"] = df_events["scan_focus"].replace("", "Unknown").fillna("Unknown")
+    if "decision_version" in df_events.columns:
+        df_events["Decision Version"] = (
+            df_events["decision_version"].replace("", "Legacy / Unversioned").fillna("Legacy / Unversioned")
+        )
+    if "created_decision_version" in df_events.columns:
+        df_events["Created Decision Version"] = (
+            df_events["created_decision_version"].replace("", "Legacy / Unversioned").fillna("Legacy / Unversioned")
+        )
     if "market_playbook_key" in df_events.columns or "market_playbook" in df_events.columns:
         playbook_keys = df_events.get("market_playbook_key", pd.Series(index=df_events.index, dtype=object))
         playbook_display_values = df_events.get("market_playbook", pd.Series(index=df_events.index, dtype=object))
@@ -886,6 +1003,45 @@ def render(ctx: dict) -> None:
 
     works_cards: list[dict[str, str]] = []
     fail_cards: list[dict[str, str]] = []
+    current_market_version = current_decision_version("Market")
+
+    if "Decision Version" in df_events.columns:
+        version_counts = (
+            df_events["Decision Version"]
+            .fillna("Legacy / Unversioned")
+            .astype(str)
+            .str.strip()
+            .replace("", "Legacy / Unversioned")
+            .value_counts()
+        )
+        current_count = int(version_counts.get(current_market_version, 0))
+        if len(version_counts) > 1:
+            dominant_version = str(version_counts.index[0])
+            dominant_count = int(version_counts.iloc[0])
+            fail_cards.append(
+                {
+                    "title": "Mixed Decision Versions",
+                    "body_html": (
+                        f"This archive currently mixes <b>{len(version_counts)}</b> decision versions. "
+                        f"The largest slice is <b>{dominant_version}</b> ({dominant_count} signals), while the current "
+                        f"scanner version <b>{current_market_version}</b> has {current_count} signals so far."
+                    ),
+                    "tone": "warning",
+                }
+            )
+        elif len(version_counts) == 1:
+            only_version = str(version_counts.index[0])
+            only_count = int(version_counts.iloc[0])
+            works_cards.append(
+                {
+                    "title": "Decision Version",
+                    "body_html": (
+                        f"Current archive slice is running on <b>{only_version}</b> "
+                        f"({only_count} logged signals in this review window)."
+                    ),
+                    "tone": "positive" if only_version == current_market_version else "neutral",
+                }
+            )
 
     qualified_session_execution_df = _qualified_summary_rows(
         session_summary_df,
@@ -1301,6 +1457,7 @@ def render(ctx: dict) -> None:
                 ("Market Lead", "By Market Lead"),
                 ("Session", "By Session"),
                 ("timeframe", "By Timeframe"),
+                ("Decision Version", "By Decision Version"),
                 ("Market Regime", "By Market Regime"),
                 ("Scan Focus", "By Scan Focus"),
                 ("Playbook", "By Playbook"),
@@ -1360,6 +1517,8 @@ def render(ctx: dict) -> None:
         "Primary Alert",
         "Alert Footprint",
         "Scan Focus",
+        "Decision Version",
+        "Created Decision Version",
         "setup_confirm",
         "direction",
         "Lead",

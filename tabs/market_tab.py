@@ -26,6 +26,7 @@ from core.confidence import (
     build_execution_confidence_snapshot,
     confidence_bucket,
 )
+from core.decision_version import current_decision_version
 from core.market_decision import (
     apply_setup_archive_calibration,
     ai_led_confirmation_snapshot,
@@ -70,7 +71,7 @@ from core.adaptive_weighting import (
 from core.catalyst_engine import catalyst_signal_note, catalyst_window_label
 from core.no_trade_engine import apply_market_trade_gate_archive_calibration
 from core.session_utils import session_bucket_for_timestamp
-from core.signal_tracker import build_alert_effectiveness_summary
+from core.signal_tracker import build_alert_effectiveness_summary, prefer_current_decision_version_slice
 from core.symbols import canonical_base_symbol, is_stable_base_symbol
 from core.trading_copy import copy_text
 from tabs.market_scan_helpers import (
@@ -402,6 +403,7 @@ def _market_signal_log_events(
     market_alerts,
 ) -> list[dict[str, object]]:
     events: list[dict[str, object]] = []
+    decision_version = current_decision_version("Market")
     alert_keys = [
         str(getattr(alert, "alert_key", "") or "").strip().upper()
         for alert in list(market_alerts or [])
@@ -458,6 +460,7 @@ def _market_signal_log_events(
         events.append(
             {
                 "source": "Market",
+                "decision_version": decision_version,
                 "symbol": symbol,
                 "timeframe": str(row.get("__timeframe") or timeframe),
                 "event_time": event_time,
@@ -2848,6 +2851,7 @@ def render(ctx: dict) -> None:
             .replace("▲ ", "")
             .replace("▼ ", "")
             .replace("→ ", "")
+            .replace("- ", "")
             .replace("– ", "")
             .strip()
         )
@@ -2857,13 +2861,13 @@ def render(ctx: dict) -> None:
         if "NEAR BOTTOM" in clean_upper:
             return "▲ Near Bottom"
         if "NEAR VWAP" in clean_upper:
-            return "→ Near VWAP"
+            return "- Near VWAP"
         if "BULLISH" in clean_upper or clean_upper in {"ABOVE", "OVERSOLD", "LOW"}:
             return f"▲ {clean}"
         if "BEARISH" in clean_upper or clean_upper in {"BELOW", "OVERBOUGHT", "HIGH"}:
             return f"▼ {clean}"
         if any(k in clean_upper for k in ["NEUTRAL", "MODERATE", "STARTING", "INDECISION", "MIXED"]):
-            return f"→ {clean}"
+            return f"- {clean}"
         return clean
 
     def _compact_adx_label(v: object) -> str:
@@ -2884,7 +2888,7 @@ def render(ctx: dict) -> None:
         if raw.startswith("▼"):
             return f"▼ {bucket}"
         if raw.startswith("→"):
-            return f"→ {bucket}"
+            return f"- {bucket}"
         if raw.startswith("🔥"):
             return f"🔥 {bucket}"
         return bucket
@@ -2976,7 +2980,7 @@ def render(ctx: dict) -> None:
                 return "pos"
             if "DOWNSIDE" in s:
                 return "neg"
-            return "warn"
+            return "muted"
 
         if col in {"Confidence", "AI Confidence"}:
             if "HIGH" in s:
@@ -3015,13 +3019,13 @@ def render(ctx: dict) -> None:
                 return "pos"
             if s.startswith("DOWNSIDE"):
                 return "neg"
-            return "warn"
+            return "muted"
 
         if col == "Volatility":
             if "LOW" in s:
                 return "pos"
             if "MODERATE" in s or "NEUTRAL" in s:
-                return "warn"
+                return "muted"
             if "HIGH" in s or "EXTREME" in s:
                 return "neg"
             return "muted"
@@ -3043,14 +3047,14 @@ def render(ctx: dict) -> None:
                 return "pos"
             if "BEARISH" in s or "BELOW" in s:
                 return "neg"
-            return "warn"
+            return "muted"
 
         if col in {"Bollinger", "Stochastic RSI", "Williams %R", "CCI"}:
             if "OVERSOLD" in s or "NEAR BOTTOM" in s or "LOW" in s:
                 return "pos"
             if "OVERBOUGHT" in s or "NEAR TOP" in s or "HIGH" in s:
                 return "neg"
-            return "warn"
+            return "muted"
 
         if col == "Candle Pattern":
             if s.startswith("▲"):
@@ -3058,17 +3062,26 @@ def render(ctx: dict) -> None:
             if s.startswith("▼"):
                 return "neg"
             if s.startswith("→") or s.startswith("-"):
-                return "warn"
+                return "muted"
             # Compatibility fallback when arrow prefixes are missing.
             if "BULLISH" in s:
                 return "pos"
             if "BEARISH" in s:
                 return "neg"
             if "NEUTRAL" in s or "INDECISION" in s:
-                return "warn"
-            return "warn"
+                return "muted"
+            return "muted"
 
         return _tone_for_text(s)
+
+    def _tone_css_class(tone_key: str) -> str:
+        return {
+            "pos": "mk-tone-pos",
+            "neg": "mk-tone-neg",
+            "warn": "mk-tone-warn",
+            "info": "mk-tone-info",
+            "muted": "mk-tone-muted",
+        }.get(tone_key, "mk-tone-muted")
 
     def _chip(
         text: object,
@@ -3097,26 +3110,149 @@ def render(ctx: dict) -> None:
         if not raw or raw.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE", "-", "NEUTRAL"}:
             return ""
         tone_key = _tone_for_col("Scalp Opportunity", raw)
-        tone_map = {
-            "pos": "mk-pos",
-            "neg": "mk-neg",
-            "warn": "mk-warn",
-            "muted": "mk-muted",
-            "info": "mk-info",
-        }
-        tone_cls = tone_map.get(tone_key, "mk-muted")
         display_state = str(row.get("__scalp_display_state", "")).strip().upper()
         reason_text = str(row.get("__scalp_reason_text", "")).strip()
         if not reason_text and display_state == "LIVE":
             reason_text = "Live scalp passed the current intraday setup, market gate, and quality checks."
-        state_cls = "mk-chip-scalp-live" if display_state == "LIVE" else "mk-chip-scalp-conditional"
-        extra_cls = f"mk-chip-direction mk-chip-scalp {state_cls}"
+        tone_cls = _tone_css_class(tone_key)
+        state_cls = "mk-scalp-live" if display_state == "LIVE" else "mk-scalp-conditional"
+        state_symbol = "✓" if display_state == "LIVE" else "!"
         title_attr = f" title='{html.escape(reason_text, quote=True)}'" if reason_text else ""
-        return f"<span class='mk-chip {tone_cls} {extra_cls}'{title_attr}>{html.escape(raw)}</span>"
+        return (
+            f"<span class='mk-scalp-wrap {tone_cls} {state_cls}'{title_attr}>"
+            f"<span class='mk-scalp-main'>"
+            f"<span class='mk-scalp-label'>{html.escape(raw)}</span>"
+            f"</span>"
+            f"<span class='mk-scalp-state'>{html.escape(state_symbol)}</span>"
+            f"</span>"
+        )
+
+    def _score_metric(
+        text: object,
+        *,
+        tone: str,
+        title: str | None = None,
+        extra_class: str = "",
+    ) -> str:
+        raw = "" if text is None else str(text).strip()
+        if not raw or raw.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE", "-"}:
+            return ""
+        score = _confidence_value_from_badge(raw)
+        if score is None:
+            score = 0.0
+        label = _extract_confidence_label(raw)
+        meter_pct = max(8.0, min(100.0, float(score)))
+        title_attr = f" title='{html.escape(title, quote=True)}'" if title else ""
+        cls = f"mk-score-wrap {_tone_css_class(tone)} {extra_class}".strip()
+        return (
+            f"<span class='{cls}'{title_attr}>"
+            f"<span class='mk-score-topline'>"
+            f"<span class='mk-score-value'>{score:.0f}</span>"
+            f"<span class='mk-score-unit'>%</span>"
+            f"<span class='mk-score-label'>{html.escape(label)}</span>"
+            f"</span>"
+            f"<span class='mk-score-track'><span class='mk-score-fill' style='width:{meter_pct:.0f}%'></span></span>"
+            f"</span>"
+        )
+
+    def _ensemble_metric(text: object, *, tone: str, votes: int, title: str | None = None) -> str:
+        raw = "" if text is None else str(text).strip()
+        if not raw or raw.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE", "-"}:
+            return ""
+        title_attr = f" title='{html.escape(title, quote=True)}'" if title else ""
+        cls = f"mk-ensemble-wrap {_tone_css_class(tone)}".strip()
+        votes_n = max(0, min(3, int(votes)))
+        dots_html = "".join(
+            f"<span class='mk-ai-dot{' is-filled' if i < votes_n else ''}'></span>"
+            for i in range(3)
+        )
+        return (
+            f"<span class='{cls}'{title_attr}>"
+            f"<span class='mk-ensemble-text'>{html.escape(raw)}</span>"
+            f"<span class='mk-ai-dots'>{dots_html}</span>"
+            f"</span>"
+        )
+
+    def _direction_metric(text: object, *, tone: str, title: str | None = None) -> str:
+        raw = "" if text is None else str(text).strip()
+        if not raw or raw.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE", "-"}:
+            return ""
+        marker = "-"
+        if tone == "pos":
+            marker = "▲"
+        elif tone == "neg":
+            marker = "▼"
+        title_attr = f" title='{html.escape(title, quote=True)}'" if title else ""
+        cls = f"mk-direction-wrap {_tone_css_class(tone)}".strip()
+        return (
+            f"<span class='{cls}'{title_attr}>"
+            f"<span class='mk-direction-marker'>{html.escape(marker)}</span>"
+            f"<span class='mk-direction-text'>{html.escape(raw)}</span>"
+            f"</span>"
+        )
+
+    def _rr_metric(
+        text: object,
+        *,
+        tone: str,
+        title: str | None = None,
+        conditional: bool = False,
+    ) -> str:
+        raw = "" if text is None else str(text).strip()
+        if not raw or raw.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE", "-"}:
+            return ""
+        title_attr = f" title='{html.escape(title, quote=True)}'" if title else ""
+        cls = f"mk-rr-wrap {_tone_css_class(tone)}".strip()
+        if conditional:
+            cls += " mk-rr-conditional"
+        suffix = "*" if title else ""
+        return (
+            f"<span class='{cls}'{title_attr}>"
+            f"<span class='mk-rr-value'>{html.escape(raw)}{suffix}</span>"
+            f"</span>"
+        )
+
+    def _indicator_metric(
+        text: object,
+        *,
+        tone: str,
+        title: str | None = None,
+        extra_class: str = "",
+    ) -> str:
+        raw = "" if text is None else str(text).strip()
+        if not raw or raw.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE", "-"}:
+            return ""
+        clean = _strip_indicator_prefix(raw)
+        glyph = ""
+        if raw.startswith("▲▲"):
+            glyph = "▲▲"
+        elif raw.startswith("▲"):
+            glyph = "▲"
+        elif raw.startswith("▼"):
+            glyph = "▼"
+        elif raw.startswith("→") or raw.startswith("-"):
+            glyph = "-"
+        elif raw.startswith("🔥"):
+            glyph = "✦"
+        title_attr = f" title='{html.escape(title, quote=True)}'" if title else ""
+        cls = f"mk-indicator-wrap {_tone_css_class(tone)} {extra_class}".strip()
+        if not glyph and tone == "muted":
+            glyph = "-"
+        marker_html = (
+            f"<span class='mk-indicator-glyph'>{html.escape(glyph)}</span>"
+            if glyph
+            else "<span class='mk-indicator-dot'></span>"
+        )
+        return (
+            f"<span class='{cls}'{title_attr}>"
+            f"{marker_html}"
+            f"<span class='mk-indicator-text'>{html.escape(clean)}</span>"
+            f"</span>"
+        )
 
     def _strip_indicator_prefix(value: object) -> str:
         raw = str(value or "").strip()
-        for prefix in ("▲▲ ", "▲ ", "▼ ", "→ ", "🔥 ", "– "):
+        for prefix in ("▲▲ ", "▲ ", "▼ ", "→ ", "- ", "🔥 ", "– "):
             if raw.startswith(prefix):
                 return raw[len(prefix):].strip()
         return raw
@@ -3283,8 +3419,10 @@ def render(ctx: dict) -> None:
                     extra_cls += " mk-sc-trend-led"
                 elif sc_cls == "ENTER_AI_LED":
                     extra_cls += " mk-sc-ai-led"
+                elif sc_cls == "PROBE":
+                    extra_cls += " mk-sc-probe"
                 elif sc_cls == "WATCH":
-                        extra_cls += " mk-sc-watch"
+                    extra_cls += " mk-sc-watch"
                 execution_fit_note = str(row.get("__execution_fit_note", "")).strip()
                 session_fit_note = str(row.get("__session_fit_note", "")).strip()
                 catalyst_fit_note = str(row.get("__catalyst_fit_note", "")).strip()
@@ -3312,41 +3450,34 @@ def render(ctx: dict) -> None:
                 )
             if col == "Direction":
                 direction_note = str(row.get("__direction_note", "")).strip()
-                return _chip(
+                return _direction_metric(
                     txt,
-                    _tone_for_col(col, txt),
+                    tone=_tone_for_col(col, txt),
                     title=direction_note or None,
-                    extra_class="mk-chip-direction",
                 )
             if col == "Confidence":
                 confidence_note = str(row.get("__confidence_note", "")).strip()
-                return _chip(
+                return _score_metric(
                     txt,
-                    _tone_for_col(col, txt),
+                    tone=_tone_for_col(col, txt),
                     title=confidence_note or None,
-                    extra_class="mk-chip-score",
+                    extra_class="mk-score-confidence",
                 )
             if col == "AI Confidence":
                 ai_confidence_note = str(row.get("__ai_confidence_note", "")).strip()
-                return _chip(
+                return _score_metric(
                     txt,
-                    _tone_for_col(col, txt),
+                    tone=_tone_for_col(col, txt),
                     title=ai_confidence_note or None,
-                    extra_class="mk-chip-score mk-chip-ai-score",
+                    extra_class="mk-score-ai",
                 )
             if col == "R:R":
                 rr_note = str(row.get("__rr_note", "")).strip()
-                rr_text = txt
-                if rr_note:
-                    rr_text = f"{txt}*"
-                rr_extra = "mk-chip-score mk-chip-rr"
-                if str(row.get("__scalp_display_state", "")).strip().upper() == "CONDITIONAL":
-                    rr_extra += " mk-chip-rr-conditional"
-                return _chip(
-                    rr_text,
-                    _tone_for_col(col, txt),
+                return _rr_metric(
+                    txt,
+                    tone=_tone_for_col(col, txt),
                     title=rr_note or None,
-                    extra_class=rr_extra,
+                    conditional=str(row.get("__scalp_display_state", "")).strip().upper() == "CONDITIONAL",
                 )
             if col == "Scalp Opportunity":
                 return _scalp_chip(txt, row)
@@ -3368,25 +3499,7 @@ def render(ctx: dict) -> None:
                 m = re.search(r"\((\d)\s*/\s*3\)", txt)
                 votes_n = int(m.group(1)) if m else 0
             votes_n = max(0, min(3, votes_n))
-            tone_map = {
-                "pos": "mk-pos",
-                "neg": "mk-neg",
-                "warn": "mk-warn",
-                "muted": "mk-muted",
-                "info": "mk-info",
-            }
-            tone_cls = tone_map.get(t, "mk-muted")
-            title_attr = f" title='{html.escape(ai_note)}'" if ai_note else ""
-            dots_html = "".join(
-                f"<span class='mk-ai-dot{' is-filled' if i < votes_n else ''}'></span>"
-                for i in range(3)
-            )
-            return (
-                f"<span class='mk-chip {tone_cls} mk-chip-ai mk-chip-ensemble'{title_attr}>"
-                f"<span class='mk-ai-text'>{html.escape(base_txt)}</span>"
-                f"<span class='mk-ai-dots'>{dots_html}</span>"
-                f"</span>"
-            )
+            return _ensemble_metric(base_txt, tone=t, votes=votes_n, title=ai_note or None)
         if col == "Spike Alert":
             if not txt:
                 return ""
@@ -3417,7 +3530,12 @@ def render(ctx: dict) -> None:
             if spike_vwap_ctx:
                 detail_parts.append(f"VWAP context: {spike_vwap_ctx}")
             detail_title = " • ".join(detail_parts) if detail_parts else "Unusual volume activity detected"
-            return _chip(spike_label, spike_tone, title=detail_title)
+            return _indicator_metric(
+                spike_label,
+                tone=spike_tone,
+                title=detail_title,
+                extra_class="mk-indicator-spike",
+            )
         if col == "Δ (%)":
             if not txt:
                 return ""
@@ -3474,11 +3592,11 @@ def render(ctx: dict) -> None:
                 if ichi_title and ichi_summary
                 else (ichi_title or ichi_summary)
             )
-            return _chip(
+            return _indicator_metric(
                 txt,
-                _tone_for_col(col, txt),
+                tone=_tone_for_col(col, txt),
                 title=ichi_full_title or None,
-                extra_class="mk-chip-indicator",
+                extra_class="mk-indicator-ichi",
             ) if txt else ""
         if col == "ADX":
             adx_raw = row.get("__adx_raw")
@@ -3492,18 +3610,18 @@ def render(ctx: dict) -> None:
                         adx_title = f"ADX {adx_f:.1f}. Trend strength still looks weak for scalp setups."
             except Exception:
                 adx_title = None
-            return _chip(
+            return _indicator_metric(
                 txt,
-                _tone_for_col(col, txt),
+                tone=_tone_for_col(col, txt),
                 title=adx_title,
-                extra_class="mk-chip-indicator mk-chip-adx",
+                extra_class="mk-indicator-adx",
             ) if txt else ""
         if col in {"SuperTrend", "Ichimoku", "VWAP", "Bollinger", "Stochastic RSI", "Volatility", "PSAR", "Williams %R", "CCI", "Candle Pattern"}:
-            return _chip(
+            return _indicator_metric(
                 txt,
-                _tone_for_col(col, txt),
+                tone=_tone_for_col(col, txt),
                 title=_indicator_cell_title(col, row, txt),
-                extra_class="mk-chip-indicator",
+                extra_class="mk-indicator-generic",
             ) if txt else ""
         return f"<span class='mk-plain'>{html.escape(txt)}</span>"
 
@@ -3611,6 +3729,17 @@ def render(ctx: dict) -> None:
         rows_html = []
         for _, r in df.iterrows():
             row_dict = r.to_dict()
+            row_action = str(row_dict.get("__action_raw", row_dict.get("Setup Confirm", "")) or "")
+            row_action_cls = _setup_confirm_class(row_action)
+            row_class = ""
+            if row_action_cls in {"ENTER_TREND_AI", "ENTER_TREND_LED", "ENTER_AI_LED"}:
+                row_class = "mk-row-ready"
+            elif row_action_cls == "PROBE":
+                row_class = "mk-row-probe"
+            elif row_action_cls == "WATCH":
+                row_class = "mk-row-watch"
+            elif row_action_cls == "SKIP":
+                row_class = "mk-row-skip"
             cell_html = []
             for c in cols:
                 sticky = ""
@@ -3628,7 +3757,8 @@ def render(ctx: dict) -> None:
                     cell_classes.append("mk-coin-cell")
                 cell_class_attr = f" class='{' '.join(cell_classes)}'" if cell_classes else ""
                 cell_html.append(f"<td{cell_class_attr} style='{width_style}{sticky}'>{_render_cell(c, row_dict)}</td>")
-            rows_html.append("<tr>" + "".join(cell_html) + "</tr>")
+            row_class_attr = f" class='{row_class}'" if row_class else ""
+            rows_html.append(f"<tr{row_class_attr}>" + "".join(cell_html) + "</tr>")
 
         st.markdown(
             f"""
@@ -3651,10 +3781,10 @@ def render(ctx: dict) -> None:
             .mk-wrap {{
               width:100%;
               overflow-x:auto;
-              border:1px solid rgba(0,212,255,0.20);
-              border-radius:12px;
-              background:linear-gradient(180deg, rgba(6,10,18,0.96), rgba(4,8,14,0.96));
-              box-shadow:0 10px 28px rgba(0,0,0,0.34), inset 0 0 0 1px rgba(255,255,255,0.03);
+              border:1px solid rgba(148,163,184,0.18);
+              border-radius:14px;
+              background:linear-gradient(180deg, rgba(7,11,18,0.98), rgba(5,9,15,0.98));
+              box-shadow:0 12px 28px rgba(0,0,0,0.30), inset 0 0 0 1px rgba(255,255,255,0.02);
             }}
             .mk-table {{
               width:max-content;
@@ -3667,16 +3797,16 @@ def render(ctx: dict) -> None:
             .mk-table th {{
               text-align:left;
               padding:10px 10px;
-              color:{TEXT_MUTED};
+              color:rgba(191,211,230,0.78);
               font-weight:700;
-              letter-spacing:0.25px;
+              letter-spacing:0.18px;
               border-bottom:1px solid rgba(148,163,184,0.22);
               border-right:1px solid rgba(148,163,184,0.08);
               white-space:nowrap;
               top:0;
               position:sticky;
               z-index:4;
-              background:linear-gradient(180deg, rgba(18,24,36,0.98), rgba(12,18,30,0.98));
+              background:linear-gradient(180deg, rgba(18,24,36,0.98), rgba(13,18,28,0.98));
             }}
             .mk-group-row th {{
               position:static;
@@ -3687,7 +3817,7 @@ def render(ctx: dict) -> None:
               font-weight:850;
               letter-spacing:0.18em;
               text-transform:uppercase;
-              color:rgba(191,211,230,0.82);
+              color:rgba(191,211,230,0.58);
               background:linear-gradient(180deg, rgba(10,16,26,0.98), rgba(8,13,22,0.98));
               border-bottom:1px solid rgba(148,163,184,0.14);
               border-right:1px solid rgba(148,163,184,0.06);
@@ -3696,16 +3826,16 @@ def render(ctx: dict) -> None:
               box-shadow: inset 0 -1px 0 rgba(148,163,184,0.18);
             }}
             .mk-group-trend {{
-              color:rgba(125,211,252,0.86);
-              box-shadow: inset 0 -1px 0 rgba(125,211,252,0.18);
+              color:rgba(191,211,230,0.66);
+              box-shadow: inset 0 -1px 0 rgba(125,211,252,0.10);
             }}
             .mk-group-momentum {{
-              color:rgba(253,224,71,0.84);
-              box-shadow: inset 0 -1px 0 rgba(253,224,71,0.16);
+              color:rgba(191,211,230,0.66);
+              box-shadow: inset 0 -1px 0 rgba(253,224,71,0.10);
             }}
             .mk-group-context {{
-              color:rgba(244,114,182,0.82);
-              box-shadow: inset 0 -1px 0 rgba(244,114,182,0.14);
+              color:rgba(191,211,230,0.66);
+              box-shadow: inset 0 -1px 0 rgba(244,114,182,0.10);
             }}
             .mk-core-row th {{
               position:static;
@@ -3725,10 +3855,10 @@ def render(ctx: dict) -> None:
             }}
             .mk-core-cell {{
               text-align:left;
-              color:rgba(145,224,255,0.86);
+              color:rgba(191,211,230,0.72);
               box-shadow:
-                inset 0 1px 0 rgba(0,212,255,0.10),
-                inset 0 -1px 0 rgba(0,212,255,0.18);
+                inset 0 1px 0 rgba(255,255,255,0.03),
+                inset 0 -1px 0 rgba(94,234,212,0.14);
             }}
             .mk-header-row th {{
               top:0;
@@ -3755,15 +3885,39 @@ def render(ctx: dict) -> None:
               background-color:rgba(255,255,255,0.004);
             }}
             .mk-table tr:hover td {{
-              background-color:rgba(0,212,255,0.052);
-              border-bottom-color:rgba(0,212,255,0.20);
+              background-color:rgba(148,163,184,0.050);
+              border-bottom-color:rgba(148,163,184,0.22);
             }}
             .mk-table tr:hover td[style*="position:sticky"] {{
               background:linear-gradient(180deg, rgba(11,18,29,1.0), rgba(8,14,24,1.0)) !important;
             }}
             .mk-table tr:hover td.mk-coin-cell {{
               box-shadow:
-                inset 2px 0 0 rgba(0,212,255,0.42),
+                inset 2px 0 0 rgba(0,212,255,0.24),
+                1px 0 0 rgba(148,163,184,0.22),
+                2px 0 10px rgba(0,0,0,0.24) !important;
+            }}
+            .mk-table tbody tr.mk-row-ready td.mk-coin-cell {{
+              box-shadow:
+                inset 3px 0 0 rgba(0,255,136,0.42),
+                1px 0 0 rgba(148,163,184,0.22),
+                2px 0 10px rgba(0,0,0,0.24) !important;
+            }}
+            .mk-table tbody tr.mk-row-probe td.mk-coin-cell {{
+              box-shadow:
+                inset 3px 0 0 rgba(255,209,102,0.36),
+                1px 0 0 rgba(148,163,184,0.22),
+                2px 0 10px rgba(0,0,0,0.24) !important;
+            }}
+            .mk-table tbody tr.mk-row-watch td.mk-coin-cell {{
+              box-shadow:
+                inset 3px 0 0 rgba(125,211,252,0.30),
+                1px 0 0 rgba(148,163,184,0.22),
+                2px 0 10px rgba(0,0,0,0.24) !important;
+            }}
+            .mk-table tbody tr.mk-row-skip td.mk-coin-cell {{
+              box-shadow:
+                inset 3px 0 0 rgba(255,51,102,0.28),
                 1px 0 0 rgba(148,163,184,0.22),
                 2px 0 10px rgba(0,0,0,0.24) !important;
             }}
@@ -3775,15 +3929,15 @@ def render(ctx: dict) -> None:
               padding:2px 8px;
               max-width:100%;
               border-radius:999px;
-              border:1px solid rgba(148,163,184,0.34);
-              background:rgba(148,163,184,0.10);
-              font-size:0.74rem;
-              font-weight:700;
+              border:1px solid rgba(148,163,184,0.18);
+              background:rgba(15,23,36,0.76);
+              font-size:0.73rem;
+              font-weight:760;
               overflow:hidden;
               text-overflow:ellipsis;
               white-space:nowrap;
               box-sizing:border-box;
-              box-shadow:inset 0 0 0 1px rgba(255,255,255,0.02);
+              box-shadow:none;
             }}
             .mk-chip-wrap {{
               position:relative;
@@ -3826,85 +3980,233 @@ def render(ctx: dict) -> None:
             .mk-chip-action {{
               min-height:23px;
               font-size:0.70rem;
-              padding:2px 7px;
-              font-weight:800;
+              padding:2px 8px;
+              font-weight:820;
               letter-spacing:0.02em;
               gap:4px;
+              background:rgba(14,20,31,0.92);
             }}
-            .mk-chip-direction {{
-              min-height:23px;
-              padding:2px 9px;
+            .mk-scalp-wrap {{
+              display:inline-flex;
+              align-items:center;
+              gap:8px;
+              min-height:22px;
+              max-width:100%;
+            }}
+            .mk-scalp-main {{
+              display:inline-flex;
+              align-items:center;
+              min-width:0;
+              line-height:1;
+            }}
+            .mk-scalp-label {{
+              font-size:0.81rem;
               font-weight:800;
               letter-spacing:0.01em;
+              color:currentColor;
+              white-space:nowrap;
             }}
-            .mk-chip-score {{
-              min-height:21px;
-              padding:2px 9px;
-              font-weight:750;
-              font-variant-numeric: tabular-nums;
-              font-feature-settings:"tnum" 1, "lnum" 1;
-            }}
-            .mk-chip-ai-score {{
-              border-style:solid;
-            }}
-            .mk-chip-rr {{
-              font-weight:800;
-            }}
-            .mk-chip-scalp {{
-              min-height:21px;
-              padding:2px 8px;
-              cursor:default;
-            }}
-            .mk-chip-scalp-conditional {{
-              opacity:0.94;
-            }}
-            .mk-chip-scalp-live::after,
-            .mk-chip-scalp-conditional::after {{
+            .mk-scalp-state {{
               display:inline-flex;
               align-items:center;
               justify-content:center;
               width:16px;
               height:16px;
-              margin-left:2px;
               border-radius:999px;
-              font-size:0.60rem;
+              font-size:0.58rem;
               font-weight:900;
               line-height:1;
               flex:0 0 16px;
-              box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);
+              box-shadow:inset 0 0 0 1px rgba(255,255,255,0.04);
             }}
-            .mk-chip-scalp-live::after {{
-              content:"✓";
-              color:#06140D;
-              background:rgba(255,255,255,0.88);
+            .mk-scalp-live .mk-scalp-state {{
+              color:#04120A;
+              background:rgba(255,255,255,0.82);
             }}
-            .mk-chip-scalp-conditional::after {{
-              content:"!";
+            .mk-scalp-conditional .mk-scalp-state {{
               color:#FFF4CC;
-              background:rgba(255,209,102,0.18);
-              border:1px solid rgba(255,209,102,0.34);
+              background:rgba(255,209,102,0.14);
+              border:1px solid rgba(255,209,102,0.24);
             }}
-            .mk-chip-ai {{
-              gap:7px;
-              min-height:24px;
-              padding:2px 8px;
+            .mk-scalp-conditional .mk-scalp-line {{
+              opacity:0.18;
             }}
-            .mk-chip-ensemble {{
-              gap:7px;
+            .mk-tone-pos {{ color:{POSITIVE}; }}
+            .mk-tone-neg {{ color:{NEGATIVE}; }}
+            .mk-tone-warn {{ color:{WARNING}; }}
+            .mk-tone-info {{ color:{ACCENT}; }}
+            .mk-tone-muted {{ color:rgba(191,211,230,0.74); }}
+            .mk-score-wrap {{
+              display:inline-flex;
+              flex-direction:column;
+              gap:5px;
+              min-width:108px;
+              max-width:100%;
+              line-height:1;
             }}
-            .mk-chip-indicator {{
-              min-height:21px;
-              padding:2px 8px;
-              font-size:0.71rem;
-              font-weight:760;
-              letter-spacing:0.01em;
-              box-shadow:
-                inset 0 0 0 1px rgba(255,255,255,0.018),
-                inset 0 -1px 0 rgba(255,255,255,0.012);
+            .mk-score-topline {{
+              display:inline-flex;
+              align-items:flex-end;
+              gap:4px;
+              min-width:0;
             }}
-            .mk-chip-adx {{
+            .mk-score-value {{
+              color:#F8FAFC;
+              font-size:0.98rem;
+              font-weight:840;
+              letter-spacing:-0.01em;
               font-variant-numeric: tabular-nums;
               font-feature-settings:"tnum" 1, "lnum" 1;
+            }}
+            .mk-score-unit {{
+              font-size:0.62rem;
+              font-weight:770;
+              letter-spacing:0.04em;
+              color:rgba(191,211,230,0.58);
+              transform:translateY(-1px);
+              margin-right:2px;
+            }}
+            .mk-score-label {{
+              font-size:0.57rem;
+              font-weight:780;
+              letter-spacing:0.14em;
+              text-transform:uppercase;
+              color:currentColor;
+              opacity:0.88;
+            }}
+            .mk-score-track {{
+              position:relative;
+              width:100%;
+              max-width:116px;
+              height:4px;
+              border-radius:999px;
+              background:
+                repeating-linear-gradient(
+                  90deg,
+                  rgba(15,23,42,0.00) 0 18px,
+                  rgba(15,23,42,0.36) 18px 19px
+                ),
+                linear-gradient(90deg, rgba(148,163,184,0.18), rgba(148,163,184,0.09));
+              box-shadow: inset 0 0 0 1px rgba(255,255,255,0.025);
+              overflow:hidden;
+            }}
+            .mk-score-fill {{
+              display:block;
+              height:100%;
+              border-radius:999px;
+              background:currentColor;
+              opacity:0.96;
+            }}
+            .mk-score-confidence .mk-score-value {{
+              letter-spacing:-0.02em;
+            }}
+            .mk-score-ai {{
+              opacity:0.92;
+            }}
+            .mk-score-ai .mk-score-value {{
+              font-size:0.91rem;
+              color:rgba(248,250,252,0.95);
+            }}
+            .mk-score-ai .mk-score-unit {{
+              font-size:0.58rem;
+              color:rgba(191,211,230,0.5);
+            }}
+            .mk-score-ai .mk-score-label {{
+              opacity:0.80;
+            }}
+            .mk-score-ai .mk-score-track {{
+              max-width:108px;
+              height:3px;
+              background:
+                repeating-linear-gradient(
+                  90deg,
+                  rgba(15,23,42,0.00) 0 18px,
+                  rgba(15,23,42,0.28) 18px 19px
+                ),
+                linear-gradient(90deg, rgba(148,163,184,0.15), rgba(148,163,184,0.07));
+            }}
+            .mk-ensemble-wrap {{
+              display:inline-flex;
+              align-items:center;
+              gap:8px;
+              min-height:22px;
+              max-width:100%;
+              line-height:1.1;
+            }}
+            .mk-ensemble-text {{
+              font-weight:770;
+              letter-spacing:0.01em;
+            }}
+            .mk-direction-wrap {{
+              display:inline-flex;
+              align-items:center;
+              gap:7px;
+              min-height:22px;
+              max-width:100%;
+              line-height:1.1;
+            }}
+            .mk-direction-marker {{
+              font-size:0.68rem;
+              font-weight:860;
+              line-height:1;
+              opacity:0.94;
+            }}
+            .mk-direction-text {{
+              font-weight:800;
+              letter-spacing:0.01em;
+            }}
+            .mk-rr-wrap {{
+              display:inline-flex;
+              align-items:center;
+              min-height:20px;
+              font-variant-numeric: tabular-nums;
+              font-feature-settings:"tnum" 1, "lnum" 1;
+            }}
+            .mk-rr-value {{
+              font-weight:820;
+              letter-spacing:0.01em;
+            }}
+            .mk-rr-conditional {{
+              opacity:0.72;
+            }}
+            .mk-indicator-wrap {{
+              display:inline-flex;
+              align-items:center;
+              gap:6px;
+              min-height:19px;
+              max-width:100%;
+              padding:1px 0 2px;
+              border-bottom:1px solid rgba(148,163,184,0.12);
+              line-height:1.05;
+            }}
+            .mk-indicator-glyph {{
+              font-size:0.68rem;
+              font-weight:860;
+              letter-spacing:0.02em;
+              line-height:1;
+              flex:0 0 auto;
+              opacity:0.95;
+            }}
+            .mk-indicator-dot {{
+              width:6px;
+              height:6px;
+              border-radius:999px;
+              background:currentColor;
+              opacity:0.72;
+              flex:0 0 6px;
+            }}
+            .mk-indicator-text {{
+              font-size:0.73rem;
+              font-weight:750;
+              letter-spacing:0.01em;
+              color:currentColor;
+              white-space:nowrap;
+            }}
+            .mk-indicator-adx .mk-indicator-text {{
+              font-weight:800;
+            }}
+            .mk-indicator-spike {{
+              border-bottom-color:rgba(255,209,102,0.16);
             }}
             .mk-num {{
               display:inline-block;
@@ -3927,51 +4229,50 @@ def render(ctx: dict) -> None:
             .mk-level-conditional {{
               color:rgba(220,231,245,0.72);
             }}
-            .mk-chip-rr-conditional {{
-              opacity:0.82;
-            }}
-            .mk-ai-text {{
-              line-height:1.15;
-            }}
             .mk-ai-dots {{
               display:inline-flex;
               align-items:center;
-              gap:3px;
+              gap:4px;
               min-height:12px;
             }}
             .mk-ai-dot {{
-              width:8px;
-              height:8px;
+              width:7px;
+              height:7px;
               border-radius:999px;
               border:1px solid currentColor;
               background:transparent;
-              opacity:0.55;
-              flex:0 0 8px;
+              opacity:0.32;
+              flex:0 0 7px;
             }}
             .mk-ai-dot.is-filled {{
               background:currentColor;
-              opacity:1;
+              opacity:0.96;
             }}
             .mk-sc-trend-led {{
-              color:#38BDF8 !important;
-              border-color:rgba(56,189,248,0.52) !important;
-              background:rgba(56,189,248,0.12) !important;
+              color:#58C4F6 !important;
+              border-color:rgba(88,196,246,0.34) !important;
+              background:rgba(88,196,246,0.08) !important;
             }}
             .mk-sc-ai-led {{
-              color:#22D3EE !important;
-              border-color:rgba(34,211,238,0.52) !important;
-              background:rgba(34,211,238,0.12) !important;
+              color:#2EE6D6 !important;
+              border-color:rgba(46,230,214,0.34) !important;
+              background:rgba(46,230,214,0.08) !important;
+            }}
+            .mk-sc-probe {{
+              color:#E7D6B0 !important;
+              border-color:rgba(231,214,176,0.28) !important;
+              background:rgba(231,214,176,0.06) !important;
             }}
             .mk-sc-watch {{
-              color:#7DD3FC !important;
-              border-color:rgba(125,211,252,0.52) !important;
-              background:rgba(125,211,252,0.12) !important;
+              color:#A7B6C8 !important;
+              border-color:rgba(167,182,200,0.24) !important;
+              background:rgba(167,182,200,0.05) !important;
             }}
-            .mk-pos {{ color:{POSITIVE}; border-color:rgba(0,255,136,0.42); background:rgba(0,255,136,0.10); }}
-            .mk-neg {{ color:{NEGATIVE}; border-color:rgba(255,51,102,0.44); background:rgba(255,51,102,0.10); }}
-            .mk-warn {{ color:{WARNING}; border-color:rgba(255,209,102,0.46); background:rgba(255,209,102,0.10); }}
-            .mk-info {{ color:{ACCENT}; border-color:rgba(0,212,255,0.46); background:rgba(0,212,255,0.10); }}
-            .mk-muted {{ color:{TEXT_MUTED}; border-color:rgba(140,161,182,0.35); background:rgba(140,161,182,0.08); }}
+            .mk-pos {{ color:{POSITIVE}; border-color:rgba(0,255,136,0.24); background:rgba(0,255,136,0.045); }}
+            .mk-neg {{ color:{NEGATIVE}; border-color:rgba(255,51,102,0.26); background:rgba(255,51,102,0.045); }}
+            .mk-warn {{ color:{WARNING}; border-color:rgba(255,209,102,0.24); background:rgba(255,209,102,0.05); }}
+            .mk-info {{ color:{ACCENT}; border-color:rgba(0,212,255,0.22); background:rgba(0,212,255,0.045); }}
+            .mk-muted {{ color:{TEXT_MUTED}; border-color:rgba(140,161,182,0.18); background:rgba(140,161,182,0.05); }}
             .mk-coin {{ font-weight:800; letter-spacing:0.2px; color:#F8FAFC; }}
             .mk-coin-wrap {{
               position:relative;
@@ -4132,6 +4433,10 @@ def render(ctx: dict) -> None:
         status="RESOLVED",
         source="Market",
         db_path=signal_tracker_db_path,
+    )
+    adaptive_history_df = prefer_current_decision_version_slice(
+        adaptive_history_df,
+        source="Market",
     )
     adaptive_model = build_adaptive_context_model(adaptive_history_df)
     ai_confidence_calibration_model = build_ai_confidence_calibration_model(adaptive_history_df)
@@ -6266,6 +6571,7 @@ def render(ctx: dict) -> None:
         )
         df_results["VWAP"] = df_results["VWAP"].apply(_normalize_indicator_label)
         df_results["Bollinger"] = df_results["Bollinger"].apply(_normalize_indicator_label)
+        df_results["Volatility"] = df_results["Volatility"].apply(_normalize_indicator_label)
         df_results["PSAR"] = df_results["PSAR"].apply(_normalize_indicator_label)
         df_results["Williams %R"] = df_results["Williams %R"].apply(_normalize_indicator_label)
         df_results["CCI"] = df_results["CCI"].apply(_normalize_indicator_label)

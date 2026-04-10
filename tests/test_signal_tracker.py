@@ -23,6 +23,7 @@ from core.signal_tracker import (
     init_signal_tracker_db,
     log_market_alerts,
     log_signal_events,
+    prefer_current_decision_version_slice,
     resolve_open_signal_events_for_frame,
     save_signal_trade_journal,
     save_signal_trade_overlay,
@@ -44,6 +45,7 @@ class SignalTrackerTests(unittest.TestCase):
             "symbol": "BTC",
             "timeframe": "1h",
             "event_time": "2026-04-04T12:00:00Z",
+            "decision_version": "market-scanner-legacy-v0",
             "direction": "Upside",
             "setup_confirm": "WATCH",
             "lead_label": "Emerging Upside",
@@ -60,11 +62,21 @@ class SignalTrackerTests(unittest.TestCase):
             "delta_pct": 0.5,
         }
         self.assertEqual(log_signal_events([event], self.db_path), 1)
-        self.assertEqual(log_signal_events([event], self.db_path), 1)
+        updated_event = dict(event)
+        updated_event["decision_version"] = "market-scanner-2026-04-10-v1"
+        self.assertEqual(log_signal_events([updated_event], self.db_path), 1)
         df = fetch_signal_events_df(limit=20, db_path=self.db_path)
         self.assertEqual(len(df), 1)
         self.assertEqual(str(df.iloc[0]["symbol"]), "BTC")
         self.assertEqual(str(df.iloc[0]["session_bucket"]), "European (08-16 UTC)")
+        self.assertEqual(
+            str(df.iloc[0]["created_decision_version"]),
+            "market-scanner-legacy-v0",
+        )
+        self.assertEqual(
+            str(df.iloc[0]["decision_version"]),
+            "market-scanner-2026-04-10-v1",
+        )
 
     def test_log_signal_events_persists_market_alert_footprint(self) -> None:
         event = {
@@ -349,6 +361,42 @@ class SignalTrackerTests(unittest.TestCase):
         primary = build_alert_effectiveness_summary(annotated, primary_only=True)
         self.assertFalse(primary.empty)
         self.assertIn("Primary Alert", primary.columns)
+
+    def test_prefer_current_decision_version_slice_uses_current_when_sample_is_healthy(self) -> None:
+        df = pd.DataFrame(
+            {
+                "symbol": [f"C{i}" for i in range(6)],
+                "decision_version": [
+                    "market-scanner-2026-04-10-v1",
+                    "market-scanner-2026-04-10-v1",
+                    "market-scanner-2026-04-10-v1",
+                    "market-scanner-2026-04-10-v1",
+                    "legacy-v0",
+                    "legacy-v0",
+                ],
+            }
+        )
+        filtered = prefer_current_decision_version_slice(df, source="Market", min_rows=4)
+        self.assertEqual(filtered.attrs.get("decision_version_mode"), "current_only")
+        self.assertEqual(len(filtered), 4)
+        self.assertTrue((filtered["decision_version"] == "market-scanner-2026-04-10-v1").all())
+
+    def test_prefer_current_decision_version_slice_falls_back_when_current_sample_is_thin(self) -> None:
+        df = pd.DataFrame(
+            {
+                "symbol": [f"C{i}" for i in range(5)],
+                "decision_version": [
+                    "market-scanner-2026-04-10-v1",
+                    "market-scanner-2026-04-10-v1",
+                    "legacy-v0",
+                    "legacy-v0",
+                    "legacy-v0",
+                ],
+            }
+        )
+        filtered = prefer_current_decision_version_slice(df, source="Market", min_rows=4)
+        self.assertEqual(filtered.attrs.get("decision_version_mode"), "mixed_fallback")
+        self.assertEqual(len(filtered), 5)
 
     def test_alert_footprint_annotation_handles_nan_fields_safely(self) -> None:
         df = pd.DataFrame(

@@ -15,6 +15,7 @@ from core.trading_copy import copy_text, playbook_key, trade_gate_key
 from core.session_utils import session_bucket_for_timestamp
 from core.confidence import confidence_bucket
 from core.market_decision import apply_setup_archive_calibration, action_reason_text, normalize_action_class
+from core.signal_tracker import prefer_current_decision_version_slice
 from core.spot_execution_pipeline import build_spot_execution_pipeline, direction_fetch_symbol
 from ui.primitives import render_help_details, render_kpi_grid, render_page_header
 from ui.signal_panels import (
@@ -380,6 +381,10 @@ def render(ctx: dict) -> None:
             status="RESOLVED",
             source="Market",
             db_path=signal_tracker_db_path,
+        )
+        adaptive_history_df = prefer_current_decision_version_slice(
+            adaptive_history_df,
+            source="Market",
         )
         recent_market_events_df = fetch_signal_events_df(
             limit=240,

@@ -26,7 +26,11 @@ from core.position_metrics import (
     estimate_liquidation,
 )
 from core.position_management import build_position_management_snapshot
-from core.signal_tracker import build_actual_exit_quality_profile, build_actual_trade_hold_profile
+from core.signal_tracker import (
+    build_actual_exit_quality_profile,
+    build_actual_trade_hold_profile,
+    prefer_current_decision_version_slice,
+)
 from core.spot_execution_pipeline import build_spot_execution_pipeline
 from ui.primitives import render_help_details, render_page_header
 from ui.signal_panels import build_indicator_groups_html, build_learned_edge_banner_html, build_setup_snapshot_html
@@ -351,6 +355,10 @@ def render(ctx: dict) -> None:
             status="RESOLVED",
             source="Market",
             db_path=signal_tracker_db_path,
+        )
+        adaptive_history_df = prefer_current_decision_version_slice(
+            adaptive_history_df,
+            source="Market",
         )
         recent_market_events_df = fetch_signal_events_df(
             limit=240,
