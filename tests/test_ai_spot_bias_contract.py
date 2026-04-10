@@ -314,6 +314,41 @@ class AISpotBiasContractTests(unittest.TestCase):
         self.assertEqual(partial.direction, "UPSIDE")
         self.assertEqual(ai_spot_bias_display_votes(partial), 2)
 
+    def test_build_ai_spot_bias_snapshot_supports_custom_anchor_pair(self) -> None:
+        out = build_ai_spot_bias_snapshot(
+            df_4h=None,
+            df_1d=None,
+            confirm_df=_frame(start=105.0, end=130.0),
+            lead_df=_frame(start=95.0, end=150.0),
+            confirm_timeframe="1h",
+            lead_timeframe="4h",
+            predictor=_predictor(
+                *_htf_outputs(
+                    (
+                        0.68,
+                        "LONG",
+                        {
+                            "directional_agreement": 2.0 / 3.0,
+                            "consensus_agreement": 2.0 / 3.0,
+                        },
+                    ),
+                    (
+                        0.74,
+                        "LONG",
+                        {
+                            "directional_agreement": 1.0,
+                            "consensus_agreement": 1.0,
+                        },
+                    ),
+                )
+            ),
+        )
+        self.assertEqual(out.direction, "UPSIDE")
+        self.assertEqual(out.lead_timeframe, "4h")
+        self.assertEqual(out.confirm_timeframe, "1h")
+        self.assertEqual(out.anchor_pair_label, "4H + 1H")
+        self.assertIn("4H", out.note)
+
         conflicted = build_ai_spot_bias_snapshot(
             df_4h=_frame(start=140.0, end=100.0),
             df_1d=_frame(start=95.0, end=150.0),

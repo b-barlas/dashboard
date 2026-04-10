@@ -134,6 +134,21 @@ class SpotDirectionContractTests(unittest.TestCase):
         self.assertTrue(out.degraded_data)
         self.assertEqual(out.note, "Higher-timeframe context is incomplete.")
 
+    def test_build_spot_direction_snapshot_supports_custom_anchor_pair(self) -> None:
+        out = build_spot_direction_snapshot(
+            df_4h=None,
+            df_1d=None,
+            confirm_df=_frame(start=100.0, end=125.0),
+            lead_df=_frame(start=92.0, end=150.0),
+            confirm_timeframe="1h",
+            lead_timeframe="4h",
+        )
+        self.assertEqual(out.direction, "UPSIDE")
+        self.assertEqual(out.lead_timeframe, "4h")
+        self.assertEqual(out.confirm_timeframe, "1h")
+        self.assertEqual(out.anchor_pair_label, "4H + 1H")
+        self.assertIn("4H", out.note)
+
 
 if __name__ == "__main__":
     unittest.main()

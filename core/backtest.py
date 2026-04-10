@@ -842,6 +842,43 @@ def build_scalp_outcome_study(
             conviction_label=str(conviction_label),
             ai_agreement=float(decision_agreement),
         )
+        execution_snapshot = selected_timeframe_execution_snapshot(
+            df=df_slice,
+            direction=signal_side,
+            bias_score=float(bias_score),
+            adx_val=adx_val,
+            supertrend_trend=str(getattr(analysis, "supertrend", "") or ""),
+            ichimoku_trend=str(getattr(analysis, "ichimoku", "") or ""),
+            vwap_label=str(getattr(analysis, "vwap", "") or ""),
+            psar_trend=str(getattr(analysis, "psar", "") or ""),
+            bollinger_bias=str(getattr(analysis, "bollinger", "") or ""),
+            williams_label=str(getattr(analysis, "williams", "") or ""),
+            cci_label=str(getattr(analysis, "cci", "") or ""),
+        )
+        setup_rr_ratio = float(selected_timeframe_rr_ratio(execution_snapshot, direction=signal_side))
+        trend_led_snapshot = trend_led_confirmation_snapshot(
+            spot_dir=signal_side,
+            spot_confidence=float(directional_confidence),
+            tactical_dir=signal_side,
+            adx_val=adx_val,
+            structure_quality=float(execution_snapshot.structure_quality),
+            trend_quality=float(execution_snapshot.trend_quality),
+            regime_quality=float(execution_snapshot.regime_quality),
+            location_quality=float(execution_snapshot.location_quality),
+            rr_ratio=setup_rr_ratio if pd.notna(setup_rr_ratio) and setup_rr_ratio > 0.0 else None,
+        )
+        ai_led_snapshot = ai_led_confirmation_snapshot(
+            spot_dir=signal_side,
+            spot_confidence=float(directional_confidence),
+            ai_dir=ai_key,
+            ai_probability=float(_prob),
+            directional_agreement=float(directional_agreement),
+            consensus_agreement=float(consensus_agreement),
+            adx_val=adx_val,
+            location_quality=float(execution_snapshot.location_quality),
+            rr_ratio=setup_rr_ratio if pd.notna(setup_rr_ratio) and setup_rr_ratio > 0.0 else None,
+            ai_status=ai_status,
+        )
 
         action_raw, _action_reason = action_decision_with_reason(
             signal_side,
@@ -863,10 +900,16 @@ def build_scalp_outcome_study(
                     getattr(analysis, "ichimoku", ""),
                     getattr(analysis, "vwap", ""),
                     sr_lookback_fn=sr_lookback_fn,
+                    timeframe=timeframe,
+                    execution_snapshot=execution_snapshot,
+                    trend_led_snapshot=trend_led_snapshot,
+                    ai_led_snapshot=ai_led_snapshot,
+                    spot_direction=signal_side,
+                    ai_direction=ai_key,
                 )
             except TypeError as te:
                 # Service-layer wrapper does not take sr_lookback_fn; retry without it.
-                if "sr_lookback_fn" not in str(te):
+                if "sr_lookback_fn" not in str(te) and "execution_snapshot" not in str(te):
                     raise
                 scalp_direction, entry, target, stop, rr_ratio, breakout_note = get_scalping_entry_target_fn(
                     df_slice,
@@ -874,6 +917,12 @@ def build_scalp_outcome_study(
                     getattr(analysis, "supertrend", ""),
                     getattr(analysis, "ichimoku", ""),
                     getattr(analysis, "vwap", ""),
+                    timeframe=timeframe,
+                    execution_snapshot=execution_snapshot,
+                    trend_led_snapshot=trend_led_snapshot,
+                    ai_led_snapshot=ai_led_snapshot,
+                    spot_direction=signal_side,
+                    ai_direction=ai_key,
                 )
         except Exception as plan_exc:
             diagnostics["plan_fail"] += 1
@@ -893,6 +942,8 @@ def build_scalp_outcome_study(
             min_rr=gate_min_rr,
             min_adx=gate_min_adx,
             min_confidence=gate_min_confidence,
+            timeframe=timeframe,
+            setup_confirm=action_raw,
         )
         if not gate_pass:
             gate_reject_counter[str(gate_reason or "UNKNOWN_GATE_REJECT")] += 1

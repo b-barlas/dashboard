@@ -58,6 +58,28 @@ class AISpotBiasSnapshot:
     four_hour: TimeframeAIBiasSnapshot
     one_day: TimeframeAIBiasSnapshot
     support_votes: int = 0
+    lead_timeframe: str = "1d"
+    confirm_timeframe: str = "4h"
+
+    @property
+    def lead_snapshot(self) -> TimeframeAIBiasSnapshot:
+        return self.one_day
+
+    @property
+    def confirm_snapshot(self) -> TimeframeAIBiasSnapshot:
+        return self.four_hour
+
+    @property
+    def anchor_pair_label(self) -> str:
+        return f"{self.lead_timeframe.upper()} + {self.confirm_timeframe.upper()}"
+
+
+def _lead_snapshot(snapshot: AISpotBiasSnapshot | object):
+    return getattr(snapshot, "lead_snapshot", getattr(snapshot, "one_day", None))
+
+
+def _confirm_snapshot(snapshot: AISpotBiasSnapshot | object):
+    return getattr(snapshot, "confirm_snapshot", getattr(snapshot, "four_hour", None))
 
 
 def _empty_tf_snapshot(timeframe: str, *, note: str = "Higher-timeframe AI context is incomplete.") -> TimeframeAIBiasSnapshot:
@@ -114,14 +136,14 @@ def _opposite_dir(direction: str) -> str:
     return "NEUTRAL"
 
 
-def _model_htf_verdict(one_day_vote: str, four_hour_vote: str) -> str:
-    daily = _dir_key(one_day_vote)
-    intraday = _dir_key(four_hour_vote)
-    if daily == "NEUTRAL":
+def _model_htf_verdict(lead_vote: str, confirm_vote: str) -> str:
+    lead = _dir_key(lead_vote)
+    confirm = _dir_key(confirm_vote)
+    if lead == "NEUTRAL":
         return "NEUTRAL"
-    if intraday == _opposite_dir(daily):
+    if confirm == _opposite_dir(lead):
         return "NEUTRAL"
-    return daily
+    return lead
 
 
 def _ai_probability_edge_quality(ai_probability: float, ai_dir: str) -> float:
@@ -184,18 +206,20 @@ def _ai_consensus_quality(consensus_agreement: float) -> float:
     return 94.0
 
 
-def _timeframe_alignment(one_day: TimeframeAIBiasSnapshot, four_hour: TimeframeAIBiasSnapshot) -> tuple[float, bool]:
-    if one_day.direction == "NEUTRAL":
+def _timeframe_alignment(lead: TimeframeAIBiasSnapshot, confirm: TimeframeAIBiasSnapshot) -> tuple[float, bool]:
+    if lead.direction == "NEUTRAL":
         return 0.0, False
-    if four_hour.direction == one_day.direction:
+    if confirm.direction == lead.direction:
         return 100.0, False
-    if four_hour.direction == "NEUTRAL":
+    if confirm.direction == "NEUTRAL":
         return 70.0, False
     return 0.0, True
 
 
 def _trace_offsets(timeframe: str) -> tuple[int, ...]:
     tf = str(timeframe or "").strip().lower()
+    if tf == "1w":
+        return (0, 1, 2)
     if tf == "1d":
         return (0, 1, 3)
     return (0, 1, 2, 4)
@@ -475,15 +499,15 @@ def analyze_timeframe_ai_bias(
 
 def _htf_support_votes(
     final_direction: str,
-    one_day: TimeframeAIBiasSnapshot,
-    four_hour: TimeframeAIBiasSnapshot,
+    lead: TimeframeAIBiasSnapshot,
+    confirm: TimeframeAIBiasSnapshot,
 ) -> int:
     direction = _dir_key(final_direction)
     support = 0
     for idx in range(3):
-        one_day_vote = _dir_key(one_day.model_votes[idx] if idx < len(one_day.model_votes) else "NEUTRAL")
-        four_hour_vote = _dir_key(four_hour.model_votes[idx] if idx < len(four_hour.model_votes) else "NEUTRAL")
-        model_verdict = _model_htf_verdict(one_day_vote, four_hour_vote)
+        lead_vote = _dir_key(lead.model_votes[idx] if idx < len(lead.model_votes) else "NEUTRAL")
+        confirm_vote = _dir_key(confirm.model_votes[idx] if idx < len(confirm.model_votes) else "NEUTRAL")
+        model_verdict = _model_htf_verdict(lead_vote, confirm_vote)
         if model_verdict == direction:
             support += 1
     return max(0, min(3, support))
@@ -494,36 +518,49 @@ def build_ai_spot_bias_snapshot(
     df_4h: pd.DataFrame | None,
     df_1d: pd.DataFrame | None,
     predictor=ml_ensemble_predict,
+    lead_df: pd.DataFrame | None = None,
+    confirm_df: pd.DataFrame | None = None,
+    lead_timeframe: str = "1d",
+    confirm_timeframe: str = "4h",
 ) -> AISpotBiasSnapshot:
-    four_hour = analyze_timeframe_ai_bias(df_4h, timeframe="4h", predictor=predictor)
-    one_day = analyze_timeframe_ai_bias(df_1d, timeframe="1d", predictor=predictor)
+    if lead_df is None and confirm_df is None:
+        lead_df = df_1d
+        confirm_df = df_4h
+        lead_timeframe = "1d"
+        confirm_timeframe = "4h"
 
-    degraded_data = bool(four_hour.degraded or one_day.degraded)
-    timeframe_alignment, timeframe_conflict = _timeframe_alignment(one_day, four_hour)
-    score = float(np.clip(0.60 * one_day.score + 0.40 * four_hour.score, -100.0, 100.0))
+    confirm = analyze_timeframe_ai_bias(confirm_df, timeframe=confirm_timeframe, predictor=predictor)
+    lead = analyze_timeframe_ai_bias(lead_df, timeframe=lead_timeframe, predictor=predictor)
+
+    degraded_data = bool(confirm.degraded or lead.degraded)
+    timeframe_alignment, timeframe_conflict = _timeframe_alignment(lead, confirm)
+    score = float(np.clip(0.60 * lead.score + 0.40 * confirm.score, -100.0, 100.0))
     conviction_quality = float(
-        np.clip(0.60 * one_day.conviction_quality + 0.40 * four_hour.conviction_quality, 0.0, 100.0)
+        np.clip(0.60 * lead.conviction_quality + 0.40 * confirm.conviction_quality, 0.0, 100.0)
     )
     consensus_quality = float(
-        np.clip(0.60 * one_day.consensus_quality + 0.40 * four_hour.consensus_quality, 0.0, 100.0)
+        np.clip(0.60 * lead.consensus_quality + 0.40 * confirm.consensus_quality, 0.0, 100.0)
     )
 
     if degraded_data:
         direction = "NEUTRAL"
         note = "Higher-timeframe AI context is incomplete."
-    elif one_day.direction == "NEUTRAL":
+    elif lead.direction == "NEUTRAL":
         direction = "NEUTRAL"
-        note = "1D AI bias is not directional enough."
+        note = f"{lead_timeframe.upper()} AI bias is not directional enough."
     elif timeframe_conflict:
         direction = "NEUTRAL"
-        note = "4H AI bias conflicts with the 1D AI bias."
+        note = f"{confirm_timeframe.upper()} AI bias conflicts with the {lead_timeframe.upper()} AI bias."
     elif abs(score) < _FINAL_AI_BIAS_THRESHOLD:
         direction = "NEUTRAL"
         note = "Combined higher-timeframe AI score is too weak."
     else:
-        direction = one_day.direction
-        note = "1D AI bias leads and 4H AI does not oppose it."
-    support_votes = _htf_support_votes(direction, one_day, four_hour)
+        direction = lead.direction
+        note = (
+            f"{lead_timeframe.upper()} AI bias leads and "
+            f"{confirm_timeframe.upper()} AI does not oppose it."
+        )
+    support_votes = _htf_support_votes(direction, lead, confirm)
 
     return AISpotBiasSnapshot(
         direction=direction,
@@ -534,9 +571,11 @@ def build_ai_spot_bias_snapshot(
         timeframe_conflict=timeframe_conflict,
         degraded_data=degraded_data,
         note=note,
-        four_hour=four_hour,
-        one_day=one_day,
+        four_hour=confirm,
+        one_day=lead,
         support_votes=support_votes,
+        lead_timeframe=lead_timeframe,
+        confirm_timeframe=confirm_timeframe,
     )
 
 
@@ -549,37 +588,51 @@ def ai_spot_bias_display_votes(snapshot: AISpotBiasSnapshot) -> int:
 
 
 def ai_spot_bias_probability_up(snapshot: AISpotBiasSnapshot) -> float:
+    lead = _lead_snapshot(snapshot)
+    confirm = _confirm_snapshot(snapshot)
     return max(
         0.0,
         min(
             1.0,
-            0.60 * float(snapshot.one_day.probability_up) + 0.40 * float(snapshot.four_hour.probability_up),
+            0.60 * float(getattr(lead, "probability_up", 0.5) or 0.5)
+            + 0.40 * float(getattr(confirm, "probability_up", 0.5) or 0.5),
         ),
     )
 
 
 def ai_spot_bias_directional_agreement(snapshot: AISpotBiasSnapshot) -> float:
+    lead = _lead_snapshot(snapshot)
+    confirm = _confirm_snapshot(snapshot)
     return max(
         0.0,
         min(
             1.0,
-            0.60 * float(snapshot.one_day.directional_agreement) + 0.40 * float(snapshot.four_hour.directional_agreement),
+            0.60 * float(getattr(lead, "directional_agreement", 0.0) or 0.0)
+            + 0.40 * float(getattr(confirm, "directional_agreement", 0.0) or 0.0),
         ),
     )
 
 
 def ai_spot_bias_consensus_agreement(snapshot: AISpotBiasSnapshot) -> float:
+    lead = _lead_snapshot(snapshot)
+    confirm = _confirm_snapshot(snapshot)
     return max(
         0.0,
         min(
             1.0,
-            0.60 * float(snapshot.one_day.consensus_agreement) + 0.40 * float(snapshot.four_hour.consensus_agreement),
+            0.60 * float(getattr(lead, "consensus_agreement", 0.0) or 0.0)
+            + 0.40 * float(getattr(confirm, "consensus_agreement", 0.0) or 0.0),
         ),
     )
 
 
 def ai_spot_bias_status(snapshot: AISpotBiasSnapshot) -> str:
-    for status in (str(snapshot.one_day.status or "").strip(), str(snapshot.four_hour.status or "").strip()):
+    lead = _lead_snapshot(snapshot)
+    confirm = _confirm_snapshot(snapshot)
+    for status in (
+        str(getattr(lead, "status", "") or "").strip(),
+        str(getattr(confirm, "status", "") or "").strip(),
+    ):
         if status:
             return status
     if bool(snapshot.degraded_data):

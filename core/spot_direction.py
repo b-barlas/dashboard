@@ -51,6 +51,20 @@ class SpotDirectionSnapshot:
     note: str
     four_hour: TimeframeDirectionSnapshot
     one_day: TimeframeDirectionSnapshot
+    lead_timeframe: str = "1d"
+    confirm_timeframe: str = "4h"
+
+    @property
+    def lead_snapshot(self) -> TimeframeDirectionSnapshot:
+        return self.one_day
+
+    @property
+    def confirm_snapshot(self) -> TimeframeDirectionSnapshot:
+        return self.four_hour
+
+    @property
+    def anchor_pair_label(self) -> str:
+        return f"{self.lead_timeframe.upper()} + {self.confirm_timeframe.upper()}"
 
 
 def _empty_tf_snapshot(timeframe: str) -> TimeframeDirectionSnapshot:
@@ -407,30 +421,30 @@ def _early_lead_direction(snapshot: TimeframeDirectionSnapshot) -> tuple[str, bo
 
 
 def _emerging_lead_direction(
-    one_day: TimeframeDirectionSnapshot,
-    four_hour: TimeframeDirectionSnapshot,
+    lead: TimeframeDirectionSnapshot,
+    confirm: TimeframeDirectionSnapshot,
 ) -> tuple[str, bool]:
-    if one_day.direction != "NEUTRAL":
-        return one_day.direction, False
+    if lead.direction != "NEUTRAL":
+        return lead.direction, False
 
-    daily_structure = str(one_day.structure_label or "").strip().upper()
-    four_hour_structure = str(four_hour.structure_label or "").strip().upper()
+    lead_structure = str(lead.structure_label or "").strip().upper()
+    confirm_structure = str(confirm.structure_label or "").strip().upper()
 
     if (
-        float(one_day.raw_score) >= 4.0
-        and float(one_day.trend_score) >= 5.0
-        and daily_structure not in {"EARLY_DOWN", "LH/LL", "BREAKOUT_DOWN"}
-        and four_hour_structure in {"BREAKOUT_UP", "EARLY_UP", "HH/HL"}
-        and float(four_hour.score) >= _TIMEFRAME_SCORE_THRESHOLD
+        float(lead.raw_score) >= 4.0
+        and float(lead.trend_score) >= 5.0
+        and lead_structure not in {"EARLY_DOWN", "LH/LL", "BREAKOUT_DOWN"}
+        and confirm_structure in {"BREAKOUT_UP", "EARLY_UP", "HH/HL"}
+        and float(confirm.score) >= _TIMEFRAME_SCORE_THRESHOLD
     ):
         return "UPSIDE", True
 
     if (
-        float(one_day.raw_score) <= -4.0
-        and float(one_day.trend_score) <= -5.0
-        and daily_structure not in {"EARLY_UP", "HH/HL", "BREAKOUT_UP"}
-        and four_hour_structure in {"BREAKOUT_DOWN", "EARLY_DOWN", "LH/LL"}
-        and float(four_hour.score) <= -_TIMEFRAME_SCORE_THRESHOLD
+        float(lead.raw_score) <= -4.0
+        and float(lead.trend_score) <= -5.0
+        and lead_structure not in {"EARLY_UP", "HH/HL", "BREAKOUT_UP"}
+        and confirm_structure in {"BREAKOUT_DOWN", "EARLY_DOWN", "LH/LL"}
+        and float(confirm.score) <= -_TIMEFRAME_SCORE_THRESHOLD
     ):
         return "DOWNSIDE", True
 
@@ -438,19 +452,19 @@ def _emerging_lead_direction(
 
 
 def _timeframe_alignment(
-    one_day: TimeframeDirectionSnapshot,
-    four_hour: TimeframeDirectionSnapshot,
+    lead: TimeframeDirectionSnapshot,
+    confirm: TimeframeDirectionSnapshot,
     *,
     lead_direction: str | None = None,
-    early_daily_bias: bool = False,
+    early_lead_bias: bool = False,
 ) -> tuple[float, bool]:
-    daily_direction = normalize_direction(lead_direction or one_day.direction)
-    if daily_direction == "NEUTRAL":
+    resolved_lead_direction = normalize_direction(lead_direction or lead.direction)
+    if resolved_lead_direction == "NEUTRAL":
         return 0.0, False
-    if four_hour.direction == daily_direction:
-        return (80.0 if early_daily_bias else 100.0), False
-    if four_hour.direction == "NEUTRAL":
-        return (50.0 if early_daily_bias else 70.0), False
+    if confirm.direction == resolved_lead_direction:
+        return (80.0 if early_lead_bias else 100.0), False
+    if confirm.direction == "NEUTRAL":
+        return (50.0 if early_lead_bias else 70.0), False
     return 0.0, True
 
 
@@ -458,55 +472,77 @@ def build_spot_direction_snapshot(
     *,
     df_4h: pd.DataFrame | None,
     df_1d: pd.DataFrame | None,
+    lead_df: pd.DataFrame | None = None,
+    confirm_df: pd.DataFrame | None = None,
+    lead_timeframe: str = "1d",
+    confirm_timeframe: str = "4h",
 ) -> SpotDirectionSnapshot:
-    four_hour = analyze_timeframe_direction(df_4h, timeframe="4h")
-    one_day = analyze_timeframe_direction(df_1d, timeframe="1d")
+    if lead_df is None and confirm_df is None:
+        lead_df = df_1d
+        confirm_df = df_4h
+        lead_timeframe = "1d"
+        confirm_timeframe = "4h"
 
-    degraded_data = bool(four_hour.degraded or one_day.degraded)
-    lead_direction, early_daily_bias = _early_lead_direction(one_day)
+    confirm = analyze_timeframe_direction(confirm_df, timeframe=confirm_timeframe)
+    lead = analyze_timeframe_direction(lead_df, timeframe=lead_timeframe)
+
+    degraded_data = bool(confirm.degraded or lead.degraded)
+    lead_direction, early_lead_bias = _early_lead_direction(lead)
     if lead_direction == "NEUTRAL":
-        lead_direction, early_daily_bias = _emerging_lead_direction(one_day, four_hour)
+        lead_direction, early_lead_bias = _emerging_lead_direction(lead, confirm)
     timeframe_alignment, timeframe_conflict = _timeframe_alignment(
-        one_day,
-        four_hour,
+        lead,
+        confirm,
         lead_direction=lead_direction,
-        early_daily_bias=early_daily_bias,
+        early_lead_bias=early_lead_bias,
     )
-    daily_effective_score = one_day.raw_score if early_daily_bias else one_day.score
-    score = 0.60 * daily_effective_score + 0.40 * four_hour.score
+    lead_effective_score = lead.raw_score if early_lead_bias else lead.score
+    score = 0.60 * lead_effective_score + 0.40 * confirm.score
     score = float(np.clip(score, -100.0, 100.0))
 
-    structure_quality = float(np.clip(0.60 * abs(one_day.structure_score) + 0.40 * abs(four_hour.structure_score), 0.0, 100.0))
-    trend_quality = float(np.clip(0.60 * abs(one_day.trend_score) + 0.40 * abs(four_hour.trend_score), 0.0, 100.0))
-    regime_quality = float(np.clip(0.60 * one_day.regime_quality + 0.40 * four_hour.regime_quality, 0.0, 100.0))
-    location_quality = float(np.clip(0.60 * one_day.location_quality + 0.40 * four_hour.location_quality, 0.0, 100.0))
-    range_regime = one_day.regime_label == "RANGE"
+    structure_quality = float(np.clip(0.60 * abs(lead.structure_score) + 0.40 * abs(confirm.structure_score), 0.0, 100.0))
+    trend_quality = float(np.clip(0.60 * abs(lead.trend_score) + 0.40 * abs(confirm.trend_score), 0.0, 100.0))
+    regime_quality = float(np.clip(0.60 * lead.regime_quality + 0.40 * confirm.regime_quality, 0.0, 100.0))
+    location_quality = float(np.clip(0.60 * lead.location_quality + 0.40 * confirm.location_quality, 0.0, 100.0))
+    range_regime = lead.regime_label == "RANGE"
 
     if degraded_data:
         direction = "NEUTRAL"
         note = "Higher-timeframe context is incomplete."
     elif lead_direction == "NEUTRAL":
         direction = "NEUTRAL"
-        note = "1D structure is not directional enough."
+        note = f"{lead_timeframe.upper()} structure is not directional enough."
     elif timeframe_conflict:
         direction = "NEUTRAL"
-        note = "4H direction conflicts with 1D bias."
-    elif early_daily_bias:
-        if four_hour.direction != lead_direction:
+        note = f"{confirm_timeframe.upper()} direction conflicts with {lead_timeframe.upper()} bias."
+    elif early_lead_bias:
+        if confirm.direction != lead_direction:
             direction = "NEUTRAL"
-            note = "1D bias is still early and 4H has not confirmed it yet."
+            note = (
+                f"{lead_timeframe.upper()} bias is still early and "
+                f"{confirm_timeframe.upper()} has not confirmed it yet."
+            )
         elif abs(score) < _EARLY_FINAL_DIRECTION_SCORE_THRESHOLD:
             direction = "NEUTRAL"
-            note = "Early 1D bias exists, but the combined 1D + 4H score is still too weak."
+            note = (
+                f"Early {lead_timeframe.upper()} bias exists, but the combined "
+                f"{lead_timeframe.upper()} + {confirm_timeframe.upper()} score is still too weak."
+            )
         else:
             direction = lead_direction
-            note = "1D bias is still early, but 4H confirms the same side."
+            note = (
+                f"{lead_timeframe.upper()} bias is still early, but "
+                f"{confirm_timeframe.upper()} confirms the same side."
+            )
     elif abs(score) < _FINAL_DIRECTION_SCORE_THRESHOLD:
         direction = "NEUTRAL"
         note = "Combined higher-timeframe score is too weak."
     else:
-        direction = one_day.direction
-        note = "1D structure defines the bias and 4H does not oppose it."
+        direction = lead.direction
+        note = (
+            f"{lead_timeframe.upper()} structure defines the bias and "
+            f"{confirm_timeframe.upper()} does not oppose it."
+        )
 
     return SpotDirectionSnapshot(
         direction=direction,
@@ -520,6 +556,8 @@ def build_spot_direction_snapshot(
         degraded_data=degraded_data,
         range_regime=range_regime,
         note=note,
-        four_hour=four_hour,
-        one_day=one_day,
+        four_hour=confirm,
+        one_day=lead,
+        lead_timeframe=lead_timeframe,
+        confirm_timeframe=confirm_timeframe,
     )

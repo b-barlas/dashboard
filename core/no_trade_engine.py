@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from core.trading_copy import copy_text, trade_gate_display
 
@@ -20,10 +20,78 @@ class MarketTradeGateSnapshot:
     session_fit_note: str = ""
     archive_guardrail_label: str = ""
     archive_guardrail_note: str = ""
+    archive_calibration_delta: float = 0.0
+    archive_calibration_note: str = ""
 
 
 def _gate_label(gate_key: str) -> str:
     return trade_gate_display(gate_key)
+
+
+_CALIBRATION_BLOCK_REASONS = {
+    "DEGRADED_SCAN",
+    "REGIME_NO_TRADE",
+    "CATALYST_BLOCK",
+    "NO_READY_SETUPS",
+    "WEAK_PARTICIPATION",
+    "ARCHIVE_CLUSTER_NO_TRADE",
+    "RISK_OFF_DEFENSIVE",
+    "RISK_OFF_WEAKNESS",
+    "CATALYST_SELECTIVE",
+    "SESSION_ARCHIVE_WEAK",
+    "ARCHIVE_GUARDRAIL",
+    "SELECTIVE_SESSION_WEAK",
+    "SELECTIVE_ARCHIVE_WEAK",
+    "FILTER_HARDER_SESSION_WEAK",
+    "FILTER_HARDER_ARCHIVE",
+}
+
+
+def apply_market_trade_gate_archive_calibration(
+    snapshot: MarketTradeGateSnapshot,
+    *,
+    calibration_delta: float = 0.0,
+    calibration_note: str = "",
+) -> MarketTradeGateSnapshot:
+    delta = float(calibration_delta or 0.0)
+    note = str(calibration_note or "").strip()
+    if abs(delta) < 0.18:
+        return replace(snapshot, archive_calibration_delta=delta, archive_calibration_note=note)
+
+    gate_key = str(snapshot.gate_key or "").strip().upper()
+    reason_code = str(snapshot.reason_code or "").strip().upper()
+    base = replace(snapshot, archive_calibration_delta=delta, archive_calibration_note=note)
+
+    if gate_key in {"NO_TRADE", "DEFENSIVE_ONLY"}:
+        return base
+
+    if gate_key == "TRADEABLE" and delta <= -0.45:
+        merged_note = f"{snapshot.note} {note}".strip() if note else snapshot.note
+        return replace(
+            base,
+            gate_key="SELECTIVE_ONLY",
+            label=_gate_label("SELECTIVE_ONLY"),
+            reason_code="ARCHIVE_GATE_CAUTION",
+            note=merged_note,
+            tone="warning",
+            no_trade=False,
+            tradable=True,
+        )
+
+    if gate_key == "SELECTIVE_ONLY" and delta >= 0.55 and reason_code not in _CALIBRATION_BLOCK_REASONS:
+        merged_note = f"{snapshot.note} {note}".strip() if note else snapshot.note
+        return replace(
+            base,
+            gate_key="TRADEABLE",
+            label=_gate_label("TRADEABLE"),
+            reason_code="ARCHIVE_GATE_SUPPORT",
+            note=merged_note,
+            tone="positive",
+            no_trade=False,
+            tradable=True,
+        )
+
+    return base
 
 
 def build_market_trade_gate(

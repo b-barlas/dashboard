@@ -5,11 +5,25 @@ import unittest
 import pandas as pd
 
 from core.adaptive_weighting import (
+    build_actionable_ranking_model,
+    build_actionable_ranking_snapshot,
+    build_ai_confidence_calibration_model,
+    build_ai_confidence_calibration_snapshot,
     build_adaptive_context_model,
     build_archive_guardrail_snapshot,
+    build_confidence_calibration_model,
+    build_confidence_calibration_snapshot,
     build_learning_edge_table,
     build_live_signal_adaptive_snapshot,
+    build_risk_sizing_calibration_model,
+    build_risk_sizing_calibration_snapshot,
+    build_scalp_calibration_model,
+    build_scalp_calibration_snapshot,
+    build_setup_calibration_model,
+    build_setup_calibration_snapshot,
     build_session_fit_snapshot,
+    build_trade_gate_calibration_model,
+    build_trade_gate_calibration_snapshot,
 )
 
 
@@ -22,6 +36,8 @@ class AdaptiveWeightingTests(unittest.TestCase):
                     "symbol": f"AI{idx}",
                     "status": "RESOLVED",
                     "directional_return_pct": 2.5 if idx < 9 else -1.0,
+                    "direction": "Upside",
+                    "scan_focus": "Actionable Setups",
                     "lead_active": 1,
                     "ai_aligned": 1,
                     "market_lead_label": "Upside",
@@ -38,6 +54,9 @@ class AdaptiveWeightingTests(unittest.TestCase):
                     "session_bucket": "European (08-16 UTC)",
                     "timeframe": "1h",
                     "setup_confirm": "✅ ENTER (Trend+AI)",
+                    "has_plan": 1,
+                    "plan_outcome": "TP" if idx < 9 else "SL",
+                    "rr_ratio": 1.85 if idx < 9 else 1.25,
                     "adaptive_edge_label": "Historically Favored",
                     "archive_guardrail_label": "Archive Clear",
                     "actual_trade_status": "CLOSED" if idx < 8 else "",
@@ -50,6 +69,8 @@ class AdaptiveWeightingTests(unittest.TestCase):
                     "symbol": f"BAD{idx}",
                     "status": "RESOLVED",
                     "directional_return_pct": -2.0 if idx < 9 else 1.0,
+                    "direction": "Downside",
+                    "scan_focus": "Broad Market",
                     "lead_active": 0,
                     "ai_aligned": 0,
                     "market_lead_label": "Balanced",
@@ -66,6 +87,9 @@ class AdaptiveWeightingTests(unittest.TestCase):
                     "session_bucket": "Asian (00-08 UTC)",
                     "timeframe": "1h",
                     "setup_confirm": "⛔ SKIP",
+                    "has_plan": 1,
+                    "plan_outcome": "SL" if idx < 9 else "TP",
+                    "rr_ratio": 1.20 if idx < 9 else 1.55,
                     "adaptive_edge_label": "Historically Weak",
                     "archive_guardrail_label": "Archive Guardrail",
                     "actual_trade_status": "CLOSED" if idx < 8 else "",
@@ -234,6 +258,228 @@ class AdaptiveWeightingTests(unittest.TestCase):
             },
         )
         self.assertLessEqual(snap.score, 48.0)
+
+    def test_ai_confidence_calibration_supports_strong_aligned_enter_cohort(self) -> None:
+        enriched = pd.concat([self._resolved_history(), self._resolved_history()], ignore_index=True)
+        model = build_ai_confidence_calibration_model(enriched)
+        snap = build_ai_confidence_calibration_snapshot(
+            model,
+            signal={
+                "Setup Confirm": "ENTER_TREND_AI",
+                "AI Alignment": "Aligned",
+                "Timeframe": "1h",
+                "Scan Focus": "Actionable Setups",
+                "Direction": "Upside",
+            },
+        )
+        self.assertGreater(snap.delta, 0.0)
+        self.assertIn("Archive calibration", snap.note)
+
+    def test_ai_confidence_calibration_stays_off_when_archive_is_thin(self) -> None:
+        thin = self._resolved_history().head(12).copy()
+        model = build_ai_confidence_calibration_model(thin)
+        snap = build_ai_confidence_calibration_snapshot(
+            model,
+            signal={
+                "Setup Confirm": "ENTER_TREND_AI",
+                "AI Alignment": "Aligned",
+                "Timeframe": "1h",
+                "Scan Focus": "Actionable Setups",
+                "Direction": "Upside",
+            },
+        )
+        self.assertEqual(snap.delta, 0.0)
+        self.assertEqual(snap.note, "")
+
+    def test_confidence_calibration_supports_strong_directional_cohort(self) -> None:
+        enriched = pd.concat([self._resolved_history(), self._resolved_history()], ignore_index=True)
+        model = build_confidence_calibration_model(enriched)
+        snap = build_confidence_calibration_snapshot(
+            model,
+            signal={
+                "Direction": "Upside",
+                "AI Alignment": "Aligned",
+                "Timeframe": "1h",
+                "Scan Focus": "Actionable Setups",
+            },
+        )
+        self.assertGreater(snap.delta, 0.0)
+        self.assertIn("Archive confidence calibration", snap.note)
+
+    def test_confidence_calibration_softens_weak_directional_cohort(self) -> None:
+        enriched = pd.concat([self._resolved_history(), self._resolved_history()], ignore_index=True)
+        model = build_confidence_calibration_model(enriched)
+        snap = build_confidence_calibration_snapshot(
+            model,
+            signal={
+                "Direction": "Downside",
+                "AI Alignment": "Not aligned",
+                "Timeframe": "1h",
+                "Scan Focus": "Broad Market",
+            },
+        )
+        self.assertLess(snap.delta, 0.0)
+        self.assertIn("cautious", snap.note.lower())
+
+    def test_setup_calibration_supports_strong_enter_cohort(self) -> None:
+        enriched = pd.concat([self._resolved_history(), self._resolved_history()], ignore_index=True)
+        model = build_setup_calibration_model(enriched)
+        snap = build_setup_calibration_snapshot(
+            model,
+            signal={
+                "Setup Confirm": "ENTER_TREND_AI",
+                "AI Alignment": "Aligned",
+                "Timeframe": "1h",
+                "Scan Focus": "Actionable Setups",
+                "Direction": "Upside",
+            },
+        )
+        self.assertGreater(snap.delta, 0.0)
+        self.assertIn("Archive setup calibration", snap.note)
+
+    def test_setup_calibration_stays_off_when_archive_is_thin(self) -> None:
+        thin = self._resolved_history().head(16).copy()
+        model = build_setup_calibration_model(thin)
+        snap = build_setup_calibration_snapshot(
+            model,
+            signal={
+                "Setup Confirm": "PROBE",
+                "AI Alignment": "Aligned",
+                "Timeframe": "1h",
+                "Scan Focus": "Actionable Setups",
+                "Direction": "Upside",
+            },
+        )
+        self.assertEqual(snap.delta, 0.0)
+        self.assertEqual(snap.note, "")
+
+    def test_actionable_ranking_snapshot_supports_strong_probe_cohort(self) -> None:
+        enriched = pd.concat([self._resolved_history(), self._resolved_history()], ignore_index=True)
+        model = build_actionable_ranking_model(enriched)
+        snap = build_actionable_ranking_snapshot(
+            model,
+            signal={
+                "Setup Confirm": "PROBE",
+                "AI Alignment": "Aligned",
+                "Timeframe": "1h",
+                "Scan Focus": "Actionable Setups",
+                "Direction": "Upside",
+            },
+        )
+        self.assertGreater(snap.delta, 0.0)
+        self.assertIn("Archive ranking", snap.note)
+
+    def test_actionable_ranking_stays_off_when_archive_is_thin(self) -> None:
+        thin = self._resolved_history().head(18).copy()
+        model = build_actionable_ranking_model(thin)
+        snap = build_actionable_ranking_snapshot(
+            model,
+            signal={
+                "Setup Confirm": "PROBE",
+                "AI Alignment": "Aligned",
+                "Timeframe": "1h",
+                "Scan Focus": "Actionable Setups",
+                "Direction": "Upside",
+            },
+        )
+        self.assertEqual(snap.delta, 0.0)
+        self.assertEqual(snap.note, "")
+
+    def test_risk_sizing_calibration_supports_strong_probe_cohort(self) -> None:
+        enriched = pd.concat([self._resolved_history(), self._resolved_history()], ignore_index=True)
+        model = build_risk_sizing_calibration_model(enriched)
+        snap = build_risk_sizing_calibration_snapshot(
+            model,
+            signal={
+                "Setup Confirm": "PROBE",
+                "AI Alignment": "Aligned",
+                "Timeframe": "1h",
+                "Scan Focus": "Actionable Setups",
+                "Direction": "Upside",
+            },
+        )
+        self.assertGreater(snap.delta, 0.0)
+        self.assertIn("Archive sizing calibration", snap.note)
+
+    def test_risk_sizing_calibration_softens_weak_skip_cohort(self) -> None:
+        enriched = pd.concat([self._resolved_history(), self._resolved_history()], ignore_index=True)
+        model = build_risk_sizing_calibration_model(enriched)
+        snap = build_risk_sizing_calibration_snapshot(
+            model,
+            signal={
+                "Setup Confirm": "SKIP",
+                "AI Alignment": "Not aligned",
+                "Timeframe": "1h",
+                "Scan Focus": "Broad Market",
+                "Direction": "Downside",
+            },
+        )
+        self.assertLess(snap.delta, 0.0)
+        self.assertIn("cautious", snap.note.lower())
+
+    def test_trade_gate_calibration_supports_strong_tradeable_context(self) -> None:
+        enriched = pd.concat([self._resolved_history(), self._resolved_history()], ignore_index=True)
+        model = build_trade_gate_calibration_model(enriched)
+        snap = build_trade_gate_calibration_snapshot(
+            model,
+            signal={
+                "Trade Gate": "Tradeable",
+                "Playbook": "Selective upside rotation",
+                "Market Regime": "Alt Rotation",
+                "Session": "European (08-16 UTC)",
+                "Catalyst Window": "Far / Clear",
+            },
+        )
+        self.assertGreater(snap.delta, 0.0)
+        self.assertIn("Archive gate calibration", snap.note)
+
+    def test_scalp_calibration_supports_strong_intraday_probe_cohort(self) -> None:
+        enriched = pd.concat([self._resolved_history(), self._resolved_history()], ignore_index=True)
+        model = build_scalp_calibration_model(enriched)
+        snap = build_scalp_calibration_snapshot(
+            model,
+            signal={
+                "Setup Confirm": "PROBE",
+                "AI Alignment": "Aligned",
+                "Timeframe": "1h",
+                "Scan Focus": "Actionable Setups",
+                "Direction": "Upside",
+            },
+        )
+        self.assertGreater(snap.delta, 0.0)
+        self.assertIn("Archive scalp calibration", snap.note)
+
+    def test_scalp_calibration_stays_off_when_archive_is_thin(self) -> None:
+        thin = self._resolved_history().head(18).copy()
+        model = build_scalp_calibration_model(thin)
+        snap = build_scalp_calibration_snapshot(
+            model,
+            signal={
+                "Setup Confirm": "PROBE",
+                "AI Alignment": "Aligned",
+                "Timeframe": "1h",
+                "Scan Focus": "Actionable Setups",
+                "Direction": "Upside",
+            },
+        )
+        self.assertEqual(snap.delta, 0.0)
+        self.assertEqual(snap.note, "")
+
+    def test_trade_gate_calibration_softens_weak_no_trade_context(self) -> None:
+        enriched = pd.concat([self._resolved_history(), self._resolved_history()], ignore_index=True)
+        model = build_trade_gate_calibration_model(enriched)
+        snap = build_trade_gate_calibration_snapshot(
+            model,
+            signal={
+                "Trade Gate": "No-Trade",
+                "Playbook": "Stand aside / mean reversion only",
+                "Market Regime": "Range / Chop",
+                "Session": "Asian (00-08 UTC)",
+                "Catalyst Window": "Blocking (<6h)",
+            },
+        )
+        self.assertLess(snap.delta, 0.0)
+        self.assertIn("cautious", snap.note.lower())
 
 
 if __name__ == "__main__":

@@ -15,10 +15,8 @@ class MarketCoinColumnContractTests(unittest.TestCase):
         self.assertIn("pair = str(row.get(\"__pair\", \"\")).strip()", self.text)
         self.assertIn("'__pair': pair_label", self.text)
         self.assertIn("def _pair_provenance_label(", self.text)
-        self.assertRegex(
-            self.text,
-            r"(?s)hidden_meta_cols\s*=\s*\[.*?\"__pair\"",
-        )
+        self.assertIn("def _market_hidden_meta_cols(", self.text)
+        self.assertRegex(self.text, r"(?s)_MARKET_RENDER_META_COLS\s*=\s*\[.*?\"__pair\"")
 
     def test_stablecoin_filter_is_part_of_scan_signature_and_universe_filter(self):
         self.assertIn("bool(exclude_stables)", self.text)

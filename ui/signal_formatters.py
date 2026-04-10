@@ -96,19 +96,27 @@ def ai_spot_tf_note(snapshot) -> str:
 
 def ai_spot_note(snapshot) -> str:
     dots = ai_spot_bias_display_votes(snapshot)
+    pair_label = str(getattr(snapshot, "anchor_pair_label", "") or "").strip()
+    if not pair_label:
+        lead = getattr(snapshot, "lead_snapshot", getattr(snapshot, "one_day", None))
+        confirm = getattr(snapshot, "confirm_snapshot", getattr(snapshot, "four_hour", None))
+        if lead is not None and confirm is not None:
+            pair_label = f"{str(lead.timeframe).upper()} + {str(confirm.timeframe).upper()}"
+        else:
+            pair_label = "HTF"
     return (
-        f"AI spot bias (1D + 4H): {spot_bias_label(snapshot.direction)} | "
+        f"AI spot bias ({pair_label}): {spot_bias_label(snapshot.direction)} | "
         f"Combined score {float(snapshot.score):.1f} | "
         f"Conviction quality {float(snapshot.conviction_quality):.0f} | "
         f"Timeframe alignment {float(snapshot.timeframe_alignment):.0f} | "
         f"Displayed model-support dots {dots}/3 | "
         f"{str(snapshot.note or '').strip()} | "
-        f"{ai_spot_tf_note(snapshot.one_day)} | "
-        f"{ai_spot_tf_note(snapshot.four_hour)}"
+        f"{ai_spot_tf_note(getattr(snapshot, 'lead_snapshot', getattr(snapshot, 'one_day', None)))} | "
+        f"{ai_spot_tf_note(getattr(snapshot, 'confirm_snapshot', getattr(snapshot, 'four_hour', None)))}"
     )
 
 
-def ai_confidence_note(snapshot, score: float) -> str:
+def ai_confidence_note(snapshot, score: float, confidence_snapshot=None) -> str:
     dots = ai_spot_bias_display_votes(snapshot)
     caps: list[str] = []
     direction_key = str(snapshot.direction or "").strip().upper()
@@ -121,7 +129,7 @@ def ai_confidence_note(snapshot, score: float) -> str:
     if direction_key != "NEUTRAL" and int(dots) <= 1:
         caps.append("low-model-support cap <=59")
     cap_text = f" | Active caps: {', '.join(caps)}" if caps else ""
-    return (
+    note = (
         f"AI confidence: {float(score):.1f}% "
         f"({ai_confidence_bucket(float(score), direction=str(snapshot.direction or ''), support_votes=int(dots), timeframe_conflict=bool(snapshot.timeframe_conflict), degraded_data=bool(snapshot.degraded_data)).title()}) | "
         f"HTF AI verdict {spot_bias_label(snapshot.direction)} | "
@@ -131,6 +139,10 @@ def ai_confidence_note(snapshot, score: float) -> str:
         f"Consensus quality {float(snapshot.consensus_quality):.0f} | "
         f"Model support {int(dots)}/3{cap_text}"
     )
+    calibration_note = str(getattr(confidence_snapshot, "note", "") or "").strip()
+    if calibration_note:
+        note = f"{note} | {calibration_note}".strip()
+    return note
 
 
 def adx_bucket_only(adx_value: float) -> str:

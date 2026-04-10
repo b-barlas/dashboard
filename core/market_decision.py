@@ -44,6 +44,9 @@ ACTION_REASON_TEXT = {
     "PROBE_TREND": "The technical setup is close enough for a small starter position, but not strong enough for full size yet.",
     "PROBE_AI": "AI support is early but strong enough for a small starter position, not full size yet.",
     "PROBE_DUAL": "Trend and AI are both promising, but the setup is still just below full confirmation.",
+    "ARCHIVE_UPGRADE_TO_PROBE": "Matched archive history is supportive enough to allow a starter position while the live setup is still borderline.",
+    "ARCHIVE_DOWNGRADE_TO_PROBE": "Matched archive history is softer here, so the live setup is trimmed to starter-size only.",
+    "ARCHIVE_DOWNGRADE_TO_WATCH": "Matched archive history is too soft to justify a starter position yet, so this stays on watch.",
     "NEEDS_CONFIRMATION": "The idea is alive, but it still needs more confirmation.",
     "AI_UNAVAILABLE": "AI is temporarily unavailable, so this stays on watch.",
 }
@@ -229,6 +232,37 @@ def _probe_reason(*, trend_candidate: bool, ai_candidate: bool) -> str:
     return "PROBE_TREND"
 
 
+def apply_setup_archive_calibration(
+    action: str,
+    reason_code: str,
+    *,
+    calibration_delta: float = 0.0,
+) -> tuple[str, str]:
+    delta = float(calibration_delta or 0.0)
+    cls = normalize_action_class(action)
+    reason = str(reason_code or "").strip().upper()
+    if cls in {"UNKNOWN", "SKIP"} or abs(delta) < 2.5:
+        return action, reason_code
+
+    if cls.startswith("ENTER_") and delta <= -3.25:
+        return ACTION_PROBE, "ARCHIVE_DOWNGRADE_TO_PROBE"
+
+    if cls == "PROBE" and delta <= -2.5:
+        return ACTION_WATCH, "ARCHIVE_DOWNGRADE_TO_WATCH"
+
+    if cls == "WATCH" and delta >= 3.0 and reason in {
+        "NEEDS_CONFIRMATION",
+        "TREND_SCORE_TOO_LOW",
+        "AI_EDGE_WEAK",
+        "AI_NEUTRAL",
+        "TACTICAL_NEUTRAL",
+        "DUAL_NOT_ELITE",
+    }:
+        return ACTION_PROBE, "ARCHIVE_UPGRADE_TO_PROBE"
+
+    return action, reason_code
+
+
 def _dir_key(value: str) -> str:
     s = str(value or "").strip().upper()
     if s in {"UPSIDE", "LONG", "BUY", "BULLISH"}:
@@ -276,9 +310,13 @@ def emerging_bias_snapshot(
             note="Higher-timeframe AI context is incomplete.",
         )
 
-    one_day = getattr(spot_snapshot, "one_day", None)
-    four_hour = getattr(spot_snapshot, "four_hour", None)
-    if one_day is None or four_hour is None:
+    lead = getattr(spot_snapshot, "lead_snapshot", getattr(spot_snapshot, "one_day", None))
+    confirm = getattr(spot_snapshot, "confirm_snapshot", getattr(spot_snapshot, "four_hour", None))
+    lead_tf = str(getattr(spot_snapshot, "lead_timeframe", getattr(lead, "timeframe", "1d")) or "1d").upper()
+    confirm_tf = str(
+        getattr(spot_snapshot, "confirm_timeframe", getattr(confirm, "timeframe", "4h")) or "4h"
+    ).upper()
+    if lead is None or confirm is None:
         return EmergingBiasSnapshot(
             active=False,
             direction="NEUTRAL",
@@ -286,44 +324,44 @@ def emerging_bias_snapshot(
             note="Higher-timeframe technical structure is unavailable.",
         )
 
-    daily_structure = str(getattr(one_day, "structure_label", "") or "").strip().upper()
-    four_hour_structure = str(getattr(four_hour, "structure_label", "") or "").strip().upper()
-    four_hour_direction = _dir_key(getattr(four_hour, "direction", ""))
-    daily_raw = float(getattr(one_day, "raw_score", 0.0) or 0.0)
-    daily_trend = float(getattr(one_day, "trend_score", 0.0) or 0.0)
-    four_hour_score = float(getattr(four_hour, "score", 0.0) or 0.0)
-    four_hour_raw = float(getattr(four_hour, "raw_score", 0.0) or 0.0)
-    four_hour_trend = float(getattr(four_hour, "trend_score", 0.0) or 0.0)
+    lead_structure = str(getattr(lead, "structure_label", "") or "").strip().upper()
+    confirm_structure = str(getattr(confirm, "structure_label", "") or "").strip().upper()
+    confirm_direction = _dir_key(getattr(confirm, "direction", ""))
+    lead_raw = float(getattr(lead, "raw_score", 0.0) or 0.0)
+    lead_trend = float(getattr(lead, "trend_score", 0.0) or 0.0)
+    confirm_score = float(getattr(confirm, "score", 0.0) or 0.0)
+    confirm_raw = float(getattr(confirm, "raw_score", 0.0) or 0.0)
+    confirm_trend = float(getattr(confirm, "trend_score", 0.0) or 0.0)
 
     ai_direction = _dir_key(getattr(ai_spot_snapshot, "direction", ""))
     ai_support_votes = int(max(0, min(3, int(getattr(ai_spot_snapshot, "support_votes", 0) or 0))))
     ai_confidence = _clamp_100(ai_confidence_score)
 
-    bullish_structure = four_hour_structure in {"BREAKOUT_UP", "EARLY_UP", "HH/HL"}
-    bearish_structure = four_hour_structure in {"BREAKOUT_DOWN", "EARLY_DOWN", "LH/LL"}
+    bullish_structure = confirm_structure in {"BREAKOUT_UP", "EARLY_UP", "HH/HL"}
+    bearish_structure = confirm_structure in {"BREAKOUT_DOWN", "EARLY_DOWN", "LH/LL"}
 
-    bullish_four_hour = (
-        four_hour_direction == "UPSIDE"
-        and four_hour_raw >= 8.0
-        and four_hour_trend >= 4.0
-        and (bullish_structure or four_hour_score >= 12.0)
+    bullish_confirm = (
+        confirm_direction == "UPSIDE"
+        and confirm_raw >= 8.0
+        and confirm_trend >= 4.0
+        and (bullish_structure or confirm_score >= 12.0)
     )
-    bearish_four_hour = (
-        four_hour_direction == "DOWNSIDE"
-        and four_hour_raw <= -8.0
-        and four_hour_trend <= -4.0
-        and (bearish_structure or four_hour_score <= -12.0)
+    bearish_confirm = (
+        confirm_direction == "DOWNSIDE"
+        and confirm_raw <= -8.0
+        and confirm_trend <= -4.0
+        and (bearish_structure or confirm_score <= -12.0)
     )
 
-    daily_guard_up = (
-        daily_structure not in {"BREAKOUT_DOWN", "EARLY_DOWN", "LH/LL"}
-        and daily_raw > -15.0
-        and daily_trend > -12.0
+    lead_guard_up = (
+        lead_structure not in {"BREAKOUT_DOWN", "EARLY_DOWN", "LH/LL"}
+        and lead_raw > -15.0
+        and lead_trend > -12.0
     )
-    daily_guard_down = (
-        daily_structure not in {"BREAKOUT_UP", "EARLY_UP", "HH/HL"}
-        and daily_raw < 15.0
-        and daily_trend < 12.0
+    lead_guard_down = (
+        lead_structure not in {"BREAKOUT_UP", "EARLY_UP", "HH/HL"}
+        and lead_raw < 15.0
+        and lead_trend < 12.0
     )
 
     ai_strongly_opposes_up = ai_direction == "DOWNSIDE" and ai_confidence >= 70.0 and ai_support_votes >= 2
@@ -331,7 +369,7 @@ def emerging_bias_snapshot(
     ai_confirms_up = ai_direction == "UPSIDE" and ai_confidence >= 55.0 and ai_support_votes >= 2
     ai_confirms_down = ai_direction == "DOWNSIDE" and ai_confidence >= 55.0 and ai_support_votes >= 2
 
-    if bullish_four_hour and daily_guard_up and not ai_strongly_opposes_up:
+    if bullish_confirm and lead_guard_up and not ai_strongly_opposes_up:
         if spot_direction == "DOWNSIDE":
             return EmergingBiasSnapshot(
                 active=False,
@@ -344,13 +382,13 @@ def emerging_bias_snapshot(
             direction="UPSIDE",
             label="Emerging Upside",
             note=(
-                "4H technical leadership is building higher, "
+                f"{confirm_tf} technical leadership is building higher, "
                 + ("AI confirms upside, " if ai_confirms_up else "AI is not strongly opposing, ")
-                + "and 1D is not opposing the move yet."
+                + f"and {lead_tf} is not opposing the move yet."
             ),
         )
 
-    if bearish_four_hour and daily_guard_down and not ai_strongly_opposes_down:
+    if bearish_confirm and lead_guard_down and not ai_strongly_opposes_down:
         if spot_direction == "UPSIDE":
             return EmergingBiasSnapshot(
                 active=False,
@@ -363,9 +401,9 @@ def emerging_bias_snapshot(
             direction="DOWNSIDE",
             label="Emerging Downside",
             note=(
-                "4H technical leadership is building lower, "
+                f"{confirm_tf} technical leadership is building lower, "
                 + ("AI confirms downside, " if ai_confirms_down else "AI is not strongly opposing, ")
-                + "and 1D is not opposing the move yet."
+                + f"and {lead_tf} is not opposing the move yet."
             ),
         )
 

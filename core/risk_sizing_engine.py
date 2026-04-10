@@ -90,6 +90,8 @@ def build_signal_risk_sizing(
     archive_guardrail_penalty: float | None = None,
     archive_guardrail_label: str | None = None,
     archive_guardrail_note: str | None = None,
+    archive_risk_delta: float | None = None,
+    archive_risk_note: str | None = None,
     symbol: str | None = None,
     sector_tag: str | None = None,
 ) -> RiskSizingSnapshot:
@@ -101,8 +103,10 @@ def build_signal_risk_sizing(
     adaptive_score = float(max(0.0, min(100.0, float(adaptive_edge_score or 50.0))))
     session_score = float(session_fit_score or 0.0)
     guardrail_penalty = float(max(0.0, float(archive_guardrail_penalty or 0.0)))
+    risk_calibration_delta = float(max(-0.25, min(0.25, float(archive_risk_delta or 0.0))))
     guardrail_label_key = str(archive_guardrail_label or "").strip().upper()
     guardrail_note_text = str(archive_guardrail_note or "").strip()
+    risk_calibration_note = str(archive_risk_note or "").strip()
 
     gate_key = str(getattr(market_trade_gate_snapshot, "gate_key", "") or "").strip().upper()
     gate_reason = str(getattr(market_trade_gate_snapshot, "reason_code", "") or "").strip().upper()
@@ -178,6 +182,8 @@ def build_signal_risk_sizing(
             desired = min(1.0, desired + 0.25)
         elif session_score <= -2.5:
             desired = max(0.0, desired - 0.25)
+    if action_class != "WATCH" and abs(risk_calibration_delta) >= 0.04:
+        desired = max(0.0, min(1.0, desired + risk_calibration_delta))
 
     severe_archive_cluster = (
         guardrail_label_key == "ARCHIVE GUARDRAIL"
@@ -215,6 +221,8 @@ def build_signal_risk_sizing(
         note_parts.append(copy_text("risk_sizing.note.session_support"))
     elif session_score <= -2.5 and action_class not in {"WATCH", "PROBE"}:
         note_parts.append(copy_text("risk_sizing.note.session_trim"))
+    if risk_calibration_note and action_class != "WATCH":
+        note_parts.append(risk_calibration_note)
     if weak_cluster_probe_cap:
         note_parts.append(copy_text("risk_sizing.note.weak_cluster_probe"))
     if guardrail_penalty >= 3.0:

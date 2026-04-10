@@ -6,11 +6,19 @@ import io
 import pandas as pd
 import plotly.graph_objs as go
 import ta
+from core.adaptive_weighting import (
+    build_ai_confidence_calibration_model,
+    build_ai_confidence_calibration_snapshot,
+    build_confidence_calibration_model,
+    build_setup_calibration_model,
+    build_setup_calibration_snapshot,
+)
+from core.confidence import build_ai_confidence_snapshot
 from core.trading_copy import copy_text, playbook_key, trade_gate_key
 from core.session_utils import session_bucket_for_timestamp
 from core.confidence import confidence_bucket
-from core.market_decision import action_reason_text, normalize_action_class
-from core.scalping import scalp_gate_thresholds
+from core.market_decision import apply_setup_archive_calibration, action_reason_text, normalize_action_class
+from core.scalping import scalp_gate_thresholds, scalp_reason_text
 from core.position_metrics import (
     compute_hard_invalidation,
     compute_health_decision,
@@ -46,6 +54,25 @@ def _spot_tf_note(snapshot) -> str:
         f"Regime {snapshot.regime_label} ({float(snapshot.regime_quality):.0f}) | "
         f"Location {float(snapshot.location_quality):.0f}"
     )
+
+
+def _spot_lead_snapshot(snapshot):
+    return getattr(snapshot, "lead_snapshot", getattr(snapshot, "one_day", None))
+
+
+def _spot_confirm_snapshot(snapshot):
+    return getattr(snapshot, "confirm_snapshot", getattr(snapshot, "four_hour", None))
+
+
+def _spot_anchor_pair_label(snapshot) -> str:
+    label = str(getattr(snapshot, "anchor_pair_label", "") or "").strip()
+    if label:
+        return label
+    lead = _spot_lead_snapshot(snapshot)
+    confirm = _spot_confirm_snapshot(snapshot)
+    if lead is None or confirm is None:
+        return "HTF"
+    return f"{str(lead.timeframe).upper()} + {str(confirm.timeframe).upper()}"
 
 
 def _learned_edge_tone(adaptive_label: str, execution_fit_label: str, archive_guardrail_label: str = "") -> str:
@@ -332,6 +359,9 @@ def render(ctx: dict) -> None:
         )
         recent_market_context = build_recent_market_context_snapshot(recent_market_events_df)
         adaptive_model = build_adaptive_context_model(adaptive_history_df)
+        confidence_calibration_model = build_confidence_calibration_model(adaptive_history_df)
+        setup_calibration_model = build_setup_calibration_model(adaptive_history_df)
+        ai_confidence_calibration_model = build_ai_confidence_calibration_model(adaptive_history_df)
         report_rows: list[dict] = []
         tf_order = {'1m': 1, '3m': 2, '5m': 3, '15m': 4, '1h': 5, '4h': 6, '1d': 7}
         largest_tf = max(selected_timeframes, key=lambda tf: tf_order[tf])
@@ -392,6 +422,8 @@ def render(ctx: dict) -> None:
                     analyse_fn=analyse,
                     predictor=ml_ensemble_predict,
                     conviction_fn=_calc_conviction,
+                    confidence_calibration_model=confidence_calibration_model,
+                    scan_focus="Unknown",
                 )
                 a = pipeline.analysis
                 spot_snapshot = pipeline.spot_snapshot
@@ -542,8 +574,6 @@ def render(ctx: dict) -> None:
                 confidence_display = _confidence_display(float(confidence_snapshot.score))
                 conf_bucket = confidence_bucket(float(confidence_snapshot.score))
                 conf_color = POSITIVE if conf_bucket == "HIGH" else (WARNING if conf_bucket == "MEDIUM" else NEGATIVE)
-                ai_conf_bucket = str(ai_confidence_snapshot.label or "LOW").upper()
-                ai_conf_color = POSITIVE if ai_conf_bucket == "HIGH" else (WARNING if ai_conf_bucket == "MEDIUM" else NEGATIVE)
                 setup_confirm = _setup_confirm_display(action_raw)
                 setup_reason = action_reason_text(action_reason_code)
                 action_class = normalize_action_class(action_raw)
@@ -558,10 +588,10 @@ def render(ctx: dict) -> None:
                     setup_color = NEGATIVE
 
                 direction_note = (
-                    f"Spot bias (1D + 4H): {_spot_bias_label(spot_snapshot.direction)} | "
+                    f"Spot bias ({_spot_anchor_pair_label(spot_snapshot)}): {_spot_bias_label(spot_snapshot.direction)} | "
                     f"Combined score {float(spot_snapshot.score):.1f} | {str(spot_snapshot.note or '').strip()} | "
-                    f"{_spot_tf_note(spot_snapshot.one_day)} | "
-                    f"{_spot_tf_note(spot_snapshot.four_hour)} | "
+                    f"{_spot_tf_note(_spot_lead_snapshot(spot_snapshot))} | "
+                    f"{_spot_tf_note(_spot_confirm_snapshot(spot_snapshot))} | "
                     f"Tactical ({tf}): {direction_label(signal_dir)} | Bias {float(bias_score):.1f}"
                 )
                 confidence_note = (
@@ -572,8 +602,70 @@ def render(ctx: dict) -> None:
                     f"Regime quality {float(spot_snapshot.regime_quality):.0f} | "
                     f"Location quality {float(spot_snapshot.location_quality):.0f}"
                 )
+                if str(getattr(confidence_snapshot, "note", "") or "").strip():
+                    confidence_note = (
+                        f"{confidence_note} | {str(getattr(confidence_snapshot, 'note', '')).strip()}"
+                    )
                 ai_note = _ai_spot_note(ai_spot_snapshot)
-                ai_confidence_note = _ai_confidence_note(ai_spot_snapshot, float(ai_confidence_snapshot.score))
+                setup_calibration_snapshot = build_setup_calibration_snapshot(
+                    setup_calibration_model,
+                    signal={
+                        "Setup Confirm": str(action_raw or ""),
+                        "AI Alignment": "Aligned" if direction_key(spot_snapshot.direction) == ai_spot_direction else "Not aligned",
+                        "Timeframe": str(tf or "Unknown"),
+                        "Scan Focus": "Unknown",
+                        "Direction": str(spot_snapshot.direction or ""),
+                    },
+                )
+                action_raw, action_reason_code = apply_setup_archive_calibration(
+                    action_raw,
+                    action_reason_code,
+                    calibration_delta=float(getattr(setup_calibration_snapshot, "delta", 0.0) or 0.0),
+                )
+                setup_confirm = _setup_confirm_display(action_raw)
+                setup_reason = action_reason_text(action_reason_code)
+                action_class = normalize_action_class(action_raw)
+                if action_class.startswith("ENTER_"):
+                    setup_color = POSITIVE
+                elif action_class == "PROBE":
+                    setup_color = WARNING
+                elif action_class == "WATCH":
+                    setup_color = watch_setup_color
+                else:
+                    setup_color = NEGATIVE
+                ai_confidence_calibration_snapshot = build_ai_confidence_calibration_snapshot(
+                    ai_confidence_calibration_model,
+                    signal={
+                        "Setup Confirm": str(action_raw or ""),
+                        "AI Alignment": "Aligned" if direction_key(spot_snapshot.direction) == ai_spot_direction else "Not aligned",
+                        "Timeframe": str(tf or "Unknown"),
+                        "Scan Focus": "Unknown",
+                        "Direction": str(spot_snapshot.direction or ""),
+                    },
+                )
+                ai_confidence_snapshot = build_ai_confidence_snapshot(
+                    direction=ai_spot_snapshot.direction,
+                    combined_score=float(ai_spot_snapshot.score),
+                    conviction_quality=float(ai_spot_snapshot.conviction_quality),
+                    timeframe_alignment=float(ai_spot_snapshot.timeframe_alignment),
+                    consensus_quality=float(ai_spot_snapshot.consensus_quality),
+                    support_votes=int(pipeline.ai_spot_votes),
+                    timeframe_conflict=bool(ai_spot_snapshot.timeframe_conflict),
+                    degraded_data=bool(ai_spot_snapshot.degraded_data),
+                    archive_calibration_delta=float(getattr(ai_confidence_calibration_snapshot, "delta", 0.0) or 0.0),
+                    archive_calibration_note=str(getattr(ai_confidence_calibration_snapshot, "note", "") or ""),
+                )
+                ai_conf_bucket = str(ai_confidence_snapshot.label or "LOW").upper()
+                ai_conf_color = POSITIVE if ai_conf_bucket == "HIGH" else (WARNING if ai_conf_bucket == "MEDIUM" else NEGATIVE)
+                ai_confidence_note = _ai_confidence_note(
+                    ai_spot_snapshot,
+                    float(ai_confidence_snapshot.score),
+                    ai_confidence_snapshot,
+                )
+                if str(getattr(setup_calibration_snapshot, "note", "") or "").strip():
+                    confidence_note = (
+                        f"{confidence_note} | Setup calibration: {str(getattr(setup_calibration_snapshot, 'note', '')).strip()}"
+                    )
                 current_session_bucket = session_bucket_for_timestamp()
                 current_sector_tag = str(classify_symbol_sector(coin) or "").strip()
                 recent_symbol_market_signal = build_recent_symbol_market_signal_snapshot(
@@ -995,20 +1087,13 @@ def render(ctx: dict) -> None:
                                     unsafe_allow_html=True,
                                 )
                             else:
-                                scalp_reason_map = {
-                                    "NO_SCALP_DIRECTION": "No directional scalp setup on current structure.",
-                                    "SIGNAL_DIRECTION_NEUTRAL": "Signal direction is neutral; scalp setup is blocked.",
-                                    "DIRECTION_MISMATCH": "Scalp side does not match direction; setup filtered.",
-                                    "CONFLICT": "Technical vs AI alignment is in conflict.",
-                                    "RR_TOO_LOW": f"R:R below required threshold ({gate_min_rr:.2f}).",
-                                    "ADX_TOO_LOW": f"ADX below required trend threshold ({gate_min_adx:.0f}).",
-                                    "CONFIDENCE_TOO_LOW": f"Confidence below required threshold ({gate_min_confidence:.0f}).",
-                                    "INVALID_LEVELS": "Invalid Entry/Stop/Target levels.",
-                                }
-                                msg = breakout_note or scalp_reason_map.get(
+                                msg = breakout_note or scalp_reason_text(
                                     scalp_reason,
-                                    "No valid scalping setup with current filters.",
-                                )
+                                    timeframe=tf,
+                                    min_rr=gate_min_rr,
+                                    min_adx=gate_min_adx,
+                                    min_confidence=gate_min_confidence,
+                                ) or "No valid scalping setup with current filters."
                                 if msg in {"Invalid plan levels", "Invalid ATR/price"}:
                                     msg = "No valid plan on current candle structure."
                                 st.markdown(

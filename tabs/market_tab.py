@@ -27,6 +27,7 @@ from core.confidence import (
     confidence_bucket,
 )
 from core.market_decision import (
+    apply_setup_archive_calibration,
     ai_led_confirmation_snapshot,
     ai_vote_metrics,
     action_reason_text,
@@ -38,16 +39,36 @@ from core.market_decision import (
     spot_structure_state,
     trend_led_confirmation_snapshot,
 )
-from core.scalping import scalp_gate_thresholds
+from core.scalping import scalp_gate_thresholds, scalp_reason_short_label, scalp_reason_text
+from core.scalping import apply_scalp_archive_calibration
 from core.signal_contract import bias_confidence_from_bias
 from core.spot_direction import build_spot_direction_snapshot
+from core.timeframe_anchors import choose_anchor_context
 from core.metric_catalog import (
     AI_LONG_THRESHOLD,
     AI_SHORT_THRESHOLD,
     direction_from_prob,
 )
-from core.adaptive_weighting import build_archive_guardrail_snapshot, build_session_fit_snapshot
+from core.adaptive_weighting import (
+    build_actionable_ranking_model,
+    build_actionable_ranking_snapshot,
+    build_ai_confidence_calibration_model,
+    build_ai_confidence_calibration_snapshot,
+    build_archive_guardrail_snapshot,
+    build_confidence_calibration_model,
+    build_confidence_calibration_snapshot,
+    build_risk_sizing_calibration_model,
+    build_risk_sizing_calibration_snapshot,
+    build_scalp_calibration_model,
+    build_scalp_calibration_snapshot,
+    build_setup_calibration_model,
+    build_setup_calibration_snapshot,
+    build_session_fit_snapshot,
+    build_trade_gate_calibration_model,
+    build_trade_gate_calibration_snapshot,
+)
 from core.catalyst_engine import catalyst_signal_note, catalyst_window_label
+from core.no_trade_engine import apply_market_trade_gate_archive_calibration
 from core.session_utils import session_bucket_for_timestamp
 from core.signal_tracker import build_alert_effectiveness_summary
 from core.symbols import canonical_base_symbol, is_stable_base_symbol
@@ -152,7 +173,6 @@ def _market_result_priority_key(row: dict) -> tuple[float, float, float, float, 
         -_sortable_float(row.get("__confidence_val", 0.0)),
         -_sortable_float(row.get("__adaptive_edge_score", 50.0)),
         _sortable_float(row.get("__archive_guardrail_penalty", 0.0)),
-        -_sortable_float(row.get("__rr_val", 0.0)),
         -_sortable_float(row.get("__ai_confidence_val", 0.0)),
         -_sortable_float(row.get("__mcap_val", 0)),
         str(row.get("Coin", "")),
@@ -161,17 +181,17 @@ def _market_result_priority_key(row: dict) -> tuple[float, float, float, float, 
 
 def _actionable_market_result_priority_key(
     row: dict,
-) -> tuple[float, float, float, float, float, float, float, float, float, str]:
+) -> tuple[float, float, float, float, float, float, float, float, float, float, str]:
     return (
         -float(_setup_confirm_priority(str(row.get("__action_raw", row.get("Setup Confirm", ""))))),
         -_sortable_float(row.get("__actionable_context_score", 0.0)),
         -_sortable_float(row.get("__actionable_tactical_score", 0.0)),
         -_sortable_float(row.get("__actionable_setup_score", 0.0)),
+        -_sortable_float(row.get("__actionable_archive_score", 0.0)),
         -_sortable_float(row.get("__risk_unit_fraction", 0.0)),
         -_sortable_float(row.get("__confidence_val", 0.0)),
         -_sortable_float(row.get("__adaptive_edge_score", 50.0)),
         _sortable_float(row.get("__archive_guardrail_penalty", 0.0)),
-        -_sortable_float(row.get("__rr_val", 0.0)),
         -_sortable_float(row.get("__ai_confidence_val", 0.0)),
         str(row.get("Coin", "")),
     )
@@ -181,6 +201,44 @@ def _market_result_priority_key_for_mode(row: dict, scan_mode: str) -> tuple:
     if _normalize_scan_mode(scan_mode) == _SCAN_MODE_ACTIONABLE:
         return _actionable_market_result_priority_key(row)
     return _market_result_priority_key(row)
+
+
+_MARKET_RENDER_META_COLS = [
+    "__action_reason",
+    "__action_raw",
+    "__adaptive_edge_note",
+    "__ai_confidence_note",
+    "__ai_note",
+    "__catalyst_fit_note",
+    "__confidence_note",
+    "__delta_note",
+    "__direction_note",
+    "__emerging_direction",
+    "__emerging_label",
+    "__emerging_note",
+    "__entry_note",
+    "__execution_fit_note",
+    "__ichimoku_detail",
+    "__pair",
+    "__rr_note",
+    "__scalp_display_state",
+    "__scalp_reason_short",
+    "__scalp_reason_text",
+    "__session_fit_note",
+    "__setup_calibration_note",
+    "__spike_candle_pct",
+    "__spike_dir",
+    "__spike_vol_ratio",
+    "__spike_vwap_ctx",
+    "__target_note",
+    "__adx_raw",
+]
+
+
+def _market_hidden_meta_cols(df_columns, display_cols) -> list[str]:
+    available = set(df_columns)
+    display_set = set(display_cols)
+    return [col for col in _MARKET_RENDER_META_COLS if col in available and col not in display_set]
 
 
 def _emerging_badge_tone(direction: str) -> str:
@@ -385,6 +443,8 @@ def _market_signal_log_events(
             archive_guardrail_penalty=row.get("__archive_guardrail_penalty"),
             archive_guardrail_label=row.get("__archive_guardrail_label"),
             archive_guardrail_note=row.get("__archive_guardrail_note"),
+            archive_risk_delta=row.get("__risk_archive_delta"),
+            archive_risk_note=row.get("__risk_archive_note"),
             symbol=symbol,
             sector_tag=str(sector_tag or ""),
         )
@@ -817,6 +877,21 @@ def _compact_alert_note(note: str) -> str:
     return f"{clipped}..."
 
 
+def _compact_hover_note(note: str, *, limit: int = 140) -> str:
+    text = re.sub(r"\s+", " ", str(note or "").strip())
+    if not text:
+        return ""
+    sentence_match = re.match(r"^(.+?[.!?])(?:\s|$)", text)
+    if sentence_match:
+        first = sentence_match.group(1).strip()
+        if len(first) <= limit:
+            return first
+    if len(text) <= limit:
+        return text
+    clipped = text[: max(0, limit - 3)].rstrip(" ,.;:")
+    return f"{clipped}..."
+
+
 def _market_alert_strip_html(alerts: list[object], *, total_active: int | None = None) -> str:
     rows_html: list[str] = []
     tone_map = {
@@ -926,6 +1001,123 @@ def _extract_confidence_label(value: object) -> str:
     if match:
         return match.group(1).strip() or "Unknown"
     return text or "Unknown"
+
+
+def _pick_confidence_leader(df_results: pd.DataFrame) -> tuple[str, float | None, str]:
+    if "__confidence_val" not in df_results.columns or len(df_results) <= 0:
+        return "—", None, "No confidence data available."
+
+    working = df_results.copy()
+    working["__confidence_num"] = pd.to_numeric(working["__confidence_val"], errors="coerce")
+    working = working.dropna(subset=["__confidence_num"])
+    if working.empty:
+        return "—", None, "No confidence data available."
+
+    if "__action_raw" in working.columns:
+        action_series = working["__action_raw"].astype(str)
+    elif "Setup Confirm" in working.columns:
+        action_series = working["Setup Confirm"].astype(str)
+    else:
+        action_series = pd.Series("", index=working.index, dtype=str)
+    working["__setup_priority"] = action_series.apply(_setup_confirm_priority)
+    working["__ai_conf_num"] = pd.to_numeric(
+        working.get("__ai_confidence_val", pd.Series(index=working.index, dtype=float)),
+        errors="coerce",
+    ).fillna(-1.0)
+
+    scoped = working
+    for min_priority in (3, 2, 1):
+        candidate = working[working["__setup_priority"] >= min_priority]
+        if not candidate.empty:
+            scoped = candidate
+            break
+
+    best_row = scoped.sort_values(
+        ["__confidence_num", "__setup_priority", "__ai_conf_num", "Coin"],
+        ascending=[False, False, False, True],
+    ).iloc[0]
+    confidence_coin = str(best_row.get("Coin", "—"))
+    confidence_val = float(best_row.get("__confidence_num", 0.0))
+    confidence_sub = (
+        f"Direction: {best_row.get('Direction', '')} • "
+        f"Setup: {best_row.get('Setup Confirm', '')}"
+    )
+    return confidence_coin, confidence_val, confidence_sub
+
+
+def _pick_best_scalp_opportunity(df_results: pd.DataFrame) -> tuple[str, str]:
+    if "Scalp Opportunity" not in df_results.columns or len(df_results) <= 0:
+        return "—", ""
+
+    working = df_results.copy()
+    working["__scalp_state"] = (
+        working.get("__scalp_display_state", pd.Series(index=working.index, dtype=object))
+        .astype(str)
+        .str.upper()
+    )
+    working["__scalp_reason_short"] = (
+        working.get("__scalp_reason_short", pd.Series(index=working.index, dtype=object))
+        .astype(str)
+        .str.strip()
+    )
+    working = working[working["Scalp Opportunity"].astype(str).isin(["Upside", "Downside"])]
+    if working.empty:
+        return "—", ""
+
+    live_count = int(working["__scalp_state"].eq("LIVE").sum())
+    conditional_count = int(working["__scalp_state"].eq("CONDITIONAL").sum())
+    working["__rr"] = pd.to_numeric(
+        working["R:R"]
+        .astype(str)
+        .str.replace("🟢", "", regex=False)
+        .str.replace("🟡", "", regex=False)
+        .str.replace("🔴", "", regex=False)
+        .str.replace("*", "", regex=False)
+        .str.strip(),
+        errors="coerce",
+    )
+    working["__action_rank"] = (
+        working.get("__action_raw", working.get("Setup Confirm", pd.Series(dtype=str)))
+        .astype(str)
+        .apply(_setup_confirm_priority)
+    )
+    working["__state_rank"] = working["__scalp_state"].map({"LIVE": 2, "CONDITIONAL": 1}).fillna(0)
+    working["__confidence_num"] = pd.to_numeric(
+        working.get("__confidence_val", pd.Series(index=working.index, dtype=float)),
+        errors="coerce",
+    ).fillna(0.0)
+    working = working.dropna(subset=["__rr"])
+    working = working[working["__rr"] > 0]
+    if working.empty:
+        count_sub = f"Live: {live_count} • Conditional: {conditional_count}"
+        return "—", count_sub
+
+    scoped = working[working["__scalp_state"] == "LIVE"].copy()
+    if scoped.empty:
+        scoped = working[working["__scalp_state"] == "CONDITIONAL"].copy()
+    if scoped.empty:
+        scoped = working
+
+    best_row = scoped.sort_values(
+        ["__rr", "__action_rank", "__confidence_num", "Coin"],
+        ascending=[False, False, False, True],
+    ).iloc[0]
+    best_coin = str(best_row.get("Coin", "—"))
+    best_rr = float(best_row.get("__rr", 0.0) or 0.0)
+    best_head = f"{best_coin} ({best_rr:.2f})"
+    best_state = str(best_row.get("__scalp_state", "")).strip().title() or "Scalp"
+    best_direction = str(best_row.get("Scalp Opportunity", "")).strip()
+    best_reason = str(best_row.get("__scalp_reason_short", "")).strip()
+    best_action = str(best_row.get("__action_raw", best_row.get("Setup Confirm", ""))).strip()
+    best_action_compact = _shared_setup_confirm_display(best_action)
+
+    sub_parts = [best_state, best_direction]
+    if best_state.upper() == "CONDITIONAL" and best_reason:
+        sub_parts.append(best_reason)
+    sub_parts.append(f"Setup: {best_action_compact}")
+    sub_parts.append(f"Live: {live_count}")
+    sub_parts.append(f"Conditional: {conditional_count}")
+    return best_head, " • ".join(sub_parts)
 
 
 def _valid_market_bases(market_rows: list[dict]) -> set[str]:
@@ -1123,6 +1315,25 @@ def _spot_tf_summary(snapshot) -> str:
     )
 
 
+def _spot_lead_snapshot(snapshot):
+    return getattr(snapshot, "lead_snapshot", getattr(snapshot, "one_day", None))
+
+
+def _spot_confirm_snapshot(snapshot):
+    return getattr(snapshot, "confirm_snapshot", getattr(snapshot, "four_hour", None))
+
+
+def _spot_anchor_pair_label(snapshot) -> str:
+    label = str(getattr(snapshot, "anchor_pair_label", "") or "").strip()
+    if label:
+        return label
+    lead = _spot_lead_snapshot(snapshot)
+    confirm = _spot_confirm_snapshot(snapshot)
+    if lead is None or confirm is None:
+        return "HTF"
+    return f"{str(lead.timeframe).upper()} + {str(confirm.timeframe).upper()}"
+
+
 def _spot_direction_note(
     snapshot,
     *,
@@ -1132,17 +1343,20 @@ def _spot_direction_note(
     tactical_bias: float,
     tactical_comment: str,
 ) -> str:
-    one_day = _spot_tf_summary(snapshot.one_day)
-    four_hour = _spot_tf_summary(snapshot.four_hour)
+    lead = _spot_lead_snapshot(snapshot)
+    confirm = _spot_confirm_snapshot(snapshot)
+    lead_summary = _spot_tf_summary(lead)
+    confirm_summary = _spot_tf_summary(confirm)
     tactical = (
         f"Selected {str(selected_timeframe).upper()}: "
         f"{_spot_bias_label(tactical_direction)} | {tactical_signal}"
     )
     summary = str(snapshot.note or "").strip()
     note = (
-        f"Higher-timeframe direction from 1D + 4H closed candles: {_spot_bias_label(snapshot.direction)}. "
+        f"Higher-timeframe direction from {_spot_anchor_pair_label(snapshot)} closed anchors: "
+        f"{_spot_bias_label(snapshot.direction)}. "
         f"{summary} "
-        f"{one_day}. {four_hour}. {tactical}."
+        f"{lead_summary}. {confirm_summary}. {tactical}."
     )
     comment = str(tactical_comment or "").strip()
     if comment:
@@ -1150,7 +1364,7 @@ def _spot_direction_note(
     return note.strip()
 
 
-def _confidence_note(snapshot, score: float) -> str:
+def _confidence_note(snapshot, score: float, confidence_snapshot=None) -> str:
     caps: list[str] = []
     if str(snapshot.direction or "").strip().upper() == "NEUTRAL":
         caps.append("neutral bias")
@@ -1163,11 +1377,15 @@ def _confidence_note(snapshot, score: float) -> str:
     if bool(snapshot.range_regime):
         caps.append("range regime")
     cap_text = f" Limits active: {', '.join(caps)}." if caps else ""
-    return (
+    note = (
         f"How strong the Direction call is: {float(score):.1f}% ({confidence_bucket(score).title()}). "
         f"Built from alignment, structure, trend, regime, and location quality."
         f"{cap_text}"
     )
+    calibration_note = str(getattr(confidence_snapshot, "note", "") or "").strip()
+    if calibration_note:
+        note = f"{note} {_compact_hover_note(calibration_note)}".strip()
+    return note
 
 
 def _ai_spot_tf_summary(snapshot) -> str:
@@ -1188,15 +1406,15 @@ def _ai_spot_tf_summary(snapshot) -> str:
 def _ai_spot_bias_note(snapshot) -> str:
     dots = ai_spot_bias_display_votes(snapshot)
     return (
-        f"AI view from 1D + 4H: {_spot_bias_label(snapshot.direction)}. "
+        f"AI view from {_spot_anchor_pair_label(snapshot)}: {_spot_bias_label(snapshot.direction)}. "
         f"Model support: {dots}/3 dots. "
         f"{str(snapshot.note or '').strip()} "
-        f"{_ai_spot_tf_summary(snapshot.one_day)}. "
-        f"{_ai_spot_tf_summary(snapshot.four_hour)}."
+        f"{_ai_spot_tf_summary(_spot_lead_snapshot(snapshot))}. "
+        f"{_ai_spot_tf_summary(_spot_confirm_snapshot(snapshot))}."
     )
 
 
-def _ai_confidence_note(snapshot, score: float) -> str:
+def _ai_confidence_note(snapshot, score: float, confidence_snapshot=None) -> str:
     dots = ai_spot_bias_display_votes(snapshot)
     caps: list[str] = []
     if str(snapshot.direction or "").strip().upper() == "NEUTRAL":
@@ -1208,12 +1426,16 @@ def _ai_confidence_note(snapshot, score: float) -> str:
     if str(snapshot.direction or "").strip().upper() != "NEUTRAL" and int(dots) <= 1:
         caps.append("low model support")
     cap_text = f" Limits active: {', '.join(caps)}." if caps else ""
-    return (
+    note = (
         f"How trustworthy the AI verdict is: {float(score):.1f}% "
         f"({ai_confidence_bucket(float(score), direction=str(snapshot.direction or ''), support_votes=int(dots), timeframe_conflict=bool(snapshot.timeframe_conflict), degraded_data=bool(snapshot.degraded_data)).title()}). "
         f"AI side: {_spot_bias_label(snapshot.direction)}. Model support: {int(dots)}/3."
         f"{cap_text}"
     )
+    calibration_note = str(getattr(confidence_snapshot, "note", "") or "").strip()
+    if calibration_note:
+        note = f"{note} {_compact_hover_note(calibration_note)}".strip()
+    return note
 
 
 def _cache_is_fresh(cache_ts: str | None, ttl_minutes: int) -> bool:
@@ -2484,6 +2706,136 @@ def render(ctx: dict) -> None:
             return f"${p:,.8f}"
         return f"${p:,.10f}"
 
+    def _build_scalp_display_payload(
+        *,
+        timeframe_value: str | None,
+        scalp_direction: str | None,
+        signal_direction: str | None,
+        rr_ratio: float | None,
+        adx_val: float | None,
+        confidence: float | None,
+        conviction_label: str | None,
+        entry: float | None,
+        stop: float | None,
+        target: float | None,
+        setup_confirm: str | None = None,
+        market_trade_gate_key: str | None = None,
+        archive_guardrail_penalty: float | None = None,
+        archive_guardrail_label: str | None = None,
+        direction_value: str | None = None,
+        ai_aligned: bool | None = None,
+        scan_focus_value: str | None = None,
+        breakout_note: str = "",
+        close_ref: float | None = None,
+        ema_ref: float | None = None,
+    ) -> dict[str, object]:
+        scalp_calibration_snapshot = build_scalp_calibration_snapshot(
+            scalp_calibration_model,
+            signal={
+                "Setup Confirm": str(setup_confirm or ""),
+                "AI Alignment": "Aligned" if bool(ai_aligned) else "Not aligned",
+                "Timeframe": str(timeframe_value or "Unknown"),
+                "Scan Focus": str(scan_focus_value or "Unknown"),
+                "Direction": str(direction_value or signal_direction or ""),
+            },
+        )
+        gate_min_rr_local, gate_min_adx_local, gate_min_confidence_local = scalp_gate_thresholds(timeframe_value)
+        gate_pass, gate_reason = scalp_quality_gate(
+            scalp_direction=scalp_direction,
+            signal_direction=signal_direction,
+            rr_ratio=rr_ratio,
+            adx_val=adx_val,
+            confidence=confidence,
+            conviction_label=conviction_label,
+            entry=entry,
+            stop=stop,
+            target=target,
+            min_rr=gate_min_rr_local,
+            min_adx=gate_min_adx_local,
+            min_confidence=gate_min_confidence_local,
+            timeframe=timeframe_value,
+            setup_confirm=setup_confirm,
+            market_trade_gate_key=market_trade_gate_key,
+            archive_guardrail_penalty=archive_guardrail_penalty,
+            archive_guardrail_label=archive_guardrail_label,
+        )
+        gate_pass, gate_reason = apply_scalp_archive_calibration(
+            gate_pass,
+            gate_reason,
+            calibration_delta=float(getattr(scalp_calibration_snapshot, "delta", 0.0) or 0.0),
+            rr_ratio=rr_ratio,
+            adx_val=adx_val,
+            confidence=confidence,
+            timeframe=timeframe_value,
+        )
+        reason_text = scalp_reason_text(
+            gate_reason,
+            timeframe=timeframe_value,
+            min_rr=gate_min_rr_local,
+            min_adx=gate_min_adx_local,
+            min_confidence=gate_min_confidence_local,
+        )
+        scalp_calibration_note = str(getattr(scalp_calibration_snapshot, "note", "") or "")
+        if scalp_calibration_note:
+            reason_text = f"{reason_text} {scalp_calibration_note}".strip() if reason_text else scalp_calibration_note
+        show_blocked = bool(scalp_direction) and str(gate_reason or "").upper() not in {
+            "NO_SCALP_DIRECTION",
+            "SIGNAL_DIRECTION_NEUTRAL",
+            "UNSUPPORTED_TIMEFRAME",
+        }
+        blocked_short_reason = scalp_reason_short_label(gate_reason) if show_blocked and not gate_pass else ""
+        display_state = "LIVE" if gate_pass else ("CONDITIONAL" if show_blocked else "NONE")
+        scalp_label = (
+            direction_label(scalp_direction or "")
+            if gate_pass
+            else (
+                direction_label(scalp_direction or "")
+                if show_blocked
+                else ""
+            )
+        )
+        show_levels = bool(entry and stop and target) and display_state in {"LIVE", "CONDITIONAL"}
+        entry_note = ""
+        if show_levels and entry and close_ref and ema_ref:
+            try:
+                base_dir = direction_label(scalp_direction or "")
+                entry_note = (
+                    f"{base_dir} entry guide built from the latest close, EMA5, and an ATR buffer. "
+                    f"Close {_fmt_price(float(close_ref))} • EMA5 {_fmt_price(float(ema_ref))}"
+                )
+            except Exception:
+                entry_note = ""
+        target_note = str(breakout_note or "").strip() if show_levels else ""
+        rr_note = ""
+        if show_levels and target_note:
+            rr_note = "This reward-to-risk depends on the target condition shown in the target tooltip."
+        if display_state == "CONDITIONAL":
+            reference_prefix = "Reference only while scalp veto is active."
+            entry_note = f"{reference_prefix} {entry_note}".strip() if entry_note else reference_prefix
+            target_note = f"{reference_prefix} {target_note}".strip() if target_note else reference_prefix
+            rr_note = f"{reference_prefix} {reason_text}".strip()
+        return {
+            "pass": bool(gate_pass),
+            "display_state": display_state,
+            "reason": str(gate_reason or ""),
+            "reason_text": reason_text,
+            "reason_short": blocked_short_reason,
+            "label": scalp_label,
+            "entry_display": _fmt_price(entry) if show_levels and entry else "",
+            "entry_val": float(entry) if show_levels and entry else None,
+            "stop_display": _fmt_price(stop) if show_levels and stop else "",
+            "stop_val": float(stop) if show_levels and stop else None,
+            "target_display": _fmt_price(target) if show_levels and target else "",
+            "target_val": float(target) if show_levels and target else None,
+            "rr_badge": _rr_badge(rr_ratio if show_levels else 0.0),
+            "rr_val": float(rr_ratio) if show_levels and rr_ratio else None,
+            "entry_note": entry_note,
+            "target_note": target_note,
+            "rr_note": rr_note,
+            "calibration_delta": float(getattr(scalp_calibration_snapshot, "delta", 0.0) or 0.0),
+            "calibration_note": scalp_calibration_note,
+        }
+
     def _normalize_indicator_label(v: object) -> str:
         raw = str(v or "").strip()
         if not raw or raw in {"Unavailable", "N/A", "nan"}:
@@ -2740,6 +3092,28 @@ def render(ctx: dict) -> None:
         cls_full = f"mk-chip {cls} {extra_class}".strip()
         return f"<span class='{cls_full}'{title_attr}>{html.escape(raw)}</span>"
 
+    def _scalp_chip(text: str, row: dict) -> str:
+        raw = str(text or "").strip()
+        if not raw or raw.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE", "-", "NEUTRAL"}:
+            return ""
+        tone_key = _tone_for_col("Scalp Opportunity", raw)
+        tone_map = {
+            "pos": "mk-pos",
+            "neg": "mk-neg",
+            "warn": "mk-warn",
+            "muted": "mk-muted",
+            "info": "mk-info",
+        }
+        tone_cls = tone_map.get(tone_key, "mk-muted")
+        display_state = str(row.get("__scalp_display_state", "")).strip().upper()
+        reason_text = str(row.get("__scalp_reason_text", "")).strip()
+        if not reason_text and display_state == "LIVE":
+            reason_text = "Live scalp passed the current intraday setup, market gate, and quality checks."
+        state_cls = "mk-chip-scalp-live" if display_state == "LIVE" else "mk-chip-scalp-conditional"
+        extra_cls = f"mk-chip-direction mk-chip-scalp {state_cls}"
+        title_attr = f" title='{html.escape(reason_text, quote=True)}'" if reason_text else ""
+        return f"<span class='mk-chip {tone_cls} {extra_cls}'{title_attr}>{html.escape(raw)}</span>"
+
     def _strip_indicator_prefix(value: object) -> str:
         raw = str(value or "").strip()
         for prefix in ("▲▲ ", "▲ ", "▼ ", "→ ", "🔥 ", "– "):
@@ -2753,11 +3127,11 @@ def render(ctx: dict) -> None:
             "Price ($)": "Latest closed-candle price from the active data feed.",
             "Δ (%)": "Move from the previous closed candle to the latest closed candle on your selected timeframe.",
             "Setup Confirm": copy_text("market.tooltip.setup_confirm"),
-            "Direction": "Main higher-timeframe technical bias from the 1D and 4H closed candles.",
+            "Direction": "Main higher-timeframe technical bias from the adaptive lead/confirm anchor pair.",
             "Confidence": "How strong and trustworthy that Direction call is.",
             "AI Ensemble": "Higher-timeframe AI view. Dots show how many models agree.",
             "AI Confidence": "How trustworthy the AI verdict is.",
-            "R:R": "Reward-to-risk ratio from target distance versus stop distance.",
+            "R:R": "Reward-to-risk ratio for the scalp execution lens, not the main Setup Confirm verdict.",
             "Entry Price": copy_text("market.tooltip.entry_price"),
             "Stop Loss": copy_text("market.tooltip.stop_loss"),
             "Target Price": copy_text("market.tooltip.target_price"),
@@ -2910,13 +3284,25 @@ def render(ctx: dict) -> None:
                 elif sc_cls == "ENTER_AI_LED":
                     extra_cls += " mk-sc-ai-led"
                 elif sc_cls == "WATCH":
-                    extra_cls += " mk-sc-watch"
+                        extra_cls += " mk-sc-watch"
                 execution_fit_note = str(row.get("__execution_fit_note", "")).strip()
+                session_fit_note = str(row.get("__session_fit_note", "")).strip()
+                catalyst_fit_note = str(row.get("__catalyst_fit_note", "")).strip()
+                historical_read_note = str(row.get("__adaptive_edge_note", "")).strip()
+                setup_calibration_note = str(row.get("__setup_calibration_note", "")).strip()
                 title_parts = [display_txt]
                 if reason_text:
                     title_parts.append(f"Reason: {reason_text}")
+                if historical_read_note:
+                    title_parts.append(f"Historical read: {_compact_hover_note(historical_read_note)}")
+                if setup_calibration_note:
+                    title_parts.append(f"Setup calibration: {_compact_hover_note(setup_calibration_note)}")
                 if execution_fit_note:
                     title_parts.append(f"Execution fit: {execution_fit_note}")
+                if session_fit_note:
+                    title_parts.append(f"Session fit: {session_fit_note}")
+                if catalyst_fit_note:
+                    title_parts.append(f"Catalyst: {catalyst_fit_note}")
                 title_txt = " | ".join(title_parts)
                 return _chip(
                     display_txt,
@@ -2948,21 +3334,29 @@ def render(ctx: dict) -> None:
                     title=ai_confidence_note or None,
                     extra_class="mk-chip-score mk-chip-ai-score",
                 )
-            if col == "Scalp Opportunity" and txt.upper() == "NEUTRAL":
-                return ""
             if col == "R:R":
                 rr_note = str(row.get("__rr_note", "")).strip()
                 rr_text = txt
                 if rr_note:
                     rr_text = f"{txt}*"
+                rr_extra = "mk-chip-score mk-chip-rr"
+                if str(row.get("__scalp_display_state", "")).strip().upper() == "CONDITIONAL":
+                    rr_extra += " mk-chip-rr-conditional"
                 return _chip(
                     rr_text,
                     _tone_for_col(col, txt),
                     title=rr_note or None,
-                    extra_class="mk-chip-score mk-chip-rr",
+                    extra_class=rr_extra,
                 )
-            extra_cls = "mk-chip-direction mk-chip-scalp" if col == "Scalp Opportunity" else ""
-            return _chip(txt, _tone_for_col(col, txt), extra_class=extra_cls)
+            if col == "Scalp Opportunity":
+                return _scalp_chip(txt, row)
+            extra_cls = ""
+            return _chip(
+                txt,
+                _tone_for_col(col, txt),
+                title=None,
+                extra_class=extra_cls,
+            )
         if col == "AI Ensemble":
             t = _tone_for_col(col, txt)
             ai_note = str(row.get("__ai_note", "")).strip()
@@ -3043,24 +3437,35 @@ def render(ctx: dict) -> None:
             if not txt:
                 return ""
             entry_note = str(row.get("__entry_note", "")).strip()
+            level_cls = "mk-plain mk-num mk-level"
+            if str(row.get("__scalp_display_state", "")).strip().upper() == "CONDITIONAL":
+                level_cls += " mk-level-conditional"
             if entry_note:
                 return (
-                    f"<span class='mk-plain mk-num mk-level' title='{html.escape(entry_note, quote=True)}'>"
+                    f"<span class='{level_cls}' title='{html.escape(entry_note, quote=True)}'>"
                     f"{html.escape(txt)}</span>"
                 )
-            return f"<span class='mk-plain mk-num mk-level'>{html.escape(txt)}</span>"
+            return f"<span class='{level_cls}'>{html.escape(txt)}</span>"
         if col == "Stop Loss":
-            return f"<span class='mk-plain mk-num mk-level'>{html.escape(txt)}</span>" if txt else ""
+            if not txt:
+                return ""
+            level_cls = "mk-plain mk-num mk-level"
+            if str(row.get("__scalp_display_state", "")).strip().upper() == "CONDITIONAL":
+                level_cls += " mk-level-conditional"
+            return f"<span class='{level_cls}'>{html.escape(txt)}</span>"
         if col == "Target Price":
             if not txt:
                 return ""
             target_note = str(row.get("__target_note", "")).strip()
+            level_cls = "mk-plain mk-num mk-level"
+            if str(row.get("__scalp_display_state", "")).strip().upper() == "CONDITIONAL":
+                level_cls += " mk-level-conditional"
             if target_note:
                 return (
-                    f"<span class='mk-plain mk-num mk-level' title='{html.escape(target_note, quote=True)}'>"
+                    f"<span class='{level_cls}' title='{html.escape(target_note, quote=True)}'>"
                     f"{html.escape(txt)}</span>"
                 )
-            return f"<span class='mk-plain mk-num mk-level'>{html.escape(txt)}</span>"
+            return f"<span class='{level_cls}'>{html.escape(txt)}</span>"
         if col == "Ichimoku":
             ichi_title = str(row.get("__ichimoku_detail", "")).strip()
             ichi_summary = _indicator_cell_title(col, row, txt) if txt else ""
@@ -3210,7 +3615,7 @@ def render(ctx: dict) -> None:
             for c in cols:
                 sticky = ""
                 width_style = ""
-                cell_class = ""
+                cell_classes: list[str] = []
                 if c in col_widths:
                     w = col_widths[c]
                     width_style = f"min-width:{w}px; max-width:{w}px; width:{w}px;"
@@ -3220,8 +3625,9 @@ def render(ctx: dict) -> None:
                         f"background:rgba(8,12,20,1.0); box-shadow:1px 0 0 rgba(148,163,184,0.22), 2px 0 10px rgba(0,0,0,0.24);"
                     )
                 if c == "Coin":
-                    cell_class = " class='mk-coin-cell'"
-                cell_html.append(f"<td{cell_class} style='{width_style}{sticky}'>{_render_cell(c, row_dict)}</td>")
+                    cell_classes.append("mk-coin-cell")
+                cell_class_attr = f" class='{' '.join(cell_classes)}'" if cell_classes else ""
+                cell_html.append(f"<td{cell_class_attr} style='{width_style}{sticky}'>{_render_cell(c, row_dict)}</td>")
             rows_html.append("<tr>" + "".join(cell_html) + "</tr>")
 
         st.markdown(
@@ -3379,6 +3785,44 @@ def render(ctx: dict) -> None:
               box-sizing:border-box;
               box-shadow:inset 0 0 0 1px rgba(255,255,255,0.02);
             }}
+            .mk-chip-wrap {{
+              position:relative;
+              display:inline-flex;
+              align-items:center;
+              max-width:100%;
+              z-index:1;
+              cursor:help;
+            }}
+            .mk-chip-wrap:hover {{
+              z-index:60;
+            }}
+            .mk-chip-wrap:hover .mk-chip-tooltip {{
+              opacity:1;
+              visibility:visible;
+              transform:translateY(-50%) translateX(0);
+            }}
+            .mk-chip-tooltip {{
+              position:absolute;
+              left:calc(100% + 10px);
+              top:50%;
+              transform:translateY(-50%) translateX(4px);
+              z-index:40;
+              max-width:340px;
+              padding:8px 10px;
+              border-radius:10px;
+              border:1px solid rgba(0,212,255,0.30);
+              background:rgba(6,12,24,0.96);
+              color:#D6E8FF;
+              font-size:0.71rem;
+              font-weight:700;
+              line-height:1.3;
+              white-space:normal;
+              box-shadow:0 8px 20px rgba(0,0,0,0.35);
+              opacity:0;
+              visibility:hidden;
+              transition:opacity 0.14s ease, visibility 0.14s ease, transform 0.14s ease;
+              pointer-events:none;
+            }}
             .mk-chip-action {{
               min-height:23px;
               font-size:0.70rem;
@@ -3409,6 +3853,36 @@ def render(ctx: dict) -> None:
             .mk-chip-scalp {{
               min-height:21px;
               padding:2px 8px;
+              cursor:default;
+            }}
+            .mk-chip-scalp-conditional {{
+              opacity:0.94;
+            }}
+            .mk-chip-scalp-live::after,
+            .mk-chip-scalp-conditional::after {{
+              display:inline-flex;
+              align-items:center;
+              justify-content:center;
+              width:16px;
+              height:16px;
+              margin-left:2px;
+              border-radius:999px;
+              font-size:0.60rem;
+              font-weight:900;
+              line-height:1;
+              flex:0 0 16px;
+              box-shadow:inset 0 0 0 1px rgba(255,255,255,0.06);
+            }}
+            .mk-chip-scalp-live::after {{
+              content:"✓";
+              color:#06140D;
+              background:rgba(255,255,255,0.88);
+            }}
+            .mk-chip-scalp-conditional::after {{
+              content:"!";
+              color:#FFF4CC;
+              background:rgba(255,209,102,0.18);
+              border:1px solid rgba(255,209,102,0.34);
             }}
             .mk-chip-ai {{
               gap:7px;
@@ -3449,6 +3923,12 @@ def render(ctx: dict) -> None:
             .mk-level {{
               color:#DCE7F5;
               font-weight:700;
+            }}
+            .mk-level-conditional {{
+              color:rgba(220,231,245,0.72);
+            }}
+            .mk-chip-rr-conditional {{
+              opacity:0.82;
             }}
             .mk-ai-text {{
               line-height:1.15;
@@ -3647,6 +4127,20 @@ def render(ctx: dict) -> None:
     live_ranked_out_count = 0
     attempted_symbols: set[str] = set()
     skipped_symbols: list[tuple[str, str]] = []
+    adaptive_history_df = fetch_signal_events_df(
+        limit=2000,
+        status="RESOLVED",
+        source="Market",
+        db_path=signal_tracker_db_path,
+    )
+    adaptive_model = build_adaptive_context_model(adaptive_history_df)
+    ai_confidence_calibration_model = build_ai_confidence_calibration_model(adaptive_history_df)
+    confidence_calibration_model = build_confidence_calibration_model(adaptive_history_df)
+    setup_calibration_model = build_setup_calibration_model(adaptive_history_df)
+    actionable_ranking_model = build_actionable_ranking_model(adaptive_history_df)
+    risk_sizing_calibration_model = build_risk_sizing_calibration_model(adaptive_history_df)
+    trade_gate_calibration_model = build_trade_gate_calibration_model(adaptive_history_df)
+    scalp_calibration_model = build_scalp_calibration_model(adaptive_history_df)
 
     # Fetch top coins
     if should_scan:
@@ -3759,15 +4253,15 @@ def render(ctx: dict) -> None:
             # 1) Fetch OHLCV with a narrow lock for shared exchange safety.
             # 2) Run analysis/model pipeline in parallel on fetched frames.
             fetch_lock = Lock()
-
             def _scan_one(
                 sym: str,
                 df_eval: pd.DataFrame,
                 pair_label: str,
                 actual_symbol: str,
                 source_provider: str,
-                df_direction_4h: pd.DataFrame | None,
-                df_direction_1d: pd.DataFrame | None,
+                chosen_anchor_plan,
+                df_direction_confirm: pd.DataFrame | None,
+                df_direction_lead: pd.DataFrame | None,
                 frame_hunt_score: float,
             ) -> dict | None:
                 """Analyse a single symbol for the scanner. Returns a row dict or None."""
@@ -3864,20 +4358,44 @@ def render(ctx: dict) -> None:
                     except Exception:
                         spike_dir = "NEUTRAL"
 
-                # Plan generator produces candidate levels; final execution decision is
-                # made by a single external gate (scalp_quality_gate) below.
-                scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note = get_scalping_entry_target(
-                    df_eval, bias_score_v, supertrend_trend_v, ichimoku_trend_v, vwap_label_v,
-                )
-                entry_price = entry_s if scalp_direction else 0.0
-                target_price = target_s if scalp_direction else 0.0
+                scalp_direction = None
+                entry_s = target_s = stop_s = rr_ratio = 0.0
+                breakout_note = ""
 
                 signal_direction = direction_key(signal_plain(signal))
                 signal_text = sanitize_trading_terms(signal)
                 comment_text = sanitize_trading_terms(str(getattr(a, 'comment', '') or '').strip())
                 spot_snapshot = build_spot_direction_snapshot(
-                    df_4h=df_direction_4h,
-                    df_1d=df_direction_1d,
+                    df_4h=None,
+                    df_1d=None,
+                    lead_df=df_direction_lead,
+                    confirm_df=df_direction_confirm,
+                    lead_timeframe=chosen_anchor_plan.lead_timeframe,
+                    confirm_timeframe=chosen_anchor_plan.confirm_timeframe,
+                )
+                ai_spot_snapshot = build_ai_spot_bias_snapshot(
+                    df_4h=None,
+                    df_1d=None,
+                    lead_df=df_direction_lead,
+                    confirm_df=df_direction_confirm,
+                    lead_timeframe=chosen_anchor_plan.lead_timeframe,
+                    confirm_timeframe=chosen_anchor_plan.confirm_timeframe,
+                    predictor=ml_ensemble_predict,
+                )
+                confidence_calibration_snapshot = build_confidence_calibration_snapshot(
+                    confidence_calibration_model,
+                    signal={
+                        "Direction": str(spot_snapshot.direction or ""),
+                        "AI Alignment": (
+                            "Aligned"
+                            if _signal_tracker_direction_key(spot_snapshot.direction) in {"UPSIDE", "DOWNSIDE"}
+                            and _signal_tracker_direction_key(spot_snapshot.direction)
+                            == _signal_tracker_direction_key(ai_spot_snapshot.direction)
+                            else "Not aligned"
+                        ),
+                        "Timeframe": str(timeframe or "Unknown"),
+                        "Scan Focus": str(_normalize_scan_mode(scan_mode) or "Unknown"),
+                    },
                 )
                 confidence_snapshot = build_confidence_snapshot(
                     direction=spot_snapshot.direction,
@@ -3889,11 +4407,8 @@ def render(ctx: dict) -> None:
                     timeframe_conflict=spot_snapshot.timeframe_conflict,
                     degraded_data=spot_snapshot.degraded_data,
                     range_regime=spot_snapshot.range_regime,
-                )
-                ai_spot_snapshot = build_ai_spot_bias_snapshot(
-                    df_4h=df_direction_4h,
-                    df_1d=df_direction_1d,
-                    predictor=ml_ensemble_predict,
+                    archive_calibration_delta=float(getattr(confidence_calibration_snapshot, "delta", 0.0) or 0.0),
+                    archive_calibration_note=str(getattr(confidence_calibration_snapshot, "note", "") or ""),
                 )
 
                 direction_note = _spot_direction_note(
@@ -3904,7 +4419,11 @@ def render(ctx: dict) -> None:
                     tactical_bias=float(bias_score_v),
                     tactical_comment=comment_text,
                 )
-                confidence_note = _confidence_note(spot_snapshot, float(confidence_snapshot.score))
+                confidence_note = _confidence_note(
+                    spot_snapshot,
+                    float(confidence_snapshot.score),
+                    confidence_snapshot,
+                )
 
                 ai_direction_key = direction_key(ai_direction)
                 _, _, decision_agreement = ai_vote_metrics(
@@ -3917,23 +4436,6 @@ def render(ctx: dict) -> None:
                 if bool(ai_spot_snapshot.degraded_data):
                     ai_display += " *"
                 ai_note = _ai_spot_bias_note(ai_spot_snapshot)
-                ai_confidence_snapshot = build_ai_confidence_snapshot(
-                    direction=ai_spot_snapshot.direction,
-                    combined_score=float(ai_spot_snapshot.score),
-                    conviction_quality=float(ai_spot_snapshot.conviction_quality),
-                    timeframe_alignment=float(ai_spot_snapshot.timeframe_alignment),
-                    consensus_quality=float(ai_spot_snapshot.consensus_quality),
-                    support_votes=int(ai_display_votes),
-                    timeframe_conflict=bool(ai_spot_snapshot.timeframe_conflict),
-                    degraded_data=bool(ai_spot_snapshot.degraded_data),
-                )
-                ai_confidence_note = _ai_confidence_note(ai_spot_snapshot, float(ai_confidence_snapshot.score))
-                emerging_snapshot = emerging_bias_snapshot(
-                    spot_snapshot=spot_snapshot,
-                    ai_spot_snapshot=ai_spot_snapshot,
-                    ai_confidence_score=float(ai_confidence_snapshot.score),
-                    tech_confidence_score=float(confidence_snapshot.score),
-                )
 
                 ai_spot_direction_key = direction_key(ai_spot_snapshot.direction)
                 ai_spot_agreement = float(ai_spot_bias_directional_agreement(ai_spot_snapshot))
@@ -3962,7 +4464,6 @@ def render(ctx: dict) -> None:
                     conviction_label=str(_conv_lbl),
                     ai_agreement=float(decision_agreement),
                 )
-                rr_val = float(rr_ratio) if rr_ratio else 0.0
                 execution_snapshot = selected_timeframe_execution_snapshot(
                     df=df_eval,
                     direction=spot_snapshot.direction,
@@ -4037,27 +4538,100 @@ def render(ctx: dict) -> None:
                     trend_led_snapshot=trend_led_snapshot,
                     ai_led_snapshot=ai_led_snapshot,
                 )
-                scalp_gate_pass, _ = scalp_quality_gate(
+                setup_calibration_snapshot = build_setup_calibration_snapshot(
+                    setup_calibration_model,
+                    signal={
+                        "Setup Confirm": str(action or ""),
+                        "AI Alignment": (
+                            "Aligned"
+                            if _signal_tracker_direction_key(spot_snapshot.direction) in {"UPSIDE", "DOWNSIDE"}
+                            and _signal_tracker_direction_key(spot_snapshot.direction) == _signal_tracker_direction_key(ai_spot_snapshot.direction)
+                            else "Not aligned"
+                        ),
+                        "Timeframe": str(timeframe or "Unknown"),
+                        "Scan Focus": str(_normalize_scan_mode(scan_mode) or "Unknown"),
+                        "Direction": str(spot_snapshot.direction or ""),
+                    },
+                )
+                action, action_reason_code = apply_setup_archive_calibration(
+                    action,
+                    action_reason_code,
+                    calibration_delta=float(getattr(setup_calibration_snapshot, "delta", 0.0) or 0.0),
+                )
+                scalp_direction, entry_s, target_s, stop_s, rr_ratio, breakout_note = get_scalping_entry_target(
+                    df_eval,
+                    bias_score_v,
+                    supertrend_trend_v,
+                    ichimoku_trend_v,
+                    vwap_label_v,
+                    timeframe=timeframe,
+                    execution_snapshot=execution_snapshot,
+                    trend_led_snapshot=trend_led_snapshot,
+                    ai_led_snapshot=ai_led_snapshot,
+                    spot_direction=spot_snapshot.direction,
+                    ai_direction=ai_spot_snapshot.direction,
+                )
+                scalp_display = _build_scalp_display_payload(
+                    timeframe_value=timeframe,
                     scalp_direction=scalp_direction,
                     signal_direction=signal_direction,
-                    rr_ratio=rr_val,
+                    rr_ratio=rr_ratio,
                     adx_val=float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
                     confidence=float(execution_confidence.score),
                     conviction_label=str(_conv_lbl),
                     entry=entry_s,
                     stop=stop_s,
                     target=target_s,
-                    min_rr=gate_min_rr,
-                    min_adx=gate_min_adx,
-                    min_confidence=gate_min_confidence,
+                    setup_confirm=action,
+                    direction_value=spot_snapshot.direction,
+                    ai_aligned=(
+                        _signal_tracker_direction_key(spot_snapshot.direction) in {"UPSIDE", "DOWNSIDE"}
+                        and _signal_tracker_direction_key(spot_snapshot.direction) == _signal_tracker_direction_key(ai_spot_snapshot.direction)
+                    ),
+                    scan_focus_value=str(_normalize_scan_mode(scan_mode) or "Unknown"),
+                    breakout_note=str(breakout_note or ""),
+                    close_ref=float(latest_closed["close"]) if pd.notna(latest_closed["close"]) else None,
+                    ema_ref=float(df_eval["close"].ewm(span=5, adjust=False).mean().iloc[-1]),
                 )
-                scalp_opportunity_label = direction_label(scalp_direction or "") if scalp_gate_pass else ""
-
-                if not scalp_gate_pass:
-                    entry_price = 0.0
-                    stop_s = 0.0
-                    target_price = 0.0
-                    rr_val = 0.0
+                rr_val = float(scalp_display["rr_val"] or 0.0)
+                ai_confidence_calibration_snapshot = build_ai_confidence_calibration_snapshot(
+                    ai_confidence_calibration_model,
+                    signal={
+                        "Setup Confirm": str(action or ""),
+                        "AI Alignment": (
+                            "Aligned"
+                            if _signal_tracker_direction_key(spot_snapshot.direction) in {"UPSIDE", "DOWNSIDE"}
+                            and _signal_tracker_direction_key(spot_snapshot.direction) == _signal_tracker_direction_key(ai_spot_snapshot.direction)
+                            else "Not aligned"
+                        ),
+                        "Timeframe": str(timeframe or "Unknown"),
+                        "Scan Focus": str(_normalize_scan_mode(scan_mode) or "Unknown"),
+                        "Direction": str(spot_snapshot.direction or ""),
+                    },
+                )
+                ai_confidence_snapshot = build_ai_confidence_snapshot(
+                    direction=ai_spot_snapshot.direction,
+                    combined_score=float(ai_spot_snapshot.score),
+                    conviction_quality=float(ai_spot_snapshot.conviction_quality),
+                    timeframe_alignment=float(ai_spot_snapshot.timeframe_alignment),
+                    consensus_quality=float(ai_spot_snapshot.consensus_quality),
+                    support_votes=int(ai_display_votes),
+                    timeframe_conflict=bool(ai_spot_snapshot.timeframe_conflict),
+                    degraded_data=bool(ai_spot_snapshot.degraded_data),
+                    archive_calibration_delta=float(getattr(ai_confidence_calibration_snapshot, "delta", 0.0) or 0.0),
+                    archive_calibration_note=str(getattr(ai_confidence_calibration_snapshot, "note", "") or ""),
+                )
+                ai_confidence_note = _ai_confidence_note(
+                    ai_spot_snapshot,
+                    float(ai_confidence_snapshot.score),
+                    ai_confidence_snapshot,
+                )
+                emerging_snapshot = emerging_bias_snapshot(
+                    spot_snapshot=spot_snapshot,
+                    ai_spot_snapshot=ai_spot_snapshot,
+                    ai_confidence_score=float(ai_confidence_snapshot.score),
+                    tech_confidence_score=float(confidence_snapshot.score),
+                )
                 if actionable_tactical_candidate:
                     tactical_note = (
                         "Actionable tactical candidate: selected timeframe is aligned early while HTF direction is still neutral."
@@ -4067,30 +4641,6 @@ def render(ctx: dict) -> None:
                         if confidence_note
                         else tactical_note
                     )
-                entry_note = ""
-                scalp_dir_key = direction_key(scalp_direction)
-                if scalp_gate_pass and scalp_dir_key != "NEUTRAL" and entry_s:
-                    try:
-                        close_ref = float(latest_closed["close"])
-                        ema5_ref = float(df_eval["close"].ewm(span=5, adjust=False).mean().iloc[-1])
-                        if scalp_dir_key == "UPSIDE":
-                            base_ref = max(close_ref, ema5_ref)
-                            atr_used = (float(entry_s) - base_ref) / 0.20
-                        else:
-                            base_ref = min(close_ref, ema5_ref)
-                            atr_used = (base_ref - float(entry_s)) / 0.20
-                        entry_note = (
-                            f"{direction_label(scalp_direction)} entry guide built from the latest close, "
-                            f"EMA5, and an ATR buffer. Close {_fmt_price(close_ref)} • "
-                            f"EMA5 {_fmt_price(ema5_ref)} • ATR {_fmt_price(abs(atr_used))}"
-                        )
-                    except Exception:
-                        entry_note = ""
-                target_note = str(breakout_note or "").strip() if scalp_gate_pass else ""
-                rr_note = ""
-                if scalp_gate_pass and target_note:
-                    rr_note = "This reward-to-risk depends on the target condition shown in the target tooltip."
-
                 ichimoku_cell = format_trend(ichimoku_trend_v)
                 ichi_detail_parts: list[str] = []
                 if a.ichimoku_tk_cross:
@@ -4121,6 +4671,10 @@ def render(ctx: dict) -> None:
                     'Setup Confirm': _setup_confirm_display(action),
                     '__action_raw': action,
                     '__action_reason': action_reason_code,
+                    '__setup_calibrated': True,
+                    '__setup_calibration_delta': float(getattr(setup_calibration_snapshot, "delta", 0.0) or 0.0),
+                    '__setup_calibration_note': str(getattr(setup_calibration_snapshot, "note", "") or ""),
+                    '__signal_direction_raw': signal_direction,
                     'Direction': direction_label(spot_snapshot.direction),
                     '__direction_note': direction_note,
                     'Confidence': _confidence_badge(float(confidence_snapshot.score)),
@@ -4128,21 +4682,37 @@ def render(ctx: dict) -> None:
                     'AI Ensemble': ai_display,
                     '__ai_votes': ai_display_votes,
                     '__ai_note': ai_note,
+                    '__ai_direction_raw': str(ai_spot_snapshot.direction or ""),
+                    '__ai_score_raw': float(ai_spot_snapshot.score),
+                    '__ai_conviction_quality_raw': float(ai_spot_snapshot.conviction_quality),
+                    '__ai_timeframe_alignment_raw': float(ai_spot_snapshot.timeframe_alignment),
+                    '__ai_consensus_quality_raw': float(ai_spot_snapshot.consensus_quality),
+                    '__ai_timeframe_conflict_raw': bool(ai_spot_snapshot.timeframe_conflict),
+                    '__ai_degraded_data_raw': bool(ai_spot_snapshot.degraded_data),
                     'AI Confidence': _ai_confidence_badge(ai_spot_snapshot, float(ai_confidence_snapshot.score)),
                     '__ai_confidence_note': ai_confidence_note,
                     '__ai_confidence_val': float(ai_confidence_snapshot.score),
-                    'Scalp Opportunity': scalp_opportunity_label,
-                    'Entry Price': _fmt_price(entry_price) if entry_price else '',
-                    '__entry_val': float(entry_price) if entry_price else None,
-                    '__entry_note': entry_note,
-                    'Stop Loss': _fmt_price(stop_s) if stop_s else '',
-                    '__stop_val': float(stop_s) if stop_s else None,
-                    'Target Price': _fmt_price(target_price) if target_price else '',
-                    '__target_val': float(target_price) if target_price else None,
-                    '__target_note': target_note,
-                    '__rr_note': rr_note,
-                    'R:R': _rr_badge(rr_val),
-                    '__rr_val': float(rr_val) if rr_val else None,
+                    'Scalp Opportunity': str(scalp_display["label"] or ""),
+                    '__scalp_direction_raw': scalp_direction,
+                    '__scalp_entry_val_raw': float(entry_s) if entry_s else None,
+                    '__scalp_stop_val_raw': float(stop_s) if stop_s else None,
+                    '__scalp_target_val_raw': float(target_s) if target_s else None,
+                    '__scalp_rr_val_raw': float(rr_ratio) if rr_ratio else None,
+                    '__scalp_breakout_note_raw': str(breakout_note or ""),
+                    '__scalp_reason_text': str(scalp_display["reason_text"] or ""),
+                    '__scalp_reason_short': str(scalp_display["reason_short"] or ""),
+                    '__scalp_display_state': str(scalp_display["display_state"] or ""),
+                    'Entry Price': str(scalp_display["entry_display"] or ""),
+                    '__entry_val': scalp_display["entry_val"],
+                    '__entry_note': str(scalp_display["entry_note"] or ""),
+                    'Stop Loss': str(scalp_display["stop_display"] or ""),
+                    '__stop_val': scalp_display["stop_val"],
+                    'Target Price': str(scalp_display["target_display"] or ""),
+                    '__target_val': scalp_display["target_val"],
+                    '__target_note': str(scalp_display["target_note"] or ""),
+                    '__rr_note': str(scalp_display["rr_note"] or ""),
+                    'R:R': str(scalp_display["rr_badge"] or ""),
+                    '__rr_val': scalp_display["rr_val"],
                     'Market Cap ($)': readable_market_cap(mcap_val) if mcap_val else "—",
                     '__mcap_val': int(mcap_val) if mcap_val else 0,
                     'Spike Alert': '→ Spike' if volume_spike else '',
@@ -4164,15 +4734,10 @@ def render(ctx: dict) -> None:
                     'Williams %R': a.williams,
                     'CCI': a.cci,
                     '__confidence_val': float(confidence_snapshot.score),
-                    '__execution_structure_quality': float(execution_snapshot.structure_quality),
-                    '__execution_trend_quality': float(execution_snapshot.trend_quality),
-                    '__execution_regime_quality': float(execution_snapshot.regime_quality),
-                    '__execution_location_quality': float(execution_snapshot.location_quality),
-                    '__trend_led_score': float(trend_led_snapshot.score),
-                    '__ai_led_score': float(ai_led_snapshot.score),
+                    '__execution_confidence_val': float(execution_confidence.score),
+                    '__execution_conviction_label': str(_conv_lbl),
                     '__actionable_frame_score': float(frame_hunt_score),
                     '__actionable_tactical_score': float(actionable_tactical_score),
-                    '__actionable_tactical_candidate': bool(actionable_tactical_candidate),
                     '__actionable_setup_score': _actionable_setup_score(
                         timeframe=timeframe,
                         execution_structure_quality=float(execution_snapshot.structure_quality),
@@ -4275,7 +4840,7 @@ def render(ctx: dict) -> None:
                     )[:analysis_batch_n]
 
                 fetched_frames: list[
-                    tuple[str, pd.DataFrame, str, str, str, pd.DataFrame | None, pd.DataFrame | None, float]
+                    tuple[str, pd.DataFrame, str, str, str, object, pd.DataFrame | None, pd.DataFrame | None, float]
                 ] = []
                 for (
                     sym,
@@ -4287,27 +4852,28 @@ def render(ctx: dict) -> None:
                     frame_hunt_score,
                 ) in analysis_frames:
                     direction_fetch_symbol = _direction_fetch_symbol(sym, actual_symbol, source_provider)
-                    # Keep HTF context stable across selected-timeframe changes.
-                    df_4h_raw = _fetch_market_scan_ohlcv(
-                        fetch_ohlcv=fetch_ohlcv,
-                        fetch_coingecko_ohlcv_by_coin_id=fetch_coingecko_ohlcv_by_coin_id,
-                        fetch_lock=fetch_lock,
-                        symbol=direction_fetch_symbol,
-                        timeframe="4h",
-                        limit=260,
-                        fallback_coin_id=fallback_coin_id,
+                    frame_cache: dict[str, pd.DataFrame | None] = {}
+
+                    def _fetch_anchor_frame(anchor_timeframe: str) -> pd.DataFrame | None:
+                        if anchor_timeframe in frame_cache:
+                            return frame_cache[anchor_timeframe]
+                        raw = _fetch_market_scan_ohlcv(
+                            fetch_ohlcv=fetch_ohlcv,
+                            fetch_coingecko_ohlcv_by_coin_id=fetch_coingecko_ohlcv_by_coin_id,
+                            fetch_lock=fetch_lock,
+                            symbol=direction_fetch_symbol,
+                            timeframe=anchor_timeframe,
+                            limit=260,
+                            fallback_coin_id=fallback_coin_id,
+                        )
+                        prepared = _prepare_closed_frame(raw, min_rows=81)
+                        frame_cache[anchor_timeframe] = prepared
+                        return prepared
+
+                    chosen_anchor_plan, df_direction_lead, df_direction_confirm = choose_anchor_context(
+                        timeframe,
+                        _fetch_anchor_frame,
                     )
-                    df_1d_raw = _fetch_market_scan_ohlcv(
-                        fetch_ohlcv=fetch_ohlcv,
-                        fetch_coingecko_ohlcv_by_coin_id=fetch_coingecko_ohlcv_by_coin_id,
-                        fetch_lock=fetch_lock,
-                        symbol=direction_fetch_symbol,
-                        timeframe="1d",
-                        limit=260,
-                        fallback_coin_id=fallback_coin_id,
-                    )
-                    df_direction_4h = _prepare_closed_frame(df_4h_raw, min_rows=81)
-                    df_direction_1d = _prepare_closed_frame(df_1d_raw, min_rows=81)
                     fetched_frames.append(
                         (
                             sym,
@@ -4315,8 +4881,9 @@ def render(ctx: dict) -> None:
                             pair_label,
                             actual_symbol,
                             source_provider,
-                            df_direction_4h,
-                            df_direction_1d,
+                            chosen_anchor_plan,
+                            df_direction_confirm,
+                            df_direction_lead,
                             frame_hunt_score,
                         )
                     )
@@ -4332,8 +4899,9 @@ def render(ctx: dict) -> None:
                             pair_label,
                             actual_symbol,
                             source_provider,
-                            df_direction_4h,
-                            df_direction_1d,
+                            chosen_anchor_plan,
+                            df_direction_confirm,
+                            df_direction_lead,
                             frame_hunt_score,
                         ): pair_label
                         for (
@@ -4342,8 +4910,9 @@ def render(ctx: dict) -> None:
                             pair_label,
                             actual_symbol,
                             source_provider,
-                            df_direction_4h,
-                            df_direction_1d,
+                            chosen_anchor_plan,
+                            df_direction_confirm,
+                            df_direction_lead,
                             frame_hunt_score,
                         ) in fetched_frames
                     }
@@ -4801,7 +5370,9 @@ def render(ctx: dict) -> None:
         # Quick scan health summary (visual-first, logic unchanged)
         shown_bundle = _distribution_bundle(df_results)
         produced_bundle = _distribution_bundle(df_live_produced)
-        gate_bundle = produced_bundle if int(produced_bundle.get("total", 0) or 0) > 0 else shown_bundle
+        # Keep the decision surface anchored to the same visible table slice.
+        # The broader produced universe still appears in diagnostics below.
+        gate_bundle = shown_bundle
 
         def _lead_component_display(value: float) -> tuple[float, str]:
             clipped = max(-100.0, min(100.0, float(value)))
@@ -4826,13 +5397,6 @@ def render(ctx: dict) -> None:
         market_catalyst_snapshot = build_market_catalyst_snapshot(catalyst_events)
         market_flow_rows = get_market_flow_proxy_rows()
         market_flow_snapshot = build_market_flow_proxy_snapshot(market_flow_rows)
-        adaptive_history_df = fetch_signal_events_df(
-            limit=2000,
-            status="RESOLVED",
-            source="Market",
-            db_path=signal_tracker_db_path,
-        )
-        adaptive_model = build_adaptive_context_model(adaptive_history_df)
         current_session_bucket = session_bucket_for_timestamp()
         session_fit_snapshot = build_session_fit_snapshot(adaptive_model, current_session_bucket)
         market_regime_snapshot = build_market_regime_snapshot(
@@ -4888,6 +5452,23 @@ def render(ctx: dict) -> None:
             archive_guardrail_label=str(getattr(market_archive_guardrail_snapshot, "label", "") or ""),
             archive_guardrail_note=str(getattr(market_archive_guardrail_snapshot, "note", "") or ""),
         )
+        trade_gate_calibration_snapshot = build_trade_gate_calibration_snapshot(
+            trade_gate_calibration_model,
+            signal={
+                "Trade Gate Key": str(getattr(market_trade_gate_snapshot, "gate_key", "") or "Unknown"),
+                "Trade Gate": str(getattr(market_trade_gate_snapshot, "label", "") or "Unknown"),
+                "Playbook Key": str(getattr(market_regime_snapshot, "playbook_key", "") or "Unknown"),
+                "Playbook": str(getattr(market_regime_snapshot, "playbook", "") or "Unknown"),
+                "Market Regime": str(getattr(market_regime_snapshot, "label", "") or "Unknown"),
+                "Session": current_session_bucket,
+                "Catalyst Window": catalyst_window_label(market_catalyst_snapshot),
+            },
+        )
+        market_trade_gate_snapshot = apply_market_trade_gate_archive_calibration(
+            market_trade_gate_snapshot,
+            calibration_delta=float(getattr(trade_gate_calibration_snapshot, "delta", 0.0) or 0.0),
+            calibration_note=str(getattr(trade_gate_calibration_snapshot, "note", "") or ""),
+        )
         market_default_budget_snapshot = market_default_risk_budget(
             market_trade_gate_snapshot,
             market_catalyst_snapshot,
@@ -4897,6 +5478,77 @@ def render(ctx: dict) -> None:
             ai_ensemble = str(row.get("AI Ensemble") or "").strip()
             ai_direction = ai_ensemble.split("(", 1)[0].strip()
             catalyst_window = catalyst_window_label(market_catalyst_snapshot)
+            if not bool(row.get("__setup_calibrated")):
+                setup_calibration_snapshot = build_setup_calibration_snapshot(
+                    setup_calibration_model,
+                    signal={
+                        "Setup Confirm": str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                        "AI Alignment": (
+                            "Aligned"
+                            if _signal_tracker_direction_key(direction_raw) in {"UPSIDE", "DOWNSIDE"}
+                            and _signal_tracker_direction_key(direction_raw) == _signal_tracker_direction_key(ai_direction)
+                            else "Not aligned"
+                        ),
+                        "Timeframe": str(row.get("__timeframe") or timeframe or "Unknown"),
+                        "Scan Focus": str(_normalize_scan_mode(scan_mode) or "Unknown"),
+                        "Direction": direction_raw,
+                    },
+                )
+                calibrated_action_raw, calibrated_action_reason = apply_setup_archive_calibration(
+                    str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                    str(row.get("__action_reason", "") or ""),
+                    calibration_delta=float(getattr(setup_calibration_snapshot, "delta", 0.0) or 0.0),
+                )
+                row["__action_raw"] = calibrated_action_raw
+                row["__action_reason"] = calibrated_action_reason
+                row["Setup Confirm"] = _setup_confirm_display(calibrated_action_raw)
+                row["__setup_calibration_delta"] = float(getattr(setup_calibration_snapshot, "delta", 0.0) or 0.0)
+                row["__setup_calibration_note"] = str(getattr(setup_calibration_snapshot, "note", "") or "")
+                row["__setup_calibrated"] = True
+            if "__ai_score_raw" in row:
+                ai_confidence_calibration_snapshot = build_ai_confidence_calibration_snapshot(
+                    ai_confidence_calibration_model,
+                    signal={
+                        "Setup Confirm": str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                        "AI Alignment": (
+                            "Aligned"
+                            if _signal_tracker_direction_key(direction_raw) in {"UPSIDE", "DOWNSIDE"}
+                            and _signal_tracker_direction_key(direction_raw) == _signal_tracker_direction_key(ai_direction)
+                            else "Not aligned"
+                        ),
+                        "Timeframe": str(row.get("__timeframe") or timeframe or "Unknown"),
+                        "Scan Focus": str(_normalize_scan_mode(scan_mode) or "Unknown"),
+                        "Direction": direction_raw,
+                    },
+                )
+                ai_confidence_snapshot = build_ai_confidence_snapshot(
+                    direction=str(row.get("__ai_direction_raw") or ""),
+                    combined_score=float(row.get("__ai_score_raw") or 0.0),
+                    conviction_quality=float(row.get("__ai_conviction_quality_raw") or 0.0),
+                    timeframe_alignment=float(row.get("__ai_timeframe_alignment_raw") or 0.0),
+                    consensus_quality=float(row.get("__ai_consensus_quality_raw") or 0.0),
+                    support_votes=int(row.get("__ai_votes") or 0),
+                    timeframe_conflict=bool(row.get("__ai_timeframe_conflict_raw")),
+                    degraded_data=bool(row.get("__ai_degraded_data_raw")),
+                    archive_calibration_delta=float(getattr(ai_confidence_calibration_snapshot, "delta", 0.0) or 0.0),
+                    archive_calibration_note=str(getattr(ai_confidence_calibration_snapshot, "note", "") or ""),
+                )
+                ai_snapshot_proxy = SimpleNamespace(
+                    direction=str(row.get("__ai_direction_raw") or ""),
+                    degraded_data=bool(row.get("__ai_degraded_data_raw")),
+                    timeframe_conflict=bool(row.get("__ai_timeframe_conflict_raw")),
+                    support_votes=int(row.get("__ai_votes") or 0),
+                )
+                row["AI Confidence"] = _ai_confidence_badge(
+                    ai_snapshot_proxy,
+                    float(ai_confidence_snapshot.score),
+                )
+                row["__ai_confidence_note"] = _ai_confidence_note(
+                    ai_snapshot_proxy,
+                    float(ai_confidence_snapshot.score),
+                    ai_confidence_snapshot,
+                )
+                row["__ai_confidence_val"] = float(ai_confidence_snapshot.score)
             adaptive_snapshot = build_live_signal_adaptive_snapshot(
                 adaptive_model,
                 signal={
@@ -4927,10 +5579,8 @@ def render(ctx: dict) -> None:
             row["__adaptive_edge_score"] = float(getattr(adaptive_snapshot, "score", 50.0) or 50.0)
             row["__adaptive_edge_label"] = str(getattr(adaptive_snapshot, "label", "") or "")
             row["__adaptive_edge_note"] = str(getattr(adaptive_snapshot, "note", "") or "")
-            row["__execution_fit_label"] = str(getattr(adaptive_snapshot, "execution_fit_label", "") or "")
             row["__execution_fit_note"] = str(getattr(adaptive_snapshot, "execution_fit_note", "") or "")
             row["__session_fit_score"] = float(getattr(adaptive_snapshot, "session_fit_score", 0.0) or 0.0)
-            row["__session_fit_label"] = str(getattr(adaptive_snapshot, "session_fit_label", "") or "")
             row["__session_fit_note"] = str(getattr(adaptive_snapshot, "session_fit_note", "") or "")
             row["__archive_guardrail_penalty"] = float(getattr(adaptive_snapshot, "archive_guardrail_penalty", 0.0) or 0.0)
             row["__archive_guardrail_label"] = str(getattr(adaptive_snapshot, "archive_guardrail_label", "") or "")
@@ -4940,28 +5590,21 @@ def render(ctx: dict) -> None:
                 symbol=str(row.get("Coin") or ""),
                 sector_tag=str(classify_symbol_sector(str(row.get("Coin") or "")) or ""),
             )
-            if row.get("__confidence_note") and row["__adaptive_edge_note"]:
-                row["__confidence_note"] = f"{row['__confidence_note']} Historical read: {row['__adaptive_edge_note']}"
-            elif row["__adaptive_edge_note"]:
-                row["__confidence_note"] = row["__adaptive_edge_note"]
-            if row["__execution_fit_note"]:
-                row["__confidence_note"] = (
-                    f"{row['__confidence_note']} Execution fit: {row['__execution_fit_note']}".strip()
-                    if row.get("__confidence_note")
-                    else row["__execution_fit_note"]
-                )
-            if row["__session_fit_note"]:
-                row["__confidence_note"] = (
-                    f"{row['__confidence_note']} Session fit: {row['__session_fit_note']}".strip()
-                    if row.get("__confidence_note")
-                    else row["__session_fit_note"]
-                )
-            if row["__catalyst_fit_note"]:
-                row["__confidence_note"] = (
-                    f"{row['__confidence_note']} Catalyst: {row['__catalyst_fit_note']}".strip()
-                    if row.get("__confidence_note")
-                    else row["__catalyst_fit_note"]
-                )
+            risk_sizing_calibration_snapshot = build_risk_sizing_calibration_snapshot(
+                risk_sizing_calibration_model,
+                signal={
+                    "Setup Confirm": str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                    "AI Alignment": (
+                        "Aligned"
+                        if _signal_tracker_direction_key(direction_raw) in {"UPSIDE", "DOWNSIDE"}
+                        and _signal_tracker_direction_key(direction_raw) == _signal_tracker_direction_key(ai_direction)
+                        else "Not aligned"
+                    ),
+                    "Timeframe": str(row.get("__timeframe") or timeframe or "Unknown"),
+                    "Scan Focus": str(_normalize_scan_mode(scan_mode) or "Unknown"),
+                    "Direction": direction_raw,
+                },
+            )
             live_risk_sizing_snapshot = build_signal_risk_sizing(
                 market_trade_gate_snapshot=market_trade_gate_snapshot,
                 market_catalyst_snapshot=market_catalyst_snapshot,
@@ -4984,12 +5627,15 @@ def render(ctx: dict) -> None:
                 archive_guardrail_penalty=row.get("__archive_guardrail_penalty"),
                 archive_guardrail_label=row.get("__archive_guardrail_label"),
                 archive_guardrail_note=row.get("__archive_guardrail_note"),
+                archive_risk_delta=float(getattr(risk_sizing_calibration_snapshot, "delta", 0.0) or 0.0),
+                archive_risk_note=str(getattr(risk_sizing_calibration_snapshot, "note", "") or ""),
                 symbol=str(row.get("Coin") or ""),
                 sector_tag=str(classify_symbol_sector(str(row.get("Coin") or "")) or ""),
             )
             row["__risk_tier_label"] = str(getattr(live_risk_sizing_snapshot, "label", "") or "")
             row["__risk_unit_fraction"] = float(getattr(live_risk_sizing_snapshot, "unit_fraction", 0.0) or 0.0)
-            row["__risk_note"] = str(getattr(live_risk_sizing_snapshot, "note", "") or "")
+            row["__risk_archive_delta"] = float(getattr(risk_sizing_calibration_snapshot, "delta", 0.0) or 0.0)
+            row["__risk_archive_note"] = str(getattr(risk_sizing_calibration_snapshot, "note", "") or "")
             row["__actionable_context_score"] = _actionable_context_score(
                 adaptive_edge_score=row.get("__adaptive_edge_score"),
                 session_fit_score=row.get("__session_fit_score"),
@@ -5000,15 +5646,155 @@ def render(ctx: dict) -> None:
                 classify_symbol_sector=classify_symbol_sector,
                 sector_rotation_snapshot=sector_rotation_snapshot,
             )
+            actionable_archive_snapshot = build_actionable_ranking_snapshot(
+                actionable_ranking_model,
+                signal={
+                    "Setup Confirm": str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                    "AI Alignment": (
+                        "Aligned"
+                        if _signal_tracker_direction_key(direction_raw) in {"UPSIDE", "DOWNSIDE"}
+                        and _signal_tracker_direction_key(direction_raw) == _signal_tracker_direction_key(ai_direction)
+                        else "Not aligned"
+                    ),
+                    "Timeframe": str(row.get("__timeframe") or timeframe or "Unknown"),
+                    "Scan Focus": str(_normalize_scan_mode(scan_mode) or "Unknown"),
+                    "Direction": direction_raw,
+                },
+            )
+            row["__actionable_archive_score"] = float(getattr(actionable_archive_snapshot, "delta", 0.0) or 0.0)
         results = sorted(
             list(results or []),
             key=lambda row: _market_result_priority_key_for_mode(row, scan_mode),
         )
         df_results = pd.DataFrame(results)
+        shown_bundle = _distribution_bundle(df_results)
+        produced_bundle = _distribution_bundle(df_live_produced)
+        display_gate_bundle = shown_bundle
+        display_market_trade_gate_snapshot = build_market_trade_gate(
+            market_regime_snapshot=market_regime_snapshot,
+            market_catalyst_snapshot=market_catalyst_snapshot,
+            scan_degraded=bool(scan_degraded),
+            setup_quality_score=float(composite_score),
+            setup_quality_mode=str(composite_mode),
+            market_lead_score=float(market_lead_snapshot.score),
+            market_lead_state=str(market_lead_snapshot.state),
+            direction_score=float(direction_score),
+            breadth_score=float(breadth_score),
+            trust_score=float(trust_score),
+            ready_count=int(display_gate_bundle["enter_count"]),
+            probe_count=int(display_gate_bundle["probe_count"]),
+            watch_count=int(display_gate_bundle["watch_count"]),
+            skip_count=int(display_gate_bundle["skip_count"]),
+            session_fit_score=float(getattr(session_fit_snapshot, "score", 0.0) or 0.0),
+            session_fit_label=str(getattr(session_fit_snapshot, "label", "") or ""),
+            session_fit_note=str(getattr(session_fit_snapshot, "note", "") or ""),
+            archive_guardrail_penalty=float(getattr(market_archive_guardrail_snapshot, "penalty", 0.0) or 0.0),
+            archive_guardrail_label=str(getattr(market_archive_guardrail_snapshot, "label", "") or ""),
+            archive_guardrail_note=str(getattr(market_archive_guardrail_snapshot, "note", "") or ""),
+        )
+        display_trade_gate_calibration_snapshot = build_trade_gate_calibration_snapshot(
+            trade_gate_calibration_model,
+            signal={
+                "Trade Gate Key": str(getattr(display_market_trade_gate_snapshot, "gate_key", "") or "Unknown"),
+                "Trade Gate": str(getattr(display_market_trade_gate_snapshot, "label", "") or "Unknown"),
+                "Playbook Key": str(getattr(market_regime_snapshot, "playbook_key", "") or "Unknown"),
+                "Playbook": str(getattr(market_regime_snapshot, "playbook", "") or "Unknown"),
+                "Market Regime": str(getattr(market_regime_snapshot, "label", "") or "Unknown"),
+                "Session": current_session_bucket,
+                "Catalyst Window": catalyst_window_label(market_catalyst_snapshot),
+            },
+        )
+        display_market_trade_gate_snapshot = apply_market_trade_gate_archive_calibration(
+            display_market_trade_gate_snapshot,
+            calibration_delta=float(getattr(display_trade_gate_calibration_snapshot, "delta", 0.0) or 0.0),
+            calibration_note=str(getattr(display_trade_gate_calibration_snapshot, "note", "") or ""),
+        )
+        display_market_default_budget_snapshot = market_default_risk_budget(
+            display_market_trade_gate_snapshot,
+            market_catalyst_snapshot,
+        )
+        # Rebuild displayed risk tiers against the same final gate shown above.
+        for row in list(results or []):
+            direction_raw = str(row.get("Direction") or "")
+            ai_ensemble = str(row.get("AI Ensemble") or "").strip()
+            ai_direction = ai_ensemble.split("(", 1)[0].strip()
+            scalp_display = _build_scalp_display_payload(
+                timeframe_value=str(row.get("__timeframe") or timeframe or ""),
+                scalp_direction=row.get("__scalp_direction_raw"),
+                signal_direction=str(row.get("__signal_direction_raw") or ""),
+                rr_ratio=row.get("__scalp_rr_val_raw"),
+                adx_val=row.get("__adx_raw"),
+                confidence=row.get("__execution_confidence_val"),
+                conviction_label=str(row.get("__execution_conviction_label") or ""),
+                entry=row.get("__scalp_entry_val_raw"),
+                stop=row.get("__scalp_stop_val_raw"),
+                target=row.get("__scalp_target_val_raw"),
+                setup_confirm=str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                market_trade_gate_key=str(getattr(display_market_trade_gate_snapshot, "gate_key", "") or ""),
+                archive_guardrail_penalty=row.get("__archive_guardrail_penalty"),
+                archive_guardrail_label=str(row.get("__archive_guardrail_label") or ""),
+                direction_value=direction_raw,
+                ai_aligned=(
+                    _signal_tracker_direction_key(direction_raw) in {"UPSIDE", "DOWNSIDE"}
+                    and _signal_tracker_direction_key(direction_raw) == _signal_tracker_direction_key(ai_direction)
+                ),
+                scan_focus_value=str(_normalize_scan_mode(scan_mode) or "Unknown"),
+                breakout_note=str(row.get("__scalp_breakout_note_raw") or ""),
+            )
+            row["Scalp Opportunity"] = str(scalp_display["label"] or "")
+            row["__scalp_reason_text"] = str(scalp_display["reason_text"] or "")
+            row["__scalp_reason_short"] = str(scalp_display["reason_short"] or "")
+            row["__scalp_display_state"] = str(scalp_display["display_state"] or "")
+            row["Entry Price"] = str(scalp_display["entry_display"] or "")
+            row["__entry_val"] = scalp_display["entry_val"]
+            row["__entry_note"] = str(scalp_display["entry_note"] or "") if scalp_display["display_state"] in {"LIVE", "CONDITIONAL"} else ""
+            row["Stop Loss"] = str(scalp_display["stop_display"] or "")
+            row["__stop_val"] = scalp_display["stop_val"]
+            row["Target Price"] = str(scalp_display["target_display"] or "")
+            row["__target_val"] = scalp_display["target_val"]
+            row["__target_note"] = str(scalp_display["target_note"] or "") if scalp_display["display_state"] in {"LIVE", "CONDITIONAL"} else ""
+            row["__rr_note"] = str(scalp_display["rr_note"] or "") if scalp_display["display_state"] in {"LIVE", "CONDITIONAL"} else ""
+            row["R:R"] = str(scalp_display["rr_badge"] or "")
+            row["__rr_val"] = scalp_display["rr_val"]
+            live_risk_sizing_snapshot = build_signal_risk_sizing(
+                market_trade_gate_snapshot=display_market_trade_gate_snapshot,
+                market_catalyst_snapshot=market_catalyst_snapshot,
+                direction=direction_raw,
+                setup_confirm=str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                confidence=row.get("__confidence_val", _confidence_value_from_badge(row.get("Confidence"))),
+                ai_confidence=row.get("__ai_confidence_val", _confidence_value_from_badge(row.get("AI Confidence"))),
+                ai_aligned=(
+                    _signal_tracker_direction_key(direction_raw) in {"UPSIDE", "DOWNSIDE"}
+                    and _signal_tracker_direction_key(direction_raw) == _signal_tracker_direction_key(ai_direction)
+                ),
+                market_lead_aligned=(
+                    _signal_tracker_direction_key(direction_raw) in {"UPSIDE", "DOWNSIDE"}
+                    and _signal_tracker_direction_key(direction_raw) == _signal_tracker_direction_key(market_lead_snapshot.label)
+                ),
+                lead_active=_signal_tracker_direction_key(row.get("__emerging_direction")) in {"UPSIDE", "DOWNSIDE"},
+                rr_ratio=row.get("__rr_val"),
+                adaptive_edge_score=row.get("__adaptive_edge_score"),
+                session_fit_score=row.get("__session_fit_score"),
+                archive_guardrail_penalty=row.get("__archive_guardrail_penalty"),
+                archive_guardrail_label=row.get("__archive_guardrail_label"),
+                archive_guardrail_note=row.get("__archive_guardrail_note"),
+                archive_risk_delta=float(row.get("__risk_archive_delta") or 0.0),
+                archive_risk_note=str(row.get("__risk_archive_note") or ""),
+                symbol=str(row.get("Coin") or ""),
+                sector_tag=str(classify_symbol_sector(str(row.get("Coin") or "")) or ""),
+            )
+            row["__risk_tier_label"] = str(getattr(live_risk_sizing_snapshot, "label", "") or "")
+            row["__risk_unit_fraction"] = float(getattr(live_risk_sizing_snapshot, "unit_fraction", 0.0) or 0.0)
+        results = sorted(
+            list(results or []),
+            key=lambda row: _market_result_priority_key_for_mode(row, scan_mode),
+        )
+        df_results = pd.DataFrame(results)
+        shown_bundle = _distribution_bundle(df_results)
         market_alerts = build_market_alerts(
             market_lead_snapshot=market_lead_snapshot,
             market_regime_snapshot=market_regime_snapshot,
-            market_trade_gate_snapshot=market_trade_gate_snapshot,
+            market_trade_gate_snapshot=display_market_trade_gate_snapshot,
             market_catalyst_snapshot=market_catalyst_snapshot,
             market_flow_snapshot=market_flow_snapshot,
             sector_rotation_snapshot=sector_rotation_snapshot,
@@ -5026,7 +5812,7 @@ def render(ctx: dict) -> None:
                     scan_mode=str(scan_mode),
                     market_lead_snapshot=market_lead_snapshot,
                     market_regime_snapshot=market_regime_snapshot,
-                    market_trade_gate_snapshot=market_trade_gate_snapshot,
+                    market_trade_gate_snapshot=display_market_trade_gate_snapshot,
                     build_signal_risk_sizing=build_signal_risk_sizing,
                     sector_rotation_snapshot=sector_rotation_snapshot,
                     classify_symbol_sector=classify_symbol_sector,
@@ -5256,19 +6042,19 @@ def render(ctx: dict) -> None:
         skip_count = int(shown_bundle["skip_count"])
         st.markdown(
             _trade_gate_banner_html(
-                trade_gate_display_label(market_trade_gate_snapshot.label),
+                trade_gate_display_label(display_market_trade_gate_snapshot.label),
                 _compact_trade_gate_note(
-                    market_trade_gate_snapshot=market_trade_gate_snapshot,
+                    market_trade_gate_snapshot=display_market_trade_gate_snapshot,
                     market_catalyst_snapshot=market_catalyst_snapshot,
                     market_flow_snapshot=market_flow_snapshot,
-                    market_default_budget_snapshot=market_default_budget_snapshot,
+                    market_default_budget_snapshot=display_market_default_budget_snapshot,
                     session_fit_snapshot=session_fit_snapshot,
                     adaptive_model=adaptive_model,
                     enter_count=enter_count,
                     probe_count=probe_count,
                 ),
-                market_trade_gate_snapshot.tone,
-                market_trade_gate_snapshot.reason_code,
+                display_market_trade_gate_snapshot.tone,
+                display_market_trade_gate_snapshot.reason_code,
             ),
             unsafe_allow_html=True,
         )
@@ -5278,64 +6064,16 @@ def render(ctx: dict) -> None:
                 unsafe_allow_html=True,
             )
         st.markdown("<div style='height:0.55rem;'></div>", unsafe_allow_html=True)
-        lead_bundle = produced_bundle if int(produced_bundle["total"]) > 0 else shown_bundle
-        lead_scope_label = "Produced universe" if int(produced_bundle["total"]) > 0 else "Shown rows"
+        lead_bundle = shown_bundle
+        lead_scope_label = "Shown rows"
         emerging_counts = dict(lead_bundle["emerging_counts"])
         emerging_up_count = int(emerging_counts.get("Emerging Upside", 0))
         emerging_down_count = int(emerging_counts.get("Emerging Downside", 0))
         emerging_total = int(emerging_up_count + emerging_down_count)
 
-        best_scalp_coin = "—"
-        best_scalp_sub = ""
-        if "Scalp Opportunity" in df_results.columns:
-            scalp_mask = df_results["Scalp Opportunity"].astype(str).isin(["Upside", "Downside"])
-            scoped = df_results[scalp_mask].copy()
-            if not scoped.empty:
-                scoped["__rr"] = pd.to_numeric(
-                    scoped["R:R"]
-                    .astype(str)
-                    .str.replace("🟢", "", regex=False)
-                    .str.replace("🟡", "", regex=False)
-                    .str.replace("🔴", "", regex=False)
-                    .str.strip(),
-                    errors="coerce",
-                )
-                scoped["__action_rank"] = (
-                    scoped.get("__action_raw", scoped.get("Setup Confirm", pd.Series(dtype=str)))
-                    .astype(str)
-                    .apply(_setup_confirm_rank)
-                )
-                scoped = scoped.dropna(subset=["__rr"])
-                scoped = scoped[scoped["__rr"] > 0]
-                if not scoped.empty:
-                    best_row = scoped.sort_values(["__rr", "__action_rank"], ascending=[False, False]).iloc[0]
-                    best_coin = str(best_row.get("Coin", "—"))
-                    best_rr = float(best_row["__rr"])
-                    best_scalp_coin = f"{best_coin} ({best_rr:.2f})"
-                    best_action = str(best_row.get("__action_raw", best_row.get("Setup Confirm", ""))).strip()
-                    best_direction = str(best_row.get("Direction", "")).strip()
-                    best_confidence = str(best_row.get("Confidence", "")).strip()
-                    best_ai = str(best_row.get("AI Ensemble", "")).strip()
-                    best_action_compact = _setup_confirm_display(best_action)
-                    best_scalp_sub = (
-                        f"Setup: {best_action_compact} • Direction: {best_direction} • "
-                        f"Confidence: {best_confidence} • Ensemble: {best_ai}"
-                    )
+        best_scalp_coin, best_scalp_sub = _pick_best_scalp_opportunity(df_results)
 
-        confidence_coin = "—"
-        confidence_val_head = None
-        confidence_sub = "No confidence data available."
-        if "__confidence_val" in df_results.columns and len(df_results) > 0:
-            confidence_series = pd.to_numeric(df_results["__confidence_val"], errors="coerce").dropna()
-            if not confidence_series.empty:
-                confidence_idx = confidence_series.idxmax()
-                row = df_results.loc[confidence_idx]
-                confidence_coin = str(row.get("Coin", "—"))
-                confidence_val_head = float(row.get("__confidence_val", 0.0))
-                confidence_sub = (
-                    f"Direction: {row.get('Direction', '')} • "
-                    f"Setup: {row.get('Setup Confirm', '')}"
-                )
+        confidence_coin, confidence_val_head, confidence_sub = _pick_confidence_leader(df_results)
         confidence_head = (
             confidence_coin
             if confidence_val_head is None
@@ -5565,29 +6303,7 @@ def render(ctx: dict) -> None:
         ]
         all_cols = primary_cols + [c for c in advanced_extra_cols if c not in primary_cols]
         display_cols = all_cols if show_advanced else primary_cols
-        hidden_meta_cols = [
-                c for c in [
-                    "__action_reason",
-                    "__action_raw",
-                    "__entry_note",
-                "__emerging_label",
-                "__emerging_direction",
-                "__emerging_note",
-                "__ichimoku_detail",
-                "__spike_dir",
-                "__spike_vol_ratio",
-                "__spike_candle_pct",
-                "__spike_vwap_ctx",
-                "__target_note",
-                "__rr_note",
-                "__adx_raw",
-                "__direction_note",
-                "__confidence_note",
-                    "__ai_confidence_note",
-                    "__ai_note",
-                    "__pair",
-                ] if c in df_results.columns and c not in display_cols
-            ]
+        hidden_meta_cols = _market_hidden_meta_cols(df_results.columns, display_cols)
         df_display = df_results[display_cols + hidden_meta_cols].copy()
 
         _render_pro_table(df_display, display_cols)

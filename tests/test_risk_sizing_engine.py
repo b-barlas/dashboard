@@ -476,6 +476,110 @@ class RiskSizingEngineTests(unittest.TestCase):
         self.assertLess(guarded.unit_fraction, baseline.unit_fraction)
         self.assertIn("trim aggression", guarded.note)
 
+    def test_archive_risk_calibration_can_support_size_within_gate(self) -> None:
+        regime = build_market_regime_snapshot(
+            setup_quality_score=76.0,
+            setup_quality_mode="Risk-On",
+            market_lead_score=73.0,
+            market_lead_state="Upside",
+            lead_breadth_component=24.0,
+            lead_rotation_component=12.0,
+            lead_flow_component=16.0,
+            lead_dominance_component=6.0,
+            direction_score=61.0,
+            breadth_score=67.0,
+            trust_score=63.0,
+        )
+        gate = build_market_trade_gate(
+            market_regime_snapshot=regime,
+            scan_degraded=False,
+            setup_quality_score=76.0,
+            setup_quality_mode="Risk-On",
+            market_lead_score=73.0,
+            market_lead_state="Upside",
+            direction_score=61.0,
+            breadth_score=67.0,
+            trust_score=63.0,
+            ready_count=2,
+            watch_count=4,
+            skip_count=1,
+            probe_count=1,
+        )
+        baseline = build_signal_risk_sizing(
+            market_trade_gate_snapshot=gate,
+            market_catalyst_snapshot=None,
+            direction="Upside",
+            setup_confirm="PROBE",
+            confidence=62.0,
+            ai_confidence=65.0,
+            ai_aligned=True,
+            market_lead_aligned=True,
+            lead_active=False,
+            rr_ratio=1.6,
+        )
+        supported = build_signal_risk_sizing(
+            market_trade_gate_snapshot=gate,
+            market_catalyst_snapshot=None,
+            direction="Upside",
+            setup_confirm="PROBE",
+            confidence=62.0,
+            ai_confidence=65.0,
+            ai_aligned=True,
+            market_lead_aligned=True,
+            lead_active=False,
+            rr_ratio=1.6,
+            archive_risk_delta=0.25,
+            archive_risk_note="Archive sizing calibration is modestly supportive here.",
+        )
+        self.assertLess(baseline.unit_fraction, supported.unit_fraction)
+        self.assertIn("sizing calibration", supported.note.lower())
+
+    def test_archive_risk_calibration_does_not_upgrade_watch(self) -> None:
+        regime = build_market_regime_snapshot(
+            setup_quality_score=68.0,
+            setup_quality_mode="Selective",
+            market_lead_score=71.0,
+            market_lead_state="Upside",
+            lead_breadth_component=18.0,
+            lead_rotation_component=9.0,
+            lead_flow_component=11.0,
+            lead_dominance_component=3.0,
+            direction_score=44.0,
+            breadth_score=55.0,
+            trust_score=57.0,
+        )
+        gate = build_market_trade_gate(
+            market_regime_snapshot=regime,
+            scan_degraded=False,
+            setup_quality_score=68.0,
+            setup_quality_mode="Selective",
+            market_lead_score=71.0,
+            market_lead_state="Upside",
+            direction_score=44.0,
+            breadth_score=55.0,
+            trust_score=57.0,
+            ready_count=0,
+            probe_count=2,
+            watch_count=4,
+            skip_count=2,
+        )
+        sizing = build_signal_risk_sizing(
+            market_trade_gate_snapshot=gate,
+            market_catalyst_snapshot=None,
+            direction="Upside",
+            setup_confirm="WATCH",
+            confidence=72.0,
+            ai_confidence=61.0,
+            ai_aligned=True,
+            market_lead_aligned=True,
+            lead_active=True,
+            rr_ratio=1.9,
+            archive_risk_delta=0.25,
+            archive_risk_note="Archive sizing calibration is modestly supportive here.",
+        )
+        self.assertEqual(sizing.tier_key, "FLAT")
+        self.assertAlmostEqual(sizing.unit_fraction, 0.0, places=4)
+
     def test_targeted_catalyst_caps_matching_sector_only(self) -> None:
         regime = build_market_regime_snapshot(
             setup_quality_score=76.0,

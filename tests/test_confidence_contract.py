@@ -125,6 +125,31 @@ class ConfidenceContractTests(unittest.TestCase):
         self.assertGreater(snap.score, 0.0)
         self.assertEqual(snap.label, confidence_bucket(snap.score))
 
+    def test_build_confidence_snapshot_applies_archive_delta_but_respects_caps(self) -> None:
+        supportive = build_confidence_snapshot(
+            direction="Upside",
+            timeframe_alignment=90,
+            structure_quality=85,
+            trend_quality=80,
+            regime_quality=75,
+            location_quality=70,
+            archive_calibration_delta=4.0,
+            archive_calibration_note="Archive confidence calibration is modestly supportive here.",
+        )
+        neutral_capped = build_confidence_snapshot(
+            direction="Neutral",
+            timeframe_alignment=100,
+            structure_quality=90,
+            trend_quality=90,
+            regime_quality=90,
+            location_quality=90,
+            archive_calibration_delta=8.0,
+        )
+        self.assertGreater(supportive.score, float(supportive.base_score))
+        self.assertEqual(supportive.calibration_delta, 4.0)
+        self.assertIn("Archive confidence calibration", supportive.note)
+        self.assertEqual(neutral_capped.score, 35.0)
+
     def test_ai_confidence_uses_weighted_htf_quality_formula(self) -> None:
         score = ai_confidence_from_components(
             direction="Upside",
@@ -190,6 +215,33 @@ class ConfidenceContractTests(unittest.TestCase):
         self.assertIsInstance(snap, ConfidenceSnapshot)
         self.assertGreater(snap.score, 0.0)
         self.assertEqual(snap.label, "MEDIUM")
+        self.assertEqual(snap.base_score, snap.score)
+
+    def test_build_ai_confidence_snapshot_applies_archive_delta_but_respects_caps(self) -> None:
+        supportive = build_ai_confidence_snapshot(
+            direction="Upside",
+            combined_score=76.0,
+            conviction_quality=80.0,
+            timeframe_alignment=100.0,
+            consensus_quality=72.0,
+            support_votes=2,
+            archive_calibration_delta=4.0,
+            archive_calibration_note="Archive calibration is modestly supportive here.",
+        )
+        degraded = build_ai_confidence_snapshot(
+            direction="Upside",
+            combined_score=90.0,
+            conviction_quality=95.0,
+            timeframe_alignment=100.0,
+            consensus_quality=95.0,
+            support_votes=3,
+            degraded_data=True,
+            archive_calibration_delta=8.0,
+        )
+        self.assertGreater(supportive.score, float(supportive.base_score))
+        self.assertEqual(supportive.calibration_delta, 4.0)
+        self.assertIn("Archive calibration", supportive.note)
+        self.assertEqual(degraded.score, 35.0)
 
     def test_ai_confidence_bucket_uses_ai_specific_semantics(self) -> None:
         self.assertEqual(

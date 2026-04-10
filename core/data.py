@@ -18,6 +18,7 @@ TF_TO_CG_DAYS = {
     "1h": 90,
     "4h": 90,
     "1d": 365,
+    "1w": 1825,
 }
 
 TF_TO_RESAMPLE_RULE = {
@@ -28,6 +29,7 @@ TF_TO_RESAMPLE_RULE = {
     "1h": "1h",
     "4h": "4h",
     "1d": "1d",
+    "1w": "1W",
 }
 
 TF_TO_SECONDS = {
@@ -38,6 +40,7 @@ TF_TO_SECONDS = {
     "1h": 3600,
     "4h": 14400,
     "1d": 86400,
+    "1w": 604800,
 }
 
 COINGECKO_ID_OVERRIDES: dict[str, str] = {

@@ -8,6 +8,7 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
+from core.adaptive_weighting import build_confidence_calibration_snapshot
 from core.ai_spot_bias import (
     ai_spot_bias_consensus_agreement,
     ai_spot_bias_directional_agreement,
@@ -32,6 +33,7 @@ from core.market_decision import (
 )
 from core.signal_contract import bias_confidence_from_bias
 from core.spot_direction import build_spot_direction_snapshot
+from core.timeframe_anchors import choose_anchor_context
 
 
 def prepare_closed_frame(df: pd.DataFrame | None, *, min_rows: int = 55) -> pd.DataFrame | None:
@@ -87,6 +89,7 @@ def _direction_key(direction: str) -> str:
 
 @dataclass(frozen=True)
 class SpotExecutionPipelineSnapshot:
+    anchor_plan: Any
     analysis: Any
     spot_snapshot: Any
     confidence_snapshot: Any
@@ -138,18 +141,57 @@ def build_spot_execution_pipeline(
     analyse_fn: Callable[[pd.DataFrame], Any],
     predictor: Callable[[pd.DataFrame], tuple[Any, Any, dict | None]],
     conviction_fn: Callable[[str, str, float, float], tuple[str, Any]],
+    confidence_calibration_model: dict[str, object] | None = None,
+    scan_focus: str = "Unknown",
     htf_limit: int = 260,
     min_context_rows: int = 81,
 ) -> SpotExecutionPipelineSnapshot:
     symbol_for_context = direction_fetch_symbol(symbol, actual_symbol, source_provider)
-    df_4h_raw = fetch_ohlcv(symbol_for_context, "4h", limit=htf_limit)
-    df_1d_raw = fetch_ohlcv(symbol_for_context, "1d", limit=htf_limit)
-    df_direction_4h = prepare_closed_frame(df_4h_raw, min_rows=min_context_rows)
-    df_direction_1d = prepare_closed_frame(df_1d_raw, min_rows=min_context_rows)
+    frame_cache: dict[str, pd.DataFrame | None] = {}
+
+    def _fetch_anchor_frame(anchor_timeframe: str) -> pd.DataFrame | None:
+        if anchor_timeframe in frame_cache:
+            return frame_cache[anchor_timeframe]
+        raw = fetch_ohlcv(symbol_for_context, anchor_timeframe, limit=htf_limit)
+        prepared = prepare_closed_frame(raw, min_rows=min_context_rows)
+        frame_cache[anchor_timeframe] = prepared
+        return prepared
+
+    anchor_plan, df_direction_lead, df_direction_confirm = choose_anchor_context(
+        timeframe,
+        _fetch_anchor_frame,
+    )
 
     spot_snapshot = build_spot_direction_snapshot(
-        df_4h=df_direction_4h,
-        df_1d=df_direction_1d,
+        df_4h=None,
+        df_1d=None,
+        lead_df=df_direction_lead,
+        confirm_df=df_direction_confirm,
+        lead_timeframe=anchor_plan.lead_timeframe,
+        confirm_timeframe=anchor_plan.confirm_timeframe,
+    )
+    ai_spot_snapshot = build_ai_spot_bias_snapshot(
+        df_4h=None,
+        df_1d=None,
+        lead_df=df_direction_lead,
+        confirm_df=df_direction_confirm,
+        lead_timeframe=anchor_plan.lead_timeframe,
+        confirm_timeframe=anchor_plan.confirm_timeframe,
+        predictor=predictor,
+    )
+    confidence_calibration_snapshot = build_confidence_calibration_snapshot(
+        dict(confidence_calibration_model or {}),
+        signal={
+            "Direction": str(spot_snapshot.direction or ""),
+            "AI Alignment": (
+                "Aligned"
+                if _direction_key(spot_snapshot.direction) in {"UPSIDE", "DOWNSIDE"}
+                and _direction_key(spot_snapshot.direction) == _direction_key(ai_spot_snapshot.direction)
+                else "Not aligned"
+            ),
+            "Timeframe": str(timeframe or "Unknown"),
+            "Scan Focus": str(scan_focus or "Unknown"),
+        },
     )
     confidence_snapshot = build_confidence_snapshot(
         direction=spot_snapshot.direction,
@@ -161,11 +203,8 @@ def build_spot_execution_pipeline(
         timeframe_conflict=spot_snapshot.timeframe_conflict,
         degraded_data=spot_snapshot.degraded_data,
         range_regime=spot_snapshot.range_regime,
-    )
-    ai_spot_snapshot = build_ai_spot_bias_snapshot(
-        df_4h=df_direction_4h,
-        df_1d=df_direction_1d,
-        predictor=predictor,
+        archive_calibration_delta=float(getattr(confidence_calibration_snapshot, "delta", 0.0) or 0.0),
+        archive_calibration_note=str(getattr(confidence_calibration_snapshot, "note", "") or ""),
     )
 
     analysis = analyse_fn(df_eval)
@@ -306,6 +345,7 @@ def build_spot_execution_pipeline(
     )
 
     return SpotExecutionPipelineSnapshot(
+        anchor_plan=anchor_plan,
         analysis=analysis,
         spot_snapshot=spot_snapshot,
         confidence_snapshot=confidence_snapshot,

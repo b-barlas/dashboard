@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import math
 
 import pandas as pd
+from core.confidence import normalize_direction
+from core.market_decision import normalize_action_class
 from core.session_utils import session_bucket_for_timestamp
 from core.trading_copy import playbook_display, trade_gate_display, trade_gate_key
 
@@ -47,6 +49,112 @@ _ARCHIVE_GUARDRAIL_LENSES = {
     "Market Regime": 0.80,
     "Catalyst Scope": 0.50,
 }
+
+_AI_CONFIDENCE_CALIBRATION_LENSES = {
+    "Setup Class": 1.00,
+    "AI Alignment": 0.85,
+    "Timeframe": 0.55,
+    "Scan Focus": 0.40,
+    "Setup Class x AI Alignment": 0.90,
+    "Timeframe x Setup Class": 0.75,
+    "Scan Focus x Setup Class": 0.60,
+}
+
+_AI_CONFIDENCE_MIN_RESOLVED = 30
+_AI_CONFIDENCE_MIN_BUCKET = 12
+_AI_CONFIDENCE_MAX_DELTA = 5.0
+
+_CONFIDENCE_CALIBRATION_LENSES = {
+    "Direction": 1.00,
+    "AI Alignment": 0.75,
+    "Timeframe": 0.70,
+    "Scan Focus": 0.40,
+    "Direction x Timeframe": 0.95,
+    "Timeframe x AI Alignment": 0.75,
+    "Direction x AI Alignment": 0.65,
+}
+
+_CONFIDENCE_CALIBRATION_MIN_RESOLVED = 30
+_CONFIDENCE_CALIBRATION_MIN_BUCKET = 12
+_CONFIDENCE_CALIBRATION_MAX_DELTA = 5.0
+
+_SETUP_CALIBRATION_LENSES = {
+    "Setup Class": 1.00,
+    "AI Alignment": 0.80,
+    "Timeframe": 0.60,
+    "Direction": 0.50,
+    "Scan Focus": 0.35,
+    "Setup Class x AI Alignment": 0.90,
+    "Timeframe x Setup Class": 0.80,
+    "Setup Class x Direction": 0.70,
+    "Scan Focus x Setup Class": 0.55,
+}
+
+_SETUP_CALIBRATION_MIN_RESOLVED = 40
+_SETUP_CALIBRATION_MIN_BUCKET = 14
+_SETUP_CALIBRATION_MAX_DELTA = 4.5
+
+_ACTIONABLE_RANKING_LENSES = {
+    "Setup Class": 1.00,
+    "AI Alignment": 0.70,
+    "Timeframe": 0.70,
+    "Direction": 0.55,
+    "Scan Focus": 0.35,
+    "Timeframe x Setup Class": 0.90,
+    "Setup Class x Direction": 0.80,
+    "Setup Class x AI Alignment": 0.75,
+    "Scan Focus x Setup Class": 0.55,
+}
+
+_ACTIONABLE_RANKING_MIN_RESOLVED = 35
+_ACTIONABLE_RANKING_MIN_BUCKET = 12
+_ACTIONABLE_RANKING_MAX_DELTA = 8.0
+
+_RISK_SIZING_CALIBRATION_LENSES = {
+    "Setup Class": 1.00,
+    "AI Alignment": 0.70,
+    "Timeframe": 0.70,
+    "Direction": 0.55,
+    "Scan Focus": 0.35,
+    "Timeframe x Setup Class": 0.90,
+    "Setup Class x Direction": 0.80,
+    "Setup Class x AI Alignment": 0.75,
+    "Scan Focus x Setup Class": 0.55,
+}
+
+_RISK_SIZING_MIN_RESOLVED = 40
+_RISK_SIZING_MIN_BUCKET = 14
+_RISK_SIZING_MAX_DELTA = 0.25
+
+_TRADE_GATE_CALIBRATION_LENSES = {
+    "Trade Gate": 1.00,
+    "Playbook": 0.90,
+    "Market Regime": 0.75,
+    "Session": 0.65,
+    "Catalyst Window": 0.75,
+    "Playbook x Session": 0.85,
+    "Playbook x Catalyst Window": 0.90,
+}
+
+_TRADE_GATE_MIN_RESOLVED = 40
+_TRADE_GATE_MIN_BUCKET = 14
+_TRADE_GATE_MAX_DELTA = 1.0
+
+_SCALP_CALIBRATION_LENSES = {
+    "Setup Class": 1.00,
+    "Timeframe": 0.90,
+    "Direction": 0.65,
+    "AI Alignment": 0.55,
+    "Scan Focus": 0.35,
+    "Timeframe x Setup Class": 0.95,
+    "Setup Class x Direction": 0.80,
+    "Setup Class x AI Alignment": 0.65,
+}
+
+_SCALP_SUPPORTED_TIMEFRAMES = {"1m", "3m", "5m", "15m", "1h"}
+_SCALP_CALIBRATION_MIN_RESOLVED = 24
+_SCALP_CALIBRATION_MIN_BUCKET = 8
+_SCALP_CALIBRATION_MAX_DELTA = 1.0
 
 
 def _text_value(value: object) -> str:
@@ -90,6 +198,62 @@ class ArchiveGuardrailSnapshot:
     matched_factors: int
 
 
+@dataclass(frozen=True)
+class AICalibrationSnapshot:
+    delta: float
+    note: str
+    matched_factors: int
+    resolved_sample: int
+
+
+@dataclass(frozen=True)
+class ConfidenceCalibrationSnapshot:
+    delta: float
+    note: str
+    matched_factors: int
+    resolved_sample: int
+
+
+@dataclass(frozen=True)
+class SetupCalibrationSnapshot:
+    delta: float
+    note: str
+    matched_factors: int
+    resolved_sample: int
+
+
+@dataclass(frozen=True)
+class ActionableRankingSnapshot:
+    delta: float
+    note: str
+    matched_factors: int
+    resolved_sample: int
+
+
+@dataclass(frozen=True)
+class RiskSizingCalibrationSnapshot:
+    delta: float
+    note: str
+    matched_factors: int
+    resolved_sample: int
+
+
+@dataclass(frozen=True)
+class TradeGateCalibrationSnapshot:
+    delta: float
+    note: str
+    matched_factors: int
+    resolved_sample: int
+
+
+@dataclass(frozen=True)
+class ScalpCalibrationSnapshot:
+    delta: float
+    note: str
+    matched_factors: int
+    resolved_sample: int
+
+
 def _weighted_mean(values: pd.Series, weights: pd.Series) -> float:
     numeric_values = pd.to_numeric(values, errors="coerce")
     numeric_weights = pd.to_numeric(weights, errors="coerce").fillna(0.0)
@@ -107,6 +271,20 @@ def _compose_combo_value(left: object, right: object) -> str:
     left_value = str(left or "").strip() or "Unknown"
     right_value = str(right or "").strip() or "Unknown"
     return f"{left_value} | {right_value}"
+
+
+def _direction_value(value: object) -> str:
+    direction = normalize_direction(str(value or ""))
+    if direction == "UPSIDE":
+        return "Upside"
+    if direction == "DOWNSIDE":
+        return "Downside"
+    return "Neutral"
+
+
+def _setup_class_value(value: object) -> str:
+    action_class = normalize_action_class(str(value or ""))
+    return action_class or "UNKNOWN"
 
 
 def _execution_stance_value(trade_gate: object, adaptive_edge: object, archive_guardrail: object) -> str:
@@ -238,6 +416,37 @@ def _prepare_resolved_events(df_events: pd.DataFrame) -> pd.DataFrame:
     d["Session"] = session_series.where(session_series.ne(""), derived_session).replace("", "Unknown").fillna("Unknown")
     d["Timeframe"] = d.get("timeframe", pd.Series(dtype=object)).replace("", "Unknown").fillna("Unknown")
     d["Setup Confirm"] = d.get("setup_confirm", pd.Series(dtype=object)).replace("", "Unknown").fillna("Unknown")
+    d["Setup Class"] = d.get("setup_confirm", pd.Series(dtype=object)).map(_setup_class_value).replace("", "UNKNOWN").fillna("UNKNOWN")
+    d["Scan Focus"] = d.get("scan_focus", pd.Series(dtype=object)).replace("", "Unknown").fillna("Unknown")
+    d["Direction"] = d.get("direction", pd.Series(dtype=object)).map(_direction_value).replace("", "Neutral").fillna("Neutral")
+    d["Timeframe x Setup Class"] = d.apply(
+        lambda row: _compose_combo_value(row.get("Timeframe"), row.get("Setup Class")),
+        axis=1,
+    )
+    d["Setup Class x Direction"] = d.apply(
+        lambda row: _compose_combo_value(row.get("Setup Class"), row.get("Direction")),
+        axis=1,
+    )
+    d["Setup Class x AI Alignment"] = d.apply(
+        lambda row: _compose_combo_value(row.get("Setup Class"), row.get("AI Alignment")),
+        axis=1,
+    )
+    d["Scan Focus x Setup Class"] = d.apply(
+        lambda row: _compose_combo_value(row.get("Scan Focus"), row.get("Setup Class")),
+        axis=1,
+    )
+    d["Direction x Timeframe"] = d.apply(
+        lambda row: _compose_combo_value(row.get("Direction"), row.get("Timeframe")),
+        axis=1,
+    )
+    d["Timeframe x AI Alignment"] = d.apply(
+        lambda row: _compose_combo_value(row.get("Timeframe"), row.get("AI Alignment")),
+        axis=1,
+    )
+    d["Direction x AI Alignment"] = d.apply(
+        lambda row: _compose_combo_value(row.get("Direction"), row.get("AI Alignment")),
+        axis=1,
+    )
     d["Execution Stance"] = d.apply(
         lambda row: _execution_stance_value(
             row.get("market_trade_gate"),
@@ -268,7 +477,883 @@ def _prepare_resolved_events(df_events: pd.DataFrame) -> pd.DataFrame:
     d["actual_pnl_pct"] = pd.to_numeric(d.get("actual_pnl_pct"), errors="coerce")
     d["is_trade_closed"] = (d["actual_trade_status"] == "CLOSED").astype(int)
     d["is_trade_win"] = ((d["is_trade_closed"] == 1) & (d["actual_pnl_pct"] > 0)).astype(int)
+    has_plan_series = d.get("has_plan", pd.Series(index=d.index, dtype=float))
+    if not isinstance(has_plan_series, pd.Series):
+        has_plan_series = pd.Series(has_plan_series, index=d.index, dtype=float)
+    d["has_plan"] = pd.to_numeric(has_plan_series.reindex(d.index), errors="coerce").fillna(0).astype(int)
+    rr_ratio_series = d.get("rr_ratio", pd.Series(index=d.index, dtype=float))
+    if not isinstance(rr_ratio_series, pd.Series):
+        rr_ratio_series = pd.Series(rr_ratio_series, index=d.index, dtype=float)
+    d["rr_ratio"] = pd.to_numeric(rr_ratio_series.reindex(d.index), errors="coerce")
+    plan_outcome_series = d.get("plan_outcome", pd.Series(index=d.index, dtype=object))
+    if not isinstance(plan_outcome_series, pd.Series):
+        plan_outcome_series = pd.Series(plan_outcome_series, index=d.index, dtype=object)
+    d["plan_outcome"] = plan_outcome_series.reindex(d.index).fillna("").astype(str).str.upper()
+    d["is_tp"] = (d["plan_outcome"] == "TP").astype(int)
+    d["is_sl"] = (d["plan_outcome"] == "SL").astype(int)
     return d
+
+
+def build_scalp_calibration_model(df_events: pd.DataFrame, *, min_samples: int = 6) -> dict[str, object]:
+    resolved = _prepare_resolved_events(df_events)
+    if resolved.empty:
+        return {
+            "resolved_count": 0,
+            "overall_tp_pct": 0.0,
+            "overall_sl_pct": 0.0,
+            "overall_follow_pct": 0.0,
+            "overall_avg_return": 0.0,
+            "lenses": {},
+        }
+
+    planned = resolved[
+        (pd.to_numeric(resolved.get("has_plan"), errors="coerce").fillna(0).astype(int) == 1)
+        & resolved.get("Timeframe", pd.Series(index=resolved.index, dtype=object)).isin(_SCALP_SUPPORTED_TIMEFRAMES)
+    ].copy()
+    if planned.empty:
+        return {
+            "resolved_count": 0,
+            "overall_tp_pct": 0.0,
+            "overall_sl_pct": 0.0,
+            "overall_follow_pct": 0.0,
+            "overall_avg_return": 0.0,
+            "lenses": {},
+        }
+
+    recency_weights = pd.to_numeric(planned.get("recency_weight"), errors="coerce").fillna(1.0)
+    overall_tp_pct = float(_weighted_mean(planned["is_tp"], recency_weights) * 100.0)
+    overall_sl_pct = float(_weighted_mean(planned["is_sl"], recency_weights) * 100.0)
+    overall_follow_pct = float(_weighted_mean(planned["is_follow"], recency_weights) * 100.0)
+    overall_avg_return = float(_weighted_mean(planned["directional_return_pct"], recency_weights))
+    lenses: dict[str, dict[str, dict[str, float]]] = {}
+    for lens in _SCALP_CALIBRATION_LENSES:
+        if lens not in planned.columns:
+            continue
+        lens_map: dict[str, dict[str, float]] = {}
+        for value, bucket_df in planned.groupby(lens, dropna=False):
+            sample_n = int(len(bucket_df))
+            if sample_n < int(min_samples):
+                continue
+            bucket_weights = pd.to_numeric(bucket_df.get("recency_weight"), errors="coerce").fillna(1.0)
+            tp_pct = float(_weighted_mean(bucket_df["is_tp"], bucket_weights) * 100.0)
+            sl_pct = float(_weighted_mean(bucket_df["is_sl"], bucket_weights) * 100.0)
+            follow_pct = float(_weighted_mean(bucket_df["is_follow"], bucket_weights) * 100.0)
+            avg_dir = float(_weighted_mean(bucket_df["directional_return_pct"], bucket_weights))
+            edge_score = (
+                ((tp_pct - overall_tp_pct) * 0.60)
+                - ((sl_pct - overall_sl_pct) * 0.55)
+                + ((follow_pct - overall_follow_pct) * 0.30)
+                + ((avg_dir - overall_avg_return) * 4.5)
+            )
+            lens_map[str(value or "Unknown")] = {
+                "resolved": float(sample_n),
+                "tp_pct": tp_pct,
+                "sl_pct": sl_pct,
+                "follow_pct": follow_pct,
+                "avg_dir_return": avg_dir,
+                "edge_score": edge_score,
+            }
+        if lens_map:
+            lenses[lens] = lens_map
+    return {
+        "resolved_count": int(len(planned)),
+        "overall_tp_pct": overall_tp_pct,
+        "overall_sl_pct": overall_sl_pct,
+        "overall_follow_pct": overall_follow_pct,
+        "overall_avg_return": overall_avg_return,
+        "lenses": lenses,
+    }
+
+
+def build_scalp_calibration_snapshot(
+    model: dict[str, object],
+    *,
+    signal: dict[str, object],
+) -> ScalpCalibrationSnapshot:
+    resolved_count = int(model.get("resolved_count") or 0)
+    if resolved_count < _SCALP_CALIBRATION_MIN_RESOLVED:
+        return ScalpCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    signal_values = dict(signal or {})
+    signal_values["Setup Class"] = _setup_class_value(signal_values.get("Setup Confirm"))
+    signal_values["AI Alignment"] = (
+        "Aligned" if str(signal_values.get("AI Alignment") or "").strip().lower().startswith("aligned") else "Not aligned"
+    )
+    signal_values["Timeframe"] = str(signal_values.get("Timeframe") or "").strip() or "Unknown"
+    signal_values["Direction"] = _direction_value(signal_values.get("Direction"))
+    signal_values["Scan Focus"] = str(signal_values.get("Scan Focus") or "").strip() or "Unknown"
+    signal_values["Timeframe x Setup Class"] = _compose_combo_value(
+        signal_values.get("Timeframe"),
+        signal_values.get("Setup Class"),
+    )
+    signal_values["Setup Class x Direction"] = _compose_combo_value(
+        signal_values.get("Setup Class"),
+        signal_values.get("Direction"),
+    )
+    signal_values["Setup Class x AI Alignment"] = _compose_combo_value(
+        signal_values.get("Setup Class"),
+        signal_values.get("AI Alignment"),
+    )
+
+    lenses = dict(model.get("lenses") or {})
+    contributions: list[tuple[float, str, float]] = []
+    for lens, weight in _SCALP_CALIBRATION_LENSES.items():
+        value = str(signal_values.get(lens) or "").strip() or "Unknown"
+        lens_map = lenses.get(lens)
+        if not isinstance(lens_map, dict):
+            continue
+        bucket = lens_map.get(value)
+        if not isinstance(bucket, dict):
+            continue
+        bucket_resolved = float(bucket.get("resolved") or 0.0)
+        if bucket_resolved < float(_SCALP_CALIBRATION_MIN_BUCKET):
+            continue
+        edge_score = float(bucket.get("edge_score") or 0.0)
+        sample_factor = min(1.0, bucket_resolved / 28.0)
+        weighted = edge_score * float(weight) * sample_factor * 0.02
+        if abs(weighted) < 0.05:
+            continue
+        contributions.append((weighted, f"{lens}: {value}", bucket_resolved))
+
+    if not contributions:
+        return ScalpCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    contributions.sort(key=lambda item: abs(item[0]), reverse=True)
+    delta = max(
+        -_SCALP_CALIBRATION_MAX_DELTA,
+        min(_SCALP_CALIBRATION_MAX_DELTA, sum(value for value, _, _ in contributions)),
+    )
+    if abs(delta) < 0.12:
+        return ScalpCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    strongest = [name for value, name, _ in contributions if value > 0][:2]
+    weakest = [name for value, name, _ in contributions if value < 0][:2]
+    if delta > 0.0 and strongest:
+        note = "Archive scalp calibration is modestly supportive here. Strongest cohorts: " + ", ".join(strongest) + "."
+    elif delta < 0.0 and weakest:
+        note = "Archive scalp calibration is modestly cautious here. Weakest cohorts: " + ", ".join(weakest) + "."
+    else:
+        note = ""
+
+    return ScalpCalibrationSnapshot(
+        delta=float(delta),
+        note=note,
+        matched_factors=len(contributions),
+        resolved_sample=resolved_count,
+    )
+
+
+def build_ai_confidence_calibration_model(df_events: pd.DataFrame, *, min_samples: int = 8) -> dict[str, object]:
+    resolved = _prepare_resolved_events(df_events)
+    if resolved.empty:
+        return {
+            "resolved_count": 0,
+            "overall_follow_pct": 0.0,
+            "overall_avg_return": 0.0,
+            "lenses": {},
+        }
+
+    recency_weights = pd.to_numeric(resolved.get("recency_weight"), errors="coerce").fillna(1.0)
+    overall_follow_pct = float(_weighted_mean(resolved["is_follow"], recency_weights) * 100.0)
+    overall_avg_return = float(_weighted_mean(resolved["directional_return_pct"], recency_weights))
+    lenses: dict[str, dict[str, dict[str, float]]] = {}
+    for lens in _AI_CONFIDENCE_CALIBRATION_LENSES:
+        if lens not in resolved.columns:
+            continue
+        lens_map: dict[str, dict[str, float]] = {}
+        for value, bucket_df in resolved.groupby(lens, dropna=False):
+            sample_n = int(len(bucket_df))
+            if sample_n < int(min_samples):
+                continue
+            bucket_weights = pd.to_numeric(bucket_df.get("recency_weight"), errors="coerce").fillna(1.0)
+            follow_pct = float(_weighted_mean(bucket_df["is_follow"], bucket_weights) * 100.0)
+            avg_dir = float(_weighted_mean(bucket_df["directional_return_pct"], bucket_weights))
+            edge_score = ((follow_pct - overall_follow_pct) * 0.60) + ((avg_dir - overall_avg_return) * 5.0)
+            lens_map[str(value or "Unknown")] = {
+                "resolved": float(sample_n),
+                "follow_pct": follow_pct,
+                "avg_dir_return": avg_dir,
+                "edge_score": edge_score,
+            }
+        if lens_map:
+            lenses[lens] = lens_map
+    return {
+        "resolved_count": int(len(resolved)),
+        "overall_follow_pct": overall_follow_pct,
+        "overall_avg_return": overall_avg_return,
+        "lenses": lenses,
+    }
+
+
+def build_ai_confidence_calibration_snapshot(model: dict[str, object], *, signal: dict[str, object]) -> AICalibrationSnapshot:
+    resolved_count = int(model.get("resolved_count") or 0)
+    if resolved_count < _AI_CONFIDENCE_MIN_RESOLVED:
+        return AICalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    signal_values = dict(signal or {})
+    signal_values["Setup Class"] = _setup_class_value(signal_values.get("Setup Confirm"))
+    signal_values["AI Alignment"] = (
+        "Aligned" if str(signal_values.get("AI Alignment") or "").strip().lower().startswith("aligned") else "Not aligned"
+    )
+    signal_values["Timeframe"] = str(signal_values.get("Timeframe") or "").strip() or "Unknown"
+    signal_values["Scan Focus"] = str(signal_values.get("Scan Focus") or "").strip() or "Unknown"
+    signal_values["Direction"] = _direction_value(signal_values.get("Direction"))
+    signal_values["Timeframe x Setup Class"] = _compose_combo_value(
+        signal_values.get("Timeframe"),
+        signal_values.get("Setup Class"),
+    )
+    signal_values["Setup Class x AI Alignment"] = _compose_combo_value(
+        signal_values.get("Setup Class"),
+        signal_values.get("AI Alignment"),
+    )
+    signal_values["Scan Focus x Setup Class"] = _compose_combo_value(
+        signal_values.get("Scan Focus"),
+        signal_values.get("Setup Class"),
+    )
+
+    lenses = dict(model.get("lenses") or {})
+    contributions: list[tuple[float, str, float]] = []
+    for lens, weight in _AI_CONFIDENCE_CALIBRATION_LENSES.items():
+        value = str(signal_values.get(lens) or "").strip() or "Unknown"
+        lens_map = lenses.get(lens)
+        if not isinstance(lens_map, dict):
+            continue
+        bucket = lens_map.get(value)
+        if not isinstance(bucket, dict):
+            continue
+        bucket_resolved = float(bucket.get("resolved") or 0.0)
+        if bucket_resolved < float(_AI_CONFIDENCE_MIN_BUCKET):
+            continue
+        edge_score = float(bucket.get("edge_score") or 0.0)
+        sample_factor = min(1.0, bucket_resolved / 40.0)
+        weighted = edge_score * float(weight) * sample_factor * 0.08
+        if abs(weighted) < 0.18:
+            continue
+        contributions.append((weighted, f"{lens}: {value}", bucket_resolved))
+
+    if not contributions:
+        return AICalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    contributions.sort(key=lambda item: abs(item[0]), reverse=True)
+    delta = max(
+        -_AI_CONFIDENCE_MAX_DELTA,
+        min(_AI_CONFIDENCE_MAX_DELTA, sum(value for value, _, _ in contributions)),
+    )
+    if abs(delta) < 0.35:
+        return AICalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    strongest = [name for value, name, _ in contributions if value > 0][:2]
+    weakest = [name for value, name, _ in contributions if value < 0][:2]
+    if delta > 0.0 and strongest:
+        note = "Archive calibration is modestly supportive here. Strongest cohorts: " + ", ".join(strongest) + "."
+    elif delta < 0.0 and weakest:
+        note = "Archive calibration is modestly cautious here. Weakest cohorts: " + ", ".join(weakest) + "."
+    else:
+        note = ""
+
+    return AICalibrationSnapshot(
+        delta=float(delta),
+        note=note,
+        matched_factors=len(contributions),
+        resolved_sample=resolved_count,
+    )
+
+
+def build_confidence_calibration_model(df_events: pd.DataFrame, *, min_samples: int = 8) -> dict[str, object]:
+    resolved = _prepare_resolved_events(df_events)
+    if resolved.empty:
+        return {
+            "resolved_count": 0,
+            "overall_follow_pct": 0.0,
+            "overall_avg_return": 0.0,
+            "lenses": {},
+        }
+
+    recency_weights = pd.to_numeric(resolved.get("recency_weight"), errors="coerce").fillna(1.0)
+    overall_follow_pct = float(_weighted_mean(resolved["is_follow"], recency_weights) * 100.0)
+    overall_avg_return = float(_weighted_mean(resolved["directional_return_pct"], recency_weights))
+    lenses: dict[str, dict[str, dict[str, float]]] = {}
+    for lens in _CONFIDENCE_CALIBRATION_LENSES:
+        if lens not in resolved.columns:
+            continue
+        lens_map: dict[str, dict[str, float]] = {}
+        for value, bucket_df in resolved.groupby(lens, dropna=False):
+            sample_n = int(len(bucket_df))
+            if sample_n < int(min_samples):
+                continue
+            bucket_weights = pd.to_numeric(bucket_df.get("recency_weight"), errors="coerce").fillna(1.0)
+            follow_pct = float(_weighted_mean(bucket_df["is_follow"], bucket_weights) * 100.0)
+            avg_dir = float(_weighted_mean(bucket_df["directional_return_pct"], bucket_weights))
+            edge_score = ((follow_pct - overall_follow_pct) * 0.65) + ((avg_dir - overall_avg_return) * 5.5)
+            lens_map[str(value or "Unknown")] = {
+                "resolved": float(sample_n),
+                "follow_pct": follow_pct,
+                "avg_dir_return": avg_dir,
+                "edge_score": edge_score,
+            }
+        if lens_map:
+            lenses[lens] = lens_map
+    return {
+        "resolved_count": int(len(resolved)),
+        "overall_follow_pct": overall_follow_pct,
+        "overall_avg_return": overall_avg_return,
+        "lenses": lenses,
+    }
+
+
+def build_confidence_calibration_snapshot(
+    model: dict[str, object],
+    *,
+    signal: dict[str, object],
+) -> ConfidenceCalibrationSnapshot:
+    resolved_count = int(model.get("resolved_count") or 0)
+    if resolved_count < _CONFIDENCE_CALIBRATION_MIN_RESOLVED:
+        return ConfidenceCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    signal_values = dict(signal or {})
+    signal_values["Direction"] = _direction_value(signal_values.get("Direction"))
+    signal_values["AI Alignment"] = (
+        "Aligned" if str(signal_values.get("AI Alignment") or "").strip().lower().startswith("aligned") else "Not aligned"
+    )
+    signal_values["Timeframe"] = str(signal_values.get("Timeframe") or "").strip() or "Unknown"
+    signal_values["Scan Focus"] = str(signal_values.get("Scan Focus") or "").strip() or "Unknown"
+    signal_values["Direction x Timeframe"] = _compose_combo_value(
+        signal_values.get("Direction"),
+        signal_values.get("Timeframe"),
+    )
+    signal_values["Timeframe x AI Alignment"] = _compose_combo_value(
+        signal_values.get("Timeframe"),
+        signal_values.get("AI Alignment"),
+    )
+    signal_values["Direction x AI Alignment"] = _compose_combo_value(
+        signal_values.get("Direction"),
+        signal_values.get("AI Alignment"),
+    )
+
+    lenses = dict(model.get("lenses") or {})
+    contributions: list[tuple[float, str, float]] = []
+    for lens, weight in _CONFIDENCE_CALIBRATION_LENSES.items():
+        value = str(signal_values.get(lens) or "").strip() or "Unknown"
+        lens_map = lenses.get(lens)
+        if not isinstance(lens_map, dict):
+            continue
+        bucket = lens_map.get(value)
+        if not isinstance(bucket, dict):
+            continue
+        bucket_resolved = float(bucket.get("resolved") or 0.0)
+        if bucket_resolved < float(_CONFIDENCE_CALIBRATION_MIN_BUCKET):
+            continue
+        edge_score = float(bucket.get("edge_score") or 0.0)
+        sample_factor = min(1.0, bucket_resolved / 40.0)
+        weighted = edge_score * float(weight) * sample_factor * 0.08
+        if abs(weighted) < 0.18:
+            continue
+        contributions.append((weighted, f"{lens}: {value}", bucket_resolved))
+
+    if not contributions:
+        return ConfidenceCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    contributions.sort(key=lambda item: abs(item[0]), reverse=True)
+    delta = max(
+        -_CONFIDENCE_CALIBRATION_MAX_DELTA,
+        min(_CONFIDENCE_CALIBRATION_MAX_DELTA, sum(value for value, _, _ in contributions)),
+    )
+    if abs(delta) < 0.35:
+        return ConfidenceCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    strongest = [name for value, name, _ in contributions if value > 0][:2]
+    weakest = [name for value, name, _ in contributions if value < 0][:2]
+    if delta > 0.0 and strongest:
+        note = "Archive confidence calibration is modestly supportive here. Strongest cohorts: " + ", ".join(strongest) + "."
+    elif delta < 0.0 and weakest:
+        note = "Archive confidence calibration is modestly cautious here. Weakest cohorts: " + ", ".join(weakest) + "."
+    else:
+        note = ""
+
+    return ConfidenceCalibrationSnapshot(
+        delta=float(delta),
+        note=note,
+        matched_factors=len(contributions),
+        resolved_sample=resolved_count,
+    )
+
+
+def build_setup_calibration_model(df_events: pd.DataFrame, *, min_samples: int = 10) -> dict[str, object]:
+    resolved = _prepare_resolved_events(df_events)
+    if resolved.empty:
+        return {
+            "resolved_count": 0,
+            "overall_follow_pct": 0.0,
+            "overall_avg_return": 0.0,
+            "lenses": {},
+        }
+
+    recency_weights = pd.to_numeric(resolved.get("recency_weight"), errors="coerce").fillna(1.0)
+    overall_follow_pct = float(_weighted_mean(resolved["is_follow"], recency_weights) * 100.0)
+    overall_avg_return = float(_weighted_mean(resolved["directional_return_pct"], recency_weights))
+    lenses: dict[str, dict[str, dict[str, float]]] = {}
+    for lens in _SETUP_CALIBRATION_LENSES:
+        if lens not in resolved.columns:
+            continue
+        lens_map: dict[str, dict[str, float]] = {}
+        for value, bucket_df in resolved.groupby(lens, dropna=False):
+            sample_n = int(len(bucket_df))
+            if sample_n < int(min_samples):
+                continue
+            bucket_weights = pd.to_numeric(bucket_df.get("recency_weight"), errors="coerce").fillna(1.0)
+            follow_pct = float(_weighted_mean(bucket_df["is_follow"], bucket_weights) * 100.0)
+            avg_dir = float(_weighted_mean(bucket_df["directional_return_pct"], bucket_weights))
+            edge_score = ((follow_pct - overall_follow_pct) * 0.70) + ((avg_dir - overall_avg_return) * 6.0)
+            lens_map[str(value or "Unknown")] = {
+                "resolved": float(sample_n),
+                "follow_pct": follow_pct,
+                "avg_dir_return": avg_dir,
+                "edge_score": edge_score,
+            }
+        if lens_map:
+            lenses[lens] = lens_map
+    return {
+        "resolved_count": int(len(resolved)),
+        "overall_follow_pct": overall_follow_pct,
+        "overall_avg_return": overall_avg_return,
+        "lenses": lenses,
+    }
+
+
+def build_setup_calibration_snapshot(model: dict[str, object], *, signal: dict[str, object]) -> SetupCalibrationSnapshot:
+    resolved_count = int(model.get("resolved_count") or 0)
+    if resolved_count < _SETUP_CALIBRATION_MIN_RESOLVED:
+        return SetupCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    signal_values = dict(signal or {})
+    signal_values["Setup Class"] = _setup_class_value(signal_values.get("Setup Confirm"))
+    signal_values["AI Alignment"] = (
+        "Aligned" if str(signal_values.get("AI Alignment") or "").strip().lower().startswith("aligned") else "Not aligned"
+    )
+    signal_values["Timeframe"] = str(signal_values.get("Timeframe") or "").strip() or "Unknown"
+    signal_values["Direction"] = _direction_value(signal_values.get("Direction"))
+    signal_values["Scan Focus"] = str(signal_values.get("Scan Focus") or "").strip() or "Unknown"
+    signal_values["Timeframe x Setup Class"] = _compose_combo_value(
+        signal_values.get("Timeframe"),
+        signal_values.get("Setup Class"),
+    )
+    signal_values["Setup Class x Direction"] = _compose_combo_value(
+        signal_values.get("Setup Class"),
+        signal_values.get("Direction"),
+    )
+    signal_values["Setup Class x AI Alignment"] = _compose_combo_value(
+        signal_values.get("Setup Class"),
+        signal_values.get("AI Alignment"),
+    )
+    signal_values["Scan Focus x Setup Class"] = _compose_combo_value(
+        signal_values.get("Scan Focus"),
+        signal_values.get("Setup Class"),
+    )
+
+    lenses = dict(model.get("lenses") or {})
+    contributions: list[tuple[float, str, float]] = []
+    for lens, weight in _SETUP_CALIBRATION_LENSES.items():
+        value = str(signal_values.get(lens) or "").strip() or "Unknown"
+        lens_map = lenses.get(lens)
+        if not isinstance(lens_map, dict):
+            continue
+        bucket = lens_map.get(value)
+        if not isinstance(bucket, dict):
+            continue
+        bucket_resolved = float(bucket.get("resolved") or 0.0)
+        if bucket_resolved < float(_SETUP_CALIBRATION_MIN_BUCKET):
+            continue
+        edge_score = float(bucket.get("edge_score") or 0.0)
+        sample_factor = min(1.0, bucket_resolved / 45.0)
+        weighted = edge_score * float(weight) * sample_factor * 0.07
+        if abs(weighted) < 0.16:
+            continue
+        contributions.append((weighted, f"{lens}: {value}", bucket_resolved))
+
+    if not contributions:
+        return SetupCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    contributions.sort(key=lambda item: abs(item[0]), reverse=True)
+    delta = max(
+        -_SETUP_CALIBRATION_MAX_DELTA,
+        min(_SETUP_CALIBRATION_MAX_DELTA, sum(value for value, _, _ in contributions)),
+    )
+    if abs(delta) < 0.35:
+        return SetupCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    strongest = [name for value, name, _ in contributions if value > 0][:2]
+    weakest = [name for value, name, _ in contributions if value < 0][:2]
+    if delta > 0.0 and strongest:
+        note = "Archive setup calibration is modestly supportive here. Strongest cohorts: " + ", ".join(strongest) + "."
+    elif delta < 0.0 and weakest:
+        note = "Archive setup calibration is modestly cautious here. Weakest cohorts: " + ", ".join(weakest) + "."
+    else:
+        note = ""
+
+    return SetupCalibrationSnapshot(
+        delta=float(delta),
+        note=note,
+        matched_factors=len(contributions),
+        resolved_sample=resolved_count,
+    )
+
+
+def build_actionable_ranking_model(df_events: pd.DataFrame, *, min_samples: int = 10) -> dict[str, object]:
+    resolved = _prepare_resolved_events(df_events)
+    if resolved.empty:
+        return {
+            "resolved_count": 0,
+            "overall_follow_pct": 0.0,
+            "overall_avg_return": 0.0,
+            "lenses": {},
+        }
+
+    recency_weights = pd.to_numeric(resolved.get("recency_weight"), errors="coerce").fillna(1.0)
+    overall_follow_pct = float(_weighted_mean(resolved["is_follow"], recency_weights) * 100.0)
+    overall_avg_return = float(_weighted_mean(resolved["directional_return_pct"], recency_weights))
+    lenses: dict[str, dict[str, dict[str, float]]] = {}
+    for lens in _ACTIONABLE_RANKING_LENSES:
+        if lens not in resolved.columns:
+            continue
+        lens_map: dict[str, dict[str, float]] = {}
+        for value, bucket_df in resolved.groupby(lens, dropna=False):
+            sample_n = int(len(bucket_df))
+            if sample_n < int(min_samples):
+                continue
+            bucket_weights = pd.to_numeric(bucket_df.get("recency_weight"), errors="coerce").fillna(1.0)
+            follow_pct = float(_weighted_mean(bucket_df["is_follow"], bucket_weights) * 100.0)
+            avg_dir = float(_weighted_mean(bucket_df["directional_return_pct"], bucket_weights))
+            edge_score = ((follow_pct - overall_follow_pct) * 0.75) + ((avg_dir - overall_avg_return) * 6.0)
+            lens_map[str(value or "Unknown")] = {
+                "resolved": float(sample_n),
+                "follow_pct": follow_pct,
+                "avg_dir_return": avg_dir,
+                "edge_score": edge_score,
+            }
+        if lens_map:
+            lenses[lens] = lens_map
+    return {
+        "resolved_count": int(len(resolved)),
+        "overall_follow_pct": overall_follow_pct,
+        "overall_avg_return": overall_avg_return,
+        "lenses": lenses,
+    }
+
+
+def build_actionable_ranking_snapshot(model: dict[str, object], *, signal: dict[str, object]) -> ActionableRankingSnapshot:
+    resolved_count = int(model.get("resolved_count") or 0)
+    if resolved_count < _ACTIONABLE_RANKING_MIN_RESOLVED:
+        return ActionableRankingSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    signal_values = dict(signal or {})
+    signal_values["Setup Class"] = _setup_class_value(signal_values.get("Setup Confirm"))
+    signal_values["AI Alignment"] = (
+        "Aligned" if str(signal_values.get("AI Alignment") or "").strip().lower().startswith("aligned") else "Not aligned"
+    )
+    signal_values["Timeframe"] = str(signal_values.get("Timeframe") or "").strip() or "Unknown"
+    signal_values["Direction"] = _direction_value(signal_values.get("Direction"))
+    signal_values["Scan Focus"] = str(signal_values.get("Scan Focus") or "").strip() or "Unknown"
+    signal_values["Timeframe x Setup Class"] = _compose_combo_value(
+        signal_values.get("Timeframe"),
+        signal_values.get("Setup Class"),
+    )
+    signal_values["Setup Class x Direction"] = _compose_combo_value(
+        signal_values.get("Setup Class"),
+        signal_values.get("Direction"),
+    )
+    signal_values["Setup Class x AI Alignment"] = _compose_combo_value(
+        signal_values.get("Setup Class"),
+        signal_values.get("AI Alignment"),
+    )
+    signal_values["Scan Focus x Setup Class"] = _compose_combo_value(
+        signal_values.get("Scan Focus"),
+        signal_values.get("Setup Class"),
+    )
+
+    lenses = dict(model.get("lenses") or {})
+    contributions: list[tuple[float, str, float]] = []
+    for lens, weight in _ACTIONABLE_RANKING_LENSES.items():
+        value = str(signal_values.get(lens) or "").strip() or "Unknown"
+        lens_map = lenses.get(lens)
+        if not isinstance(lens_map, dict):
+            continue
+        bucket = lens_map.get(value)
+        if not isinstance(bucket, dict):
+            continue
+        bucket_resolved = float(bucket.get("resolved") or 0.0)
+        if bucket_resolved < float(_ACTIONABLE_RANKING_MIN_BUCKET):
+            continue
+        edge_score = float(bucket.get("edge_score") or 0.0)
+        sample_factor = min(1.0, bucket_resolved / 36.0)
+        weighted = edge_score * float(weight) * sample_factor * 0.10
+        if abs(weighted) < 0.20:
+            continue
+        contributions.append((weighted, f"{lens}: {value}", bucket_resolved))
+
+    if not contributions:
+        return ActionableRankingSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    contributions.sort(key=lambda item: abs(item[0]), reverse=True)
+    delta = max(
+        -_ACTIONABLE_RANKING_MAX_DELTA,
+        min(_ACTIONABLE_RANKING_MAX_DELTA, sum(value for value, _, _ in contributions)),
+    )
+    if abs(delta) < 0.40:
+        return ActionableRankingSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    strongest = [name for value, name, _ in contributions if value > 0][:2]
+    weakest = [name for value, name, _ in contributions if value < 0][:2]
+    if delta > 0.0 and strongest:
+        note = "Archive ranking is supportive here. Strongest cohorts: " + ", ".join(strongest) + "."
+    elif delta < 0.0 and weakest:
+        note = "Archive ranking is cautious here. Weakest cohorts: " + ", ".join(weakest) + "."
+    else:
+        note = ""
+
+    return ActionableRankingSnapshot(
+        delta=float(delta),
+        note=note,
+        matched_factors=len(contributions),
+        resolved_sample=resolved_count,
+    )
+
+
+def build_risk_sizing_calibration_model(df_events: pd.DataFrame, *, min_samples: int = 10) -> dict[str, object]:
+    resolved = _prepare_resolved_events(df_events)
+    if resolved.empty:
+        return {
+            "resolved_count": 0,
+            "overall_follow_pct": 0.0,
+            "overall_avg_return": 0.0,
+            "lenses": {},
+        }
+
+    recency_weights = pd.to_numeric(resolved.get("recency_weight"), errors="coerce").fillna(1.0)
+    overall_follow_pct = float(_weighted_mean(resolved["is_follow"], recency_weights) * 100.0)
+    overall_avg_return = float(_weighted_mean(resolved["directional_return_pct"], recency_weights))
+    lenses: dict[str, dict[str, dict[str, float]]] = {}
+    for lens in _RISK_SIZING_CALIBRATION_LENSES:
+        if lens not in resolved.columns:
+            continue
+        lens_map: dict[str, dict[str, float]] = {}
+        for value, bucket_df in resolved.groupby(lens, dropna=False):
+            sample_n = int(len(bucket_df))
+            if sample_n < int(min_samples):
+                continue
+            bucket_weights = pd.to_numeric(bucket_df.get("recency_weight"), errors="coerce").fillna(1.0)
+            follow_pct = float(_weighted_mean(bucket_df["is_follow"], bucket_weights) * 100.0)
+            avg_dir = float(_weighted_mean(bucket_df["directional_return_pct"], bucket_weights))
+            edge_score = ((follow_pct - overall_follow_pct) * 0.75) + ((avg_dir - overall_avg_return) * 6.0)
+            lens_map[str(value or "Unknown")] = {
+                "resolved": float(sample_n),
+                "follow_pct": follow_pct,
+                "avg_dir_return": avg_dir,
+                "edge_score": edge_score,
+            }
+        if lens_map:
+            lenses[lens] = lens_map
+    return {
+        "resolved_count": int(len(resolved)),
+        "overall_follow_pct": overall_follow_pct,
+        "overall_avg_return": overall_avg_return,
+        "lenses": lenses,
+    }
+
+
+def build_risk_sizing_calibration_snapshot(
+    model: dict[str, object],
+    *,
+    signal: dict[str, object],
+) -> RiskSizingCalibrationSnapshot:
+    resolved_count = int(model.get("resolved_count") or 0)
+    if resolved_count < _RISK_SIZING_MIN_RESOLVED:
+        return RiskSizingCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    signal_values = dict(signal or {})
+    signal_values["Setup Class"] = _setup_class_value(signal_values.get("Setup Confirm"))
+    signal_values["AI Alignment"] = (
+        "Aligned" if str(signal_values.get("AI Alignment") or "").strip().lower().startswith("aligned") else "Not aligned"
+    )
+    signal_values["Timeframe"] = str(signal_values.get("Timeframe") or "").strip() or "Unknown"
+    signal_values["Direction"] = _direction_value(signal_values.get("Direction"))
+    signal_values["Scan Focus"] = str(signal_values.get("Scan Focus") or "").strip() or "Unknown"
+    signal_values["Timeframe x Setup Class"] = _compose_combo_value(
+        signal_values.get("Timeframe"),
+        signal_values.get("Setup Class"),
+    )
+    signal_values["Setup Class x Direction"] = _compose_combo_value(
+        signal_values.get("Setup Class"),
+        signal_values.get("Direction"),
+    )
+    signal_values["Setup Class x AI Alignment"] = _compose_combo_value(
+        signal_values.get("Setup Class"),
+        signal_values.get("AI Alignment"),
+    )
+    signal_values["Scan Focus x Setup Class"] = _compose_combo_value(
+        signal_values.get("Scan Focus"),
+        signal_values.get("Setup Class"),
+    )
+
+    lenses = dict(model.get("lenses") or {})
+    contributions: list[tuple[float, str, float]] = []
+    for lens, weight in _RISK_SIZING_CALIBRATION_LENSES.items():
+        value = str(signal_values.get(lens) or "").strip() or "Unknown"
+        lens_map = lenses.get(lens)
+        if not isinstance(lens_map, dict):
+            continue
+        bucket = lens_map.get(value)
+        if not isinstance(bucket, dict):
+            continue
+        bucket_resolved = float(bucket.get("resolved") or 0.0)
+        if bucket_resolved < float(_RISK_SIZING_MIN_BUCKET):
+            continue
+        edge_score = float(bucket.get("edge_score") or 0.0)
+        sample_factor = min(1.0, bucket_resolved / 45.0)
+        weighted = edge_score * float(weight) * sample_factor * 0.004
+        if abs(weighted) < 0.015:
+            continue
+        contributions.append((weighted, f"{lens}: {value}", bucket_resolved))
+
+    if not contributions:
+        return RiskSizingCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    contributions.sort(key=lambda item: abs(item[0]), reverse=True)
+    delta = max(
+        -_RISK_SIZING_MAX_DELTA,
+        min(_RISK_SIZING_MAX_DELTA, sum(value for value, _, _ in contributions)),
+    )
+    if abs(delta) < 0.04:
+        return RiskSizingCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    strongest = [name for value, name, _ in contributions if value > 0][:2]
+    weakest = [name for value, name, _ in contributions if value < 0][:2]
+    if delta > 0.0 and strongest:
+        note = "Archive sizing calibration is modestly supportive here. Strongest cohorts: " + ", ".join(strongest) + "."
+    elif delta < 0.0 and weakest:
+        note = "Archive sizing calibration is modestly cautious here. Weakest cohorts: " + ", ".join(weakest) + "."
+    else:
+        note = ""
+
+    return RiskSizingCalibrationSnapshot(
+        delta=float(delta),
+        note=note,
+        matched_factors=len(contributions),
+        resolved_sample=resolved_count,
+    )
+
+
+def build_trade_gate_calibration_model(df_events: pd.DataFrame, *, min_samples: int = 10) -> dict[str, object]:
+    resolved = _prepare_resolved_events(df_events)
+    if resolved.empty:
+        return {
+            "resolved_count": 0,
+            "overall_follow_pct": 0.0,
+            "overall_avg_return": 0.0,
+            "lenses": {},
+        }
+
+    recency_weights = pd.to_numeric(resolved.get("recency_weight"), errors="coerce").fillna(1.0)
+    overall_follow_pct = float(_weighted_mean(resolved["is_follow"], recency_weights) * 100.0)
+    overall_avg_return = float(_weighted_mean(resolved["directional_return_pct"], recency_weights))
+    lenses: dict[str, dict[str, dict[str, float]]] = {}
+    for lens in _TRADE_GATE_CALIBRATION_LENSES:
+        if lens not in resolved.columns:
+            continue
+        lens_map: dict[str, dict[str, float]] = {}
+        for value, bucket_df in resolved.groupby(lens, dropna=False):
+            sample_n = int(len(bucket_df))
+            if sample_n < int(min_samples):
+                continue
+            bucket_weights = pd.to_numeric(bucket_df.get("recency_weight"), errors="coerce").fillna(1.0)
+            follow_pct = float(_weighted_mean(bucket_df["is_follow"], bucket_weights) * 100.0)
+            avg_dir = float(_weighted_mean(bucket_df["directional_return_pct"], bucket_weights))
+            edge_score = ((follow_pct - overall_follow_pct) * 0.70) + ((avg_dir - overall_avg_return) * 5.5)
+            lens_map[str(value or "Unknown")] = {
+                "resolved": float(sample_n),
+                "follow_pct": follow_pct,
+                "avg_dir_return": avg_dir,
+                "edge_score": edge_score,
+            }
+        if lens_map:
+            lenses[lens] = lens_map
+    return {
+        "resolved_count": int(len(resolved)),
+        "overall_follow_pct": overall_follow_pct,
+        "overall_avg_return": overall_avg_return,
+        "lenses": lenses,
+    }
+
+
+def build_trade_gate_calibration_snapshot(
+    model: dict[str, object],
+    *,
+    signal: dict[str, object],
+) -> TradeGateCalibrationSnapshot:
+    resolved_count = int(model.get("resolved_count") or 0)
+    if resolved_count < _TRADE_GATE_MIN_RESOLVED:
+        return TradeGateCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    signal_values = dict(signal or {})
+    signal_values["Playbook"] = _playbook_value(signal_values) or str(signal_values.get("Playbook") or "Unknown")
+    signal_values["Trade Gate"] = _trade_gate_value(signal_values) or str(signal_values.get("Trade Gate") or "Unknown")
+    signal_values["Market Regime"] = str(signal_values.get("Market Regime") or "").strip() or "Unknown"
+    signal_values["Session"] = str(signal_values.get("Session") or "").strip() or "Unknown"
+    signal_values["Catalyst Window"] = str(signal_values.get("Catalyst Window") or "").strip() or "Unknown"
+    signal_values["Playbook x Session"] = _compose_combo_value(
+        signal_values.get("Playbook"),
+        signal_values.get("Session"),
+    )
+    signal_values["Playbook x Catalyst Window"] = _compose_combo_value(
+        signal_values.get("Playbook"),
+        signal_values.get("Catalyst Window"),
+    )
+
+    lenses = dict(model.get("lenses") or {})
+    contributions: list[tuple[float, str, float]] = []
+    for lens, weight in _TRADE_GATE_CALIBRATION_LENSES.items():
+        value = str(signal_values.get(lens) or "").strip() or "Unknown"
+        lens_map = lenses.get(lens)
+        if not isinstance(lens_map, dict):
+            continue
+        bucket = lens_map.get(value)
+        if not isinstance(bucket, dict):
+            continue
+        bucket_resolved = float(bucket.get("resolved") or 0.0)
+        if bucket_resolved < float(_TRADE_GATE_MIN_BUCKET):
+            continue
+        edge_score = float(bucket.get("edge_score") or 0.0)
+        sample_factor = min(1.0, bucket_resolved / 45.0)
+        weighted = edge_score * float(weight) * sample_factor * 0.02
+        if abs(weighted) < 0.08:
+            continue
+        contributions.append((weighted, f"{lens}: {value}", bucket_resolved))
+
+    if not contributions:
+        return TradeGateCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    contributions.sort(key=lambda item: abs(item[0]), reverse=True)
+    delta = max(
+        -_TRADE_GATE_MAX_DELTA,
+        min(_TRADE_GATE_MAX_DELTA, sum(value for value, _, _ in contributions)),
+    )
+    if abs(delta) < 0.18:
+        return TradeGateCalibrationSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+
+    strongest = [name for value, name, _ in contributions if value > 0][:2]
+    weakest = [name for value, name, _ in contributions if value < 0][:2]
+    if delta > 0.0 and strongest:
+        note = "Archive gate calibration is modestly supportive here. Strongest cohorts: " + ", ".join(strongest) + "."
+    elif delta < 0.0 and weakest:
+        note = "Archive gate calibration is modestly cautious here. Weakest cohorts: " + ", ".join(weakest) + "."
+    else:
+        note = ""
+
+    return TradeGateCalibrationSnapshot(
+        delta=float(delta),
+        note=note,
+        matched_factors=len(contributions),
+        resolved_sample=resolved_count,
+    )
 
 
 def build_adaptive_context_model(df_events: pd.DataFrame, *, min_samples: int = 5) -> dict[str, object]:

@@ -69,7 +69,7 @@ Execution confidence buckets:
 - 80-100: High
 
 Spot-facing tabs now separate:
-- `Direction`: higher-timeframe technical bias from closed `1D + 4H` candles
+- `Direction`: higher-timeframe technical bias from closed adaptive lead/confirm anchors
 - `Confidence`: quality score for that spot direction
 - `AI Ensemble`: higher-timeframe AI bias from a separate AI engine
 - `AI Confidence`: quality score for that higher-timeframe AI verdict

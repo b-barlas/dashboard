@@ -470,20 +470,20 @@ _COPY = {
         "neutral": "Final scanner verdict showing whether the setup looks high-quality, early but interesting, still developing, or not aligned yet.",
     },
     "market.tooltip.entry_price": {
-        "trader": "Suggested model entry level for the shorter-term execution plan.",
-        "neutral": "Model reference level for the shorter-term setup read.",
+        "trader": "Suggested model entry level for the intraday scalp execution lens. If the scalp is conditional, treat this as a reference level only.",
+        "neutral": "Model reference entry level for the intraday timing lens. If the scalp is conditional, treat this as a reference only.",
     },
     "market.tooltip.stop_loss": {
-        "trader": "Risk invalidation level for the shorter-term execution plan.",
-        "neutral": "Risk reference level showing where the shorter-term setup would break.",
+        "trader": "Risk invalidation level for the intraday scalp execution lens. Conditional scalp rows show this as a reference, not a live trigger.",
+        "neutral": "Risk reference level showing where the intraday timing setup would break. Conditional rows are reference-only.",
     },
     "market.tooltip.target_price": {
-        "trader": "First take-profit level for the shorter-term execution plan.",
-        "neutral": "First upside reference level for the shorter-term setup read.",
+        "trader": "First target level for the intraday scalp execution lens. Conditional scalp rows show this as a reference target only.",
+        "neutral": "First reference target for the intraday timing lens. Conditional rows stay reference-only.",
     },
     "market.tooltip.scalp_opportunity": {
-        "trader": "Shorter-term execution signal. It only appears when the local setup passes the execution checks.",
-        "neutral": "Shorter-term timing signal. It only appears when the local setup passes the execution checks.",
+        "trader": "Separate intraday execution lens. Live rows passed all scalp gates. Conditional rows found a local scalp structure, but a veto is still active.",
+        "neutral": "Separate intraday timing lens. Live rows passed the scalp checks. Conditional rows found a local setup, but a broader veto is still active.",
     },
     "market.help.scanner_guide_html": {
         "trader": (
@@ -505,8 +505,8 @@ _COPY = {
         "trader": (
             "<b>1.</b> Start with <b>Setup Snapshot</b>: Δ (%) + Setup Confirm + Direction + Confidence.<br>"
             "<b>2.</b> Read <b>Setup Confirm</b> first: TREND+AI = strongest confirmation, TREND-led = technicals support the move, AI-led = AI support is strong enough, PROBE = starter-risk only, WATCH = idea is alive but early, SKIP = leave it alone for now. This uses selected-timeframe execution quality plus a local spot risk model, not the scalp planner.<br>"
-            "<b>3.</b> <b>Direction</b> = higher-timeframe spot bias (1D + 4H). <b>Confidence</b> = quality of that bias.<br>"
-            "<b>4.</b> Validate with <b>AI Ensemble</b> + <b>AI Confidence</b>. AI Ensemble is the higher-timeframe AI bias (1D + 4H); AI Confidence scores how reliable that HTF AI verdict is.<br>"
+            "<b>3.</b> <b>Direction</b> = higher-timeframe spot bias from the adaptive lead/confirm anchor pair. <b>Confidence</b> = quality of that bias.<br>"
+            "<b>4.</b> Validate with <b>AI Ensemble</b> + <b>AI Confidence</b>. AI Ensemble is the higher-timeframe AI bias from the same adaptive anchor pair; AI Confidence scores how reliable that HTF AI verdict is.<br>"
             "<b>5.</b> <b>Market Archive Read</b> is a market-history fit check, not a coin-specific proof card. Use it to size aggression, not to override price structure.<br>"
             "<b>6.</b> Use <b>Technical Regime Breakdown</b> only as selected-timeframe confirmation context, not as the main direction engine.<br>"
             "<b>7.</b> If the plan is defensive or SKIP, treat the lower section as reference/reclaim levels, not as an active two-path entry map."
@@ -514,8 +514,8 @@ _COPY = {
         "neutral": (
             "<b>1.</b> Start with <b>Setup Snapshot</b>: Δ (%) + Setup Confirm + Direction + Confidence.<br>"
             "<b>2.</b> Read <b>Setup Confirm</b> first: Strong = highest-quality confirmation, Early setup = interesting but still early, Developing = monitor, Not aligned = leave it alone for now. This uses selected-timeframe execution quality plus a local spot risk model, not the scalp planner.<br>"
-            "<b>3.</b> <b>Direction</b> = higher-timeframe spot bias (1D + 4H). <b>Confidence</b> = quality of that bias.<br>"
-            "<b>4.</b> Validate with <b>AI Ensemble</b> + <b>AI Confidence</b>. AI Ensemble is the higher-timeframe AI bias (1D + 4H); AI Confidence scores how reliable that HTF AI verdict is.<br>"
+            "<b>3.</b> <b>Direction</b> = higher-timeframe spot bias from the adaptive lead/confirm anchor pair. <b>Confidence</b> = quality of that bias.<br>"
+            "<b>4.</b> Validate with <b>AI Ensemble</b> + <b>AI Confidence</b>. AI Ensemble is the higher-timeframe AI bias from the same adaptive anchor pair; AI Confidence scores how reliable that HTF AI verdict is.<br>"
             "<b>5.</b> <b>Market Archive Read</b> is a market-history fit check, not a coin-specific proof card. Use it to size aggression, not to override price structure.<br>"
             "<b>6.</b> Use <b>Technical Regime Breakdown</b> only as selected-timeframe confirmation context, not as the main direction engine.<br>"
             "<b>7.</b> If the plan is defensive or low alignment, treat the lower section as reference/reclaim levels, not as an active two-path setup map."
@@ -1029,20 +1029,20 @@ Scanner input modes:
 - Top N control is disabled while custom mode is active
 - Custom watchlist mode does not depend on the live top-volume provider universe; it scans requested symbols directly
 - Selected timeframe controls tactical candle context, levels, scalp gating, and Delta
-- Visible `Direction` + `Confidence` come from closed `1D + 4H` spot bias
-- Visible `AI Ensemble` comes from a separate closed `1D + 4H` AI bias engine
+- Visible `Direction` + `Confidence` come from the closed adaptive higher-timeframe anchor pair
+- Visible `AI Ensemble` comes from a separate closed AI bias engine using the same adaptive anchors
 - Visible `AI Confidence` scores the quality of that HTF AI verdict
 
 How the 5 key columns are calculated:
 
 1. `Direction` (main spot direction)
-- Uses only closed `1D + 4H` candles
+- Uses only closed adaptive lead/confirm anchor candles
 - Technical engine builds a score for each timeframe from:
   - structure
   - trend
   - momentum
   - regime / location
-- `1D` leads and `4H` confirms
+- The slower anchor leads and the faster anchor confirms
 - Final logic is intentionally strict:
   - if `1D` is Neutral, final Direction becomes Neutral
   - if `1D` is strong and `4H` is aligned, direction is confirmed
@@ -1059,7 +1059,7 @@ How the 5 key columns are calculated:
   - and penalties for conflict / range / degraded data
 
 3. `AI Ensemble`
-- Separate AI bias engine, also using closed `1D + 4H`
+- Separate AI bias engine, also using the closed adaptive anchor pair
 - 3-model ensemble:
   - Gradient Boosting
   - Random Forest
@@ -1117,26 +1117,26 @@ Scanner input modes:
 - Top N control is disabled while custom mode is active
 - Custom watchlist mode does not depend on the live top-volume provider universe; it scans requested symbols directly
 - Selected timeframe controls tactical candle context, levels, scalp gating, and Delta
-- Visible `Direction` + `Confidence` come from closed `1D + 4H` spot bias
-- Visible `AI Ensemble` comes from a separate closed `1D + 4H` AI bias engine
+- Visible `Direction` + `Confidence` come from the closed adaptive higher-timeframe anchor pair
+- Visible `AI Ensemble` comes from a separate closed AI bias engine using the same adaptive anchors
 - Visible `AI Confidence` scores the quality of that HTF AI verdict
 
 How the 5 key columns are calculated:
 
 1. `Direction` (main spot direction)
-- Uses only closed `1D + 4H` candles
+- Uses only closed adaptive lead/confirm anchor candles
 - Technical engine builds a score for each timeframe from:
   - structure
   - trend
   - momentum
   - regime / location
-- `1D` leads and `4H` confirms
+- The slower anchor leads and the faster anchor confirms
 
 2. `Confidence`
 - This is the quality score of the same HTF technical spot direction
 
 3. `AI Ensemble`
-- Separate AI bias engine, also using closed `1D + 4H`
+- Separate AI bias engine, also using the closed adaptive anchor pair
 - The 3 dots show how many models support the final AI direction
 
 4. `AI Confidence`
@@ -1174,8 +1174,8 @@ Read in this order:
 - AI Confidence
 
 Meaning:
-- `Direction`: higher-timeframe technical spot bias from `1D + 4H`
-- `AI Ensemble`: higher-timeframe AI bias from `1D + 4H`; the 3 dots show how many ensemble models support that final AI direction
+- `Direction`: higher-timeframe technical spot bias from the adaptive lead/confirm anchor pair
+- `AI Ensemble`: higher-timeframe AI bias from the same adaptive anchor pair; the 3 dots show how many ensemble models support that final AI direction
 - `AI Confidence`: quality score of that higher-timeframe AI verdict
 
 These 5 columns use the same core logic as Market tab.

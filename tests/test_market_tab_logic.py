@@ -59,7 +59,10 @@ from tabs.market_tab import (
     _market_lead_snapshot,
     _market_result_priority_key,
     _market_result_priority_key_for_mode,
+    _market_hidden_meta_cols,
+    _pick_best_scalp_opportunity,
     _scan_universe_notice,
+    _pick_confidence_leader,
     _prepare_scan_market_enrichment,
     _prepare_closed_frame,
     _remember_last_good_snapshot,
@@ -210,6 +213,137 @@ class MarketTabLogicTests(unittest.TestCase):
         }
         ranked = sorted([weaker, stronger], key=_market_result_priority_key)
         self.assertEqual(ranked[0]["Coin"], "SOL")
+
+    def test_market_hidden_meta_cols_include_render_contract_fields(self):
+        df_columns = [
+            "Coin",
+            "Scalp Opportunity",
+            "__scalp_reason_short",
+            "__scalp_reason_text",
+            "__scalp_display_state",
+            "__adaptive_edge_note",
+            "__setup_calibration_note",
+            "__delta_note",
+        ]
+        hidden_cols = _market_hidden_meta_cols(df_columns, ["Coin", "Scalp Opportunity"])
+        self.assertEqual(
+            hidden_cols,
+            [
+                "__adaptive_edge_note",
+                "__delta_note",
+                "__scalp_display_state",
+                "__scalp_reason_short",
+                "__scalp_reason_text",
+                "__setup_calibration_note",
+            ],
+        )
+
+    def test_pick_confidence_leader_prefers_live_setup_over_skip(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "Coin": "BTC",
+                    "__confidence_val": 92.0,
+                    "__action_raw": "SKIP",
+                    "Setup Confirm": "SKIP",
+                    "Direction": "Upside",
+                    "__ai_confidence_val": 65.0,
+                },
+                {
+                    "Coin": "ETH",
+                    "__confidence_val": 81.0,
+                    "__action_raw": "PROBE",
+                    "Setup Confirm": "PROBE",
+                    "Direction": "Upside",
+                    "__ai_confidence_val": 52.0,
+                },
+            ]
+        )
+        coin, score, sub = _pick_confidence_leader(df)
+        self.assertEqual(coin, "ETH")
+        self.assertEqual(score, 81.0)
+        self.assertIn("Setup: PROBE", sub)
+
+    def test_pick_confidence_leader_falls_back_to_skip_when_only_skip_exists(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "Coin": "BTC",
+                    "__confidence_val": 92.0,
+                    "__action_raw": "SKIP",
+                    "Setup Confirm": "SKIP",
+                    "Direction": "Upside",
+                    "__ai_confidence_val": 65.0,
+                }
+            ]
+        )
+        coin, score, sub = _pick_confidence_leader(df)
+        self.assertEqual(coin, "BTC")
+        self.assertEqual(score, 92.0)
+        self.assertIn("Setup: SKIP", sub)
+
+    def test_pick_best_scalp_opportunity_prefers_live_over_conditional(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "Coin": "BTC",
+                    "Scalp Opportunity": "Upside",
+                    "__scalp_display_state": "CONDITIONAL",
+                    "__scalp_reason_short": "No-Trade",
+                    "R:R": "2.50*",
+                    "__action_raw": "PROBE",
+                    "Setup Confirm": "PROBE",
+                    "__confidence_val": 70.0,
+                },
+                {
+                    "Coin": "ETH",
+                    "Scalp Opportunity": "Downside",
+                    "__scalp_display_state": "LIVE",
+                    "__scalp_reason_short": "",
+                    "R:R": "1.40",
+                    "__action_raw": "PROBE",
+                    "Setup Confirm": "PROBE",
+                    "__confidence_val": 68.0,
+                },
+            ]
+        )
+        head, sub = _pick_best_scalp_opportunity(df)
+        self.assertEqual(head, "ETH (1.40)")
+        self.assertIn("Live", sub)
+        self.assertIn("Live: 1", sub)
+        self.assertIn("Conditional: 1", sub)
+
+    def test_pick_best_scalp_opportunity_falls_back_to_best_conditional(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "Coin": "BTC",
+                    "Scalp Opportunity": "Upside",
+                    "__scalp_display_state": "CONDITIONAL",
+                    "__scalp_reason_short": "No-Trade",
+                    "R:R": "1.10*",
+                    "__action_raw": "WATCH",
+                    "Setup Confirm": "WATCH",
+                    "__confidence_val": 66.0,
+                },
+                {
+                    "Coin": "SOL",
+                    "Scalp Opportunity": "Downside",
+                    "__scalp_display_state": "CONDITIONAL",
+                    "__scalp_reason_short": "Archive",
+                    "R:R": "1.80*",
+                    "__action_raw": "PROBE",
+                    "Setup Confirm": "PROBE",
+                    "__confidence_val": 71.0,
+                },
+            ]
+        )
+        head, sub = _pick_best_scalp_opportunity(df)
+        self.assertEqual(head, "SOL (1.80)")
+        self.assertIn("Conditional", sub)
+        self.assertIn("Archive", sub)
+        self.assertIn("Live: 0", sub)
+        self.assertIn("Conditional: 2", sub)
 
     def test_audit_scan_summary_lines_show_attempted_vs_displayed(self):
         lines = _audit_scan_summary_lines(
@@ -693,6 +827,7 @@ class MarketTabLogicTests(unittest.TestCase):
             "__action_raw": "PROBE",
             "__actionable_context_score": 74.0,
             "__actionable_setup_score": 81.0,
+            "__actionable_archive_score": 0.0,
             "__risk_unit_fraction": 0.25,
             "__confidence_val": 70.0,
             "__adaptive_edge_score": 58.0,
@@ -705,6 +840,7 @@ class MarketTabLogicTests(unittest.TestCase):
             "__action_raw": "PROBE",
             "__actionable_context_score": 52.0,
             "__actionable_setup_score": 63.0,
+            "__actionable_archive_score": 0.0,
             "__risk_unit_fraction": 0.25,
             "__confidence_val": 72.0,
             "__adaptive_edge_score": 60.0,
@@ -719,6 +855,38 @@ class MarketTabLogicTests(unittest.TestCase):
             key=lambda row: _market_result_priority_key_for_mode(row, "Actionable Setups"),
         )
         self.assertEqual(mode_ordered[0]["Coin"], "DOGE")
+
+    def test_actionable_market_result_priority_uses_archive_bias_as_tiebreaker(self):
+        supportive = {
+            "Coin": "SOL",
+            "__action_raw": "PROBE",
+            "__actionable_context_score": 68.0,
+            "__actionable_tactical_score": 76.0,
+            "__actionable_setup_score": 77.0,
+            "__actionable_archive_score": 4.2,
+            "__risk_unit_fraction": 0.25,
+            "__confidence_val": 69.0,
+            "__adaptive_edge_score": 56.0,
+            "__archive_guardrail_penalty": 2.0,
+            "__rr_val": 1.8,
+            "__ai_confidence_val": 61.0,
+        }
+        cautious = {
+            "Coin": "APT",
+            "__action_raw": "PROBE",
+            "__actionable_context_score": 68.0,
+            "__actionable_tactical_score": 76.0,
+            "__actionable_setup_score": 77.0,
+            "__actionable_archive_score": -3.8,
+            "__risk_unit_fraction": 0.25,
+            "__confidence_val": 69.0,
+            "__adaptive_edge_score": 56.0,
+            "__archive_guardrail_penalty": 2.0,
+            "__rr_val": 1.8,
+            "__ai_confidence_val": 61.0,
+        }
+        ordered = sorted([cautious, supportive], key=_actionable_market_result_priority_key)
+        self.assertEqual(ordered[0]["Coin"], "SOL")
 
     def test_direction_fetch_symbol_keeps_canonical_requested_symbol_for_htf_context(self):
         self.assertEqual(_direction_fetch_symbol("BTC/USDT", "XBT/USD", "exchange"), "BTC/USDT")

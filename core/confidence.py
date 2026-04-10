@@ -52,6 +52,7 @@ def confidence_from_components(
     timeframe_conflict: bool = False,
     degraded_data: bool = False,
     range_regime: bool = False,
+    archive_calibration_delta: float = 0.0,
 ) -> float:
     """Return a capped 0-100 confidence score for a direction call.
 
@@ -77,7 +78,7 @@ def confidence_from_components(
         + _WEIGHT_TREND_QUALITY * trend
         + _WEIGHT_REGIME_QUALITY * regime
         + _WEIGHT_LOCATION_QUALITY * location
-    )
+    ) + float(archive_calibration_delta or 0.0)
 
     cap = 100.0
     if normalize_direction(direction) == "NEUTRAL":
@@ -140,11 +141,26 @@ def ai_confidence_bucket(
 class ConfidenceSnapshot:
     score: float
     label: str
+    base_score: float | None = None
+    calibration_delta: float = 0.0
+    note: str = ""
 
 
 def build_confidence_snapshot(**kwargs) -> ConfidenceSnapshot:
-    score = confidence_from_components(**kwargs)
-    return ConfidenceSnapshot(score=score, label=confidence_bucket(score))
+    calibration_delta = float(kwargs.get("archive_calibration_delta") or 0.0)
+    calibration_note = str(kwargs.get("archive_calibration_note") or "").strip()
+    base_kwargs = dict(kwargs)
+    base_kwargs.pop("archive_calibration_delta", None)
+    base_kwargs.pop("archive_calibration_note", None)
+    base_score = confidence_from_components(**base_kwargs)
+    score = confidence_from_components(**base_kwargs, archive_calibration_delta=calibration_delta)
+    return ConfidenceSnapshot(
+        score=score,
+        label=confidence_bucket(score),
+        base_score=base_score,
+        calibration_delta=calibration_delta,
+        note=calibration_note,
+    )
 
 
 def ai_confidence_from_components(
@@ -157,6 +173,7 @@ def ai_confidence_from_components(
     support_votes: int,
     timeframe_conflict: bool = False,
     degraded_data: bool = False,
+    archive_calibration_delta: float = 0.0,
 ) -> float:
     direction_key = normalize_direction(direction)
     score_quality = clamp_100(abs(float(combined_score)))
@@ -171,7 +188,7 @@ def ai_confidence_from_components(
         + _AI_WEIGHT_TIMEFRAME_ALIGNMENT * tf_align
         + _AI_WEIGHT_CONSENSUS * consensus
         + _AI_WEIGHT_MODEL_SUPPORT * support
-    )
+    ) + float(archive_calibration_delta or 0.0)
 
     cap = 100.0
     if direction_key == "NEUTRAL":
@@ -187,16 +204,25 @@ def ai_confidence_from_components(
 
 
 def build_ai_confidence_snapshot(**kwargs) -> ConfidenceSnapshot:
-    score = ai_confidence_from_components(**kwargs)
+    calibration_delta = float(kwargs.get("archive_calibration_delta") or 0.0)
+    calibration_note = str(kwargs.get("archive_calibration_note") or "").strip()
+    base_kwargs = dict(kwargs)
+    base_kwargs.pop("archive_calibration_delta", None)
+    base_kwargs.pop("archive_calibration_note", None)
+    base_score = ai_confidence_from_components(**base_kwargs)
+    score = ai_confidence_from_components(**base_kwargs, archive_calibration_delta=calibration_delta)
     return ConfidenceSnapshot(
         score=score,
         label=ai_confidence_bucket(
             score,
-            direction=str(kwargs.get("direction", "")),
-            support_votes=int(kwargs.get("support_votes", 0) or 0),
-            timeframe_conflict=bool(kwargs.get("timeframe_conflict", False)),
-            degraded_data=bool(kwargs.get("degraded_data", False)),
+            direction=str(base_kwargs.get("direction", "")),
+            support_votes=int(base_kwargs.get("support_votes", 0) or 0),
+            timeframe_conflict=bool(base_kwargs.get("timeframe_conflict", False)),
+            degraded_data=bool(base_kwargs.get("degraded_data", False)),
         ),
+        base_score=base_score,
+        calibration_delta=calibration_delta,
+        note=calibration_note,
     )
 
 

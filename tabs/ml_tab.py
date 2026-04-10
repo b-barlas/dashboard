@@ -29,6 +29,7 @@ from core.market_decision import (
 from core.metric_catalog import AI_LONG_THRESHOLD, AI_SHORT_THRESHOLD, direction_from_prob
 from core.signal_contract import bias_confidence_from_bias
 from core.spot_direction import build_spot_direction_snapshot
+from core.timeframe_anchors import resolve_anchor_plan
 from core.trading_copy import copy_text
 from ui.primitives import render_help_details, render_intro_card, render_kpi_grid, render_page_header
 from ui.signal_panels import build_indicator_groups_html, build_setup_snapshot_html
@@ -746,8 +747,7 @@ def render(ctx: dict) -> None:
 
     # Detailed indicator panel per timeframe (optional, collapse by default).
     tf_row_map = {str(r.get("Timeframe")): r for r in rows if r.get("Direction") != "NO DATA"}
-    htf_4h = _prepare_closed_frame(fetch_ohlcv(coin, "4h", limit=260), min_rows=81)
-    htf_1d = _prepare_closed_frame(fetch_ohlcv(coin, "1d", limit=260), min_rows=81)
+    htf_cache: dict[str, pd.DataFrame | None] = {}
     with st.expander("Show Technical Indicator Panels"):
         for tf in selected_timeframes:
             df_eval = tf_eval_cache.get(tf)
@@ -755,8 +755,30 @@ def render(ctx: dict) -> None:
                 st.caption(f"{tf}: no sufficient data.")
                 continue
             try:
-                # Keep HTF context stable across selected-timeframe changes.
-                spot_snapshot = build_spot_direction_snapshot(df_4h=htf_4h, df_1d=htf_1d)
+                anchor_plan = resolve_anchor_plan(tf)
+                confirm_frame = htf_cache.get(anchor_plan.confirm_timeframe)
+                if anchor_plan.confirm_timeframe not in htf_cache:
+                    confirm_frame = _prepare_closed_frame(
+                        fetch_ohlcv(coin, anchor_plan.confirm_timeframe, limit=260),
+                        min_rows=81,
+                    )
+                    htf_cache[anchor_plan.confirm_timeframe] = confirm_frame
+                lead_frame = htf_cache.get(anchor_plan.lead_timeframe)
+                if anchor_plan.lead_timeframe not in htf_cache:
+                    lead_frame = _prepare_closed_frame(
+                        fetch_ohlcv(coin, anchor_plan.lead_timeframe, limit=260),
+                        min_rows=81,
+                    )
+                    htf_cache[anchor_plan.lead_timeframe] = lead_frame
+
+                spot_snapshot = build_spot_direction_snapshot(
+                    df_4h=None,
+                    df_1d=None,
+                    confirm_df=confirm_frame,
+                    lead_df=lead_frame,
+                    confirm_timeframe=anchor_plan.confirm_timeframe,
+                    lead_timeframe=anchor_plan.lead_timeframe,
+                )
                 confidence_snapshot = build_confidence_snapshot(
                     direction=spot_snapshot.direction,
                     timeframe_alignment=spot_snapshot.timeframe_alignment,
@@ -769,8 +791,12 @@ def render(ctx: dict) -> None:
                     range_regime=spot_snapshot.range_regime,
                 )
                 ai_spot_snapshot = build_ai_spot_bias_snapshot(
-                    df_4h=htf_4h,
-                    df_1d=htf_1d,
+                    df_4h=None,
+                    df_1d=None,
+                    confirm_df=confirm_frame,
+                    lead_df=lead_frame,
+                    confirm_timeframe=anchor_plan.confirm_timeframe,
+                    lead_timeframe=anchor_plan.lead_timeframe,
                     predictor=ml_ensemble_predict,
                 )
                 ar = analyse(df_eval)
@@ -961,7 +987,7 @@ def render(ctx: dict) -> None:
                             "label": "Direction",
                             "value": _spot_bias_label(spot_snapshot.direction),
                             "color": signal_color,
-                            "title": "Higher-timeframe spot bias from 1D + 4H closed candles.",
+                            "title": "Higher-timeframe spot bias from the adaptive lead/confirm anchor pair.",
                         },
                         {
                             "label": "Confidence",

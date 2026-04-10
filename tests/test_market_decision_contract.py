@@ -10,6 +10,7 @@ from core.market_decision import (
     ACTION_ENTER_TREND_LED,
     ACTION_SKIP,
     ACTION_WATCH,
+    apply_setup_archive_calibration,
     ai_led_confirmation_snapshot,
     ai_vote_metrics,
     action_decision_with_reason,
@@ -313,6 +314,42 @@ class MarketDecisionContractTests(unittest.TestCase):
     def test_action_reason_enter_trend_ai(self):
         out = self._reason("LONG", 70, "FULL", "HIGH", 0.8, 30.0)
         self.assertEqual(out, "ENTER_TREND_AI")
+
+    def test_setup_archive_calibration_can_upgrade_borderline_watch_to_probe(self):
+        action, reason = apply_setup_archive_calibration(
+            ACTION_WATCH,
+            "NEEDS_CONFIRMATION",
+            calibration_delta=3.2,
+        )
+        self.assertEqual(action, ACTION_PROBE)
+        self.assertEqual(reason, "ARCHIVE_UPGRADE_TO_PROBE")
+
+    def test_setup_archive_calibration_can_downgrade_enter_to_probe(self):
+        action, reason = apply_setup_archive_calibration(
+            ACTION_ENTER_TREND_AI,
+            "ENTER_TREND_AI",
+            calibration_delta=-3.5,
+        )
+        self.assertEqual(action, ACTION_PROBE)
+        self.assertEqual(reason, "ARCHIVE_DOWNGRADE_TO_PROBE")
+
+    def test_setup_archive_calibration_can_downgrade_probe_to_watch(self):
+        action, reason = apply_setup_archive_calibration(
+            ACTION_PROBE,
+            "PROBE_DUAL",
+            calibration_delta=-2.8,
+        )
+        self.assertEqual(action, ACTION_WATCH)
+        self.assertEqual(reason, "ARCHIVE_DOWNGRADE_TO_WATCH")
+
+    def test_setup_archive_calibration_does_not_override_hard_skip(self):
+        action, reason = apply_setup_archive_calibration(
+            ACTION_SKIP,
+            "LOW_CONFIDENCE",
+            calibration_delta=4.5,
+        )
+        self.assertEqual(action, ACTION_SKIP)
+        self.assertEqual(reason, "LOW_CONFIDENCE")
 
     def test_emerging_bias_snapshot_flags_bullish_4h_leader_with_ai_confirmation(self):
         snap = emerging_bias_snapshot(

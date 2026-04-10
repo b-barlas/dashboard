@@ -909,6 +909,13 @@ def get_scalping_entry_target(
     supertrend_trend: str,
     ichimoku_trend: str,
     vwap_label: str,
+    *,
+    timeframe: str | None = None,
+    execution_snapshot=None,
+    trend_led_snapshot=None,
+    ai_led_snapshot=None,
+    spot_direction: str | None = None,
+    ai_direction: str | None = None,
 ):
     return get_scalping_entry_target_core(
         df,
@@ -917,6 +924,12 @@ def get_scalping_entry_target(
         ichimoku_trend,
         vwap_label,
         sr_lookback_fn=_sr_lookback,
+        timeframe=timeframe,
+        execution_snapshot=execution_snapshot,
+        trend_led_snapshot=trend_led_snapshot,
+        ai_led_snapshot=ai_led_snapshot,
+        spot_direction=spot_direction,
+        ai_direction=ai_direction,
     )
 
 
@@ -934,6 +947,11 @@ def scalp_quality_gate(
     min_rr: float = 1.50,
     min_adx: float = 20.0,
     min_confidence: float = 55.0,
+    timeframe: str | None = None,
+    setup_confirm: str | None = None,
+    market_trade_gate_key: str | None = None,
+    archive_guardrail_penalty: float | None = None,
+    archive_guardrail_label: str | None = None,
 ) -> tuple[bool, str]:
     return scalp_quality_gate_core(
         scalp_direction=scalp_direction,
@@ -948,6 +966,11 @@ def scalp_quality_gate(
         min_rr=min_rr,
         min_adx=min_adx,
         min_confidence=min_confidence,
+        timeframe=timeframe,
+        setup_confirm=setup_confirm,
+        market_trade_gate_key=market_trade_gate_key,
+        archive_guardrail_penalty=archive_guardrail_penalty,
+        archive_guardrail_label=archive_guardrail_label,
     )
 
 # === Machine Learning Prediction ===

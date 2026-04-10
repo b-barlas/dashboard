@@ -666,7 +666,7 @@ def render(ctx: dict) -> None:
         + _pill(
             f"Spot Bias · {direction_label(spot_direction)} · {spot_confidence:.0f}%",
             POSITIVE if spot_direction == "UPSIDE" else (NEGATIVE if spot_direction == "DOWNSIDE" else WARNING),
-            "Higher-timeframe spot bias from 1D + 4H with confidence score.",
+            "Higher-timeframe spot bias summary with confidence score.",
         )
         + _pill(
             f"Higher-TF · {direction_label(metrics['higher_tf_bias'])} · {metrics['higher_tf_read']}",
