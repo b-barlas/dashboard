@@ -92,9 +92,9 @@ def _annotate_actual_exit_quality(df_events: pd.DataFrame) -> pd.DataFrame:
 def _review_scope_note(
     status_filter: str,
     timeframe_filter: str,
-    version_filter: str,
     limit: int,
     rows_in_slice: int,
+    version_filter: str = "All",
 ) -> str:
     status_text = "all statuses" if str(status_filter) == "All" else f"{str(status_filter).lower()} signals"
     timeframe_text = "all timeframes" if str(timeframe_filter) == "All" else f"{str(timeframe_filter).upper()} only"
