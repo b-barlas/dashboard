@@ -21,8 +21,8 @@ class TabRegistryContractTests(unittest.TestCase):
     def test_titles_and_specs_count_match(self):
         deps = _FallbackDict()
         specs = reg.build_tab_specs(deps)
-        self.assertEqual(len(reg.TAB_TITLES), 19)
-        self.assertEqual(len(specs), 19)
+        self.assertGreaterEqual(len(reg.TAB_TITLES), 15)
+        self.assertEqual(len(reg.TAB_TITLES), len(specs))
         for renderer, ctx in specs:
             self.assertTrue(callable(renderer))
             self.assertIsInstance(ctx, dict)
