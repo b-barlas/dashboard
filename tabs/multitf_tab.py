@@ -3,19 +3,39 @@ from ui.ctx import get_ctx
 import html
 
 import pandas as pd
-from core.confidence import build_confidence_snapshot, build_execution_confidence_snapshot, confidence_bucket
+from core.adaptive_weighting import (
+    build_ai_confidence_calibration_model,
+    build_ai_confidence_calibration_snapshot,
+    build_confidence_calibration_model,
+    build_setup_calibration_model,
+    build_setup_calibration_snapshot,
+)
+from core.confidence import (
+    build_ai_confidence_snapshot,
+    build_confidence_snapshot,
+    confidence_bucket,
+)
 from core.market_decision import (
-    ai_vote_metrics,
+    apply_setup_archive_calibration,
     normalize_action_class,
-    spot_action_decision_with_reason,
-    structure_state,
 )
 from core.multitf import HIGHER_TFS, TF_SEQUENCE, TF_WEIGHTS, compute_multitf_alignment, summarize_scope_bias
-from core.signal_contract import bias_confidence_from_bias
+from core.signal_tracker import (
+    fetch_signal_events_df as _fetch_signal_events_df_fallback,
+    get_signal_tracker_db_path as _get_signal_tracker_db_path_fallback,
+    init_signal_tracker_db as _init_signal_tracker_db_fallback,
+    prefer_current_decision_version_slice,
+)
+from core.spot_execution_pipeline import build_spot_execution_pipeline
 from core.spot_direction import build_spot_direction_snapshot
 from core.trading_copy import copy_text
 from ui.primitives import render_help_details, render_page_header
-from ui.signal_formatters import setup_confirm_display as _shared_setup_confirm_display
+from ui.signal_panels import normalize_indicator_label
+from ui.signal_formatters import (
+    ai_confidence_display as _shared_ai_confidence_display,
+    setup_confirm_display as _shared_setup_confirm_display,
+    spot_confidence_display as _shared_spot_confidence_display,
+)
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -40,42 +60,16 @@ def render(ctx: dict) -> None:
     _normalize_coin_input = get_ctx(ctx, "_normalize_coin_input")
     _validate_coin_symbol = get_ctx(ctx, "_validate_coin_symbol")
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
+    fetch_signal_events_df = ctx.get("fetch_signal_events_df", _fetch_signal_events_df_fallback)
     analyse = get_ctx(ctx, "analyse")
     direction_key = get_ctx(ctx, "direction_key")
     direction_label = get_ctx(ctx, "direction_label")
     format_delta = get_ctx(ctx, "format_delta")
     format_stochrsi = get_ctx(ctx, "format_stochrsi")
+    get_signal_tracker_db_path = ctx.get("get_signal_tracker_db_path", _get_signal_tracker_db_path_fallback)
+    init_signal_tracker_db = ctx.get("init_signal_tracker_db", _init_signal_tracker_db_fallback)
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     _calc_conviction = get_ctx(ctx, "_calc_conviction")
-
-    def _clean_indicator_text(value: object) -> str:
-        text = str(value or "").strip()
-        if not text:
-            return "N/A"
-        for token in ("🟢 ", "🔴 ", "🟡 ", "▲ ", "▼ ", "→ ", "🔥 "):
-            text = text.replace(token, "")
-        return text.strip() or "N/A"
-
-    def _plain_trend_label(value: str) -> str:
-        trend = str(value or "").strip().lower()
-        if trend == "bullish":
-            return "Bullish"
-        if trend == "bearish":
-            return "Bearish"
-        if trend == "neutral":
-            return "Neutral"
-        return ""
-
-    def _plain_vwap_label(value: str) -> str:
-        cleaned = _clean_indicator_text(value).lower()
-        label = cleaned.strip()
-        if label == "above":
-            return "Above"
-        if label == "below":
-            return "Below"
-        if label in {"at", "near vwap"}:
-            return "Near VWAP"
-        return "Neutral" if not label or label == "n/a" else cleaned.title()
 
     def _adx_label(adx: float) -> str:
         try:
@@ -91,10 +85,6 @@ def render(ctx: dict) -> None:
         if value < 75:
             return "Very Strong"
         return "Extreme"
-
-    def _confidence_label(value: float) -> str:
-        bucket = confidence_bucket(float(value))
-        return f"{float(value):.0f}% ({bucket.title()})"
 
     def _setup_confirm_display(raw_action: str, action_reason: str | None = None) -> str:
         return _shared_setup_confirm_display(raw_action, action_reason=action_reason)
@@ -112,6 +102,12 @@ def render(ctx: dict) -> None:
         if key == "model_exception":
             return "AI shown as Neutral for safety (model exception)"
         return f"AI shown as Neutral for safety ({key.replace('_', ' ')})"
+
+    def _spot_ai_display_value(ai_dir_key: str, ai_votes: int, fallback_note: str) -> str:
+        base = f"{direction_label(ai_dir_key)} ({ai_votes}/3)"
+        if fallback_note:
+            return f"{direction_label(ai_dir_key)}* ({ai_votes}/3)"
+        return base
 
     def _conviction_quality(rows: list[dict], dominant_bias: str) -> tuple[str, str]:
         if dominant_bias not in {"UPSIDE", "DOWNSIDE"}:
@@ -173,68 +169,22 @@ def render(ctx: dict) -> None:
         return [f"<b>{html.escape(col)}</b>: {html.escape(help_map[col])}" for col in columns if col in help_map]
 
     def _style_indicator(value: str) -> str:
-        text = str(value or "")
+        text = str(value or "").strip()
         upper = text.upper()
         if upper in {"", "NO DATA", "N/A"}:
             return f"color:{TEXT_MUTED}; font-weight:600;"
+        if upper.startswith("▲") or upper.startswith("🔥"):
+            return f"color:{POSITIVE}; font-weight:700;"
+        if upper.startswith("▼"):
+            return f"color:{NEGATIVE}; font-weight:700;"
+        if upper.startswith("-"):
+            return f"color:{TEXT_MUTED}; font-weight:600;"
         if any(token in upper for token in {"UPSIDE", "BULLISH", "STRONG", "VERY STRONG", "EXTREME"}):
             return f"color:{POSITIVE}; font-weight:700;"
-        if any(token in upper for token in {"DOWNSIDE", "BEARISH", "WEAK"}):
+        if any(token in upper for token in {"DOWNSIDE", "BEARISH", "WEAK", "VERY LOW", "LOW"}):
             return f"color:{NEGATIVE}; font-weight:700;"
-        return f"color:{WARNING}; font-weight:700;"
-
-    def _style_spike_alert(value: str) -> str:
-        text = str(value or "").strip().upper()
-        if not text or text == "N/A":
+        if any(token in upper for token in {"NEUTRAL", "MODERATE", "STARTING", "MIXED", "INDECISION", "SPIKE"}):
             return f"color:{TEXT_MUTED}; font-weight:600;"
-        if "SPIKE" in text:
-            return f"color:{WARNING}; font-weight:700;"
-        return f"color:{TEXT_MUTED}; font-weight:600;"
-
-    def _style_trend_context(value: str) -> str:
-        text = str(value or "").strip().upper()
-        if text in {"", "N/A", "NO DATA"}:
-            return f"color:{TEXT_MUTED}; font-weight:600;"
-        if "BULLISH" in text or "ABOVE" in text:
-            return f"color:{POSITIVE}; font-weight:700;"
-        if "BEARISH" in text or "BELOW" in text:
-            return f"color:{NEGATIVE}; font-weight:700;"
-        return f"color:{WARNING}; font-weight:700;"
-
-    def _style_momentum_context(value: str) -> str:
-        text = str(value or "").strip().upper()
-        if text in {"", "N/A", "NO DATA"}:
-            return f"color:{TEXT_MUTED}; font-weight:600;"
-        if "OVERSOLD" in text or "NEAR BOTTOM" in text or text == "LOW":
-            return f"color:{POSITIVE}; font-weight:700;"
-        if "OVERBOUGHT" in text or "NEAR TOP" in text or text == "HIGH":
-            return f"color:{NEGATIVE}; font-weight:700;"
-        if "BULLISH" in text:
-            return f"color:{POSITIVE}; font-weight:700;"
-        if "BEARISH" in text:
-            return f"color:{NEGATIVE}; font-weight:700;"
-        return f"color:{WARNING}; font-weight:700;"
-
-    def _style_volatility(value: str) -> str:
-        text = str(value or "").strip().upper()
-        if text in {"", "N/A", "NO DATA"}:
-            return f"color:{TEXT_MUTED}; font-weight:600;"
-        if "LOW" in text:
-            return f"color:{POSITIVE}; font-weight:700;"
-        if "MODERATE" in text or "NEUTRAL" in text:
-            return f"color:{WARNING}; font-weight:700;"
-        if "HIGH" in text or "EXTREME" in text:
-            return f"color:{NEGATIVE}; font-weight:700;"
-        return f"color:{WARNING}; font-weight:700;"
-
-    def _style_candle_pattern(value: str) -> str:
-        text = str(value or "").strip().upper()
-        if text in {"", "N/A", "NO DATA"}:
-            return f"color:{TEXT_MUTED}; font-weight:600;"
-        if "BULLISH" in text:
-            return f"color:{POSITIVE}; font-weight:700;"
-        if "BEARISH" in text:
-            return f"color:{NEGATIVE}; font-weight:700;"
         return f"color:{WARNING}; font-weight:700;"
 
     def _style_layer(value: str) -> str:
@@ -267,16 +217,6 @@ def render(ctx: dict) -> None:
             return f"color:{NEGATIVE}; font-weight:700;"
         return f"color:{TEXT_MUTED}; font-weight:600;"
 
-    def _style_alignment(value: str) -> str:
-        label = str(value or "").strip().upper()
-        if label == "HIGH":
-            return f"color:{POSITIVE}; font-weight:700;"
-        if label in {"MEDIUM", "TREND"}:
-            return f"color:{WARNING}; font-weight:700;"
-        if label in {"WEAK", "CONFLICT"}:
-            return f"color:{NEGATIVE}; font-weight:700;"
-        return f"color:{TEXT_MUTED}; font-weight:600;"
-
     def _insight(metrics: dict) -> tuple[str, str, str]:
         dominant = metrics["dominant_bias"]
         higher = metrics["higher_tf_bias"]
@@ -306,10 +246,25 @@ def render(ctx: dict) -> None:
             WARNING,
         )
 
-    def _build_rows(coin: str, spot_direction: str, spot_confidence: float) -> list[dict]:
+    signal_tracker_db_path = init_signal_tracker_db(get_signal_tracker_db_path())
+    adaptive_history_df = fetch_signal_events_df(
+        limit=2000,
+        status="RESOLVED",
+        source="Market",
+        db_path=signal_tracker_db_path,
+    )
+    adaptive_history_df = prefer_current_decision_version_slice(
+        adaptive_history_df,
+        source="Market",
+    )
+    confidence_calibration_model = build_confidence_calibration_model(adaptive_history_df)
+    setup_calibration_model = build_setup_calibration_model(adaptive_history_df)
+    ai_confidence_calibration_model = build_ai_confidence_calibration_model(adaptive_history_df)
+
+    def _build_rows(coin: str) -> list[dict]:
         rows: list[dict] = []
         for timeframe in TF_SEQUENCE:
-            df = fetch_ohlcv(coin, timeframe, limit=200)
+            df = fetch_ohlcv(coin, timeframe, limit=500)
             if df is None or len(df) < 55:
                 rows.append(
                     {
@@ -323,7 +278,7 @@ def render(ctx: dict) -> None:
                         "confidence": 0.0,
                         "Confidence": "",
                         "AI Ensemble": "N/A",
-                        "Tech vs AI Alignment": "N/A",
+                        "AI Confidence": "",
                         "ADX": "",
                         "SuperTrend": "",
                         "Ichimoku": "",
@@ -340,9 +295,8 @@ def render(ctx: dict) -> None:
                     }
                 )
                 continue
-            # Multi-TF is a closed-candle diagnostic. Always drop the latest open candle when possible.
-            df_eval = df.iloc[:-1].copy() if len(df) > 1 else df.copy()
-            if df_eval is None or len(df_eval) < 55:
+            df_eval = _prepare_closed_frame(df, min_rows=55)
+            if df_eval is None:
                 rows.append(
                     {
                         "timeframe": timeframe,
@@ -355,7 +309,7 @@ def render(ctx: dict) -> None:
                         "confidence": 0.0,
                         "Confidence": "",
                         "AI Ensemble": "N/A",
-                        "Tech vs AI Alignment": "N/A",
+                        "AI Confidence": "",
                         "ADX": "",
                         "SuperTrend": "",
                         "Ichimoku": "",
@@ -372,90 +326,128 @@ def render(ctx: dict) -> None:
                     }
                 )
                 continue
-            analysis = analyse(df_eval)
-            direction = direction_key(analysis.signal)
-            directional_confidence = round(float(bias_confidence_from_bias(float(analysis.bias))), 1)
+            actual_symbol = str(df.attrs.get("source_symbol") or "").strip() or coin
+            source_provider = str(df.attrs.get("source_provider") or "").strip() or "exchange"
+            pipeline = build_spot_execution_pipeline(
+                symbol=coin,
+                actual_symbol=actual_symbol,
+                source_provider=source_provider,
+                timeframe=timeframe,
+                df_eval=df_eval,
+                fetch_ohlcv=fetch_ohlcv,
+                analyse_fn=analyse,
+                predictor=ml_ensemble_predict,
+                conviction_fn=_calc_conviction,
+                confidence_calibration_model=confidence_calibration_model,
+                scan_focus="Unknown",
+            )
+            analysis = pipeline.analysis
+            spot_snapshot = pipeline.spot_snapshot
+            confidence_snapshot = pipeline.confidence_snapshot
+            ai_spot_snapshot = pipeline.ai_spot_snapshot
+            ai_spot_direction_key = pipeline.ai_spot_direction
+            ai_spot_votes = int(pipeline.ai_spot_votes)
             try:
                 price_change = ((float(df_eval["close"].iloc[-1]) / float(df_eval["close"].iloc[-2])) - 1.0) * 100.0
             except Exception:
                 price_change = None
-
-            try:
-                _ai_prob, ai_dir_raw, ai_details = ml_ensemble_predict(df_eval)
-                agreement = float((ai_details or {}).get("agreement", 0.0))
-                directional_agree = float((ai_details or {}).get("directional_agreement", agreement))
-                consensus_agree = float((ai_details or {}).get("consensus_agreement", 0.0))
-                ai_status = str((ai_details or {}).get("status", "") or "").strip()
-                ai_dir_key = direction_key(ai_dir_raw)
-                ai_votes, _display_ratio, decision_agreement = ai_vote_metrics(
-                    ai_dir_key,
-                    directional_agree,
-                    consensus_agree,
-                )
-            except Exception:
-                ai_dir_key = "NEUTRAL"
-                ai_votes = 0
-                decision_agreement = 0.0
-                ai_status = "model_exception"
-
-            ai_fallback_note = _ai_fallback_note(ai_status)
-            ai_display = (
-                f"{direction_label(ai_dir_key)}* ({ai_votes}/3) · Fallback"
-                if ai_fallback_note
-                else f"{direction_label(ai_dir_key)} ({ai_votes}/3)"
+            ai_fallback_note = _ai_fallback_note(pipeline.ai_spot_status)
+            ai_display = _spot_ai_display_value(ai_spot_direction_key, ai_spot_votes, ai_fallback_note)
+            spike_label = ""
+            if bool(analysis.volume_spike):
+                try:
+                    last_open = float(df_eval["open"].iloc[-1])
+                    last_close = float(df_eval["close"].iloc[-1])
+                    if pd.notna(last_open) and pd.notna(last_close) and last_close > last_open:
+                        spike_label = "Up Spike"
+                    elif pd.notna(last_open) and pd.notna(last_close) and last_close < last_open:
+                        spike_label = "Down Spike"
+                    else:
+                        spike_label = "Spike"
+                except Exception:
+                    spike_label = "Spike"
+            action_raw, action_reason_code = pipeline.action_raw, pipeline.action_reason_code
+            setup_calibration_snapshot = build_setup_calibration_snapshot(
+                setup_calibration_model,
+                signal={
+                    "Setup Confirm": str(action_raw or ""),
+                    "AI Alignment": (
+                        "Aligned"
+                        if direction_key(spot_snapshot.direction) == ai_spot_direction_key
+                        else "Not aligned"
+                    ),
+                    "Timeframe": str(timeframe or "Unknown"),
+                    "Scan Focus": "Unknown",
+                    "Direction": str(spot_snapshot.direction or ""),
+                },
             )
-
-            sig_dir_decision = direction if direction in {"UPSIDE", "DOWNSIDE"} else "WAIT"
-            conviction_lbl, _ = _calc_conviction(
-                sig_dir_decision,
-                ai_dir_key,
-                directional_confidence,
-                decision_agreement,
+            action_raw, action_reason_code = apply_setup_archive_calibration(
+                action_raw,
+                action_reason_code,
+                calibration_delta=float(getattr(setup_calibration_snapshot, "delta", 0.0) or 0.0),
             )
-            structure_val = structure_state(sig_dir_decision, ai_dir_key, directional_confidence, float(decision_agreement))
-            execution_confidence = build_execution_confidence_snapshot(
-                direction=sig_dir_decision,
-                bias_score=float(analysis.bias),
-                adx_val=float(analysis.adx) if pd.notna(analysis.adx) else float("nan"),
-                structure_state=structure_val,
-                conviction_label=str(conviction_lbl),
-                ai_agreement=float(decision_agreement),
+            ai_confidence_calibration_snapshot = build_ai_confidence_calibration_snapshot(
+                ai_confidence_calibration_model,
+                signal={
+                    "Setup Confirm": str(action_raw or ""),
+                    "AI Alignment": (
+                        "Aligned"
+                        if direction_key(spot_snapshot.direction) == ai_spot_direction_key
+                        else "Not aligned"
+                    ),
+                    "Timeframe": str(timeframe or "Unknown"),
+                    "Scan Focus": "Unknown",
+                    "Direction": str(spot_snapshot.direction or ""),
+                },
             )
-            action_raw, action_reason_code = spot_action_decision_with_reason(
-                spot_direction,
-                float(spot_confidence),
-                direction,
-                ai_dir_key,
-                decision_agreement,
-                float(analysis.adx) if pd.notna(analysis.adx) else float("nan"),
+            ai_confidence_snapshot = build_ai_confidence_snapshot(
+                direction=ai_spot_snapshot.direction,
+                combined_score=float(ai_spot_snapshot.score),
+                conviction_quality=float(ai_spot_snapshot.conviction_quality),
+                timeframe_alignment=float(ai_spot_snapshot.timeframe_alignment),
+                consensus_quality=float(ai_spot_snapshot.consensus_quality),
+                support_votes=int(ai_spot_votes),
+                timeframe_conflict=bool(ai_spot_snapshot.timeframe_conflict),
+                degraded_data=bool(ai_spot_snapshot.degraded_data),
+                archive_calibration_delta=float(getattr(ai_confidence_calibration_snapshot, "delta", 0.0) or 0.0),
+                archive_calibration_note=str(getattr(ai_confidence_calibration_snapshot, "note", "") or ""),
             )
             rows.append(
                 {
                     "timeframe": timeframe,
                     "Timeframe": timeframe,
                     "Layer": "Timing" if timeframe in {"5m", "15m"} else "Structure",
-                    "direction": direction,
+                    "direction": str(spot_snapshot.direction or "NEUTRAL"),
                     "Delta": format_delta(price_change) if price_change is not None else "—",
                     "Setup Confirm": _setup_confirm_display(action_raw, action_reason_code),
-                    "Direction": direction_label(direction),
-                    "confidence": float(execution_confidence.score),
-                    "Confidence": _confidence_label(float(execution_confidence.score)),
+                    "Direction": direction_label(spot_snapshot.direction),
+                    "confidence": float(confidence_snapshot.score),
+                    "Confidence": _shared_spot_confidence_display(float(confidence_snapshot.score)),
                     "AI Ensemble": ai_display,
-                    "Tech vs AI Alignment": str(conviction_lbl),
-                    "Spot Bias": direction_label(spot_direction),
-                    "Spot Confidence": f"{float(spot_confidence):.0f}%",
-                    "ADX": _adx_label(analysis.adx),
-                    "SuperTrend": _plain_trend_label(analysis.supertrend),
-                    "Ichimoku": _plain_trend_label(analysis.ichimoku),
-                    "VWAP": _plain_vwap_label(analysis.vwap),
-                    "Spike Alert": "Spike" if bool(analysis.volume_spike) else "",
-                    "PSAR": _clean_indicator_text(analysis.psar),
-                    "Stochastic RSI": _clean_indicator_text(format_stochrsi(analysis.stochrsi_k, timeframe=timeframe)),
-                    "Williams %R": _clean_indicator_text(analysis.williams),
-                    "CCI": _clean_indicator_text(analysis.cci),
-                    "Candle Pattern": _clean_indicator_text(str(analysis.candle_pattern).split(" (")[0] if analysis.candle_pattern else ""),
-                    "Bollinger": _clean_indicator_text(analysis.bollinger),
-                    "Volatility": _clean_indicator_text(str(analysis.atr_comment).replace("▲", "").replace("▼", "").replace("→", "")),
+                    "AI Confidence": _shared_ai_confidence_display(
+                        ai_spot_snapshot,
+                        float(ai_confidence_snapshot.score),
+                    ),
+                    "Spot Bias": direction_label(spot_snapshot.direction),
+                    "Spot Confidence": f"{float(confidence_snapshot.score):.0f}%",
+                    "ADX": normalize_indicator_label(_adx_label(analysis.adx), name="ADX"),
+                    "SuperTrend": normalize_indicator_label(analysis.supertrend, name="SuperTrend"),
+                    "Ichimoku": normalize_indicator_label(analysis.ichimoku, name="Ichimoku"),
+                    "VWAP": normalize_indicator_label(analysis.vwap, name="VWAP"),
+                    "Spike Alert": normalize_indicator_label(spike_label, name="Spike Alert"),
+                    "PSAR": normalize_indicator_label(analysis.psar, name="PSAR"),
+                    "Stochastic RSI": normalize_indicator_label(
+                        format_stochrsi(analysis.stochrsi_k, timeframe=timeframe),
+                        name="Stochastic RSI",
+                    ),
+                    "Williams %R": normalize_indicator_label(analysis.williams, name="Williams %R"),
+                    "CCI": normalize_indicator_label(analysis.cci, name="CCI"),
+                    "Candle Pattern": normalize_indicator_label(
+                        str(analysis.candle_pattern or ""),
+                        name="Candle Pattern",
+                    ),
+                    "Bollinger": normalize_indicator_label(analysis.bollinger, name="Bollinger"),
+                    "Volatility": normalize_indicator_label(analysis.atr_comment, name="Volatility"),
                     "Weight": TF_WEIGHTS.get(timeframe, 1.0),
                 }
             )
@@ -555,7 +547,7 @@ def render(ctx: dict) -> None:
                     degraded_data=spot_snapshot.degraded_data,
                     range_regime=spot_snapshot.range_regime,
                 )
-                live_rows = _build_rows(coin, spot_snapshot.direction, float(confidence_snapshot.score))
+                live_rows = _build_rows(coin)
                 valid_live = [row for row in live_rows if row["direction"] in {"UPSIDE", "DOWNSIDE", "NEUTRAL"}]
                 rows = live_rows
                 from_cache = False
@@ -698,11 +690,11 @@ def render(ctx: dict) -> None:
         "Timeframe",
         "Role",
         "Δ (%)",
-        "Per-TF Setup",
+        "Setup Confirm",
         "Direction",
         "Confidence",
         "AI Ensemble",
-        "Tech/AI Fit",
+        "AI Confidence",
     ]
     advanced_columns = [
         "ADX",
@@ -753,11 +745,11 @@ def render(ctx: dict) -> None:
             "Timeframe": row["Timeframe"],
             "Role": row["Layer"],
             "Δ (%)": row["Delta"],
-            "Per-TF Setup": row["Setup Confirm"],
+            "Setup Confirm": row["Setup Confirm"],
             "Direction": row["Direction"],
             "Confidence": row["Confidence"],
             "AI Ensemble": row["AI Ensemble"],
-            "Tech/AI Fit": row["Tech vs AI Alignment"],
+            "AI Confidence": row["AI Confidence"],
         }
         if show_advanced_columns:
             table_row.update(
@@ -782,11 +774,11 @@ def render(ctx: dict) -> None:
                 "Timeframe": row["Timeframe"],
                 "Role": row["Layer"],
                 "Δ (%)": row["Delta"],
-                "Per-TF Setup": row["Setup Confirm"],
+                "Setup Confirm": row["Setup Confirm"],
                 "Direction": row["Direction"],
                 "Confidence": row["Confidence"],
                 "AI Ensemble": row["AI Ensemble"],
-                "Tech/AI Fit": row["Tech vs AI Alignment"],
+                "AI Confidence": row["AI Confidence"],
                 "ADX": row["ADX"],
                 "SuperTrend": row["SuperTrend"],
                 "Ichimoku": row["Ichimoku"],
@@ -808,9 +800,8 @@ def render(ctx: dict) -> None:
     styled = (
         df_rows.style
         .map(_style_delta, subset=["Δ (%)"])
-        .map(_style_setup_confirm, subset=["Per-TF Setup"])
-        .map(_style_indicator, subset=["Direction", "Confidence", "AI Ensemble"])
-        .map(_style_alignment, subset=["Tech/AI Fit"])
+        .map(_style_setup_confirm, subset=["Setup Confirm"])
+        .map(_style_indicator, subset=["Direction", "Confidence", "AI Ensemble", "AI Confidence"])
         .map(_style_layer, subset=["Role"])
     )
     if show_advanced_columns:
@@ -818,16 +809,16 @@ def render(ctx: dict) -> None:
             styled = styled.map(_style_indicator, subset=["ADX"])
         trend_cols = [col for col in ["SuperTrend", "Ichimoku", "VWAP", "PSAR"] if col in df_rows.columns]
         if trend_cols:
-            styled = styled.map(_style_trend_context, subset=trend_cols)
+            styled = styled.map(_style_indicator, subset=trend_cols)
         if "Spike Alert" in df_rows.columns:
-            styled = styled.map(_style_spike_alert, subset=["Spike Alert"])
+            styled = styled.map(_style_indicator, subset=["Spike Alert"])
         momentum_cols = [col for col in ["Bollinger", "Stochastic RSI", "Williams %R", "CCI"] if col in df_rows.columns]
         if momentum_cols:
-            styled = styled.map(_style_momentum_context, subset=momentum_cols)
+            styled = styled.map(_style_indicator, subset=momentum_cols)
         if "Volatility" in df_rows.columns:
-            styled = styled.map(_style_volatility, subset=["Volatility"])
+            styled = styled.map(_style_indicator, subset=["Volatility"])
         if "Candle Pattern" in df_rows.columns:
-            styled = styled.map(_style_candle_pattern, subset=["Candle Pattern"])
+            styled = styled.map(_style_indicator, subset=["Candle Pattern"])
     styled = styled.hide(axis="index")
     st.dataframe(styled, width="stretch", hide_index=True)
 

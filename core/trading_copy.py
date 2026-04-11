@@ -543,7 +543,7 @@ _COPY = {
             "<b>4.</b> Use <b>Short-TF Timing</b> as confirmation. If 5m/15m disagree with 1h/4h/1d, the structure may still be valid but entry timing is noisy.<br>"
             "<b>5.</b> If coverage is partial, trust the result less. Missing timeframes reduce confidence even when the visible alignment looks clean.<br>"
             "<b>6.</b> A `*` in <b>AI Ensemble</b> means the ML layer fell back to neutral for safety on that timeframe.<br>"
-            "<b>7.</b> <b>Per-TF Setup</b> and <b>Tech/AI Fit</b> are row-level checks. They support the main read, but they are not standalone trade commands."
+            "<b>7.</b> <b>Setup Confirm</b>, <b>Direction</b>, <b>Confidence</b>, <b>AI Ensemble</b>, and <b>AI Confidence</b> use the same spot execution engine family as Market/Spot for that timeframe, with archive calibration when enough history exists. They still support the main read; they are not standalone trade commands."
         ),
         "neutral": (
             "<b>1.</b> Start with <b>Higher-TF Bias</b>. That is the structural layer and usually matters most.<br>"
@@ -552,7 +552,7 @@ _COPY = {
             "<b>4.</b> Use <b>Short-TF Timing</b> as confirmation. If 5m/15m disagree with 1h/4h/1d, the structure may still be valid but timing is noisy.<br>"
             "<b>5.</b> If coverage is partial, trust the result less. Missing timeframes reduce confidence even when the visible alignment looks clean.<br>"
             "<b>6.</b> A `*` in <b>AI Ensemble</b> means the ML layer fell back to neutral for safety on that timeframe.<br>"
-            "<b>7.</b> <b>Per-TF Setup</b> and <b>Tech/AI Fit</b> are row-level checks. They support the main read, but they are not standalone action commands."
+            "<b>7.</b> <b>Setup Confirm</b>, <b>Direction</b>, <b>Confidence</b>, <b>AI Ensemble</b>, and <b>AI Confidence</b> use the same spot execution engine family as Market/Spot for that timeframe, with archive calibration when enough history exists. They still support the main read; they are not standalone action commands."
         ),
     },
     "multitf.table.confirmation_note": {
@@ -564,22 +564,22 @@ _COPY = {
             "<b>Timeframe</b>: the candle interval being checked.<br>"
             "<b>Role</b>: 5m/15m are timing; 1h/4h/1d are structural.<br>"
             "<b>Δ (%)</b>: last closed-candle change for that timeframe.<br>"
-            "<b>Per-TF Setup</b>: row-level setup check for that timeframe. It supports the main read, but it is not a standalone trade command.<br>"
-            "<b>Direction</b>: Upside / Downside / Neutral technical bias for that timeframe.<br>"
-            "<b>Confidence</b>: selected-timeframe confidence for that row. It is separate from the global spot-bias confidence shown above.<br>"
-            "<b>AI Ensemble</b>: ML directional read plus vote count on that timeframe. `*` and `Fallback` mean the AI model fell back to Neutral for safety.<br>"
-            "<b>Tech/AI Fit</b>: conviction quality between technical structure and AI context.<br>"
+            "<b>Setup Confirm</b>: the same setup-confirm engine family the scanner would use for that timeframe, then archive-calibrated when enough live history exists.<br>"
+            "<b>Direction</b>: the same higher-timeframe spot-bias direction family used in Market/Spot, but built for this row's timeframe.<br>"
+            "<b>Confidence</b>: the same spot-confidence family used in Market/Spot for that timeframe, including archive calibration when available.<br>"
+            "<b>AI Ensemble</b>: the same higher-timeframe AI bias family used in Market/Spot for that timeframe. `*` means the AI layer fell back to Neutral for safety.<br>"
+            "<b>AI Confidence</b>: the same AI-confidence family used in Market/Spot for that timeframe, including archive calibration when available.<br>"
             "<b>Advanced view</b>: filters advanced columns into Trend, Momentum, or Volatility & Volume subsets."
         ),
         "neutral": (
             "<b>Timeframe</b>: the candle interval being checked.<br>"
             "<b>Role</b>: 5m/15m are timing; 1h/4h/1d are structural.<br>"
             "<b>Δ (%)</b>: last closed-candle change for that timeframe.<br>"
-            "<b>Per-TF Setup</b>: row-level setup check for that timeframe. It supports the main read, but it is not a standalone action command.<br>"
-            "<b>Direction</b>: Upside / Downside / Neutral technical bias for that timeframe.<br>"
-            "<b>Confidence</b>: selected-timeframe confidence for that row. It is separate from the global spot-bias confidence shown above.<br>"
-            "<b>AI Ensemble</b>: ML directional read plus vote count on that timeframe. `*` and `Fallback` mean the AI model fell back to Neutral for safety.<br>"
-            "<b>Tech/AI Fit</b>: conviction quality between technical structure and AI context.<br>"
+            "<b>Setup Confirm</b>: the same setup-confirm engine family the scanner would use for that timeframe, then archive-calibrated when enough live history exists.<br>"
+            "<b>Direction</b>: the same higher-timeframe spot-bias direction family used in Market/Spot, but built for this row's timeframe.<br>"
+            "<b>Confidence</b>: the same spot-confidence family used in Market/Spot for that timeframe, including archive calibration when available.<br>"
+            "<b>AI Ensemble</b>: the same higher-timeframe AI bias family used in Market/Spot for that timeframe. `*` means the AI layer fell back to Neutral for safety.<br>"
+            "<b>AI Confidence</b>: the same AI-confidence family used in Market/Spot for that timeframe, including archive calibration when available.<br>"
             "<b>Advanced view</b>: filters advanced columns into Trend, Momentum, or Volatility & Volume subsets."
         ),
     },

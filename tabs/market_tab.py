@@ -242,6 +242,68 @@ def _market_hidden_meta_cols(df_columns, display_cols) -> list[str]:
     return [col for col in _MARKET_RENDER_META_COLS if col in available and col not in display_set]
 
 
+def _decision_version_mode_label(mode: str) -> str:
+    key = str(mode or "").strip().lower()
+    if key == "current_only":
+        return "Current Only"
+    if key == "mixed_fallback":
+        return "Mixed Fallback"
+    if key == "unversioned_fallback":
+        return "Legacy Fallback"
+    if key == "empty":
+        return "Empty"
+    return "Mixed Archive"
+
+
+def _market_calibration_diagnostic_lines(
+    *,
+    mode: str,
+    target_version: str,
+    current_rows: int,
+    total_rows: int,
+    scalp_planned_rows: int,
+    scalp_resolved_rows: int,
+    min_current_rows: int = 80,
+) -> list[str]:
+    target_label = str(target_version or "Current Version").strip() or "Current Version"
+    lines = [
+        f"- Calibration mode: **{_decision_version_mode_label(mode)}**",
+        f"- Current decision version: `{target_label}`",
+    ]
+    if mode == "current_only":
+        lines.append(
+            f"- Current-version archive is active: **{int(current_rows)}** resolved rows are driving adaptive calibration directly "
+            f"(recent resolved pool loaded: **{int(total_rows)}**)."
+        )
+    elif mode == "mixed_fallback":
+        lines.append(
+            f"- Current-version archive is still building: **{int(current_rows)}** of **{int(total_rows)}** recent resolved rows "
+            f"match the new scanner logic, so adaptive calibration still leans on mixed archive history until it reaches **{int(min_current_rows)}**."
+        )
+    elif mode == "unversioned_fallback":
+        lines.append(
+            f"- The loaded resolved pool has **{int(total_rows)}** rows, but they do not isolate the current decision version yet, "
+            "so adaptive calibration is still reading legacy archive history."
+        )
+    elif mode == "empty":
+        lines.append("- No resolved archive rows are available yet, so adaptive calibration has nothing to learn from.")
+    else:
+        lines.append(
+            f"- Resolved current rows: **{int(current_rows)}** of **{int(total_rows)}** loaded. Adaptive calibration is reading a mixed archive slice."
+        )
+
+    if int(scalp_planned_rows) > 0 or int(scalp_resolved_rows) > 0:
+        lines.append(
+            f"- Scalp learning sample for the current version: **{int(scalp_planned_rows)}** planned rows, "
+            f"**{int(scalp_resolved_rows)}** resolved outcomes."
+        )
+    else:
+        lines.append(
+            "- Scalp learning sample for the current version is still empty, so scalp archive calibration is in build-up mode."
+        )
+    return lines
+
+
 def _emerging_badge_tone(direction: str) -> str:
     key = str(direction or "").strip().upper()
     if key == "UPSIDE":
@@ -4589,15 +4651,41 @@ def render(ctx: dict) -> None:
     live_ranked_out_count = 0
     attempted_symbols: set[str] = set()
     skipped_symbols: list[tuple[str, str]] = []
-    adaptive_history_df = fetch_signal_events_df(
+    adaptive_history_raw_df = fetch_signal_events_df(
         limit=2000,
         status="RESOLVED",
         source="Market",
         db_path=signal_tracker_db_path,
     )
     adaptive_history_df = prefer_current_decision_version_slice(
-        adaptive_history_df,
+        adaptive_history_raw_df,
         source="Market",
+    )
+    adaptive_decision_mode = str(adaptive_history_df.attrs.get("decision_version_mode") or "mixed_fallback")
+    adaptive_decision_target = str(adaptive_history_df.attrs.get("decision_version_target") or current_decision_version("Market"))
+    adaptive_decision_rows = int(adaptive_history_df.attrs.get("decision_version_rows") or 0)
+    adaptive_decision_total_rows = int(adaptive_history_df.attrs.get("decision_version_total_rows") or len(adaptive_history_df))
+    _adaptive_version_series = (
+        adaptive_history_raw_df.get("decision_version", pd.Series(index=adaptive_history_raw_df.index, dtype=object))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    _adaptive_current_mask = _adaptive_version_series.eq(adaptive_decision_target)
+    _adaptive_has_plan = pd.to_numeric(
+        adaptive_history_raw_df.get("has_plan", pd.Series(index=adaptive_history_raw_df.index, dtype=float)),
+        errors="coerce",
+    ).fillna(0).astype(int)
+    _adaptive_plan_outcome = (
+        adaptive_history_raw_df.get("plan_outcome", pd.Series(index=adaptive_history_raw_df.index, dtype=object))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    adaptive_current_scalp_planned_rows = int((_adaptive_current_mask & _adaptive_has_plan.eq(1)).sum())
+    adaptive_current_scalp_resolved_rows = int(
+        (_adaptive_current_mask & _adaptive_has_plan.eq(1) & _adaptive_plan_outcome.ne("")).sum()
     )
     adaptive_model = build_adaptive_context_model(adaptive_history_df)
     ai_confidence_calibration_model = build_ai_confidence_calibration_model(adaptive_history_df)
@@ -6645,6 +6733,16 @@ def render(ctx: dict) -> None:
                 st.caption(
                     "Use this live snapshot to judge whether the current thresholds are balanced or too strict for the market regime."
                 )
+                st.markdown("**Adaptive Calibration**")
+                for line in _market_calibration_diagnostic_lines(
+                    mode=adaptive_decision_mode,
+                    target_version=adaptive_decision_target,
+                    current_rows=adaptive_decision_rows,
+                    total_rows=adaptive_decision_total_rows,
+                    scalp_planned_rows=adaptive_current_scalp_planned_rows,
+                    scalp_resolved_rows=adaptive_current_scalp_resolved_rows,
+                ):
+                    st.markdown(line)
                 for line in _audit_scan_summary_lines(
                     displayed_rows=total_rows,
                     attempted_count=attempted_count,

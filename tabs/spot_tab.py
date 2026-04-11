@@ -753,7 +753,7 @@ def render(ctx: dict) -> None:
                         {"name": "CCI", "value": cci_label, "tooltip": "Mean-reversion momentum signal."},
                         {
                             "name": "Pattern",
-                            "value": candle_pattern.split(" (")[0] if candle_pattern else "",
+                            "value": candle_pattern or "",
                             "tooltip": "Latest candle pattern direction.",
                         },
                     ],

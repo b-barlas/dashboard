@@ -10,6 +10,8 @@ from core.adaptive_weighting import (
     build_ai_confidence_calibration_model,
     build_ai_confidence_calibration_snapshot,
     build_confidence_calibration_model,
+    build_scalp_calibration_model,
+    build_scalp_calibration_snapshot,
     build_setup_calibration_model,
     build_setup_calibration_snapshot,
 )
@@ -18,7 +20,7 @@ from core.trading_copy import copy_text, playbook_key, trade_gate_key
 from core.session_utils import session_bucket_for_timestamp
 from core.confidence import confidence_bucket
 from core.market_decision import apply_setup_archive_calibration, action_reason_text, normalize_action_class
-from core.scalping import scalp_gate_thresholds, scalp_reason_text
+from core.scalping import apply_scalp_archive_calibration, scalp_gate_thresholds, scalp_reason_text
 from core.position_metrics import (
     compute_hard_invalidation,
     compute_health_decision,
@@ -370,6 +372,7 @@ def render(ctx: dict) -> None:
         confidence_calibration_model = build_confidence_calibration_model(adaptive_history_df)
         setup_calibration_model = build_setup_calibration_model(adaptive_history_df)
         ai_confidence_calibration_model = build_ai_confidence_calibration_model(adaptive_history_df)
+        scalp_calibration_model = build_scalp_calibration_model(adaptive_history_df)
         report_rows: list[dict] = []
         tf_order = {'1m': 1, '3m': 2, '5m': 3, '15m': 4, '1h': 5, '4h': 6, '1d': 7}
         largest_tf = max(selected_timeframes, key=lambda tf: tf_order[tf])
@@ -554,6 +557,12 @@ def render(ctx: dict) -> None:
                             supertrend_trend,
                             ichimoku_trend,
                             vwap_label,
+                            timeframe=tf,
+                            execution_snapshot=pipeline.execution_snapshot,
+                            trend_led_snapshot=pipeline.trend_led_snapshot,
+                            ai_led_snapshot=pipeline.ai_led_snapshot,
+                            spot_direction=spot_snapshot.direction,
+                            ai_direction=ai_spot_snapshot.direction,
                         )
                     except Exception:
                         scalp_direction = None
@@ -841,7 +850,7 @@ def render(ctx: dict) -> None:
                                 {"name": "CCI", "value": cci_label, "tooltip": "Mean-reversion momentum signal."},
                                 {
                                     "name": "Pattern",
-                                    "value": candle_pattern.split(" (")[0] if candle_pattern else "",
+                                    "value": candle_pattern or "",
                                     "tooltip": "Latest candle pattern direction.",
                                 },
                             ],
@@ -1059,6 +1068,20 @@ def render(ctx: dict) -> None:
                         )
                         if df_scalp is not None and len(df_scalp) > 30:
                             gate_min_rr, gate_min_adx, gate_min_confidence = scalp_gate_thresholds(tf)
+                            scalp_calibration_snapshot = build_scalp_calibration_snapshot(
+                                scalp_calibration_model,
+                                signal={
+                                    "Setup Confirm": str(action_raw or ""),
+                                    "AI Alignment": (
+                                        "Aligned"
+                                        if direction_key(spot_snapshot.direction) == ai_spot_direction
+                                        else "Not aligned"
+                                    ),
+                                    "Timeframe": str(tf or "Unknown"),
+                                    "Scan Focus": "Unknown",
+                                    "Direction": str(spot_snapshot.direction or signal_dir or ""),
+                                },
+                            )
                             scalp_ok, scalp_reason = scalp_quality_gate(
                                 scalp_direction=scalp_direction,
                                 signal_direction=signal_dir,
@@ -1072,10 +1095,56 @@ def render(ctx: dict) -> None:
                                 min_rr=gate_min_rr,
                                 min_adx=gate_min_adx,
                                 min_confidence=gate_min_confidence,
+                                timeframe=tf,
+                                setup_confirm=action_raw,
+                                market_trade_gate_key=str(
+                                    recent_market_context.get("Trade Gate Key")
+                                    or recent_market_context.get("Trade Gate")
+                                    or ""
+                                ),
+                                archive_guardrail_penalty=float(
+                                    getattr(adaptive_snapshot, "archive_guardrail_penalty", 0.0) or 0.0
+                                ),
+                                archive_guardrail_label=str(
+                                    getattr(adaptive_snapshot, "archive_guardrail_label", "") or ""
+                                ),
                             )
+                            scalp_ok, scalp_reason = apply_scalp_archive_calibration(
+                                scalp_ok,
+                                scalp_reason,
+                                calibration_delta=float(getattr(scalp_calibration_snapshot, "delta", 0.0) or 0.0),
+                                rr_ratio=rr_ratio,
+                                adx_val=adx_val,
+                                confidence=float(execution_confidence.score),
+                                timeframe=tf,
+                            )
+                            scalp_note = scalp_reason_text(
+                                scalp_reason,
+                                timeframe=tf,
+                                min_rr=gate_min_rr,
+                                min_adx=gate_min_adx,
+                                min_confidence=gate_min_confidence,
+                            ) or "No valid scalping setup with current filters."
+                            scalp_calibration_note = str(getattr(scalp_calibration_snapshot, "note", "") or "").strip()
+                            if scalp_calibration_note:
+                                scalp_note = f"{scalp_note} {scalp_calibration_note}".strip()
+                            if scalp_note in {"Invalid plan levels", "Invalid ATR/price"}:
+                                scalp_note = "No valid plan on current candle structure."
+                            scalp_show_conditional = bool(scalp_direction) and str(scalp_reason or "").upper() not in {
+                                "NO_SCALP_DIRECTION",
+                                "SIGNAL_DIRECTION_NEUTRAL",
+                                "UNSUPPORTED_TIMEFRAME",
+                            }
+                            show_levels = bool(entry_s and stop_s and target_s)
+                            breakout_context = str(breakout_note or "").strip()
 
                             if scalp_ok and scalp_direction:
                                 color = POSITIVE if scalp_direction == "LONG" else NEGATIVE
+                                context_line = (
+                                    f"<br><span style='color:{TEXT_MUTED};'>Trigger context: {breakout_context}</span>"
+                                    if breakout_context
+                                    else ""
+                                )
                                 st.markdown(
                                     f"""
                                     <div class='panel-box' style='border-left:4px solid {color};'>
@@ -1089,25 +1158,48 @@ def render(ctx: dict) -> None:
                                         Stop <b style='color:{NEGATIVE};'>${stop_s:,.4f}</b> |
                                         Target <b style='color:{POSITIVE};'>${target_s:,.4f}</b><br>
                                         {'Good setup quality (R:R gate passed).' if rr_ratio >= gate_min_rr else f'R:R is below gate ({gate_min_rr:.2f}).'}
+                                        {context_line}
+                                      </div>
+                                    </div>
+                                    """,
+                                    unsafe_allow_html=True,
+                                )
+                            elif scalp_show_conditional and scalp_direction:
+                                color = POSITIVE if scalp_direction == "LONG" else NEGATIVE
+                                levels_html = ""
+                                if show_levels:
+                                    levels_html = (
+                                        f"Reference Entry <b style='color:{ACCENT};'>${entry_s:,.4f}</b> | "
+                                        f"Stop <b style='color:{NEGATIVE};'>${stop_s:,.4f}</b> | "
+                                        f"Target <b style='color:{POSITIVE};'>${target_s:,.4f}</b><br>"
+                                        f"R:R <b>{float(rr_ratio or 0.0):.2f}</b><br>"
+                                    )
+                                trigger_html = (
+                                    f"<span style='color:{TEXT_MUTED};'>Trigger context: {breakout_context}</span><br>"
+                                    if breakout_context
+                                    else ""
+                                )
+                                st.markdown(
+                                    f"""
+                                    <div class='panel-box' style='border-left:4px solid {WARNING};'>
+                                      <div style='display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap;'>
+                                        <span style='color:{color}; font-weight:800;'>Scalp {direction_label(scalp_direction)} (Conditional)</span>
+                                        <span style='color:{WARNING}; font-weight:700;'>Reference Only</span>
+                                      </div>
+                                      <div style='color:{TEXT_MUTED}; font-size:0.88rem; margin-top:6px; line-height:1.65;'>
+                                        {levels_html}
+                                        {trigger_html}
+                                        {scalp_note}
                                       </div>
                                     </div>
                                     """,
                                     unsafe_allow_html=True,
                                 )
                             else:
-                                msg = breakout_note or scalp_reason_text(
-                                    scalp_reason,
-                                    timeframe=tf,
-                                    min_rr=gate_min_rr,
-                                    min_adx=gate_min_adx,
-                                    min_confidence=gate_min_confidence,
-                                ) or "No valid scalping setup with current filters."
-                                if msg in {"Invalid plan levels", "Invalid ATR/price"}:
-                                    msg = "No valid plan on current candle structure."
                                 st.markdown(
                                     f"<div class='panel-box' style='border-left:4px solid {WARNING};'>"
                                     f"<b style='color:{WARNING};'>Scalp Read: Not Available</b><br>"
-                                    f"<span style='color:{TEXT_MUTED}; font-size:0.86rem;'>Reason: {msg}</span>"
+                                    f"<span style='color:{TEXT_MUTED}; font-size:0.86rem;'>Reason: {scalp_note}</span>"
                                     f"</div>",
                                     unsafe_allow_html=True,
                                 )

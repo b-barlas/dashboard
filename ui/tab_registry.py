@@ -135,6 +135,7 @@ _TAB_DEPS = [
             "_normalize_coin_input", "_validate_coin_symbol", "fetch_ohlcv", "analyse",
             "direction_key", "direction_label", "format_delta", "format_stochrsi",
             "ml_ensemble_predict", "_calc_conviction",
+            *_TRACKER_DEPS,
         ],
     ),
     (

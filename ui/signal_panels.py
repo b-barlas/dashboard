@@ -3,29 +3,103 @@
 from __future__ import annotations
 
 import html
+import re
 
 
 def clean_indicator_text(value: str) -> str:
     text = str(value or "").strip()
     for token in ["🟢", "🔴", "🟡", "⚪", "🔥", "▲▲", "▲", "▼", "→", "–"]:
         text = text.replace(token, "")
+    text = re.sub(r"^\s*-\s*", "", text)
     return " ".join(text.split()).strip()
 
 
-def indicator_color(value: str, *, positive: str, negative: str, warning: str) -> str:
-    upper = str(value or "").upper()
+def normalize_indicator_name(name: str) -> str:
+    raw = str(name or "").strip()
+    upper = raw.upper()
+    if upper in {"STOCHRSI", "STOCH RSI", "STOCHASTIC RSI"}:
+        return "Stochastic RSI"
+    if upper in {"PATTERN", "CANDLE PATTERN"}:
+        return "Candle Pattern"
+    if upper in {"VOLUME", "SPIKE ALERT"}:
+        return "Spike Alert"
+    return raw
+
+
+def compact_adx_indicator_label(value: str) -> str:
+    clean = clean_indicator_text(value)
+    upper = clean.upper()
+    if not clean:
+        return ""
+    if "EXTREME" in upper:
+        return "🔥 Extreme"
+    if "VERY STRONG" in upper:
+        return "▲▲ Very Strong"
+    if "STRONG" in upper:
+        return "▲ Strong"
+    if "WEAK" in upper:
+        return "▼ Weak"
+    if "STARTING" in upper:
+        return "- Starting"
+    return clean
+
+
+def normalize_indicator_label(value: str, *, name: str = "") -> str:
+    raw = str(value or "").strip()
+    if not raw or raw.upper() in {"UNAVAILABLE", "N/A", "NA", "NAN"}:
+        return ""
+    column_name = str(name or "").strip().upper()
+    if column_name == "ADX":
+        return compact_adx_indicator_label(raw)
+
+    clean = clean_indicator_text(raw)
+    upper = clean.upper()
+    if not clean:
+        return ""
+    if "NEAR TOP" in upper:
+        return "▼ Near Top"
+    if "NEAR BOTTOM" in upper:
+        return "▲ Near Bottom"
+    if "NEAR VWAP" in upper:
+        return "- Near VWAP"
+    if "BULLISH" in upper or upper in {"ABOVE", "OVERSOLD", "LOW", "UP SPIKE"}:
+        return f"▲ {clean}"
+    if "BEARISH" in upper or upper in {"BELOW", "OVERBOUGHT", "HIGH", "DOWN SPIKE"}:
+        return f"▼ {clean}"
+    if any(key in upper for key in ["NEUTRAL", "MODERATE", "STARTING", "INDECISION", "MIXED", "SPIKE"]):
+        return f"- {clean}"
+    return clean
+
+
+def indicator_color(
+    value: str,
+    *,
+    positive: str,
+    negative: str,
+    warning: str,
+    muted: str,
+) -> str:
+    upper = str(value or "").upper().strip()
+    if not upper:
+        return muted
+    if upper.startswith("▲") or upper.startswith("🔥"):
+        return positive
+    if upper.startswith("▼"):
+        return negative
+    if upper.startswith("-"):
+        return muted
     if "VERY STRONG" in upper or "EXTREME" in upper:
         return positive
     if "STRONG" in upper and "NOT" not in upper:
         return positive
     if "WEAK" in upper:
         return negative
-    if "STARTING" in upper:
-        return warning
     if any(key in upper for key in ["BULLISH", "ABOVE", "OVERSOLD", "LOW", "NEAR BOTTOM", "UP SPIKE"]):
         return positive
     if any(key in upper for key in ["BEARISH", "BELOW", "OVERBOUGHT", "HIGH", "NEAR TOP", "DOWN SPIKE"]):
         return negative
+    if any(key in upper for key in ["NEUTRAL", "MODERATE", "STARTING", "MIXED", "INDECISION", "SPIKE"]):
+        return muted
     return warning
 
 
@@ -111,16 +185,23 @@ def build_indicator_groups_html(
         cells: list[str] = []
         for item in items:
             raw_value = str(item.get("value") or "")
-            cleaned = clean_indicator_text(raw_value)
-            if not cleaned:
+            display_name = normalize_indicator_name(str(item.get("name") or ""))
+            normalized = normalize_indicator_label(raw_value, name=display_name)
+            if not normalized:
                 continue
             tooltip = html.escape(str(item.get("tooltip") or ""), quote=True)
-            name = html.escape(str(item.get("name") or ""))
-            color = indicator_color(cleaned, positive=positive, negative=negative, warning=warning)
+            name = html.escape(display_name)
+            color = indicator_color(
+                normalized,
+                positive=positive,
+                negative=negative,
+                warning=warning,
+                muted=text_muted,
+            )
             cells.append(
                 f"<div class='signal-indicator-item'>"
                 f"<div class='signal-indicator-name'>{name}</div>"
-                f"<div class='signal-indicator-value' style='color:{color};' title='{tooltip}'>{cleaned}</div>"
+                f"<div class='signal-indicator-value' style='color:{color};' title='{tooltip}'>{html.escape(normalized)}</div>"
                 f"</div>"
             )
         if not cells:
