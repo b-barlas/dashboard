@@ -17,6 +17,7 @@ TAB_MODULES = [
     "tabs.fibonacci_tab",
     "tabs.guide_tab",
     "tabs.heatmap_tab",
+    "tabs.labs_tab",
     "tabs.market_tab",
     "tabs.ml_tab",
     "tabs.monte_carlo_tab",

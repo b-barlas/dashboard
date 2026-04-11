@@ -42,7 +42,7 @@ _COPY = {
         "neutral": "Use extra caution",
     },
     "context_fit.aggression.probe_only": {
-        "trader": "Probe only",
+        "trader": "Early-entry only",
         "neutral": "Early confirmation only",
     },
     "spot.archive.status.guardrail": {
@@ -174,7 +174,7 @@ _COPY = {
         "neutral": "Low Alignment",
     },
     "spot.plan.mode.probe": {
-        "trader": "Probe",
+        "trader": "Early",
         "neutral": "Early Setup",
     },
     "spot.plan.mode.watch": {
@@ -202,7 +202,7 @@ _COPY = {
         "neutral": "If already holding, keep protection at {pullback_invalidation}.",
     },
     "spot.plan.skip.next": {
-        "trader": "Wait for WATCH, PROBE, or a confirmed class before treating this as active risk.",
+        "trader": "Wait for WATCH, EARLY, or a confirmed class before treating this as active risk.",
         "neutral": "Wait for stronger confirmation before treating this as an active setup.",
     },
     "spot.plan.probe.upside.now": {
@@ -354,7 +354,7 @@ _COPY = {
         "neutral": "The tape is supportive enough for normal-quality setups.",
     },
     "market.trade_gate.summary.selective_probe": {
-        "trader": "Nothing is fully ready yet, but probe-grade setups are live.",
+        "trader": "Nothing is fully ready yet, but early-entry setups are live.",
         "neutral": "Nothing is fully ready yet, but early setups are live.",
     },
     "market.trade_gate.summary.selective_clean": {
@@ -390,7 +390,7 @@ _COPY = {
         "neutral": "CACHED SETUPS",
     },
     "market.status.head.cached_probe": {
-        "trader": "CACHED PROBES",
+        "trader": "CACHED EARLY SETUPS",
         "neutral": "CACHED EARLY SETUPS",
     },
     "market.status.head.cached_none": {
@@ -398,7 +398,7 @@ _COPY = {
         "neutral": "NO LIVE SETUP",
     },
     "market.status.sub.cached": {
-        "trader": "CACHED READY: {enter_count} • PROBE: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}",
+        "trader": "CACHED READY: {enter_count} • EARLY: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}",
         "neutral": "CACHED HIGH-QUALITY: {enter_count} • EARLY: {probe_count} • DEVELOPING: {watch_count} • NOT ALIGNED: {skip_count}",
     },
     "market.status.head.degraded_ready": {
@@ -406,7 +406,7 @@ _COPY = {
         "neutral": "DEGRADED SETUPS",
     },
     "market.status.head.degraded_probe": {
-        "trader": "PROBE-ONLY TAPE",
+        "trader": "EARLY-ENTRY TAPE",
         "neutral": "EARLY-SETUP TAPE",
     },
     "market.status.head.degraded_none": {
@@ -414,7 +414,7 @@ _COPY = {
         "neutral": "NO CLEAN SETUP",
     },
     "market.status.sub.degraded": {
-        "trader": "DEGRADED READY: {enter_count} • PROBE: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}",
+        "trader": "DEGRADED READY: {enter_count} • EARLY: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}",
         "neutral": "DEGRADED HIGH-QUALITY: {enter_count} • EARLY: {probe_count} • DEVELOPING: {watch_count} • NOT ALIGNED: {skip_count}",
     },
     "market.status.head.live_ready": {
@@ -422,7 +422,7 @@ _COPY = {
         "neutral": "SETUPS READY",
     },
     "market.status.head.live_probe": {
-        "trader": "PROBE SETUPS LIVE",
+        "trader": "EARLY SETUPS LIVE",
         "neutral": "EARLY SETUPS LIVE",
     },
     "market.status.head.live_none": {
@@ -430,15 +430,15 @@ _COPY = {
         "neutral": "NO SETUP READY",
     },
     "market.status.sub.live": {
-        "trader": "READY: {enter_count} • PROBE: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}",
+        "trader": "READY: {enter_count} • EARLY: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}",
         "neutral": "HIGH-QUALITY: {enter_count} • EARLY: {probe_count} • DEVELOPING: {watch_count} • NOT ALIGNED: {skip_count}",
     },
     "market.status.label_title": {
-        "trader": "Quick count of how many shown rows are READY, PROBE, WATCH, or SKIP.",
+        "trader": "Quick count of how many shown rows are READY, EARLY, WATCH, or SKIP.",
         "neutral": "Quick count of how many shown rows are high-quality, early, developing, or not aligned.",
     },
     "market.audit.probe_heavy": {
-        "trader": "PROBE-heavy table: setups are close enough for starter risk, but full confirmation is still scarce.",
+        "trader": "Early-entry heavy table: setups are close enough for small risk, but full confirmation is still scarce.",
         "neutral": "Early-setup heavy table: many candidates are close, but stronger confirmation is still scarce.",
     },
     "market.audit.watch_heavy": {
@@ -466,7 +466,7 @@ _COPY = {
         "neutral": "Quick sentiment gauge. Lower means fear; higher means greed. Use it as background context, not as a standalone trigger.",
     },
     "market.tooltip.setup_confirm": {
-        "trader": "Final scanner verdict showing whether the setup looks fully ready, probe-worthy with starter risk only, promising-but-early, or not good enough yet.",
+        "trader": "Final scanner verdict showing whether the setup looks fully ready, worthy of EARLY-size risk only, promising-but-early, or not good enough yet.",
         "neutral": "Final scanner verdict showing whether the setup looks high-quality, early but interesting, still developing, or not aligned yet.",
     },
     "market.tooltip.entry_price": {
@@ -488,7 +488,7 @@ _COPY = {
     "market.help.scanner_guide_html": {
         "trader": (
             "<b>Read order:</b> <b>Setup Confirm</b> -> <b>Direction + Confidence</b> -> <b>AI Ensemble + AI Confidence</b>.<br>"
-            "<b>Setup Confirm:</b> ENTER = fully ready, PROBE = starter-risk only, WATCH = monitor only, SKIP = pass.<br>"
+            "<b>Setup Confirm:</b> ENTER = fully ready, EARLY = small-risk only, WATCH = monitor only, SKIP = pass.<br>"
             "Price ($) shows the latest candle close.<br>"
             "Δ (%) shows the change from previous closed candle to latest closed candle on selected timeframe.<br>"
             "<b>Tip:</b> use column-header and cell hovers for detailed definitions. Advanced columns are optional."
@@ -504,7 +504,7 @@ _COPY = {
     "spot.help.quick_html": {
         "trader": (
             "<b>1.</b> Start with <b>Setup Snapshot</b>: Δ (%) + Setup Confirm + Direction + Confidence.<br>"
-            "<b>2.</b> Read <b>Setup Confirm</b> first: TREND+AI = strongest confirmation, TREND-led = technicals support the move, AI-led = AI support is strong enough, PROBE = starter-risk only, WATCH = idea is alive but early, SKIP = leave it alone for now. This uses selected-timeframe execution quality plus a local spot risk model, not the scalp planner.<br>"
+            "<b>2.</b> Read <b>Setup Confirm</b> first: TREND+AI = strongest confirmation, TREND-led = technicals support the move, AI-led = AI support is strong enough, EARLY = small-risk only, WATCH = idea is alive but early, SKIP = leave it alone for now. This uses selected-timeframe execution quality plus a local spot risk model, not the scalp planner.<br>"
             "<b>3.</b> <b>Direction</b> = higher-timeframe spot bias from the adaptive lead/confirm anchor pair. <b>Confidence</b> = quality of that bias.<br>"
             "<b>4.</b> Validate with <b>AI Ensemble</b> + <b>AI Confidence</b>. AI Ensemble is the higher-timeframe AI bias from the same adaptive anchor pair; AI Confidence scores how reliable that HTF AI verdict is.<br>"
             "<b>5.</b> <b>Market Archive Read</b> is a market-history fit check, not a coin-specific proof card. Use it to size aggression, not to override price structure.<br>"
@@ -608,7 +608,7 @@ _COPY = {
         "neutral": "A market-wide catalyst is too close to trust new setup exposure.",
     },
     "no_trade.note.probe_only": {
-        "trader": "Nothing is fully ready yet, but there are probe-grade setups worth small starter risk. Stay selective and keep size in probe territory until stronger confirmation appears.",
+        "trader": "Nothing is fully ready yet, but there are early-entry setups worth small risk. Stay selective and keep size light until stronger confirmation appears.",
         "neutral": "Nothing is fully ready yet, but a few early setups are interesting. Stay selective and keep size small until stronger confirmation appears.",
     },
     "no_trade.note.no_ready_setups": {
@@ -636,7 +636,7 @@ _COPY = {
         "neutral": "Setups can work, but only the clearest aligned leaders deserve attention. Treat everything else as noise.",
     },
     "no_trade.note.selective_probe": {
-        "trader": "This is still a selective tape, but probe-grade setups are showing up. Small starter risk is fine; save normal size for cleaner confirmation.",
+        "trader": "This is still a selective tape, but early-entry setups are showing up. Small risk is fine; save normal size for cleaner confirmation.",
         "neutral": "This is still a selective tape, but early setups are showing up. Keep size small and wait for cleaner confirmation before doing more.",
     },
     "no_trade.note.selective_catalyst_default": {
@@ -1087,7 +1087,7 @@ How the 5 key columns are calculated:
 - `TREND-led` = pure technical selected-timeframe confirmation
 - `AI-led` = pure AI confirmation, but it still must pass the same execution safety gates
 - `TREND+AI` = both motors are independently strong and also elite together
-- `PROBE` = not fully confirmed yet, but clean enough for starter-risk only
+- `EARLY` = not fully confirmed yet, but clean enough for small-risk only
 - `WATCH` = the idea is alive, but timing is not clean yet
 - `SKIP` = edge is too weak, too conflicted, or badly located right now
 
@@ -1148,7 +1148,7 @@ How the 5 key columns are calculated:
 - `TREND-led` = technical selected-timeframe confirmation
 - `AI-led` = AI selected-timeframe confirmation
 - `TREND+AI` = both are strong together
-- `PROBE` = early setup
+- `EARLY` = early setup
 - `WATCH` = developing setup
 - `SKIP` = not aligned right now
 
@@ -1269,70 +1269,72 @@ Use it to decide when conditions look cleaner after a setup already exists elsew
     },
     "guide.section.setup_backtest": {
         "trader": """
-Setup outcome study for Setup Confirm:
-- TREND+AI
-- TREND-led
-- AI-led
+Setup Lab is a historical simulation layer, not a live archive.
 
-Inputs:
-- setup class filter
-- timeframe
-- lookback candles
-- forward bars (for outcome window)
+What it does:
+- replays the current setup engine on closed candles
+- compares ENTER setup families (TREND+AI, TREND-led, AI-led)
+- measures forward outcome over the next N bars
 
-Outputs:
-- how many events were generated
-- event price and forward path over next N bars
-- class-level favorable rate and directional return quality
+Use it for:
+- class-level edge checks before changing live policy
+- hold-window and expectancy comparisons
+
+Use Signal Archive for:
+- what the dashboard actually logged live
+- what you actually took or skipped
+- journaled execution outcomes
 """,
         "neutral": """
-Setup outcome study for Setup Confirm:
-- TREND+AI
-- TREND-led
-- AI-led
+Setup Lab is a historical simulation layer, not a live archive.
 
-Inputs:
-- setup class filter
-- timeframe
-- lookback candles
-- forward bars (for outcome window)
+What it does:
+- replays the current setup engine on closed candles
+- compares ENTER setup families (TREND+AI, TREND-led, AI-led)
+- measures forward outcome over the next N bars
 
-Outputs:
-- how many events were generated
-- event price and forward path over next N bars
-- class-level favorable rate and directional return quality
+Use it for:
+- class-level behavior checks before changing live policy
+- hold-window and expectancy comparisons
+
+Use Signal Archive for:
+- what the dashboard actually logged live
+- what you actually took or skipped
+- journaled execution outcomes
 """,
     },
     "guide.section.scalp_backtest": {
         "trader": """
-Scalp outcome study for high-quality scalp events.
+Scalp Lab is a historical simulation layer, not a live archive.
 
-Uses the same market scalp pipeline:
-- top-volume multi-coin scan (stablecoins excluded by default)
-- scalp gate (timeframe-adaptive R:R / ADX / Confidence thresholds)
-- generated scalp levels (entry / stop / target)
+What it does:
+- replays the current scalp planner and scalp gate on closed candles
+- tracks TP-first, SL-first, and timeout behavior
+- compares outcome quality by side and by coin
 
-Outputs:
-- event count and TP-hit behavior
-- direction-level and coin-level scalp outcome quality
-- forward path table with event-relative price movement
+Use it for:
+- validating scalp behavior before trusting live scalp labels
+- testing which symbols or directions behave cleaner
 
-Use this tab to validate scalp behavior before relying on scalp labels live.
+Use Signal Archive for:
+- what the live scanner actually logged
+- actual taken trades and execution journal quality
 """,
         "neutral": """
-Scalp outcome study for high-quality scalp events.
+Scalp Lab is a historical simulation layer, not a live archive.
 
-Uses the same market scalp pipeline:
-- top-volume multi-coin scan (stablecoins excluded by default)
-- scalp gate (timeframe-adaptive R:R / ADX / Confidence thresholds)
-- generated scalp levels (entry / stop / target)
+What it does:
+- replays the current scalp planner and scalp gate on closed candles
+- tracks TP-first, SL-first, and timeout behavior
+- compares outcome quality by side and by coin
 
-Outputs:
-- event count and TP-hit behavior
-- direction-level and coin-level scalp outcome quality
-- forward path table with event-relative price movement
+Use it for:
+- validating scalp behavior before trusting live scalp labels
+- testing which symbols or directions behave cleaner
 
-Use this tab to validate scalp behavior before relying on scalp labels live.
+Use Signal Archive for:
+- what the live scanner actually logged
+- actual taken trades and execution journal quality
 """,
     },
     "guide.section.workflow": {
@@ -1345,8 +1347,8 @@ Recommended daily flow:
 5. Position: if already in trade, follow Technical Invalidation + decision model first
 6. Fibonacci/Risk: validate structure and downside risk
 7. Tools: confirm R:R and liquidation distance
-8. Setup Backtest: validate Setup Confirm class edge before using new setup live
-9. Scalp Backtest: validate scalp gate behavior and TP/SL outcome profile
+8. Setup Lab: validate Setup Confirm class edge before using new setup live
+9. Scalp Lab: validate scalp gate behavior and TP/SL outcome profile
 10. Model Lab: tune raw signal threshold/holding parameters
 
 Quick rule:
@@ -1362,8 +1364,8 @@ Recommended daily flow:
 5. Position: if already in trade, follow Technical Invalidation + decision model first
 6. Fibonacci/Risk: validate structure and downside risk
 7. Tools: confirm R:R and liquidation distance
-8. Setup Backtest: validate Setup Confirm class behavior before using a new setup live
-9. Scalp Backtest: validate scalp gate behavior and TP/SL outcome profile
+8. Setup Lab: validate Setup Confirm class behavior before using a new setup live
+9. Scalp Lab: validate scalp gate behavior and TP/SL outcome profile
 10. Model Lab: tune raw signal threshold/holding parameters
 """,
     },
@@ -1506,7 +1508,7 @@ def setup_class_key(value: object) -> str:
         return "ENTER_TREND_LED"
     if raw in {"ENTER_AI_LED", "AI_LED"}:
         return "ENTER_AI_LED"
-    if raw == "PROBE":
+    if raw in {"PROBE", "EARLY", "EARLY_ENTRY", "EARLY_SETUP"} or raw.startswith("EARLY_"):
         return "PROBE"
     if raw == "WATCH":
         return "WATCH"
@@ -1534,7 +1536,7 @@ def setup_class_display(value: object, *, audience: str | None = None) -> str:
             "neutral": "Model-Led Setup",
         },
         "PROBE": {
-            "trader": "PROBE",
+            "trader": "EARLY",
             "neutral": "Early Setup",
         },
         "WATCH": {

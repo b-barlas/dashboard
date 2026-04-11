@@ -16,7 +16,7 @@ from core.backtest import (
 from core.confidence import ai_confidence_bucket, confidence_bucket
 from core.trading_copy import setup_class_display, setup_class_key
 from ui.ctx import get_ctx
-from ui.primitives import render_kpi_grid, render_page_header
+from ui.primitives import render_help_details, render_insight_card, render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -505,13 +505,56 @@ def render(ctx: dict) -> None:
 
     render_page_header(
         st,
-        title="Setup Backtest",
+        title="Setup Lab",
         intro_html=(
-            "Forward-outcome study for setup classes. "
-            "The engine scans each closed candle, records every matching setup event, and measures how that setup behaves over the next N bars. "
-            "Use it to compare occurrence frequency, forward returns, and class-level quality between "
-            f"{setup_class_display('ENTER_TREND_AI')}, {setup_class_display('ENTER_TREND_LED')}, "
-            f"{setup_class_display('ENTER_AI_LED')}, or the full setup mix."
+            "Historical setup simulation. "
+            "This lab replays the current setup engine on closed candles and measures what happened over the next N bars. "
+            "Use it to compare setup-class behavior before changing live scanner policy."
+        ),
+    )
+    intro_cols = st.columns(3)
+    with intro_cols[0]:
+        render_insight_card(
+            st,
+            title="Mode",
+            body_html=(
+                "Simulation lab only. It replays the <b>current setup engine</b> on historical closed candles, "
+                "not the live tracker archive."
+            ),
+            tone="neutral",
+        )
+    with intro_cols[1]:
+        render_insight_card(
+            st,
+            title="Current Scope",
+            body_html=(
+                "Today this lab compares the three <b>ENTER</b> setup families: "
+                f"<b>{setup_class_display('ENTER_TREND_AI')}</b>, "
+                f"<b>{setup_class_display('ENTER_TREND_LED')}</b>, and "
+                f"<b>{setup_class_display('ENTER_AI_LED')}</b>."
+            ),
+            tone="accent",
+        )
+    with intro_cols[2]:
+        render_insight_card(
+            st,
+            title="Pair It With",
+            body_html=(
+                "Use <b>Signal Archive</b> for what the dashboard actually logged live, "
+                "and use <b>Setup Lab</b> for historical simulation before promoting a setup idea."
+            ),
+            tone="positive",
+        )
+    render_help_details(
+        st,
+        summary="How to read quickly",
+        body_html=(
+            "1. This is a <b>simulation lab</b>, not a live archive screen.<br>"
+            "2. The engine scans historical <b>closed candles</b> and records every matching setup event.<br>"
+            "3. Use <b>Forward Bars</b> to choose how far after each event you want to measure outcome.<br>"
+            "4. <b>Expectancy</b> is the average directional return per event at that horizon.<br>"
+            "5. <b>Best Hold Window</b> shows where the average forward edge was strongest.<br>"
+            "6. Use this page to compare setup behavior, then confirm real-world behavior in <b>Signal Archive</b>."
         ),
     )
 

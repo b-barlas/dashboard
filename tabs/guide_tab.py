@@ -286,30 +286,22 @@ Outputs:
             "risk",
         ),
         (
-            "15) Model Lab tab",
+            "15) Labs tab",
             """
-Signal-engine diagnostics backtest.
-Use it to calibrate:
-- confidence threshold
-- fixed holding bars
-- fee/slippage assumptions
+Research and simulation workspace with two sub-tabs:
+- Model Lab
+- Setup Lab
+- Scalp Lab
 
-This mode validates the raw Direction + Confidence engine, not only the higher-timeframe spot Direction model.
+Use Model Lab to diagnose raw signal-engine behavior.
+Use Setup Lab to compare historical setup-class behavior.
+Use Scalp Lab to test historical scalp planner and gate behavior.
+Use Signal Archive for the real logged tracker history and execution journal.
             """,
             "risk",
         ),
         (
-            "16) Setup Backtest tab",
-            copy_text("guide.section.setup_backtest"),
-            "risk",
-        ),
-        (
-            "17) Scalp Backtest tab",
-            copy_text("guide.section.scalp_backtest"),
-            "risk",
-        ),
-        (
-            "18) Analysis Guide tab (this page)",
+            "16) Analysis Guide tab (this page)",
             """
 This guide mirrors the live dashboard behavior.
 Use it as:
@@ -320,7 +312,7 @@ Use it as:
             "info",
         ),
         (
-            "19) Data sources, fallback policy, and UK-safe exchanges",
+            "17) Data sources, fallback policy, and UK-safe exchanges",
             """
 Primary exchange fallback list is intentionally UK-safe for this setup:
 - Kraken

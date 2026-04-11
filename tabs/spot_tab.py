@@ -466,7 +466,7 @@ def render(ctx: dict) -> None:
         ai_spot_note = _spot_ai_bias_note(ai_spot_snapshot)
         action_raw, action_reason_code = pipeline.action_raw, pipeline.action_reason_code
 
-        setup_confirm = _setup_confirm_display(action_raw)
+        setup_confirm = _setup_confirm_display(action_raw, action_reason=action_reason_code)
         setup_reason = action_reason_text(action_reason_code)
 
         sig_c_s = POSITIVE if spot_snapshot.direction == "UPSIDE" else (NEGATIVE if spot_snapshot.direction == "DOWNSIDE" else WARNING)
@@ -532,7 +532,7 @@ def render(ctx: dict) -> None:
             action_reason_code,
             calibration_delta=float(getattr(setup_calibration_snapshot, "delta", 0.0) or 0.0),
         )
-        setup_confirm = _setup_confirm_display(action_raw)
+        setup_confirm = _setup_confirm_display(action_raw, action_reason=action_reason_code)
         setup_reason = action_reason_text(action_reason_code)
         action_class = normalize_action_class(action_raw)
         if action_class.startswith("ENTER_"):

@@ -27,7 +27,7 @@ _ACTION_PRESENTATION = {
     },
     "PROBE": {
         "family": "probe",
-        "trader": "PROBE",
+        "trader": "EARLY",
         "neutral": "Early Setup",
     },
     "WATCH": {
@@ -48,6 +48,33 @@ def _normalized_action_key(raw_action: str) -> str:
     if raw in _ACTION_PRESENTATION:
         return raw
     return normalize_action_class(raw_action)
+
+
+def _probe_display_text(
+    *,
+    audience: str,
+    action_reason: str | None = None,
+) -> str:
+    reason = str(action_reason or "").strip().upper()
+    if audience == "neutral":
+        if reason == "PROBE_TREND":
+            return "Early Trend-Led Setup"
+        if reason == "PROBE_AI":
+            return "Early Model-Led Setup"
+        if reason == "PROBE_DUAL":
+            return "Early Trend + Model Setup"
+        if reason in {"ARCHIVE_UPGRADE_TO_PROBE", "ARCHIVE_DOWNGRADE_TO_PROBE"}:
+            return "Early Archive-Calibrated Setup"
+        return "Early Setup"
+    if reason == "PROBE_TREND":
+        return "EARLY (Trend-Led)"
+    if reason == "PROBE_AI":
+        return "EARLY (AI-Led)"
+    if reason == "PROBE_DUAL":
+        return "EARLY (Trend+AI)"
+    if reason in {"ARCHIVE_UPGRADE_TO_PROBE", "ARCHIVE_DOWNGRADE_TO_PROBE"}:
+        return "EARLY (Archive)"
+    return "EARLY"
 
 
 def spot_bias_label(direction: str) -> str:
@@ -170,11 +197,21 @@ def action_family(raw_action: str) -> str:
     return "unknown"
 
 
-def setup_confirm_display(raw_action: str, *, audience: str | None = None) -> str:
+def setup_confirm_display(
+    raw_action: str,
+    *,
+    audience: str | None = None,
+    action_reason: str | None = None,
+) -> str:
     cls = _normalized_action_key(raw_action)
     profile = _ACTION_PRESENTATION.get(cls)
     if profile:
         selected_audience = str(audience or get_copy_audience())
+        if cls == "PROBE":
+            return _probe_display_text(
+                audience=selected_audience,
+                action_reason=action_reason,
+            )
         return str(profile.get(selected_audience) or profile.get("trader") or cls)
     return str(raw_action or "").strip() or "SKIP"
 

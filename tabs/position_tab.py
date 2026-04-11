@@ -582,7 +582,7 @@ def render(ctx: dict) -> None:
                 confidence_display = _confidence_display(float(confidence_snapshot.score))
                 conf_bucket = confidence_bucket(float(confidence_snapshot.score))
                 conf_color = POSITIVE if conf_bucket == "HIGH" else (WARNING if conf_bucket == "MEDIUM" else NEGATIVE)
-                setup_confirm = _setup_confirm_display(action_raw)
+                setup_confirm = _setup_confirm_display(action_raw, action_reason=action_reason_code)
                 setup_reason = action_reason_text(action_reason_code)
                 action_class = normalize_action_class(action_raw)
                 watch_setup_color = "#7DD3FC"
@@ -630,7 +630,7 @@ def render(ctx: dict) -> None:
                     action_reason_code,
                     calibration_delta=float(getattr(setup_calibration_snapshot, "delta", 0.0) or 0.0),
                 )
-                setup_confirm = _setup_confirm_display(action_raw)
+                setup_confirm = _setup_confirm_display(action_raw, action_reason=action_reason_code)
                 setup_reason = action_reason_text(action_reason_code)
                 action_class = normalize_action_class(action_raw)
                 if action_class.startswith("ENTER_"):

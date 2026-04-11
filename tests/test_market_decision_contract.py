@@ -1026,7 +1026,7 @@ class MarketDecisionContractTests(unittest.TestCase):
         self.assertEqual(compact_action_label(ACTION_ENTER_TREND_AI), "ENTER T+AI")
         self.assertEqual(compact_action_label(ACTION_ENTER_TREND_LED), "ENTER Trend")
         self.assertEqual(compact_action_label(ACTION_ENTER_AI_LED), "ENTER AI")
-        self.assertEqual(compact_action_label(ACTION_PROBE), "PROBE")
+        self.assertEqual(compact_action_label(ACTION_PROBE), "EARLY")
         self.assertEqual(compact_action_label(ACTION_WATCH), "WATCH")
         self.assertEqual(compact_action_label(ACTION_SKIP), "SKIP")
 

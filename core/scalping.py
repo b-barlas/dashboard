@@ -27,7 +27,7 @@ def _setup_key(value: str | None) -> str:
     s = str(value or "").strip().upper()
     if "ENTER" in s:
         return "ENTER"
-    if "PROBE" in s:
+    if "EARLY" in s or "PROBE" in s:
         return "PROBE"
     if "WATCH" in s:
         return "WATCH"

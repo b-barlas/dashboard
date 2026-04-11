@@ -24,7 +24,7 @@ def render_app(deps: dict) -> None:
                 "2) Spot: confirm the setup<br>"
                 "3) Position: manage open risk<br>"
                 "4) Sessions: time the entry<br>"
-                "5) Signal Review: learn and calibrate"
+                "5) Signal Archive: learn and calibrate"
             ),
             tone="accent",
         )

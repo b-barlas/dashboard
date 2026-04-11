@@ -96,8 +96,8 @@ def render(ctx: dict) -> None:
         bucket = confidence_bucket(float(value))
         return f"{float(value):.0f}% ({bucket.title()})"
 
-    def _setup_confirm_display(raw_action: str) -> str:
-        return _shared_setup_confirm_display(raw_action)
+    def _setup_confirm_display(raw_action: str, action_reason: str | None = None) -> str:
+        return _shared_setup_confirm_display(raw_action, action_reason=action_reason)
 
     def _ai_fallback_note(status: str) -> str:
         key = str(status or "").strip().lower()
@@ -421,7 +421,7 @@ def render(ctx: dict) -> None:
                 conviction_label=str(conviction_lbl),
                 ai_agreement=float(decision_agreement),
             )
-            action_raw, _reason_code = spot_action_decision_with_reason(
+            action_raw, action_reason_code = spot_action_decision_with_reason(
                 spot_direction,
                 float(spot_confidence),
                 direction,
@@ -436,7 +436,7 @@ def render(ctx: dict) -> None:
                     "Layer": "Timing" if timeframe in {"5m", "15m"} else "Structure",
                     "direction": direction,
                     "Delta": format_delta(price_change) if price_change is not None else "—",
-                    "Setup Confirm": _setup_confirm_display(action_raw),
+                    "Setup Confirm": _setup_confirm_display(action_raw, action_reason_code),
                     "Direction": direction_label(direction),
                     "confidence": float(execution_confidence.score),
                     "Confidence": _confidence_label(float(execution_confidence.score)),

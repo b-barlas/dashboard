@@ -262,7 +262,7 @@ class MarketTabLogicTests(unittest.TestCase):
         coin, score, sub = _pick_confidence_leader(df)
         self.assertEqual(coin, "ETH")
         self.assertEqual(score, 81.0)
-        self.assertIn("Setup: PROBE", sub)
+        self.assertIn("Setup: EARLY", sub)
 
     def test_pick_confidence_leader_falls_back_to_skip_when_only_skip_exists(self):
         df = pd.DataFrame(
@@ -911,7 +911,7 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertEqual(label, "Setup Status")
         self.assertEqual(head, "CACHED SETUPS")
         self.assertIn("CACHED READY: 2", sub)
-        self.assertIn("PROBE: 0", sub)
+        self.assertIn("EARLY: 0", sub)
 
         _label, degraded_head, degraded_sub = _setup_status_summary(
             enter_count=1,
@@ -921,7 +921,7 @@ class MarketTabLogicTests(unittest.TestCase):
         )
         self.assertEqual(degraded_head, "DEGRADED SETUPS")
         self.assertIn("DEGRADED READY: 1", degraded_sub)
-        self.assertIn("PROBE: 0", degraded_sub)
+        self.assertIn("EARLY: 0", degraded_sub)
 
     def test_market_scan_signature_ignores_top_n_in_custom_mode(self):
         first = _market_scan_signature(

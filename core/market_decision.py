@@ -41,12 +41,12 @@ ACTION_REASON_TEXT = {
     "ENTER_TREND_AI": "Trend and AI align, and both pass the highest confirmation bar.",
     "ENTER_TREND_LED": "The main direction is supported by a clean technical continuation setup.",
     "ENTER_AI_LED": "AI strongly supports the main direction, and execution conditions are good enough.",
-    "PROBE_TREND": "The technical setup is close enough for a small starter position, but not strong enough for full size yet.",
-    "PROBE_AI": "AI support is early but strong enough for a small starter position, not full size yet.",
+    "PROBE_TREND": "The technical setup is close enough for a small early entry, but not strong enough for full size yet.",
+    "PROBE_AI": "AI support is early but strong enough for a small early entry, not full size yet.",
     "PROBE_DUAL": "Trend and AI are both promising, but the setup is still just below full confirmation.",
-    "ARCHIVE_UPGRADE_TO_PROBE": "Matched archive history is supportive enough to allow a starter position while the live setup is still borderline.",
-    "ARCHIVE_DOWNGRADE_TO_PROBE": "Matched archive history is softer here, so the live setup is trimmed to starter-size only.",
-    "ARCHIVE_DOWNGRADE_TO_WATCH": "Matched archive history is too soft to justify a starter position yet, so this stays on watch.",
+    "ARCHIVE_UPGRADE_TO_PROBE": "Matched archive history is supportive enough to allow a small early entry while the live setup is still borderline.",
+    "ARCHIVE_DOWNGRADE_TO_PROBE": "Matched archive history is softer here, so the live setup is trimmed to early-entry size only.",
+    "ARCHIVE_DOWNGRADE_TO_WATCH": "Matched archive history is too soft to justify an early entry yet, so this stays on watch.",
     "NEEDS_CONFIRMATION": "The idea is alive, but it still needs more confirmation.",
     "AI_UNAVAILABLE": "AI is temporarily unavailable, so this stays on watch.",
 }
@@ -163,7 +163,7 @@ def normalize_action_class(action: str) -> str:
         return "ENTER_TREND_LED"
     if "ENTER (AI-LED)" in s:
         return "ENTER_AI_LED"
-    if "PROBE" in s:
+    if "EARLY" in s or "PROBE" in s:
         return "PROBE"
     if "WATCH" in s:
         return "WATCH"
@@ -197,7 +197,7 @@ def compact_action_label(action: str) -> str:
     if cls == "ENTER_AI_LED":
         return "ENTER AI"
     if cls == "PROBE":
-        return "PROBE"
+        return "EARLY"
     if cls == "SKIP":
         return "SKIP"
     return str(action or "").strip()

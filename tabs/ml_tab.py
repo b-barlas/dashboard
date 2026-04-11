@@ -943,7 +943,7 @@ def render(ctx: dict) -> None:
                     ai_status=ai_spot_status,
                 )
 
-                action_raw, _reason_code = spot_action_decision_with_reason(
+                action_raw, action_reason_code = spot_action_decision_with_reason(
                     spot_snapshot.direction,
                     float(confidence_snapshot.score),
                     signal_side,
@@ -953,7 +953,7 @@ def render(ctx: dict) -> None:
                     trend_led_snapshot=trend_led_snapshot,
                     ai_led_snapshot=ai_led_snapshot,
                 )
-                setup_confirm = _setup_confirm_display(action_raw)
+                setup_confirm = _setup_confirm_display(action_raw, action_reason=action_reason_code)
                 action_cls = normalize_action_class(action_raw)
                 watch_setup_color = "#7DD3FC"
                 setup_color = (

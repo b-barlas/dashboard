@@ -1041,9 +1041,13 @@ def _pick_confidence_leader(df_results: pd.DataFrame) -> tuple[str, float | None
     ).iloc[0]
     confidence_coin = str(best_row.get("Coin", "—"))
     confidence_val = float(best_row.get("__confidence_num", 0.0))
+    setup_display = _shared_setup_confirm_display(
+        str(best_row.get("__action_raw", best_row.get("Setup Confirm", "")) or ""),
+        action_reason=str(best_row.get("__action_reason", "")).strip(),
+    )
     confidence_sub = (
         f"Direction: {best_row.get('Direction', '')} • "
-        f"Setup: {best_row.get('Setup Confirm', '')}"
+        f"Setup: {setup_display}"
     )
     return confidence_coin, confidence_val, confidence_sub
 
@@ -1112,7 +1116,10 @@ def _pick_best_scalp_opportunity(df_results: pd.DataFrame) -> tuple[str, str]:
     best_direction = str(best_row.get("Scalp Opportunity", "")).strip()
     best_reason = str(best_row.get("__scalp_reason_short", "")).strip()
     best_action = str(best_row.get("__action_raw", best_row.get("Setup Confirm", ""))).strip()
-    best_action_compact = _shared_setup_confirm_display(best_action)
+    best_action_compact = _shared_setup_confirm_display(
+        best_action,
+        action_reason=str(best_row.get("__action_reason", "")).strip(),
+    )
 
     sub_parts = [best_state, best_direction]
     if best_state.upper() == "CONDITIONAL" and best_reason:
@@ -2898,8 +2905,8 @@ def render(ctx: dict) -> None:
             return ""
         return f"{rr_val:.2f}"
 
-    def _setup_confirm_display(raw_action: str) -> str:
-        return _shared_setup_confirm_display(raw_action)
+    def _setup_confirm_display(raw_action: str, action_reason: str | None = None) -> str:
+        return _shared_setup_confirm_display(raw_action, action_reason=action_reason)
     def _setup_confirm_class(value: str) -> str:
         return _setup_confirm_class_key(value)
 
@@ -3105,13 +3112,13 @@ def render(ctx: dict) -> None:
         cls_full = f"mk-chip {cls} {extra_class}".strip()
         return f"<span class='{cls_full}'{title_attr}>{html.escape(raw)}</span>"
 
-    def _scalp_chip(text: str, row: dict) -> str:
+    def _scalp_chip(text: str, row: dict, *, title_override: str | None = None) -> str:
         raw = str(text or "").strip()
         if not raw or raw.upper() in {"N/A", "NA", "NAN", "UNAVAILABLE", "-", "NEUTRAL"}:
             return ""
         tone_key = _tone_for_col("Scalp Opportunity", raw)
         display_state = str(row.get("__scalp_display_state", "")).strip().upper()
-        reason_text = str(row.get("__scalp_reason_text", "")).strip()
+        reason_text = str(title_override or row.get("__scalp_reason_text", "")).strip()
         if not reason_text and display_state == "LIVE":
             reason_text = "Live scalp passed the current intraday setup, market gate, and quality checks."
         tone_cls = _tone_css_class(tone_key)
@@ -3351,6 +3358,170 @@ def render(ctx: dict) -> None:
             return f"Latest candle pattern is neutral or indecisive: {clean}."
         return clean
 
+    def _direction_anchor_label(note: str) -> str:
+        match = re.search(r"\(([^)]+)\):", str(note or ""))
+        return str(match.group(1)).strip() if match else "the higher-timeframe anchor pair"
+
+    def _setup_confirm_cell_title(row: dict, display_txt: str) -> str:
+        raw_action = str(row.get("__action_raw", display_txt) or "").strip()
+        cls = normalize_action_class(raw_action)
+        reason_code = str(row.get("__action_reason", "") or "").strip()
+        reason_text = action_reason_text(reason_code)
+        setup_calibration_note = str(row.get("__setup_calibration_note", "") or "").strip()
+        meaning_map = {
+            "ENTER": "Fully confirmed. This is the strongest setup class in the table.",
+            "PROBE": "Promising, but still small-risk only.",
+            "WATCH": "Interesting, but timing still needs more proof.",
+            "SKIP": "Too weak, conflicted, or poorly located right now.",
+        }
+        if cls.startswith("ENTER_"):
+            meaning = meaning_map["ENTER"]
+        else:
+            meaning = meaning_map.get(cls, "Current scanner verdict for this setup.")
+        parts = [f"{display_txt}: {meaning}"]
+        if reason_text:
+            parts.append(f"Why: {_compact_hover_note(reason_text, limit=100)}")
+        if reason_code.startswith("ARCHIVE_") and setup_calibration_note:
+            parts.append(f"Archive: {_compact_hover_note(setup_calibration_note, limit=90)}")
+        return " ".join(parts)
+
+    def _direction_cell_title(row: dict, txt: str) -> str:
+        clean = str(txt or "").strip() or "Neutral"
+        anchor_label = _direction_anchor_label(str(row.get("__direction_note", "") or ""))
+        meaning = {
+            "Upside": "The broader technical trend still leans up.",
+            "Downside": "The broader technical trend still leans down.",
+            "Neutral": "The broader technical read is mixed, so there is no strong edge yet.",
+        }.get(clean, "This is the broader technical bias from the scanner.")
+        return f"Direction from {anchor_label}: {clean}. {meaning}"
+
+    def _confidence_cell_title(row: dict, txt: str) -> str:
+        score = _confidence_value_from_badge(txt) or 0.0
+        label = _extract_confidence_label(txt)
+        archive_note = str(row.get("__setup_calibration_note", "") or "").strip()
+        base = f"Trust score for Direction: {score:.0f}% {label}. Higher means the technical bias looks more reliable."
+        if archive_note:
+            return f"{base} Archive read: {_compact_hover_note(archive_note, limit=95)}"
+        return base
+
+    def _ai_ensemble_cell_title(row: dict, txt: str) -> str:
+        verdict = str(txt or "").strip() or "Neutral"
+        votes = row.get("__ai_votes")
+        try:
+            votes_n = max(0, min(3, int(votes)))
+        except Exception:
+            votes_n = 0
+        meaning = {
+            "Upside": "The higher-timeframe AI stack leans up.",
+            "Downside": "The higher-timeframe AI stack leans down.",
+            "Neutral": "The higher-timeframe AI stack does not see a clear edge.",
+        }.get(verdict, "This is the higher-timeframe AI verdict.")
+        ai_note = str(row.get("__ai_note", "") or "").strip()
+        parts = [f"HTF AI verdict: {verdict}. {meaning}", f"Model agreement: {votes_n}/3."]
+        if ai_note and "fallback" in ai_note.lower():
+            parts.append(_compact_hover_note(ai_note, limit=90))
+        return " ".join(parts)
+
+    def _ai_confidence_cell_title(row: dict, txt: str) -> str:
+        score = _confidence_value_from_badge(txt) or 0.0
+        label = _extract_confidence_label(txt)
+        votes = row.get("__ai_votes")
+        try:
+            votes_n = max(0, min(3, int(votes)))
+        except Exception:
+            votes_n = 0
+        agreement_hint = (
+            "Model agreement is strong."
+            if votes_n >= 3
+            else "Model agreement is mixed." if votes_n == 2 else "Model agreement is weak."
+        )
+        return (
+            f"Trust score for the AI verdict: {score:.0f}% {label}. "
+            f"{agreement_hint}"
+        )
+
+    def _rr_cell_title(row: dict, txt: str) -> str:
+        try:
+            rr = float(str(txt or "").replace("*", "").strip())
+        except Exception:
+            rr = None
+        state = str(row.get("__scalp_display_state", "") or "").strip().upper()
+        if rr is None:
+            base = "Scalp-only reward-to-risk estimate."
+        elif rr >= 2.0:
+            base = f"Scalp-only reward-to-risk estimate: {rr:.2f}. Potential reward is meaningfully larger than risk."
+        elif rr >= 1.0:
+            base = f"Scalp-only reward-to-risk estimate: {rr:.2f}. Potential reward is only slightly larger than risk."
+        else:
+            base = f"Scalp-only reward-to-risk estimate: {rr:.2f}. Potential reward is smaller than risk."
+        if state == "CONDITIONAL":
+            base = f"{base} Reference only: this scalp idea is not fully approved."
+        rr_note = str(row.get("__rr_note", "") or "").strip()
+        if rr_note:
+            base = f"{base} {_compact_hover_note(rr_note, limit=90)}"
+        return base
+
+    def _scalp_cell_title(row: dict, txt: str) -> str:
+        direction = str(txt or "").strip() or "Neutral"
+        state = str(row.get("__scalp_display_state", "") or "").strip().upper()
+        reason_text = str(row.get("__scalp_reason_text", "") or "").strip()
+        if state == "LIVE":
+            base = f"Short-term scalp view: {direction}. This setup passed the current intraday checks."
+        else:
+            base = f"Short-term scalp view: {direction}. A scalp idea exists, but a veto is still active."
+        if reason_text:
+            base = f"{base} Why: {_compact_hover_note(reason_text, limit=95)}"
+        return base
+
+    def _price_cell_title(row: dict, txt: str) -> str:
+        pair = str(row.get("__pair", "") or "").strip()
+        base = "Latest closed price on the selected timeframe."
+        if pair:
+            return f"{base} Feed pair: {pair}."
+        return base
+
+    def _entry_cell_title(row: dict) -> str:
+        state = str(row.get("__scalp_display_state", "") or "").strip().upper()
+        entry_note = str(row.get("__entry_note", "") or "").strip()
+        base = (
+            "Suggested scalp entry price."
+            if state != "CONDITIONAL"
+            else "Reference scalp entry only. The scalp idea is still conditional."
+        )
+        if entry_note:
+            return f"{base} {_compact_hover_note(entry_note, limit=95)}"
+        return base
+
+    def _stop_cell_title(row: dict, txt: str) -> str:
+        state = str(row.get("__scalp_display_state", "") or "").strip().upper()
+        base = (
+            f"Protective stop for the scalp lens at {txt}. If price hits this level, the setup is invalidated."
+            if txt
+            else "Protective stop for the scalp lens."
+        )
+        if state == "CONDITIONAL":
+            return f"{base} Reference only because the scalp idea is not fully approved."
+        return base
+
+    def _target_cell_title(row: dict) -> str:
+        state = str(row.get("__scalp_display_state", "") or "").strip().upper()
+        target_note = str(row.get("__target_note", "") or "").strip()
+        base = (
+            "Suggested scalp target price."
+            if state != "CONDITIONAL"
+            else "Reference scalp target only. The scalp idea is still conditional."
+        )
+        if target_note:
+            return f"{base} {_compact_hover_note(target_note, limit=95)}"
+        return base
+
+    def _market_cap_cell_title(txt: str) -> str:
+        return (
+            f"Approximate market size: {txt}. Larger market caps are usually easier to trade cleanly."
+            if txt
+            else "Approximate market size and liquidity context."
+        )
+
     def _render_cell(col: str, row: dict) -> str:
         val = row.get(col, "")
         txt = "" if val is None else str(val).strip()
@@ -3410,9 +3581,8 @@ def render(ctx: dict) -> None:
         if col in {"Setup Confirm", "Direction", "Confidence", "AI Confidence", "R:R", "Scalp Opportunity"}:
             if col == "Setup Confirm":
                 reason_code = str(row.get("__action_reason", "")).strip()
-                reason_text = action_reason_text(reason_code)
                 raw_action = str(row.get("__action_raw", txt))
-                display_txt = _setup_confirm_display(raw_action)
+                display_txt = _setup_confirm_display(raw_action, reason_code)
                 sc_cls = _setup_confirm_class(raw_action or txt)
                 extra_cls = "mk-chip-action"
                 if sc_cls == "ENTER_TREND_LED":
@@ -3423,25 +3593,7 @@ def render(ctx: dict) -> None:
                     extra_cls += " mk-sc-probe"
                 elif sc_cls == "WATCH":
                     extra_cls += " mk-sc-watch"
-                execution_fit_note = str(row.get("__execution_fit_note", "")).strip()
-                session_fit_note = str(row.get("__session_fit_note", "")).strip()
-                catalyst_fit_note = str(row.get("__catalyst_fit_note", "")).strip()
-                historical_read_note = str(row.get("__adaptive_edge_note", "")).strip()
-                setup_calibration_note = str(row.get("__setup_calibration_note", "")).strip()
-                title_parts = [display_txt]
-                if reason_text:
-                    title_parts.append(f"Reason: {reason_text}")
-                if historical_read_note:
-                    title_parts.append(f"Historical read: {_compact_hover_note(historical_read_note)}")
-                if setup_calibration_note:
-                    title_parts.append(f"Setup calibration: {_compact_hover_note(setup_calibration_note)}")
-                if execution_fit_note:
-                    title_parts.append(f"Execution fit: {execution_fit_note}")
-                if session_fit_note:
-                    title_parts.append(f"Session fit: {session_fit_note}")
-                if catalyst_fit_note:
-                    title_parts.append(f"Catalyst: {catalyst_fit_note}")
-                title_txt = " | ".join(title_parts)
+                title_txt = _setup_confirm_cell_title(row, display_txt)
                 return _chip(
                     display_txt,
                     _tone_for_col(col, raw_action or txt),
@@ -3449,38 +3601,34 @@ def render(ctx: dict) -> None:
                     extra_class=extra_cls,
                 )
             if col == "Direction":
-                direction_note = str(row.get("__direction_note", "")).strip()
                 return _direction_metric(
                     txt,
                     tone=_tone_for_col(col, txt),
-                    title=direction_note or None,
+                    title=_direction_cell_title(row, txt) if txt else None,
                 )
             if col == "Confidence":
-                confidence_note = str(row.get("__confidence_note", "")).strip()
                 return _score_metric(
                     txt,
                     tone=_tone_for_col(col, txt),
-                    title=confidence_note or None,
+                    title=_confidence_cell_title(row, txt) if txt else None,
                     extra_class="mk-score-confidence",
                 )
             if col == "AI Confidence":
-                ai_confidence_note = str(row.get("__ai_confidence_note", "")).strip()
                 return _score_metric(
                     txt,
                     tone=_tone_for_col(col, txt),
-                    title=ai_confidence_note or None,
+                    title=_ai_confidence_cell_title(row, txt) if txt else None,
                     extra_class="mk-score-ai",
                 )
             if col == "R:R":
-                rr_note = str(row.get("__rr_note", "")).strip()
                 return _rr_metric(
                     txt,
                     tone=_tone_for_col(col, txt),
-                    title=rr_note or None,
+                    title=_rr_cell_title(row, txt) if txt else None,
                     conditional=str(row.get("__scalp_display_state", "")).strip().upper() == "CONDITIONAL",
                 )
             if col == "Scalp Opportunity":
-                return _scalp_chip(txt, row)
+                return _scalp_chip(txt, row, title_override=_scalp_cell_title(row, txt))
             extra_cls = ""
             return _chip(
                 txt,
@@ -3490,7 +3638,6 @@ def render(ctx: dict) -> None:
             )
         if col == "AI Ensemble":
             t = _tone_for_col(col, txt)
-            ai_note = str(row.get("__ai_note", "")).strip()
             base_txt = re.sub(r"\s*\(\s*\d+\s*/\s*3\s*\)\s*$", "", txt).strip() or txt
             votes = row.get("__ai_votes")
             try:
@@ -3499,7 +3646,12 @@ def render(ctx: dict) -> None:
                 m = re.search(r"\((\d)\s*/\s*3\)", txt)
                 votes_n = int(m.group(1)) if m else 0
             votes_n = max(0, min(3, votes_n))
-            return _ensemble_metric(base_txt, tone=t, votes=votes_n, title=ai_note or None)
+            return _ensemble_metric(
+                base_txt,
+                tone=t,
+                votes=votes_n,
+                title=_ai_ensemble_cell_title(row, base_txt),
+            )
         if col == "Spike Alert":
             if not txt:
                 return ""
@@ -3550,11 +3702,14 @@ def render(ctx: dict) -> None:
             if not txt:
                 return ""
             plain = txt[1:] if txt.startswith("$") else txt
-            return f"<span class='mk-plain mk-num mk-price'>{html.escape(plain)}</span>"
+            return (
+                f"<span class='mk-plain mk-num mk-price' title='{html.escape(_price_cell_title(row, txt), quote=True)}'>"
+                f"{html.escape(plain)}</span>"
+            )
         if col == "Entry Price":
             if not txt:
                 return ""
-            entry_note = str(row.get("__entry_note", "")).strip()
+            entry_note = _entry_cell_title(row)
             level_cls = "mk-plain mk-num mk-level"
             if str(row.get("__scalp_display_state", "")).strip().upper() == "CONDITIONAL":
                 level_cls += " mk-level-conditional"
@@ -3567,14 +3722,15 @@ def render(ctx: dict) -> None:
         if col == "Stop Loss":
             if not txt:
                 return ""
+            stop_note = _stop_cell_title(row, txt)
             level_cls = "mk-plain mk-num mk-level"
             if str(row.get("__scalp_display_state", "")).strip().upper() == "CONDITIONAL":
                 level_cls += " mk-level-conditional"
-            return f"<span class='{level_cls}'>{html.escape(txt)}</span>"
+            return f"<span class='{level_cls}' title='{html.escape(stop_note, quote=True)}'>{html.escape(txt)}</span>"
         if col == "Target Price":
             if not txt:
                 return ""
-            target_note = str(row.get("__target_note", "")).strip()
+            target_note = _target_cell_title(row)
             level_cls = "mk-plain mk-num mk-level"
             if str(row.get("__scalp_display_state", "")).strip().upper() == "CONDITIONAL":
                 level_cls += " mk-level-conditional"
@@ -3620,8 +3776,13 @@ def render(ctx: dict) -> None:
             return _indicator_metric(
                 txt,
                 tone=_tone_for_col(col, txt),
-                title=_indicator_cell_title(col, row, txt),
+                title=_compact_hover_note(_indicator_cell_title(col, row, txt), limit=120),
                 extra_class="mk-indicator-generic",
+            ) if txt else ""
+        if col == "Market Cap ($)":
+            return (
+                f"<span class='mk-plain mk-num' title='{html.escape(_market_cap_cell_title(txt), quote=True)}'>"
+                f"{html.escape(txt)}</span>"
             ) if txt else ""
         return f"<span class='mk-plain'>{html.escape(txt)}</span>"
 
@@ -4973,7 +5134,7 @@ def render(ctx: dict) -> None:
                     'Δ (%)': format_delta(price_change) if price_change is not None else '',
                     '__delta_pct': float(price_change) if price_change is not None else None,
                     '__delta_note': delta_note if price_change is not None else "",
-                    'Setup Confirm': _setup_confirm_display(action),
+                    'Setup Confirm': _setup_confirm_display(action, action_reason_code),
                     '__action_raw': action,
                     '__action_reason': action_reason_code,
                     '__setup_calibrated': True,
@@ -5806,7 +5967,7 @@ def render(ctx: dict) -> None:
                 )
                 row["__action_raw"] = calibrated_action_raw
                 row["__action_reason"] = calibrated_action_reason
-                row["Setup Confirm"] = _setup_confirm_display(calibrated_action_raw)
+                row["Setup Confirm"] = _setup_confirm_display(calibrated_action_raw, calibrated_action_reason)
                 row["__setup_calibration_delta"] = float(getattr(setup_calibration_snapshot, "delta", 0.0) or 0.0)
                 row["__setup_calibration_note"] = str(getattr(setup_calibration_snapshot, "note", "") or "")
                 row["__setup_calibrated"] = True

@@ -125,6 +125,30 @@ def test_setup_confirm_display_supports_future_neutral_presentation_mode() -> No
     assert setup_confirm_display("ENTER_TREND_LED") == "TREND-led"
     assert setup_confirm_display("ENTER_TREND_LED", audience="neutral") == "High-Quality Setup"
     assert setup_confirm_display("PROBE", audience="neutral") == "Early Setup"
+    assert setup_confirm_display("PROBE") == "EARLY"
+
+
+def test_setup_confirm_display_surfaces_probe_subtypes_when_reason_is_clear() -> None:
+    assert setup_confirm_display("PROBE", action_reason="PROBE_TREND") == "EARLY (Trend-Led)"
+    assert setup_confirm_display("PROBE", action_reason="PROBE_AI") == "EARLY (AI-Led)"
+    assert setup_confirm_display("PROBE", action_reason="PROBE_DUAL") == "EARLY (Trend+AI)"
+    assert setup_confirm_display("PROBE", action_reason="ARCHIVE_UPGRADE_TO_PROBE") == "EARLY (Archive)"
+    assert (
+        setup_confirm_display("PROBE", audience="neutral", action_reason="PROBE_TREND")
+        == "Early Trend-Led Setup"
+    )
+    assert (
+        setup_confirm_display("PROBE", audience="neutral", action_reason="PROBE_AI")
+        == "Early Model-Led Setup"
+    )
+    assert (
+        setup_confirm_display("PROBE", audience="neutral", action_reason="PROBE_DUAL")
+        == "Early Trend + Model Setup"
+    )
+    assert (
+        setup_confirm_display("PROBE", audience="neutral", action_reason="ARCHIVE_DOWNGRADE_TO_PROBE")
+        == "Early Archive-Calibrated Setup"
+    )
 
 
 def test_playbook_key_normalizes_visible_labels_into_stable_logic_keys() -> None:

@@ -283,7 +283,7 @@ def build_tracker_storage_snapshot(db_path: str | None = None) -> TrackerStorage
     elif latest_mirror is not None:
         recovery_status = "Mirror Available"
         recovery_note = (
-            "A mirror snapshot exists, but auto-restore is disabled. Manual restore is still available from Signal Review."
+            "A mirror snapshot exists, but auto-restore is disabled. Manual restore is still available from Signal Archive."
         )
     elif exists:
         recovery_status = "At Risk"

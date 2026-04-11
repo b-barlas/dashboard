@@ -16,7 +16,7 @@ from core.backtest import (
 from core.confidence import ai_confidence_bucket, confidence_bucket
 from core.symbols import is_stable_base_symbol
 from ui.ctx import get_ctx
-from ui.primitives import render_help_details, render_kpi_grid, render_page_header
+from ui.primitives import render_help_details, render_insight_card, render_kpi_grid, render_page_header
 from ui.snapshot_cache import live_or_snapshot
 
 
@@ -488,24 +488,54 @@ def render(ctx: dict) -> None:
 
     render_page_header(
         st,
-        title="Scalp Backtest",
+        title="Scalp Lab",
         intro_html=(
-            "Outcome study for the scalp engine used in Market tab. "
-            "It validates entry/stop/target behavior and the scalp quality gate over historical events, "
-            "so you can see how often setups hit TP first, SL first, or time out across a study window."
+            "Historical scalp simulation. "
+            "This lab replays the current scalp engine on closed candles and measures TP-first, SL-first, and timeout behavior over the next N bars."
         ),
     )
+    intro_cols = st.columns(3)
+    with intro_cols[0]:
+        render_insight_card(
+            st,
+            title="Mode",
+            body_html=(
+                "Simulation lab only. It replays the <b>current scalp engine</b> on historical closed candles, "
+                "not the live tracker archive."
+            ),
+            tone="neutral",
+        )
+    with intro_cols[1]:
+        render_insight_card(
+            st,
+            title="What It Uses",
+            body_html=(
+                "The same <b>entry / stop / target planner</b> and <b>scalp quality gate</b> used by the Market scanner."
+            ),
+            tone="accent",
+        )
+    with intro_cols[2]:
+        render_insight_card(
+            st,
+            title="Pair It With",
+            body_html=(
+                "Use <b>Signal Archive</b> for what the dashboard actually logged live, "
+                "and use <b>Scalp Lab</b> to test scalp behavior before trusting it in production."
+            ),
+            tone="positive",
+        )
     render_help_details(
         st,
         summary="How to read quickly",
         body_html=(
-            "1. This tab validates <b>scalp setup behavior</b> using the same scalp engine as Market tab "
+            "1. This is a <b>simulation lab</b> for scalp behavior, not a live archive screen.<br>"
+            "2. It validates <b>scalp setup behavior</b> using the same scalp engine as Market tab "
             "(entry/stop/target + quality gate).<br>"
-            "2. If <b>Custom Coins</b> is empty, scan runs on the top-volume universe (controlled by Universe Size).<br>"
-            "3. If <b>Custom Coins</b> has symbols, scan runs <b>only</b> on those symbols (Universe Size is ignored).<br>"
-            "4. Each event is tracked for the next N bars and labeled as <b>TP-first</b>, <b>SL-first</b>, or <b>TIMEOUT</b>.<br>"
-            "5. <b>Confidence</b> in the event table is the selected-timeframe execution confidence used by the scalp engine.<br>"
-            "6. Use Direction/Coin Scoreboards to decide which side or symbols are currently worth testing in live flow."
+            "3. If <b>Custom Coins</b> is empty, scan runs on the top-volume universe (controlled by Universe Size).<br>"
+            "4. If <b>Custom Coins</b> has symbols, scan runs <b>only</b> on those symbols (Universe Size is ignored).<br>"
+            "5. Each event is tracked for the next N bars and labeled as <b>TP-first</b>, <b>SL-first</b>, or <b>TIMEOUT</b>.<br>"
+            "6. <b>Confidence</b> in the event table is the selected-timeframe execution confidence used by the scalp engine.<br>"
+            "7. Use this page to judge scalp behavior, then verify live behavior and journaling quality in <b>Signal Archive</b>."
         ),
     )
 

@@ -537,7 +537,7 @@ def _render_tracker_backup_restore(
             "Upload tracker snapshot",
             type=["sqlite3", "db", "sqlite"],
             key="signal_review_tracker_restore_upload",
-            help="Accepted files are SQLite tracker snapshots previously exported from Signal Review.",
+            help="Accepted files are SQLite tracker snapshots previously exported from Signal Archive.",
         )
         if st.button("Restore Uploaded Tracker DB", key="signal_review_restore_uploaded_db"):
             if uploaded_tracker_db is None:
@@ -597,10 +597,10 @@ def render(ctx: dict) -> None:
 
     render_page_header(
         st,
-        title="Signal Review",
+        title="Signal Archive",
         intro_html=(
-            "This is the review and calibration page. Use it to learn what is actually working, what is failing, "
-            "and whether the issue is the system or your execution, not as a live entry screen."
+            "Live tracker and execution archive. Use this page to review what the dashboard actually logged, "
+            "what you actually took, and whether the gap is in the system or in execution, not as a live entry screen."
         ),
     )
 
