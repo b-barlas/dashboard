@@ -1267,6 +1267,32 @@ Shows:
 Use it to decide when conditions look cleaner after a setup already exists elsewhere.
 """,
     },
+    "guide.section.signal_archive": {
+        "trader": """
+Live tracker and execution archive.
+
+Use it to:
+- review what the dashboard actually logged in production
+- compare scanner output with what you actually took
+- study resolved outcome quality by setup, timeframe, session, and version
+- verify whether adaptive calibration is reading `Current Only` or `Mixed Fallback`
+
+This tab is not a live entry screen.
+It is the system's memory and review surface.
+""",
+        "neutral": """
+Live tracker and execution archive.
+
+Use it to:
+- review what the dashboard actually logged
+- compare scanner output with what was actually executed
+- study resolved outcome quality by setup, timeframe, session, and version
+- verify whether adaptive calibration is reading `Current Only` or `Mixed Fallback`
+
+This tab is not a live action screen.
+It is the system's memory and review surface.
+""",
+    },
     "guide.section.setup_backtest": {
         "trader": """
 Setup Lab is a historical simulation layer, not a live archive.
@@ -1341,15 +1367,14 @@ Use Signal Archive for:
         "trader": """
 Recommended daily flow:
 1. Market tab: check regime + scanner shortlist
-2. Correlation: check whether your planned basket is over-crowded
-3. Portfolio Scenario: stress-test how your basket may react if BTC/ETH or another anchor reaches target
-4. Spot: validate setup and read the Spot Execution Plan
-5. Position: if already in trade, follow Technical Invalidation + decision model first
-6. Fibonacci/Risk: validate structure and downside risk
-7. Tools: confirm R:R and liquidation distance
-8. Setup Lab: validate Setup Confirm class edge before using new setup live
-9. Scalp Lab: validate scalp gate behavior and TP/SL outcome profile
-10. Model Lab: tune raw signal threshold/holding parameters
+2. Spot: validate setup and read the Spot Execution Plan
+3. Position: if already in trade, follow Technical Invalidation + decision model first
+4. Sessions: check whether the timing window is actually favorable
+5. Signal Archive: verify what the system is learning from before trusting archive-driven tilt
+6. Correlation / Portfolio Scenario: stress-test basket overlap and anchor risk
+7. Fibonacci / Risk Analytics: validate structure and downside risk
+8. Tools: confirm R:R and liquidation distance
+9. Labs: use Setup / Scalp / Model Lab only when validating policy changes or edge hypotheses
 
 Quick rule:
 - If Direction/AI conflict and Health says REDUCE or EXIT, reduce risk first.
@@ -1358,15 +1383,14 @@ Quick rule:
         "neutral": """
 Recommended daily flow:
 1. Market tab: check regime + scanner shortlist
-2. Correlation: check whether your planned basket is over-crowded
-3. Portfolio Scenario: stress-test how your basket may react if BTC/ETH or another anchor reaches target
-4. Spot: validate setup and read the Spot Setup Read
-5. Position: if already in trade, follow Technical Invalidation + decision model first
-6. Fibonacci/Risk: validate structure and downside risk
-7. Tools: confirm R:R and liquidation distance
-8. Setup Lab: validate Setup Confirm class behavior before using a new setup live
-9. Scalp Lab: validate scalp gate behavior and TP/SL outcome profile
-10. Model Lab: tune raw signal threshold/holding parameters
+2. Spot: validate setup and read the Spot Setup Read
+3. Position: if already in trade, follow Technical Invalidation + decision model first
+4. Sessions: check whether the timing window is actually favorable
+5. Signal Archive: verify what the system is learning from before trusting archive-driven tilt
+6. Correlation / Portfolio Scenario: stress-test basket overlap and anchor risk
+7. Fibonacci / Risk Analytics: validate structure and downside risk
+8. Tools: confirm R:R and liquidation distance
+9. Labs: use Setup / Scalp / Model Lab only when validating research ideas or threshold changes
 """,
     },
     "guide.section.limitations": {

@@ -98,7 +98,40 @@ Ensemble AI (3 models) is used as confirmation:
             "core",
         ),
         (
-            "4) AI Workspace tab",
+            "4) Sessions tab",
+            copy_text("guide.section.sessions"),
+            "info",
+        ),
+        (
+            "5) Signal Archive tab",
+            copy_text("guide.section.signal_archive"),
+            "info",
+        ),
+        (
+            "6) Multi-TF tab",
+            """
+Single-coin timeframe alignment view across 5m / 15m / 1h / 4h / 1d.
+Use it to:
+- check whether short-term timing agrees with higher-timeframe structure
+- see which layer is leading (timing vs higher timeframe)
+- confirm the same spot-bias read already seen in Market / Spot / Position
+
+Read order:
+- Higher-TF Bias first (1h / 4h / 1d)
+- Weighted Alignment second
+- Timing Layer third (5m / 15m)
+- Confidence last, as the timeframe-level quality read for that row
+
+Higher timeframes carry more weight because they usually define the stronger structural regime.
+Neutral timeframes intentionally dilute the weighted score, so high alignment really means broad agreement.
+A directional bias only prints when weighted agreement is broad enough. Below 60%, the tab stays neutral on purpose.
+If coverage is partial, treat the read as lower-confidence even when the visible timeframes agree.
+This tab validates alignment; it is not a separate trade decision engine.
+            """,
+            "core",
+        ),
+        (
+            "7) AI Workspace tab",
             """
 Single AI tab with 2 modes:
 - Quick Prediction: one coin/timeframe fast ensemble output
@@ -116,7 +149,7 @@ Use this tab for model diagnostics and confirmation quality checks, not as a sta
             "core",
         ),
         (
-            "5) Heatmap tab",
+            "8) Heatmap tab",
             """
 Top-coin market breadth view.
 Shows:
@@ -135,7 +168,41 @@ Provider order:
             "info",
         ),
         (
-            "6) Monte Carlo tab",
+            "9) Whale Tracker tab",
+            """
+Attention/liquidity proxy tab (not on-chain wallet tracking).
+Combines:
+- Trending coins feed
+- Top gainers / losers snapshots
+- Volume anomaly scanner with adaptive ratio + z-score logic
+
+Scanner notes:
+- Uses closed candles (reduces partial-candle noise)
+- Trigger = Ratio OR Z-Score threshold; EXTREME = dual confirmation
+- Distinguishes no-data scan from no-anomaly scan
+
+Use it to find attention shifts, then validate entries in Market/Spot/Position.
+            """,
+            "info",
+        ),
+        (
+            "10) Risk Analytics tab",
+            """
+Portfolio-style risk metrics from recent return series.
+Includes:
+- Sharpe / Sortino / Calmar
+- Max drawdown
+- VaR / CVaR
+- Skew / Kurtosis
+- Timeframe-aware risk regime labels (1h / 4h / 1d)
+- Closed-candle evaluation (reduces live-candle noise)
+
+Use this tab to understand risk shape, not to create entry signals alone.
+            """,
+            "risk",
+        ),
+        (
+            "11) Monte Carlo tab",
             """
 Scenario-risk simulation from historical return behavior.
 Use it for:
@@ -161,7 +228,7 @@ not as a direct entry trigger.
             "risk",
         ),
         (
-            "7) Fibonacci tab",
+            "12) Fibonacci tab",
             """
 Decision-oriented structure/zone map tab.
 Main outputs:
@@ -178,64 +245,7 @@ Important:
             "core",
         ),
         (
-            "8) Risk Analytics tab",
-            """
-Portfolio-style risk metrics from recent return series.
-Includes:
-- Sharpe / Sortino / Calmar
-- Max drawdown
-- VaR / CVaR
-- Skew / Kurtosis
-- Timeframe-aware risk regime labels (1h / 4h / 1d)
-- Closed-candle evaluation (reduces live-candle noise)
-
-Use this tab to understand risk shape, not to create entry signals alone.
-            """,
-            "risk",
-        ),
-        (
-            "9) Whale Tracker tab",
-            """
-Attention/liquidity proxy tab (not on-chain wallet tracking).
-Combines:
-- Trending coins feed
-- Top gainers / losers snapshots
-- Volume anomaly scanner with adaptive ratio + z-score logic
-
-Scanner notes:
-- Uses closed candles (reduces partial-candle noise)
-- Trigger = Ratio OR Z-Score threshold; EXTREME = dual confirmation
-- Distinguishes no-data scan from no-anomaly scan
-
-Use it to find attention shifts, then validate entries in Market/Spot/Position.
-            """,
-            "info",
-        ),
-        (
-            "10) Multi-TF tab",
-            """
-Single-coin timeframe alignment view across 5m / 15m / 1h / 4h / 1d.
-Use it to:
-- check whether short-term timing agrees with higher-timeframe structure
-- see which layer is leading (timing vs higher timeframe)
-- confirm the same spot-bias read already seen in Market / Spot / Position
-
-Read order:
-- Higher-TF Bias first (1h / 4h / 1d)
-- Weighted Alignment second
-- Timing Layer third (5m / 15m)
-- Confidence last, as the timeframe-level quality read for that row
-
-Higher timeframes carry more weight because they usually define the stronger structural regime.
-Neutral timeframes intentionally dilute the weighted score, so high alignment really means broad agreement.
-A directional bias only prints when weighted agreement is broad enough. Below 60%, the tab stays neutral on purpose.
-If coverage is partial, treat the read as lower-confidence even when the visible timeframes agree.
-This tab validates alignment; it is not a separate trade decision engine.
-            """,
-            "core",
-        ),
-        (
-            "11) Correlation tab",
+            "13) Correlation tab",
             """
 Co-movement matrix for selected symbols.
 Use it to:
@@ -246,7 +256,7 @@ Use it to:
             "info",
         ),
         (
-            "12) Portfolio Scenario tab",
+            "14) Portfolio Scenario tab",
             """
 Anchor-based basket scenario engine.
 Use it to:
@@ -266,12 +276,7 @@ the engine caps that horizon and shows a warning in the tab.
             "info",
         ),
         (
-            "13) Sessions tab",
-            copy_text("guide.section.sessions"),
-            "info",
-        ),
-        (
-            "14) Tools tab",
+            "15) Tools tab",
             """
 Beginner-friendly pre-trade calculator.
 Inputs:
@@ -286,9 +291,9 @@ Outputs:
             "risk",
         ),
         (
-            "15) Labs tab",
+            "16) Labs tab",
             """
-Research and simulation workspace with two sub-tabs:
+Research and simulation workspace with three sub-tabs:
 - Model Lab
 - Setup Lab
 - Scalp Lab
@@ -301,7 +306,7 @@ Use Signal Archive for the real logged tracker history and execution journal.
             "risk",
         ),
         (
-            "16) Analysis Guide tab (this page)",
+            "17) Analysis Guide tab (this page)",
             """
 This guide mirrors the live dashboard behavior.
 Use it as:
@@ -312,7 +317,7 @@ Use it as:
             "info",
         ),
         (
-            "17) Data sources, fallback policy, and UK-safe exchanges",
+            "18) Data sources, fallback policy, and UK-safe exchanges",
             """
 Primary exchange fallback list is intentionally UK-safe for this setup:
 - Kraken
@@ -341,7 +346,7 @@ Cache policy:
             "info",
         ),
         (
-            "20) How to run with Streamlit",
+            "19) How to run with Streamlit",
             """
 Run locally:
 1. Install dependencies from `requirements.txt`
@@ -355,17 +360,17 @@ If data looks stale:
             "info",
         ),
         (
-            "21) Practical workflow (recommended)",
+            "20) Practical workflow (recommended)",
             copy_text("guide.section.workflow"),
             "core",
         ),
         (
-            "22) Limitations and responsibility",
+            "21) Limitations and responsibility",
             copy_text("guide.section.limitations"),
             "warn",
         ),
         (
-            "23) Quick Smoke Checklist (before daily use)",
+            "22) Quick Smoke Checklist (before daily use)",
             copy_text("guide.section.smoke_checklist"),
             "info",
         ),
