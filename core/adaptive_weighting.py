@@ -228,6 +228,7 @@ class ActionableRankingSnapshot:
     note: str
     matched_factors: int
     resolved_sample: int
+    bucket_resolved: float
 
 
 @dataclass(frozen=True)
@@ -1043,7 +1044,13 @@ def build_actionable_ranking_model(df_events: pd.DataFrame, *, min_samples: int 
 def build_actionable_ranking_snapshot(model: dict[str, object], *, signal: dict[str, object]) -> ActionableRankingSnapshot:
     resolved_count = int(model.get("resolved_count") or 0)
     if resolved_count < _ACTIONABLE_RANKING_MIN_RESOLVED:
-        return ActionableRankingSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+        return ActionableRankingSnapshot(
+            delta=0.0,
+            note="",
+            matched_factors=0,
+            resolved_sample=resolved_count,
+            bucket_resolved=0.0,
+        )
 
     signal_values = dict(signal or {})
     signal_values["Setup Class"] = _setup_class_value(signal_values.get("Setup Confirm"))
@@ -1091,7 +1098,13 @@ def build_actionable_ranking_snapshot(model: dict[str, object], *, signal: dict[
         contributions.append((weighted, f"{lens}: {value}", bucket_resolved))
 
     if not contributions:
-        return ActionableRankingSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+        return ActionableRankingSnapshot(
+            delta=0.0,
+            note="",
+            matched_factors=0,
+            resolved_sample=resolved_count,
+            bucket_resolved=0.0,
+        )
 
     contributions.sort(key=lambda item: abs(item[0]), reverse=True)
     delta = max(
@@ -1099,7 +1112,13 @@ def build_actionable_ranking_snapshot(model: dict[str, object], *, signal: dict[
         min(_ACTIONABLE_RANKING_MAX_DELTA, sum(value for value, _, _ in contributions)),
     )
     if abs(delta) < 0.40:
-        return ActionableRankingSnapshot(delta=0.0, note="", matched_factors=0, resolved_sample=resolved_count)
+        return ActionableRankingSnapshot(
+            delta=0.0,
+            note="",
+            matched_factors=0,
+            resolved_sample=resolved_count,
+            bucket_resolved=0.0,
+        )
 
     strongest = [name for value, name, _ in contributions if value > 0][:2]
     weakest = [name for value, name, _ in contributions if value < 0][:2]
@@ -1115,6 +1134,7 @@ def build_actionable_ranking_snapshot(model: dict[str, object], *, signal: dict[
         note=note,
         matched_factors=len(contributions),
         resolved_sample=resolved_count,
+        bucket_resolved=float(max((sample for _, _, sample in contributions), default=0.0)),
     )
 
 

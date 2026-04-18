@@ -20,6 +20,7 @@ from core.tracker_store import (
 
 _OPEN_STATUS = "OPEN"
 _RESOLVED_STATUS = "RESOLVED"
+_FORWARD_WINDOW_CHECKPOINTS: tuple[int, ...] = (1, 2, 4, 6, 8, 12, 16)
 
 
 def get_signal_tracker_db_path() -> str:
@@ -47,6 +48,8 @@ def _signal_key(source: str, symbol: str, timeframe: str, event_time: object) ->
 
 def _timeframe_horizon_bars(timeframe: str) -> int:
     key = str(timeframe or "").strip().lower()
+    if key == "5m":
+        return 12
     if key in {"15m", "30m"}:
         return 16
     if key in {"1h", "2h"}:
@@ -65,6 +68,23 @@ def _direction_key(direction: object) -> str:
     if d in {"DOWNSIDE", "SHORT", "SELL", "BEARISH"}:
         return "DOWNSIDE"
     return "NEUTRAL"
+
+
+def _archive_symbol_key(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    for separator in ("/", "-", "_", " "):
+        if separator in text:
+            text = text.split(separator, 1)[0].strip()
+            break
+    for quote_suffix in ("USDT", "USDC", "FDUSD", "BUSD", "USD"):
+        if text.endswith(quote_suffix) and len(text) > len(quote_suffix) + 1:
+            candidate = text[: -len(quote_suffix)].strip()
+            if candidate.isalpha():
+                text = candidate
+                break
+    return text
 
 
 def _playbook_display_series(frame: pd.DataFrame) -> pd.Series:
@@ -116,6 +136,24 @@ def _text_or_empty(value: object) -> str:
     if value is None or pd.isna(value):
         return ""
     return str(value).strip()
+
+
+def _forward_window_bars(horizon_bars: int) -> list[int]:
+    horizon = max(1, int(horizon_bars))
+    checkpoints = {int(value) for value in _FORWARD_WINDOW_CHECKPOINTS if 0 < int(value) <= horizon}
+    checkpoints.add(horizon)
+    return sorted(checkpoints)
+
+
+def _hold_window_style(bars_ahead: int) -> str:
+    bars = max(1, int(bars_ahead))
+    if bars <= 2:
+        return "Explosive"
+    if bars <= 6:
+        return "Quick Follow-Through"
+    if bars <= 12:
+        return "Standard Hold"
+    return "Needs Room"
 
 
 _ALERT_KEY_DISPLAY = {
@@ -391,6 +429,26 @@ def init_signal_tracker_db(db_path: str | None = None) -> str:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_market_alerts_source_active ON market_alerts(source, active, last_seen_at)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS signal_forward_windows (
+                signal_key TEXT NOT NULL,
+                bars_ahead INTEGER NOT NULL,
+                directional_return_pct REAL,
+                favorable_excursion_pct REAL,
+                adverse_excursion_pct REAL,
+                window_end_time TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (signal_key, bars_ahead)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_signal_forward_windows_signal ON signal_forward_windows(signal_key, bars_ahead)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_signal_forward_windows_bars ON signal_forward_windows(bars_ahead)"
         )
         conn.commit()
     return path
@@ -677,6 +735,48 @@ def _resolve_event_from_frame(row: Mapping[str, object], df_ohlcv: pd.DataFrame)
         favorable_excursion_pct = max(0.0, abs(max_up_pct))
         adverse_excursion_pct = max(0.0, abs(max_down_pct))
 
+    forward_windows: list[dict[str, object]] = []
+    for bars_ahead in _forward_window_bars(horizon_bars):
+        window = future.iloc[:bars_ahead].copy()
+        if window.empty:
+            continue
+        window_close = pd.to_numeric(window["close"], errors="coerce").dropna()
+        window_high = pd.to_numeric(window[high_col], errors="coerce").dropna()
+        window_low = pd.to_numeric(window[low_col], errors="coerce").dropna()
+        if window_close.empty:
+            continue
+        window_end_price = float(window_close.iloc[-1])
+        window_raw_return_pct = ((window_end_price / event_price) - 1.0) * 100.0
+        window_max_high = float(window_high.max()) if not window_high.empty else window_end_price
+        window_min_low = float(window_low.min()) if not window_low.empty else window_end_price
+        window_max_up_pct = ((window_max_high / event_price) - 1.0) * 100.0
+        window_max_down_pct = ((window_min_low / event_price) - 1.0) * 100.0
+        if direction == "UPSIDE":
+            window_directional_return_pct = window_raw_return_pct
+            window_favorable_excursion_pct = max(0.0, window_max_up_pct)
+            window_adverse_excursion_pct = max(0.0, -window_max_down_pct)
+        elif direction == "DOWNSIDE":
+            window_directional_return_pct = -window_raw_return_pct
+            window_favorable_excursion_pct = max(0.0, -window_max_down_pct)
+            window_adverse_excursion_pct = max(0.0, window_max_up_pct)
+        else:
+            window_directional_return_pct = window_raw_return_pct
+            window_favorable_excursion_pct = max(0.0, abs(window_max_up_pct))
+            window_adverse_excursion_pct = max(0.0, abs(window_max_down_pct))
+        forward_windows.append(
+            {
+                "signal_key": str(row["signal_key"]),
+                "bars_ahead": int(bars_ahead),
+                "directional_return_pct": float(window_directional_return_pct),
+                "favorable_excursion_pct": float(window_favorable_excursion_pct),
+                "adverse_excursion_pct": float(window_adverse_excursion_pct),
+                "window_end_time": _utc_iso(
+                    window.get("timestamp", pd.Series(dtype=object)).iloc[-1] if "timestamp" in window.columns else None
+                ),
+                "created_at": _utc_iso(),
+            }
+        )
+
     plan_outcome = ""
     entry_price = _float_or_none(row["entry_price"])
     stop_loss = _float_or_none(row["stop_loss"])
@@ -705,6 +805,7 @@ def _resolve_event_from_frame(row: Mapping[str, object], df_ohlcv: pd.DataFrame)
         "adverse_excursion_pct": adverse_excursion_pct,
         "resolved_at": _utc_iso(future.get("timestamp", pd.Series(dtype=object)).iloc[-1] if "timestamp" in future.columns else None),
         "updated_at": _utc_iso(),
+        "_forward_windows": forward_windows,
     }
 
 
@@ -733,6 +834,7 @@ def resolve_open_signal_events_for_frame(
             outcome = _resolve_event_from_frame(row, df_ohlcv)
             if not outcome:
                 continue
+            forward_windows = list(outcome.pop("_forward_windows", []) or [])
             conn.execute(
                 """
                 UPDATE signal_events
@@ -747,6 +849,24 @@ def resolve_open_signal_events_for_frame(
                 """,
                 {"signal_key": row["signal_key"], **outcome},
             )
+            if forward_windows:
+                conn.executemany(
+                    """
+                    INSERT INTO signal_forward_windows (
+                        signal_key, bars_ahead, directional_return_pct,
+                        favorable_excursion_pct, adverse_excursion_pct, window_end_time, created_at
+                    ) VALUES (
+                        :signal_key, :bars_ahead, :directional_return_pct,
+                        :favorable_excursion_pct, :adverse_excursion_pct, :window_end_time, :created_at
+                    )
+                    ON CONFLICT(signal_key, bars_ahead) DO UPDATE SET
+                        directional_return_pct=excluded.directional_return_pct,
+                        favorable_excursion_pct=excluded.favorable_excursion_pct,
+                        adverse_excursion_pct=excluded.adverse_excursion_pct,
+                        window_end_time=excluded.window_end_time
+                    """,
+                    forward_windows,
+                )
             resolved += 1
         conn.commit()
     if resolved > 0:
@@ -759,23 +879,34 @@ def resolve_open_signal_events_via_fetch(
     fetch_ohlcv,
     source: str = "Market",
     db_path: str | None = None,
-    limit_pairs: int = 12,
+    limit_pairs: int | None = 12,
     candle_limit: int = 260,
+    symbol: str | None = None,
+    timeframe: str | None = None,
 ) -> int:
     path = init_signal_tracker_db(db_path)
     total_resolved = 0
     with _connect(path) as conn:
-        pairs = conn.execute(
-            """
+        query = """
             SELECT symbol, timeframe, MAX(event_time) AS latest_event
             FROM signal_events
             WHERE status = ? AND source = ?
+        """
+        params: list[object] = [_OPEN_STATUS, str(source or "Market")]
+        if symbol:
+            query += " AND UPPER(COALESCE(symbol, '')) = ?"
+            params.append(str(symbol).strip().upper())
+        if timeframe:
+            query += " AND LOWER(COALESCE(timeframe, '')) = ?"
+            params.append(str(timeframe).strip().lower())
+        query += """
             GROUP BY symbol, timeframe
             ORDER BY latest_event DESC
-            LIMIT ?
-            """,
-            (_OPEN_STATUS, str(source or "Market"), int(limit_pairs)),
-        ).fetchall()
+        """
+        if limit_pairs is not None:
+            query += " LIMIT ?"
+            params.append(int(limit_pairs))
+        pairs = conn.execute(query, params).fetchall()
     for row in pairs:
         symbol = str(row["symbol"])
         timeframe = str(row["timeframe"])
@@ -794,6 +925,150 @@ def resolve_open_signal_events_via_fetch(
             db_path=path,
         )
     return total_resolved
+
+
+def backfill_signal_forward_windows_for_frame(
+    *,
+    symbol: str,
+    timeframe: str,
+    df_ohlcv: pd.DataFrame,
+    source: str = "Market",
+    db_path: str | None = None,
+    limit_rows: int = 250,
+    decision_version: str | None = None,
+) -> int:
+    path = init_signal_tracker_db(db_path)
+    backfilled = 0
+    symbol_key = str(symbol or "").strip().upper()
+    timeframe_key = str(timeframe or "").strip().lower()
+    with _connect(path) as conn:
+        rows = conn.execute(
+            (
+                """
+                SELECT *
+                FROM signal_events AS events
+                WHERE events.status = ? AND events.source = ? AND events.symbol = ? AND events.timeframe = ?
+                """
+                + (
+                    " AND TRIM(COALESCE(events.decision_version, '')) = ''"
+                    if str(decision_version).strip() == "Legacy / Unversioned"
+                    else (" AND COALESCE(events.decision_version, '') = ?" if decision_version is not None else "")
+                )
+                + """
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM signal_forward_windows AS windows
+                      WHERE windows.signal_key = events.signal_key
+                  )
+                ORDER BY events.event_time DESC
+                LIMIT ?
+                """
+            ),
+            (
+                [_RESOLVED_STATUS, str(source or "Market"), symbol_key, timeframe_key]
+                + ([str(decision_version).strip()] if decision_version is not None and str(decision_version).strip() != "Legacy / Unversioned" else [])
+                + [int(limit_rows)]
+            ),
+        ).fetchall()
+        for row in rows:
+            outcome = _resolve_event_from_frame(row, df_ohlcv)
+            if not outcome:
+                continue
+            forward_windows = list(outcome.get("_forward_windows", []) or [])
+            if not forward_windows:
+                continue
+            conn.executemany(
+                """
+                INSERT INTO signal_forward_windows (
+                    signal_key, bars_ahead, directional_return_pct,
+                    favorable_excursion_pct, adverse_excursion_pct, window_end_time, created_at
+                ) VALUES (
+                    :signal_key, :bars_ahead, :directional_return_pct,
+                    :favorable_excursion_pct, :adverse_excursion_pct, :window_end_time, :created_at
+                )
+                ON CONFLICT(signal_key, bars_ahead) DO UPDATE SET
+                    directional_return_pct=excluded.directional_return_pct,
+                    favorable_excursion_pct=excluded.favorable_excursion_pct,
+                    adverse_excursion_pct=excluded.adverse_excursion_pct,
+                    window_end_time=excluded.window_end_time
+                """,
+                forward_windows,
+            )
+            backfilled += 1
+        conn.commit()
+    if backfilled > 0:
+        _sync_tracker_mirror(path)
+    return backfilled
+
+
+def backfill_signal_forward_windows_via_fetch(
+    *,
+    fetch_ohlcv,
+    source: str = "Market",
+    db_path: str | None = None,
+    limit_pairs: int = 12,
+    rows_per_pair: int = 250,
+    candle_limit: int = 260,
+    symbol: str | None = None,
+    timeframe: str | None = None,
+    decision_version: str | None = None,
+) -> int:
+    path = init_signal_tracker_db(db_path)
+    total_backfilled = 0
+    with _connect(path) as conn:
+        pairs = conn.execute(
+            (
+                """
+                SELECT events.symbol, events.timeframe, MAX(events.event_time) AS latest_event
+                FROM signal_events AS events
+                WHERE events.status = ? AND events.source = ?
+                """
+                + (" AND UPPER(COALESCE(events.symbol, '')) = ?" if symbol else "")
+                + (" AND LOWER(COALESCE(events.timeframe, '')) = ?" if timeframe else "")
+                + (
+                    " AND TRIM(COALESCE(events.decision_version, '')) = ''"
+                    if str(decision_version).strip() == "Legacy / Unversioned"
+                    else (" AND COALESCE(events.decision_version, '') = ?" if decision_version is not None else "")
+                )
+                + """
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM signal_forward_windows AS windows
+                      WHERE windows.signal_key = events.signal_key
+                  )
+                GROUP BY events.symbol, events.timeframe
+                ORDER BY latest_event DESC
+                LIMIT ?
+                """
+            ),
+            (
+                [_RESOLVED_STATUS, str(source or "Market")]
+                + ([str(symbol).strip().upper()] if symbol else [])
+                + ([str(timeframe).strip().lower()] if timeframe else [])
+                + ([str(decision_version).strip()] if decision_version is not None and str(decision_version).strip() != "Legacy / Unversioned" else [])
+                + [int(limit_pairs)]
+            ),
+        ).fetchall()
+    for row in pairs:
+        symbol = str(row["symbol"])
+        timeframe = str(row["timeframe"])
+        try:
+            df = fetch_ohlcv(symbol, timeframe, limit=int(candle_limit))
+        except Exception:
+            continue
+        if df is None or len(df) <= 3:
+            continue
+        df_eval = df.iloc[:-1].copy() if len(df) > 1 else df
+        total_backfilled += backfill_signal_forward_windows_for_frame(
+            symbol=symbol,
+            timeframe=timeframe,
+            df_ohlcv=df_eval,
+            source=source,
+            db_path=path,
+            limit_rows=rows_per_pair,
+            decision_version=decision_version,
+        )
+    return total_backfilled
 
 
 def log_market_alerts(
@@ -879,12 +1154,34 @@ def fetch_market_alerts_df(
         return pd.read_sql_query(query, conn, params=params)
 
 
+def count_market_alerts(
+    *,
+    active_only: bool = False,
+    source: str | None = None,
+    db_path: str | None = None,
+) -> int:
+    path = init_signal_tracker_db(db_path)
+    query = "SELECT COUNT(*) FROM market_alerts WHERE 1=1"
+    params: list[object] = []
+    if source:
+        query += " AND source = ?"
+        params.append(str(source))
+    if active_only:
+        query += " AND active = 1"
+    with _connect(path) as conn:
+        cur = conn.execute(query, params)
+        row = cur.fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
 def fetch_signal_events_df(
     *,
     limit: int = 250,
     status: str | None = None,
     source: str | None = None,
     timeframe: str | None = None,
+    symbol: str | None = None,
+    decision_version: str | None = None,
     db_path: str | None = None,
 ) -> pd.DataFrame:
     path = init_signal_tracker_db(db_path)
@@ -899,8 +1196,40 @@ def fetch_signal_events_df(
     if timeframe:
         query += " AND LOWER(COALESCE(timeframe, '')) = ?"
         params.append(str(timeframe).strip().lower())
+    if symbol:
+        query += " AND UPPER(COALESCE(symbol, '')) = ?"
+        params.append(str(symbol).strip().upper())
+    if decision_version is not None:
+        version_text = str(decision_version).strip()
+        if version_text == "Legacy / Unversioned":
+            query += " AND TRIM(COALESCE(decision_version, '')) = ''"
+        else:
+            query += " AND COALESCE(decision_version, '') = ?"
+            params.append(version_text)
     query += " ORDER BY event_time DESC LIMIT ?"
     params.append(int(limit))
+    with _connect(path) as conn:
+        return pd.read_sql_query(query, conn, params=params)
+
+
+def fetch_signal_forward_windows_df(
+    *,
+    signal_keys: Sequence[str] | None = None,
+    limit: int | None = None,
+    db_path: str | None = None,
+) -> pd.DataFrame:
+    path = init_signal_tracker_db(db_path)
+    query = "SELECT * FROM signal_forward_windows WHERE 1=1"
+    params: list[object] = []
+    cleaned_keys = [str(value).strip() for value in list(signal_keys or []) if str(value).strip()]
+    if cleaned_keys:
+        placeholders = ",".join("?" for _ in cleaned_keys)
+        query += f" AND signal_key IN ({placeholders})"
+        params.extend(cleaned_keys)
+    query += " ORDER BY signal_key DESC, bars_ahead ASC"
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(int(limit))
     with _connect(path) as conn:
         return pd.read_sql_query(query, conn, params=params)
 
@@ -942,6 +1271,223 @@ def prefer_current_decision_version_slice(
     d.attrs["decision_version_rows"] = int(len(current_df))
     d.attrs["decision_version_total_rows"] = int(len(d))
     return d
+
+
+def build_hold_window_intelligence(
+    df_events: pd.DataFrame,
+    df_forward_windows: pd.DataFrame,
+    *,
+    min_resolved_signals: int = 8,
+) -> dict[str, object]:
+    empty = {
+        "available": False,
+        "building": True,
+        "resolved_signals": 0,
+        "window_rows": 0,
+        "best_bar": 0,
+        "best_label": "",
+        "best_style": "",
+        "fade_after_bar": 0,
+        "follow_through_pct": 0.0,
+        "avg_dir_return_pct": 0.0,
+        "avg_adverse_excursion_pct": 0.0,
+        "edge_score": 0.0,
+        "sample": 0,
+    }
+    if df_events is None or df_events.empty:
+        return empty
+
+    d = df_events.copy()
+    resolved = d[d.get("status", pd.Series(dtype=object)).fillna("").astype(str).str.upper() == _RESOLVED_STATUS].copy()
+    if resolved.empty or "signal_key" not in resolved.columns:
+        return empty
+    resolved_keys = resolved["signal_key"].fillna("").astype(str).str.strip()
+    resolved_keys = [value for value in resolved_keys.tolist() if value]
+    if not resolved_keys:
+        return empty
+    if df_forward_windows is None or df_forward_windows.empty:
+        return {
+            **empty,
+            "resolved_signals": int(len(set(resolved_keys))),
+        }
+
+    windows = df_forward_windows.copy()
+    if "signal_key" not in windows.columns or "bars_ahead" not in windows.columns:
+        return empty
+    windows["signal_key"] = windows["signal_key"].fillna("").astype(str).str.strip()
+    windows = windows[windows["signal_key"].isin(resolved_keys)].copy()
+    if windows.empty:
+        return {
+            **empty,
+            "resolved_signals": int(len(set(resolved_keys))),
+        }
+
+    windows["bars_ahead"] = pd.to_numeric(windows["bars_ahead"], errors="coerce")
+    windows["directional_return_pct"] = pd.to_numeric(windows.get("directional_return_pct"), errors="coerce")
+    windows["adverse_excursion_pct"] = pd.to_numeric(windows.get("adverse_excursion_pct"), errors="coerce")
+    windows = windows.dropna(subset=["bars_ahead", "directional_return_pct"]).copy()
+    if windows.empty:
+        return {
+            **empty,
+            "resolved_signals": int(len(set(resolved_keys))),
+        }
+
+    windows["bars_ahead"] = windows["bars_ahead"].astype(int)
+    grouped = (
+        windows.groupby("bars_ahead", dropna=False)
+        .agg(
+            Sample=("signal_key", "nunique"),
+            FollowThroughPct=("directional_return_pct", lambda s: float((pd.to_numeric(s, errors="coerce") > 0).mean() * 100.0)),
+            AvgDirReturnPct=("directional_return_pct", "mean"),
+            AvgAdvExcPct=("adverse_excursion_pct", "mean"),
+        )
+        .reset_index()
+        .sort_values("bars_ahead")
+    )
+    grouped["AvgAdvExcPct"] = pd.to_numeric(grouped["AvgAdvExcPct"], errors="coerce").fillna(0.0)
+    grouped["edge_score"] = pd.to_numeric(grouped["AvgDirReturnPct"], errors="coerce").fillna(0.0) - (
+        grouped["AvgAdvExcPct"] * 0.65
+    )
+    qualified = grouped[grouped["Sample"] >= int(max(1, min_resolved_signals))].copy()
+    if qualified.empty:
+        return {
+            **empty,
+            "resolved_signals": int(len(set(resolved_keys))),
+            "window_rows": int(len(windows)),
+        }
+
+    best = qualified.sort_values(
+        by=["edge_score", "AvgDirReturnPct", "FollowThroughPct", "bars_ahead"],
+        ascending=[False, False, False, True],
+    ).iloc[0]
+    best_bar = int(best["bars_ahead"])
+    best_edge = float(best["edge_score"])
+    best_return = float(best["AvgDirReturnPct"])
+    fade_after_bar = 0
+    later = qualified[qualified["bars_ahead"] > best_bar].sort_values("bars_ahead")
+    for _, row in later.iterrows():
+        later_edge = float(row["edge_score"])
+        later_return = float(row["AvgDirReturnPct"])
+        if later_edge <= (best_edge * 0.8) or later_return <= (best_return * 0.8):
+            fade_after_bar = int(row["bars_ahead"])
+            break
+
+    return {
+        "available": True,
+        "building": False,
+        "resolved_signals": int(len(set(resolved_keys))),
+        "window_rows": int(len(windows)),
+        "best_bar": best_bar,
+        "best_label": f"around {best_bar} bars",
+        "best_style": _hold_window_style(best_bar),
+        "fade_after_bar": int(fade_after_bar),
+        "follow_through_pct": float(best["FollowThroughPct"]),
+        "avg_dir_return_pct": best_return,
+        "avg_adverse_excursion_pct": float(best["AvgAdvExcPct"]),
+        "edge_score": best_edge,
+        "sample": int(best["Sample"]),
+    }
+
+
+def build_hold_window_cohort_summary(
+    df_events: pd.DataFrame,
+    df_forward_windows: pd.DataFrame,
+    group_field: str,
+    *,
+    min_checkpoint_sample: int = 4,
+) -> pd.DataFrame:
+    if (
+        df_events is None
+        or df_events.empty
+        or df_forward_windows is None
+        or df_forward_windows.empty
+        or group_field not in df_events.columns
+        or "signal_key" not in df_events.columns
+        or "signal_key" not in df_forward_windows.columns
+    ):
+        return pd.DataFrame()
+
+    events = df_events.copy()
+    events = events[events.get("status", pd.Series(dtype=object)).fillna("").astype(str).str.upper() == _RESOLVED_STATUS].copy()
+    if events.empty:
+        return pd.DataFrame()
+
+    events["signal_key"] = events["signal_key"].fillna("").astype(str).str.strip()
+    events[group_field] = events[group_field].replace("", "Unknown").fillna("Unknown").astype(str).str.strip()
+    events = events[events["signal_key"].ne("")]
+    if events.empty:
+        return pd.DataFrame()
+
+    windows = df_forward_windows.copy()
+    windows["signal_key"] = windows["signal_key"].fillna("").astype(str).str.strip()
+    windows["bars_ahead"] = pd.to_numeric(windows.get("bars_ahead"), errors="coerce")
+    windows["directional_return_pct"] = pd.to_numeric(windows.get("directional_return_pct"), errors="coerce")
+    windows["adverse_excursion_pct"] = pd.to_numeric(windows.get("adverse_excursion_pct"), errors="coerce")
+    windows = windows.dropna(subset=["bars_ahead", "directional_return_pct"]).copy()
+    if windows.empty:
+        return pd.DataFrame()
+
+    merged = windows.merge(events[["signal_key", group_field]], on="signal_key", how="inner")
+    if merged.empty:
+        return pd.DataFrame()
+
+    grouped = (
+        merged.groupby([group_field, "bars_ahead"], dropna=False)
+        .agg(
+            Sample=("signal_key", "nunique"),
+            FollowThroughPct=("directional_return_pct", lambda s: float((pd.to_numeric(s, errors="coerce") > 0).mean() * 100.0)),
+            AvgDirReturnPct=("directional_return_pct", "mean"),
+            AvgAdvExcPct=("adverse_excursion_pct", "mean"),
+        )
+        .reset_index()
+    )
+    grouped["bars_ahead"] = grouped["bars_ahead"].astype(int)
+    grouped["AvgAdvExcPct"] = pd.to_numeric(grouped["AvgAdvExcPct"], errors="coerce").fillna(0.0)
+    grouped["edge_score"] = pd.to_numeric(grouped["AvgDirReturnPct"], errors="coerce").fillna(0.0) - (
+        grouped["AvgAdvExcPct"] * 0.65
+    )
+    qualified = grouped[grouped["Sample"] >= int(max(1, min_checkpoint_sample))].copy()
+    if qualified.empty:
+        return pd.DataFrame()
+
+    rows: list[dict[str, object]] = []
+    for label, frame in qualified.groupby(group_field, dropna=False):
+        frame = frame.sort_values("bars_ahead").copy()
+        best = frame.sort_values(
+            by=["edge_score", "AvgDirReturnPct", "FollowThroughPct", "bars_ahead"],
+            ascending=[False, False, False, True],
+        ).iloc[0]
+        best_bar = int(best["bars_ahead"])
+        best_edge = float(best["edge_score"])
+        best_return = float(best["AvgDirReturnPct"])
+        fade_after_bar = 0
+        later = frame[frame["bars_ahead"] > best_bar].sort_values("bars_ahead")
+        for _, row in later.iterrows():
+            later_edge = float(row["edge_score"])
+            later_return = float(row["AvgDirReturnPct"])
+            if later_edge <= (best_edge * 0.8) or later_return <= (best_return * 0.8):
+                fade_after_bar = int(row["bars_ahead"])
+                break
+        rows.append(
+            {
+                group_field: str(label or "Unknown").strip() or "Unknown",
+                "Suggested Hold": f"around {best_bar} bars",
+                "Hold Style": _hold_window_style(best_bar),
+                "Checkpoint Sample": int(best["Sample"]),
+                "Follow-Through %": float(best["FollowThroughPct"]),
+                "Avg Dir Return %": best_return,
+                "Avg MAE %": float(best["AvgAdvExcPct"]),
+                "Edge Fades": (f"after {fade_after_bar} bars" if fade_after_bar > 0 else "not clear yet"),
+                "Edge Score": best_edge,
+            }
+        )
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values(
+        by=["Checkpoint Sample", "Follow-Through %", "Avg Dir Return %"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
 
 
 def _dominant_text_value(series: pd.Series | None, *, default: str) -> str:
@@ -1074,7 +1620,7 @@ def build_recent_symbol_market_signal_snapshot(
         "Adaptive Edge": "Unknown",
         "Signal Note": "",
     }
-    normalized_symbol = str(symbol or "").strip().upper()
+    normalized_symbol = _archive_symbol_key(symbol)
     if not normalized_symbol or df_events is None or df_events.empty:
         return snapshot
 
@@ -1083,7 +1629,7 @@ def build_recent_symbol_market_signal_snapshot(
         source_series = d["source"].fillna("").astype(str).str.strip()
         d = d[source_series.eq("Market")].copy()
     if "symbol" in d.columns:
-        symbol_series = d["symbol"].fillna("").astype(str).str.strip().str.upper()
+        symbol_series = d["symbol"].map(_archive_symbol_key).fillna("").astype(str).str.strip().str.upper()
         d = d[symbol_series.eq(normalized_symbol)].copy()
     if d.empty:
         return snapshot
@@ -1355,10 +1901,14 @@ def build_signal_review_snapshot(df_events: pd.DataFrame) -> dict[str, float]:
 def build_execution_overlay_snapshot(df_events: pd.DataFrame) -> dict[str, float]:
     if df_events is None or df_events.empty:
         return {
+            "total": 0.0,
+            "overlay_marked": 0.0,
+            "overlay_coverage_pct": 0.0,
             "taken": 0.0,
             "taken_resolved": 0.0,
             "taken_follow_through_rate": 0.0,
             "actual_closed": 0.0,
+            "journal_coverage_pct": 0.0,
             "actual_win_rate": 0.0,
             "avg_actual_pnl": 0.0,
             "avg_signal_dir_return_on_taken": 0.0,
@@ -1374,6 +1924,8 @@ def build_execution_overlay_snapshot(df_events: pd.DataFrame) -> dict[str, float
     d["status"] = d.get("status", pd.Series(dtype=object)).fillna("").astype(str).str.upper()
     d["actual_trade_status"] = d.get("actual_trade_status", pd.Series(dtype=object)).fillna("").astype(str).str.upper()
 
+    total = float(len(d))
+    overlay_marked = float(d["trade_decision"].ne("").sum())
     taken = d[d["trade_decision"] == "TAKEN"]
     taken_resolved = taken[taken["status"] == _RESOLVED_STATUS]
     actual_closed = taken[taken["actual_trade_status"] == "CLOSED"]
@@ -1393,10 +1945,14 @@ def build_execution_overlay_snapshot(df_events: pd.DataFrame) -> dict[str, float
         float((skipped_resolved["directional_return_pct"] > 0).mean() * 100.0) if len(skipped_resolved) else 0.0
     )
     return {
+        "total": total,
+        "overlay_marked": overlay_marked,
+        "overlay_coverage_pct": (overlay_marked / total * 100.0) if total > 0 else 0.0,
         "taken": float(len(taken)),
         "taken_resolved": float(len(taken_resolved)),
         "taken_follow_through_rate": taken_follow_through_rate,
         "actual_closed": float(len(actual_closed)),
+        "journal_coverage_pct": (float(len(actual_closed)) / float(len(taken)) * 100.0) if len(taken) else 0.0,
         "actual_win_rate": actual_win_rate,
         "avg_actual_pnl": avg_actual_pnl,
         "avg_signal_dir_return_on_taken": avg_signal_dir_return_on_taken,
@@ -1473,7 +2029,7 @@ def _narrow_actual_trade_archive(
         value=symbol,
         label=f"{str(symbol or '').strip().upper()} symbol",
         min_rows=3,
-        normalizer=lambda value: str(value or "").strip().upper(),
+        normalizer=_archive_symbol_key,
     )
     d = _apply_archive_filter(
         d,

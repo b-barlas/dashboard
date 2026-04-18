@@ -72,6 +72,8 @@ from tabs.market_tab import (
     _should_use_major_fallback,
     _should_use_cached_scan,
     _fetch_ticker_delta_once,
+    _execution_friction_score,
+    _expectancy_bias_score,
     _extract_ai_verdict,
     _extract_confidence_label,
     _setup_confirm_priority,
@@ -863,6 +865,8 @@ class MarketTabLogicTests(unittest.TestCase):
             "__actionable_context_score": 68.0,
             "__actionable_tactical_score": 76.0,
             "__actionable_setup_score": 77.0,
+            "__expectancy_bias_score": 58.0,
+            "__execution_friction_score": 56.0,
             "__actionable_archive_score": 4.2,
             "__risk_unit_fraction": 0.25,
             "__confidence_val": 69.0,
@@ -877,6 +881,8 @@ class MarketTabLogicTests(unittest.TestCase):
             "__actionable_context_score": 68.0,
             "__actionable_tactical_score": 76.0,
             "__actionable_setup_score": 77.0,
+            "__expectancy_bias_score": 42.0,
+            "__execution_friction_score": 56.0,
             "__actionable_archive_score": -3.8,
             "__risk_unit_fraction": 0.25,
             "__confidence_val": 69.0,
@@ -887,6 +893,43 @@ class MarketTabLogicTests(unittest.TestCase):
         }
         ordered = sorted([cautious, supportive], key=_actionable_market_result_priority_key)
         self.assertEqual(ordered[0]["Coin"], "SOL")
+
+    def test_execution_friction_score_prefers_large_calm_names(self):
+        clean = _execution_friction_score(
+            mcap_val=220_000_000_000,
+            volatility_label="Low",
+            delta_pct=0.8,
+            spike_present=False,
+            execution_confidence=84.0,
+        )
+        messy = _execution_friction_score(
+            mcap_val=350_000_000,
+            volatility_label="High",
+            delta_pct=4.2,
+            spike_present=True,
+            execution_confidence=39.0,
+        )
+        self.assertGreater(clean, messy)
+
+    def test_expectancy_bias_score_uses_archive_delta_and_cohort_strength(self):
+        supportive = _expectancy_bias_score(
+            archive_delta=4.2,
+            bucket_resolved=28.0,
+            matched_factors=3,
+        )
+        cautious = _expectancy_bias_score(
+            archive_delta=-3.8,
+            bucket_resolved=28.0,
+            matched_factors=3,
+        )
+        thin = _expectancy_bias_score(
+            archive_delta=4.2,
+            bucket_resolved=8.0,
+            matched_factors=1,
+        )
+        self.assertGreater(supportive, 50.0)
+        self.assertLess(cautious, 50.0)
+        self.assertGreater(supportive, thin)
 
     def test_direction_fetch_symbol_keeps_canonical_requested_symbol_for_htf_context(self):
         self.assertEqual(_direction_fetch_symbol("BTC/USDT", "XBT/USD", "exchange"), "BTC/USDT")

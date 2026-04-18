@@ -34,7 +34,7 @@ from core.signal_tracker import (
     prefer_current_decision_version_slice,
 )
 from core.spot_execution_pipeline import build_spot_execution_pipeline
-from ui.primitives import render_help_details, render_page_header
+from ui.primitives import render_help_details, render_insight_card, render_page_header
 from ui.signal_panels import build_indicator_groups_html, build_learned_edge_banner_html, build_setup_snapshot_html
 from ui.signal_formatters import (
     adx_bucket_only as _adx_bucket_only,
@@ -49,6 +49,114 @@ from ui.signal_formatters import (
     trade_gate_display_label as _trade_gate_display_label,
 )
 from ui.snapshot_cache import live_or_snapshot
+
+
+def _archive_symbol_key(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    for separator in ("/", "-", "_", " "):
+        if separator in text:
+            text = text.split(separator, 1)[0].strip()
+            break
+    for quote_suffix in ("USDT", "USDC", "FDUSD", "BUSD", "USD"):
+        if text.endswith(quote_suffix) and len(text) > len(quote_suffix) + 1:
+            candidate = text[: -len(quote_suffix)].strip()
+            if candidate.isalpha():
+                text = candidate
+                break
+    return text
+
+
+def _position_hold_archive_slice(
+    df_events: pd.DataFrame,
+    *,
+    symbol: str,
+    timeframe: str,
+    direction: str,
+) -> tuple[pd.DataFrame, str]:
+    if df_events is None or df_events.empty:
+        return pd.DataFrame(), "No archive sample"
+    d = df_events.copy()
+    if "status" in d.columns:
+        d = d[d["status"].fillna("").astype(str).str.upper() == "RESOLVED"].copy()
+    if d.empty:
+        return pd.DataFrame(), "No resolved archive sample"
+
+    symbol_key = _archive_symbol_key(symbol)
+    timeframe_key = str(timeframe or "").strip().lower()
+    direction_key = "UPSIDE" if str(direction or "").strip().upper() == "LONG" else "DOWNSIDE"
+
+    def _match(frame: pd.DataFrame, *, require_symbol: bool, require_timeframe: bool, require_direction: bool) -> pd.DataFrame:
+        out = frame.copy()
+        if require_symbol and "symbol" in out.columns:
+            normalized_symbol = out["symbol"].map(_archive_symbol_key).fillna("").astype(str).str.upper()
+            out = out[normalized_symbol.eq(symbol_key)].copy()
+        if require_timeframe and "timeframe" in out.columns:
+            out = out[out["timeframe"].fillna("").astype(str).str.lower() == timeframe_key]
+        if require_direction and "direction" in out.columns:
+            out = out[out["direction"].fillna("").astype(str).str.upper() == direction_key]
+        return out.copy()
+
+    candidates = [
+        (_match(d, require_symbol=True, require_timeframe=True, require_direction=True), f"{symbol_key} {str(timeframe).upper()} {direction_key.title()}"),
+        (_match(d, require_symbol=True, require_timeframe=False, require_direction=True), f"{symbol_key} {direction_key.title()}"),
+        (_match(d, require_symbol=False, require_timeframe=True, require_direction=True), f"{str(timeframe).upper()} {direction_key.title()} market"),
+        (_match(d, require_symbol=False, require_timeframe=False, require_direction=True), f"broader {direction_key.title()} archive"),
+    ]
+    for frame, label in candidates:
+        if len(frame) >= 8:
+            return frame, label
+    for frame, label in candidates:
+        if not frame.empty:
+            return frame, label
+    return pd.DataFrame(), "No matching archive sample"
+
+
+def _position_hold_window_note(snapshot: dict[str, object], *, scope_label: str) -> tuple[str, str]:
+    scope = str(scope_label or "archive slice").strip()
+    resolved_signals = int(snapshot.get("resolved_signals") or 0)
+    if resolved_signals <= 0:
+        return (
+            "No matching resolved archive sample yet, so historical hold guidance is still building.",
+            "neutral",
+        )
+    if not bool(snapshot.get("available")):
+        return (
+            (
+                f"Historical hold guidance is still building for <b>{scope}</b>. "
+                f"We have <b>{resolved_signals}</b> resolved signals, but the checkpoint sample is not deep enough yet."
+            ),
+            "neutral",
+        )
+    best_bar = int(snapshot.get("best_bar") or 0)
+    best_label = str(snapshot.get("best_label") or "").strip() or "around 0 bars"
+    best_style = str(snapshot.get("best_style") or "Standard Hold").strip()
+    sample = int(snapshot.get("sample") or 0)
+    avg_dir_return_pct = float(snapshot.get("avg_dir_return_pct") or 0.0)
+    follow_through_pct = float(snapshot.get("follow_through_pct") or 0.0)
+    fade_after_bar = int(snapshot.get("fade_after_bar") or 0)
+    fade_text = (
+        f"Edge fades after roughly <b>{fade_after_bar}</b> bars."
+        if fade_after_bar > 0
+        else "Edge has not clearly faded inside the measured checkpoint ladder yet."
+    )
+    tone = "positive" if avg_dir_return_pct > 0.0 else "warning"
+    lead_text = (
+        f"<b>Best at: {best_bar} bars</b><br>"
+        if best_bar > 0
+        else f"<b>Suggested hold: {best_label}</b><br>"
+    )
+    body_text = lead_text + (
+        f"Scope: <b>{scope}</b>.<br>"
+        f"Style: <b>{best_style}</b>. Sample at that checkpoint: <b>{sample}</b> resolved signals.<br>"
+        f"Avg directional return: <b>{avg_dir_return_pct:+.2f}%</b>, follow-through: <b>{follow_through_pct:.1f}%</b>. "
+        f"{fade_text}"
+    )
+    return (
+        body_text,
+        tone,
+    )
 
 
 def _spot_tf_note(snapshot) -> str:
@@ -250,8 +358,10 @@ def render(ctx: dict) -> None:
     get_signal_tracker_db_path = get_ctx(ctx, "get_signal_tracker_db_path")
     init_signal_tracker_db = get_ctx(ctx, "init_signal_tracker_db")
     fetch_signal_events_df = get_ctx(ctx, "fetch_signal_events_df")
+    fetch_signal_forward_windows_df = get_ctx(ctx, "fetch_signal_forward_windows_df")
     build_adaptive_context_model = get_ctx(ctx, "build_adaptive_context_model")
     build_live_signal_adaptive_snapshot = get_ctx(ctx, "build_live_signal_adaptive_snapshot")
+    build_hold_window_intelligence = get_ctx(ctx, "build_hold_window_intelligence")
     build_recent_market_context_snapshot = get_ctx(ctx, "build_recent_market_context_snapshot")
     build_recent_symbol_market_signal_snapshot = get_ctx(ctx, "build_recent_symbol_market_signal_snapshot")
     classify_symbol_sector = get_ctx(ctx, "classify_symbol_sector")
@@ -283,6 +393,7 @@ def render(ctx: dict) -> None:
         value="BTC",
         key="position_coin_input",
     ))
+    archive_symbol = _archive_symbol_key(coin) or coin
     selected_timeframes = st.multiselect(
         "Select up to 3 Timeframes",
         ['1m', '3m', '5m', '15m', '1h', '4h', '1d'],
@@ -365,6 +476,12 @@ def render(ctx: dict) -> None:
         recent_market_events_df = fetch_signal_events_df(
             limit=240,
             source="Market",
+            db_path=signal_tracker_db_path,
+        )
+        adaptive_forward_windows_df = fetch_signal_forward_windows_df(
+            signal_keys=adaptive_history_df["signal_key"].fillna("").astype(str).tolist()
+            if "signal_key" in adaptive_history_df.columns
+            else [],
             db_path=signal_tracker_db_path,
         )
         recent_market_context = build_recent_market_context_snapshot(recent_market_events_df)
@@ -591,7 +708,11 @@ def render(ctx: dict) -> None:
                 confidence_display = _confidence_display(float(confidence_snapshot.score))
                 conf_bucket = confidence_bucket(float(confidence_snapshot.score))
                 conf_color = POSITIVE if conf_bucket == "HIGH" else (WARNING if conf_bucket == "MEDIUM" else NEGATIVE)
-                setup_confirm = _setup_confirm_display(action_raw, action_reason=action_reason_code)
+                setup_confirm = _setup_confirm_display(
+                    action_raw,
+                    action_reason=action_reason_code,
+                    direction=str(spot_snapshot.direction or ""),
+                )
                 setup_reason = action_reason_text(action_reason_code)
                 action_class = normalize_action_class(action_raw)
                 watch_setup_color = "#7DD3FC"
@@ -639,7 +760,11 @@ def render(ctx: dict) -> None:
                     action_reason_code,
                     calibration_delta=float(getattr(setup_calibration_snapshot, "delta", 0.0) or 0.0),
                 )
-                setup_confirm = _setup_confirm_display(action_raw, action_reason=action_reason_code)
+                setup_confirm = _setup_confirm_display(
+                    action_raw,
+                    action_reason=action_reason_code,
+                    direction=str(spot_snapshot.direction or ""),
+                )
                 setup_reason = action_reason_text(action_reason_code)
                 action_class = normalize_action_class(action_raw)
                 if action_class.startswith("ENTER_"):
@@ -687,7 +812,7 @@ def render(ctx: dict) -> None:
                 current_sector_tag = str(classify_symbol_sector(coin) or "").strip()
                 recent_symbol_market_signal = build_recent_symbol_market_signal_snapshot(
                     recent_market_events_df,
-                    symbol=coin,
+                    symbol=archive_symbol,
                     timeframe=tf,
                 )
                 adaptive_snapshot = build_live_signal_adaptive_snapshot(
@@ -721,7 +846,7 @@ def render(ctx: dict) -> None:
                 )
                 hold_profile = build_actual_trade_hold_profile(
                     adaptive_history_df,
-                    symbol=coin,
+                    symbol=archive_symbol,
                     timeframe=tf,
                     direction=direction,
                     sector_tag=current_sector_tag,
@@ -730,9 +855,35 @@ def render(ctx: dict) -> None:
                     trade_gate=str(recent_market_context.get("Trade Gate") or ""),
                     catalyst_window=str(recent_market_context.get("Catalyst Window") or ""),
                 )
+                hold_window_events_df, hold_window_scope_label = _position_hold_archive_slice(
+                    adaptive_history_df,
+                    symbol=archive_symbol,
+                    timeframe=tf,
+                    direction=direction,
+                )
+                hold_window_keys = (
+                    hold_window_events_df["signal_key"].fillna("").astype(str).tolist()
+                    if not hold_window_events_df.empty and "signal_key" in hold_window_events_df.columns
+                    else []
+                )
+                hold_window_forward_df = (
+                    adaptive_forward_windows_df[
+                        adaptive_forward_windows_df["signal_key"].fillna("").astype(str).isin(hold_window_keys)
+                    ].copy()
+                    if hold_window_keys and not adaptive_forward_windows_df.empty and "signal_key" in adaptive_forward_windows_df.columns
+                    else pd.DataFrame()
+                )
+                hold_window_snapshot = build_hold_window_intelligence(
+                    hold_window_events_df,
+                    hold_window_forward_df,
+                )
+                hold_window_note, hold_window_tone = _position_hold_window_note(
+                    hold_window_snapshot,
+                    scope_label=hold_window_scope_label,
+                )
                 exit_quality = build_actual_exit_quality_profile(
                     adaptive_history_df,
-                    symbol=coin,
+                    symbol=archive_symbol,
                     timeframe=tf,
                     direction=direction,
                     sector_tag=current_sector_tag,
@@ -1055,6 +1206,12 @@ def render(ctx: dict) -> None:
 
                 st.markdown(setup_snapshot_html, unsafe_allow_html=True)
                 st.markdown(archive_banner_html, unsafe_allow_html=True)
+                render_insight_card(
+                    st,
+                    title="Historical Hold Window",
+                    body_html=hold_window_note,
+                    tone=hold_window_tone,
+                )
                 if indicator_groups_html:
                     st.markdown(indicator_groups_html, unsafe_allow_html=True)
 

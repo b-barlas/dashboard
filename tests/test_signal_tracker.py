@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,20 +11,27 @@ import pandas as pd
 
 from core.signal_tracker import (
     annotate_alert_footprint,
+    backfill_signal_forward_windows_for_frame,
+    backfill_signal_forward_windows_via_fetch,
     build_alert_effectiveness_summary,
     build_actual_exit_quality_profile,
     build_actual_trade_hold_profile,
+    build_hold_window_cohort_summary,
+    build_hold_window_intelligence,
     build_recent_market_context_snapshot,
     build_recent_symbol_market_signal_snapshot,
     build_signal_cohort_summary,
     build_execution_overlay_snapshot,
     build_signal_review_snapshot,
+    count_market_alerts,
     fetch_market_alerts_df,
+    fetch_signal_forward_windows_df,
     fetch_signal_events_df,
     init_signal_tracker_db,
     log_market_alerts,
     log_signal_events,
     prefer_current_decision_version_slice,
+    resolve_open_signal_events_via_fetch,
     resolve_open_signal_events_for_frame,
     save_signal_trade_journal,
     save_signal_trade_overlay,
@@ -136,6 +144,88 @@ class SignalTrackerTests(unittest.TestCase):
         df = fetch_signal_events_df(limit=2, source="Market", timeframe="1d", db_path=self.db_path)
         self.assertEqual(len(df), 2)
         self.assertEqual(set(df["timeframe"].astype(str)), {"1d"})
+
+    def test_fetch_signal_events_df_applies_symbol_filter_before_limit(self) -> None:
+        events = []
+        for idx in range(4):
+            events.append(
+                {
+                    "source": "Market",
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "event_time": f"2026-04-04T12:0{idx}:00Z",
+                    "direction": "Upside",
+                    "setup_confirm": "WATCH",
+                    "price": 100.0 + idx,
+                }
+            )
+        for idx in range(3):
+            events.append(
+                {
+                    "source": "Market",
+                    "symbol": "ETH",
+                    "timeframe": "1h",
+                    "event_time": f"2026-04-03T12:0{idx}:00Z",
+                    "direction": "Upside",
+                    "setup_confirm": "WATCH",
+                    "price": 200.0 + idx,
+                }
+            )
+        self.assertEqual(log_signal_events(events, self.db_path), 7)
+        df = fetch_signal_events_df(limit=2, source="Market", symbol="ETH", db_path=self.db_path)
+        self.assertEqual(len(df), 2)
+        self.assertEqual(set(df["symbol"].astype(str)), {"ETH"})
+
+    def test_fetch_signal_events_df_applies_decision_version_filter_before_limit(self) -> None:
+        events = []
+        for idx in range(4):
+            events.append(
+                {
+                    "source": "Market",
+                    "symbol": f"CUR{idx}",
+                    "timeframe": "1h",
+                    "event_time": f"2026-04-04T13:0{idx}:00Z",
+                    "decision_version": "market-scanner-2026-04-10-v1",
+                    "direction": "Upside",
+                    "setup_confirm": "WATCH",
+                    "price": 100.0 + idx,
+                }
+            )
+        for idx in range(3):
+            events.append(
+                {
+                    "source": "Market",
+                    "symbol": f"LEG{idx}",
+                    "timeframe": "1h",
+                    "event_time": f"2026-04-03T13:0{idx}:00Z",
+                    "decision_version": "",
+                    "direction": "Upside",
+                    "setup_confirm": "WATCH",
+                    "price": 200.0 + idx,
+                }
+            )
+        self.assertEqual(log_signal_events(events, self.db_path), 7)
+        current_df = fetch_signal_events_df(
+            limit=2,
+            source="Market",
+            decision_version="market-scanner-2026-04-10-v1",
+            db_path=self.db_path,
+        )
+        self.assertEqual(len(current_df), 2)
+        self.assertTrue(current_df["decision_version"].fillna("").eq("market-scanner-2026-04-10-v1").all())
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE signal_events SET decision_version = '' WHERE symbol LIKE 'LEG%'"
+            )
+            conn.commit()
+        legacy_df = fetch_signal_events_df(
+            limit=2,
+            source="Market",
+            decision_version="Legacy / Unversioned",
+            db_path=self.db_path,
+        )
+        self.assertEqual(len(legacy_df), 2)
+        self.assertTrue(legacy_df["decision_version"].fillna("").eq("").all())
 
     def test_log_signal_events_creates_mirror_snapshot_when_configured(self) -> None:
         mirror_dir = str(Path(self.temp_dir.name) / "mirror")
@@ -272,6 +362,455 @@ class SignalTrackerTests(unittest.TestCase):
         self.assertAlmostEqual(float(row["archive_guardrail_penalty"]), 6.2, places=4)
         self.assertIn("trim aggression", str(row["archive_guardrail_note"]))
         self.assertGreater(float(row["directional_return_pct"]), 0.0)
+        forward_windows = fetch_signal_forward_windows_df(
+            signal_keys=[str(row["signal_key"])],
+            db_path=self.db_path,
+        )
+        self.assertEqual(set(forward_windows["bars_ahead"].astype(int)), {1, 2, 4, 6, 8})
+        checkpoint_4 = forward_windows[forward_windows["bars_ahead"].astype(int) == 4].iloc[0]
+        self.assertGreater(float(checkpoint_4["directional_return_pct"]), 0.0)
+
+    def test_build_hold_window_intelligence_prefers_best_pain_adjusted_bar(self) -> None:
+        events = []
+        base_time = pd.Timestamp("2026-04-04T10:00:00Z")
+        for idx in range(8):
+            events.append(
+                {
+                    "source": "Market",
+                    "symbol": f"ETH{idx}",
+                    "timeframe": "1h",
+                    "event_time": (base_time + pd.Timedelta(hours=idx)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "direction": "Upside",
+                    "setup_confirm": "WATCH",
+                    "price": 100.0,
+                    "horizon_bars": 8,
+                }
+            )
+        self.assertEqual(log_signal_events(events, self.db_path), 8)
+        df = fetch_signal_events_df(limit=20, source="Market", db_path=self.db_path)
+        with sqlite3.connect(self.db_path) as conn:
+            for _, row in df.iterrows():
+                conn.execute(
+                    """
+                    UPDATE signal_events
+                    SET status = 'RESOLVED',
+                        directional_return_pct = 2.0,
+                        favorable_excursion_pct = 3.0,
+                        adverse_excursion_pct = 1.0
+                    WHERE signal_key = ?
+                    """,
+                    (str(row["signal_key"]),),
+                )
+                for bars, dir_ret, adv in [
+                    (1, 0.2, 0.1),
+                    (2, 0.5, 0.15),
+                    (4, 1.4, 0.25),
+                    (6, 1.1, 0.45),
+                    (8, 0.7, 0.7),
+                ]:
+                    conn.execute(
+                        """
+                        INSERT INTO signal_forward_windows (
+                            signal_key, bars_ahead, directional_return_pct,
+                            favorable_excursion_pct, adverse_excursion_pct, window_end_time, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row["signal_key"]),
+                            bars,
+                            dir_ret,
+                            dir_ret + 0.2,
+                            adv,
+                            "2026-04-04T12:00:00Z",
+                            "2026-04-04T12:00:00Z",
+                        ),
+                    )
+            conn.commit()
+        updated = fetch_signal_events_df(limit=20, source="Market", db_path=self.db_path)
+        windows = fetch_signal_forward_windows_df(signal_keys=updated["signal_key"].astype(str).tolist(), db_path=self.db_path)
+        snapshot = build_hold_window_intelligence(updated, windows)
+        self.assertTrue(bool(snapshot["available"]))
+        self.assertEqual(int(snapshot["best_bar"]), 4)
+        self.assertEqual(str(snapshot["best_style"]), "Quick Follow-Through")
+        self.assertEqual(int(snapshot["fade_after_bar"]), 6)
+
+    def test_build_hold_window_intelligence_reports_building_when_resolved_rows_exist_without_windows(self) -> None:
+        events = [
+            {
+                "source": "Market",
+                "symbol": "ETH",
+                "timeframe": "15m",
+                "event_time": "2026-04-04T10:00:00Z",
+                "direction": "Upside",
+                "setup_confirm": "WATCH",
+                "price": 100.0,
+                "status": "RESOLVED",
+                "signal_key": "eth-15m-1",
+            }
+        ]
+        df_events = pd.DataFrame(events)
+        snapshot = build_hold_window_intelligence(df_events, pd.DataFrame())
+        self.assertFalse(bool(snapshot["available"]))
+        self.assertEqual(int(snapshot["resolved_signals"]), 1)
+
+    def test_build_hold_window_cohort_summary_suggests_hold_by_group(self) -> None:
+        events = []
+        base_time = pd.Timestamp("2026-04-04T10:00:00Z")
+        setup_configs = [
+            ("ENTER ↑ T+AI", [(1, 0.4, 0.10), (2, 0.9, 0.15), (4, 1.7, 0.20), (6, 1.0, 0.45)]),
+            ("EARLY ↑ Trend", [(1, 0.2, 0.08), (2, 0.8, 0.12), (4, 0.6, 0.25), (6, 0.3, 0.40)]),
+        ]
+        for group_idx, (setup_confirm, checkpoints) in enumerate(setup_configs):
+            for idx in range(4):
+                events.append(
+                    {
+                        "source": "Market",
+                        "symbol": f"G{group_idx}{idx}",
+                        "timeframe": "1h",
+                        "event_time": (base_time + pd.Timedelta(hours=(group_idx * 8) + idx)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "direction": "Upside",
+                        "setup_confirm": setup_confirm,
+                        "price": 100.0,
+                        "horizon_bars": 6,
+                    }
+                )
+        self.assertEqual(log_signal_events(events, self.db_path), 8)
+        df = fetch_signal_events_df(limit=20, source="Market", db_path=self.db_path)
+        with sqlite3.connect(self.db_path) as conn:
+            for _, row in df.iterrows():
+                setup_confirm = str(row["setup_confirm"])
+                conn.execute(
+                    """
+                    UPDATE signal_events
+                    SET status = 'RESOLVED',
+                        directional_return_pct = 1.5,
+                        favorable_excursion_pct = 2.0,
+                        adverse_excursion_pct = 0.5
+                    WHERE signal_key = ?
+                    """,
+                    (str(row["signal_key"]),),
+                )
+                checkpoints = setup_configs[0][1] if setup_confirm == "ENTER ↑ T+AI" else setup_configs[1][1]
+                for bars, dir_ret, adv in checkpoints:
+                    conn.execute(
+                        """
+                        INSERT INTO signal_forward_windows (
+                            signal_key, bars_ahead, directional_return_pct,
+                            favorable_excursion_pct, adverse_excursion_pct, window_end_time, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(row["signal_key"]),
+                            bars,
+                            dir_ret,
+                            dir_ret + 0.2,
+                            adv,
+                            "2026-04-04T12:00:00Z",
+                            "2026-04-04T12:00:00Z",
+                        ),
+                    )
+            conn.commit()
+        updated = fetch_signal_events_df(limit=20, source="Market", db_path=self.db_path)
+        windows = fetch_signal_forward_windows_df(signal_keys=updated["signal_key"].astype(str).tolist(), db_path=self.db_path)
+        summary = build_hold_window_cohort_summary(updated, windows, "setup_confirm")
+        self.assertEqual(set(summary["setup_confirm"].astype(str)), {"ENTER ↑ T+AI", "EARLY ↑ Trend"})
+        enter_row = summary[summary["setup_confirm"].astype(str) == "ENTER ↑ T+AI"].iloc[0]
+        early_row = summary[summary["setup_confirm"].astype(str) == "EARLY ↑ Trend"].iloc[0]
+        self.assertEqual(str(enter_row["Suggested Hold"]), "around 4 bars")
+        self.assertEqual(str(enter_row["Hold Style"]), "Quick Follow-Through")
+        self.assertEqual(str(early_row["Suggested Hold"]), "around 2 bars")
+        self.assertEqual(str(early_row["Hold Style"]), "Explosive")
+
+    def test_backfill_signal_forward_windows_for_frame_populates_missing_resolved_rows(self) -> None:
+        event = {
+            "source": "Market",
+            "symbol": "BTC",
+            "timeframe": "1h",
+            "event_time": "2026-04-04T10:00:00Z",
+            "direction": "Upside",
+            "setup_confirm": "WATCH",
+            "price": 100.0,
+            "horizon_bars": 6,
+        }
+        self.assertEqual(log_signal_events([event], self.db_path), 1)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE signal_events
+                SET status = 'RESOLVED',
+                    directional_return_pct = 1.4,
+                    favorable_excursion_pct = 2.0,
+                    adverse_excursion_pct = 0.5,
+                    resolved_at = '2026-04-04T16:00:00Z'
+                WHERE symbol = 'BTC'
+                """
+            )
+            conn.commit()
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-04-04 09:00:00", periods=8, freq="1h", tz="UTC"),
+                "open": [99, 100, 100, 101, 102, 103, 104, 105],
+                "high": [100, 101, 102, 103, 105, 106, 107, 108],
+                "low": [98, 99, 99, 100, 101, 102, 103, 104],
+                "close": [99, 100, 101, 102, 103, 104, 105, 106],
+            }
+        )
+        backfilled = backfill_signal_forward_windows_for_frame(
+            symbol="BTC",
+            timeframe="1h",
+            df_ohlcv=df,
+            source="Market",
+            db_path=self.db_path,
+        )
+        self.assertEqual(backfilled, 1)
+        updated = fetch_signal_events_df(limit=5, source="Market", db_path=self.db_path)
+        windows = fetch_signal_forward_windows_df(signal_keys=updated["signal_key"].astype(str).tolist(), db_path=self.db_path)
+        self.assertEqual(set(windows["bars_ahead"].astype(int)), {1, 2, 4, 6})
+
+    def test_backfill_signal_forward_windows_via_fetch_targets_missing_pairs(self) -> None:
+        events = [
+            {
+                "source": "Market",
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "event_time": "2026-04-04T10:00:00Z",
+                "direction": "Upside",
+                "setup_confirm": "WATCH",
+                "price": 100.0,
+                "horizon_bars": 6,
+            },
+            {
+                "source": "Market",
+                "symbol": "ETH",
+                "timeframe": "15m",
+                "event_time": "2026-04-04T10:15:00Z",
+                "direction": "Downside",
+                "setup_confirm": "WATCH",
+                "price": 50.0,
+                "horizon_bars": 4,
+            },
+        ]
+        self.assertEqual(log_signal_events(events, self.db_path), 2)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE signal_events SET status = 'RESOLVED', resolved_at = '2026-04-04T12:00:00Z'")
+            conn.execute(
+                """
+                UPDATE signal_events
+                SET decision_version = '', created_decision_version = ''
+                WHERE event_time = '2026-04-03T10:00:00Z'
+                """
+            )
+            conn.commit()
+
+        def _fake_fetch(symbol: str, timeframe: str, limit: int = 260) -> pd.DataFrame:
+            if symbol == "BTC":
+                return pd.DataFrame(
+                    {
+                        "timestamp": pd.date_range("2026-04-04 09:00:00", periods=9, freq="1h", tz="UTC"),
+                        "open": [99, 100, 100, 101, 102, 103, 104, 105, 106],
+                        "high": [100, 101, 102, 103, 105, 106, 107, 108, 109],
+                        "low": [98, 99, 99, 100, 101, 102, 103, 104, 105],
+                        "close": [99, 100, 101, 102, 103, 104, 105, 106, 107],
+                    }
+                )
+            return pd.DataFrame(
+                {
+                    "timestamp": pd.date_range("2026-04-04 10:00:00", periods=7, freq="15min", tz="UTC"),
+                    "open": [50, 50, 49.8, 49.5, 49.2, 49.0, 48.8],
+                    "high": [50.2, 50.1, 49.9, 49.7, 49.4, 49.1, 48.9],
+                    "low": [49.9, 49.7, 49.4, 49.1, 48.8, 48.6, 48.4],
+                    "close": [50.0, 49.8, 49.5, 49.2, 49.0, 48.8, 48.6],
+                }
+            )
+
+        backfilled = backfill_signal_forward_windows_via_fetch(
+            fetch_ohlcv=_fake_fetch,
+            source="Market",
+            db_path=self.db_path,
+            limit_pairs=10,
+            rows_per_pair=10,
+            candle_limit=50,
+        )
+        self.assertEqual(backfilled, 2)
+        df = fetch_signal_events_df(limit=10, source="Market", db_path=self.db_path)
+        windows = fetch_signal_forward_windows_df(signal_keys=df["signal_key"].astype(str).tolist(), db_path=self.db_path)
+        self.assertEqual(set(df["symbol"].astype(str)), {"BTC", "ETH"})
+        self.assertTrue((windows.groupby("signal_key")["bars_ahead"].nunique() >= 3).all())
+
+    def test_backfill_signal_forward_windows_via_fetch_respects_decision_version_scope(self) -> None:
+        events = [
+            {
+                "source": "Market",
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "event_time": "2026-04-04T10:00:00Z",
+                "direction": "Upside",
+                "setup_confirm": "WATCH",
+                "price": 100.0,
+                "horizon_bars": 6,
+                "decision_version": "market-scanner-2026-04-10-v1",
+            },
+            {
+                "source": "Market",
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "event_time": "2026-04-03T10:00:00Z",
+                "direction": "Upside",
+                "setup_confirm": "WATCH",
+                "price": 100.0,
+                "horizon_bars": 6,
+                "decision_version": "",
+            },
+        ]
+        self.assertEqual(log_signal_events(events, self.db_path), 2)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE signal_events SET status = 'RESOLVED', resolved_at = '2026-04-04T12:00:00Z'")
+            conn.execute(
+                """
+                UPDATE signal_events
+                SET decision_version = '', created_decision_version = ''
+                WHERE event_time = '2026-04-03T10:00:00Z'
+                """
+            )
+            conn.commit()
+
+        def _fake_fetch(_symbol: str, _timeframe: str, limit: int = 260) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "timestamp": pd.date_range("2026-04-03 09:00:00", periods=34, freq="1h", tz="UTC"),
+                    "open": list(range(99, 133)),
+                    "high": list(range(100, 134)),
+                    "low": list(range(98, 132)),
+                    "close": list(range(99, 133)),
+                }
+            )
+
+        backfilled = backfill_signal_forward_windows_via_fetch(
+            fetch_ohlcv=_fake_fetch,
+            source="Market",
+            db_path=self.db_path,
+            limit_pairs=10,
+            rows_per_pair=10,
+            candle_limit=50,
+            symbol="BTC",
+            timeframe="1h",
+            decision_version="market-scanner-2026-04-10-v1",
+        )
+        self.assertEqual(backfilled, 1)
+        df = fetch_signal_events_df(limit=10, source="Market", db_path=self.db_path)
+        current_key = str(df[df["decision_version"].fillna("").eq("market-scanner-2026-04-10-v1")].iloc[0]["signal_key"])
+        legacy_key = str(df[df["decision_version"].fillna("").eq("")].iloc[0]["signal_key"])
+        windows = fetch_signal_forward_windows_df(signal_keys=[current_key, legacy_key], db_path=self.db_path)
+        self.assertIn(current_key, set(windows["signal_key"].astype(str)))
+        self.assertNotIn(legacy_key, set(windows["signal_key"].astype(str)))
+
+    def test_backfill_signal_forward_windows_for_frame_prefers_recent_missing_rows(self) -> None:
+        events = [
+            {
+                "source": "Market",
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "event_time": "2026-04-01T10:00:00Z",
+                "direction": "Upside",
+                "setup_confirm": "WATCH",
+                "price": 100.0,
+                "horizon_bars": 4,
+            },
+            {
+                "source": "Market",
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "event_time": "2026-04-04T10:00:00Z",
+                "direction": "Upside",
+                "setup_confirm": "WATCH",
+                "price": 100.0,
+                "horizon_bars": 4,
+            },
+        ]
+        self.assertEqual(log_signal_events(events, self.db_path), 2)
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE signal_events SET status = 'RESOLVED', resolved_at = '2026-04-04T14:00:00Z'")
+            conn.commit()
+        df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-04-04 09:00:00", periods=8, freq="1h", tz="UTC"),
+                "open": [99, 100, 100, 101, 102, 103, 104, 105],
+                "high": [100, 101, 102, 103, 104, 105, 106, 107],
+                "low": [98, 99, 99, 100, 101, 102, 103, 104],
+                "close": [99, 100, 101, 102, 103, 104, 105, 106],
+            }
+        )
+        backfilled = backfill_signal_forward_windows_for_frame(
+            symbol="BTC",
+            timeframe="1h",
+            df_ohlcv=df,
+            source="Market",
+            db_path=self.db_path,
+            limit_rows=1,
+        )
+        self.assertEqual(backfilled, 1)
+        all_events = fetch_signal_events_df(limit=10, source="Market", db_path=self.db_path)
+        recent_key = str(all_events[all_events["event_time"].astype(str).eq("2026-04-04T10:00:00Z")].iloc[0]["signal_key"])
+        old_key = str(all_events[all_events["event_time"].astype(str).eq("2026-04-01T10:00:00Z")].iloc[0]["signal_key"])
+        windows = fetch_signal_forward_windows_df(signal_keys=[recent_key, old_key], db_path=self.db_path)
+        self.assertIn(recent_key, set(windows["signal_key"].astype(str)))
+        self.assertNotIn(old_key, set(windows["signal_key"].astype(str)))
+
+    def test_resolve_open_signal_events_via_fetch_respects_symbol_and_timeframe_scope(self) -> None:
+        events = [
+            {
+                "source": "Market",
+                "symbol": "BTC",
+                "timeframe": "1h",
+                "event_time": "2026-04-04T10:00:00Z",
+                "direction": "Upside",
+                "setup_confirm": "WATCH",
+                "price": 100.0,
+                "horizon_bars": 4,
+            },
+            {
+                "source": "Market",
+                "symbol": "ETH",
+                "timeframe": "15m",
+                "event_time": "2026-04-04T10:15:00Z",
+                "direction": "Downside",
+                "setup_confirm": "WATCH",
+                "price": 50.0,
+                "horizon_bars": 4,
+            },
+        ]
+        self.assertEqual(log_signal_events(events, self.db_path), 2)
+        fetch_calls: list[tuple[str, str]] = []
+
+        def _fake_fetch(symbol: str, timeframe: str, limit: int = 260) -> pd.DataFrame:
+            fetch_calls.append((symbol, timeframe))
+            return pd.DataFrame(
+                {
+                    "timestamp": pd.date_range("2026-04-04 09:00:00", periods=8, freq="1h", tz="UTC")
+                    if timeframe == "1h"
+                    else pd.date_range("2026-04-04 10:00:00", periods=8, freq="15min", tz="UTC"),
+                    "open": [99, 100, 100, 101, 102, 103, 104, 105],
+                    "high": [100, 101, 102, 103, 104, 105, 106, 107],
+                    "low": [98, 99, 99, 100, 101, 102, 103, 104],
+                    "close": [99, 100, 101, 102, 103, 104, 105, 106],
+                }
+            )
+
+        resolved = resolve_open_signal_events_via_fetch(
+            fetch_ohlcv=_fake_fetch,
+            source="Market",
+            db_path=self.db_path,
+            limit_pairs=None,
+            symbol="BTC",
+            timeframe="1h",
+        )
+        self.assertEqual(resolved, 1)
+        self.assertEqual(fetch_calls, [("BTC", "1h")])
+        df = fetch_signal_events_df(limit=10, source="Market", db_path=self.db_path)
+        btc_status = str(df[df["symbol"].astype(str).eq("BTC")].iloc[0]["status"])
+        eth_status = str(df[df["symbol"].astype(str).eq("ETH")].iloc[0]["status"])
+        self.assertEqual(btc_status, "RESOLVED")
+        self.assertEqual(eth_status, "OPEN")
 
     def test_review_snapshot_and_cohort_summary(self) -> None:
         events = [
@@ -599,6 +1138,47 @@ class SignalTrackerTests(unittest.TestCase):
         self.assertIn("Upside direction", str(profile["note"]))
         self.assertIn("DeFi sector", str(profile["note"]))
 
+    def test_actual_trade_hold_profile_normalizes_pair_symbol_to_archive_base(self) -> None:
+        df = pd.DataFrame(
+            [
+                {
+                    "symbol": "SOL",
+                    "timeframe": "4h",
+                    "direction": "Upside",
+                    "actual_trade_status": "CLOSED",
+                    "actual_entry_at": "2026-04-01T08:00:00Z",
+                    "actual_exit_at": "2026-04-02T06:00:00Z",
+                    "actual_pnl_pct": 4.2,
+                },
+                {
+                    "symbol": "SOL",
+                    "timeframe": "4h",
+                    "direction": "Upside",
+                    "actual_trade_status": "CLOSED",
+                    "actual_entry_at": "2026-04-03T08:00:00Z",
+                    "actual_exit_at": "2026-04-04T04:00:00Z",
+                    "actual_pnl_pct": 3.1,
+                },
+                {
+                    "symbol": "SOL",
+                    "timeframe": "4h",
+                    "direction": "Upside",
+                    "actual_trade_status": "CLOSED",
+                    "actual_entry_at": "2026-04-05T08:00:00Z",
+                    "actual_exit_at": "2026-04-06T02:00:00Z",
+                    "actual_pnl_pct": 2.3,
+                },
+            ]
+        )
+        profile = build_actual_trade_hold_profile(
+            df,
+            symbol="SOL/USDT",
+            timeframe="4h",
+            direction="LONG",
+        )
+        self.assertEqual(profile["label"], "Needs Room")
+        self.assertIn("SOL/USDT symbol", str(profile["note"]))
+
     def test_actual_trade_hold_profile_falls_back_when_specific_slice_is_too_thin(self) -> None:
         df = pd.DataFrame(
             [
@@ -869,6 +1449,24 @@ class SignalTrackerTests(unittest.TestCase):
         self.assertEqual(signal["Risk Tier"], "Tier 1")
         self.assertIn("Emerging Upside", signal["Signal Note"])
 
+    def test_recent_symbol_market_signal_snapshot_normalizes_pair_symbol_to_archive_base(self) -> None:
+        df = pd.DataFrame(
+            [
+                {
+                    "source": "Market",
+                    "symbol": "SOL",
+                    "timeframe": "1h",
+                    "event_time": "2026-04-04T14:30:00Z",
+                    "lead_label": "Emerging Upside",
+                    "lead_active": 1,
+                    "setup_confirm": "✅ ENTER (Trend+AI)",
+                }
+            ]
+        )
+        signal = build_recent_symbol_market_signal_snapshot(df, symbol="SOL/USDT", timeframe="1h")
+        self.assertEqual(signal["Lead"], "LEAD")
+        self.assertEqual(signal["Lead Label"], "Emerging Upside")
+
     def test_market_alerts_upsert_and_deactivate(self) -> None:
         first = [
             {
@@ -902,6 +1500,8 @@ class SignalTrackerTests(unittest.TestCase):
         self.assertEqual(len(all_alerts), 2)
         prior = all_alerts[all_alerts["alert_key"] == "MARKET_LEAD"].iloc[0]
         self.assertEqual(int(prior["active"]), 0)
+        self.assertEqual(count_market_alerts(active_only=True, db_path=self.db_path), 1)
+        self.assertEqual(count_market_alerts(active_only=False, db_path=self.db_path), 2)
 
     def test_save_signal_trade_overlay_updates_manual_execution_fields(self) -> None:
         event = {
@@ -1040,9 +1640,13 @@ class SignalTrackerTests(unittest.TestCase):
             ]
         )
         snapshot = build_execution_overlay_snapshot(df)
+        self.assertEqual(snapshot["total"], 3.0)
+        self.assertEqual(snapshot["overlay_marked"], 3.0)
+        self.assertEqual(snapshot["overlay_coverage_pct"], 100.0)
         self.assertEqual(snapshot["taken"], 2.0)
         self.assertEqual(snapshot["taken_resolved"], 2.0)
         self.assertEqual(snapshot["actual_closed"], 2.0)
+        self.assertEqual(snapshot["journal_coverage_pct"], 100.0)
         self.assertEqual(snapshot["actual_win_rate"], 50.0)
         self.assertAlmostEqual(snapshot["avg_actual_pnl"], 0.5, places=4)
         self.assertAlmostEqual(snapshot["avg_signal_dir_return_on_taken"], 2.5, places=4)

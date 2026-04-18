@@ -1015,6 +1015,10 @@ class MarketDecisionContractTests(unittest.TestCase):
         self.assertEqual(normalize_action_class(ACTION_PROBE), "PROBE")
         self.assertEqual(normalize_action_class(ACTION_WATCH), "WATCH")
         self.assertEqual(normalize_action_class(ACTION_SKIP), "SKIP")
+        self.assertEqual(normalize_action_class("ENTER ↑ T+AI"), "ENTER_TREND_AI")
+        self.assertEqual(normalize_action_class("ENTER ↓ Trend"), "ENTER_TREND_LED")
+        self.assertEqual(normalize_action_class("ENTER ↑ AI"), "ENTER_AI_LED")
+        self.assertEqual(normalize_action_class("WATCH ↑"), "WATCH")
 
     def test_action_rank_contract(self):
         self.assertEqual(action_rank(ACTION_ENTER_TREND_AI), 4)

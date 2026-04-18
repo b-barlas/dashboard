@@ -54,27 +54,93 @@ def _probe_display_text(
     *,
     audience: str,
     action_reason: str | None = None,
+    direction: str | None = None,
 ) -> str:
     reason = str(action_reason or "").strip().upper()
+    dir_key = _setup_direction_key(direction)
+    dir_trader = ""
+    dir_neutral = ""
+    if dir_key in {"UPSIDE", "DOWNSIDE"}:
+        dir_trader = f" {_setup_direction_marker(dir_key)}"
+        dir_neutral = f" {spot_bias_label(dir_key)}"
     if audience == "neutral":
         if reason == "PROBE_TREND":
-            return "Early Trend-Led Setup"
+            return f"Early{dir_neutral} Trend-Led Setup".strip()
         if reason == "PROBE_AI":
-            return "Early Model-Led Setup"
+            return f"Early{dir_neutral} Model-Led Setup".strip()
         if reason == "PROBE_DUAL":
-            return "Early Trend + Model Setup"
+            return f"Early{dir_neutral} Trend + Model Setup".strip()
         if reason in {"ARCHIVE_UPGRADE_TO_PROBE", "ARCHIVE_DOWNGRADE_TO_PROBE"}:
-            return "Early Archive-Calibrated Setup"
-        return "Early Setup"
+            return f"Early{dir_neutral} Setup".strip()
+        return f"Early{dir_neutral} Setup".strip()
     if reason == "PROBE_TREND":
-        return "EARLY (Trend-Led)"
+        return f"EARLY{dir_trader} Trend".strip()
     if reason == "PROBE_AI":
-        return "EARLY (AI-Led)"
+        return f"EARLY{dir_trader} AI".strip()
     if reason == "PROBE_DUAL":
-        return "EARLY (Trend+AI)"
+        return f"EARLY{dir_trader} T+AI".strip()
     if reason in {"ARCHIVE_UPGRADE_TO_PROBE", "ARCHIVE_DOWNGRADE_TO_PROBE"}:
-        return "EARLY (Archive)"
-    return "EARLY"
+        return f"EARLY{dir_trader}".strip()
+    return f"EARLY{dir_trader}".strip()
+
+
+def _setup_direction_key(direction: str | None) -> str:
+    raw = str(direction or "").strip().upper()
+    if raw in {"UPSIDE", "LONG", "BUY", "BULLISH"}:
+        return "UPSIDE"
+    if raw in {"DOWNSIDE", "SHORT", "SELL", "BEARISH"}:
+        return "DOWNSIDE"
+    if raw in {"UPSIDE", "DOWNSIDE"}:
+        return raw
+    return "NEUTRAL"
+
+
+def _setup_direction_marker(direction: str) -> str:
+    key = _setup_direction_key(direction)
+    if key == "UPSIDE":
+        return "↑"
+    if key == "DOWNSIDE":
+        return "↓"
+    return "-"
+
+
+def _enter_display_text(
+    *,
+    audience: str,
+    raw_action: str,
+    direction: str | None = None,
+) -> str:
+    cls = _normalized_action_key(raw_action)
+    dir_key = _setup_direction_key(direction)
+    profile = _ACTION_PRESENTATION.get(cls, {})
+    trader_core = str(profile.get("trader") or cls)
+    neutral_core = str(profile.get("neutral") or cls)
+    if dir_key not in {"UPSIDE", "DOWNSIDE"}:
+        return neutral_core if audience == "neutral" else trader_core
+    dir_text = spot_bias_label(dir_key)
+    if audience == "neutral":
+        if neutral_core.endswith("Setup"):
+            return neutral_core.replace(" Setup", f" {dir_text} Setup")
+        return f"{neutral_core} {dir_text}"
+    short_core = {
+        "TREND+AI": "T+AI",
+        "TREND-led": "Trend",
+        "AI-led": "AI",
+    }.get(trader_core, trader_core)
+    return f"ENTER {_setup_direction_marker(dir_key)} {short_core}".strip()
+
+
+def _watch_display_text(
+    *,
+    audience: str,
+    direction: str | None = None,
+) -> str:
+    dir_key = _setup_direction_key(direction)
+    if dir_key not in {"UPSIDE", "DOWNSIDE"}:
+        return "Developing" if audience == "neutral" else "WATCH"
+    if audience == "neutral":
+        return f"Developing {spot_bias_label(dir_key)}"
+    return f"WATCH {_setup_direction_marker(dir_key)}"
 
 
 def spot_bias_label(direction: str) -> str:
@@ -202,6 +268,7 @@ def setup_confirm_display(
     *,
     audience: str | None = None,
     action_reason: str | None = None,
+    direction: str | None = None,
 ) -> str:
     cls = _normalized_action_key(raw_action)
     profile = _ACTION_PRESENTATION.get(cls)
@@ -211,6 +278,18 @@ def setup_confirm_display(
             return _probe_display_text(
                 audience=selected_audience,
                 action_reason=action_reason,
+                direction=direction,
+            )
+        if cls.startswith("ENTER_"):
+            return _enter_display_text(
+                audience=selected_audience,
+                raw_action=raw_action,
+                direction=direction,
+            )
+        if cls == "WATCH":
+            return _watch_display_text(
+                audience=selected_audience,
+                direction=direction,
             )
         return str(profile.get(selected_audience) or profile.get("trader") or cls)
     return str(raw_action or "").strip() or "SKIP"

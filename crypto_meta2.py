@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import threading
 import core.services as _services
+import core.signal_tracker as _signal_tracker
 from core.alert_engine import build_market_alerts
 from core.adaptive_weighting import (
     build_adaptive_context_model,
@@ -11,13 +12,17 @@ from core.adaptive_weighting import (
 )
 from core.signal_tracker import (
     annotate_alert_footprint,
+    backfill_signal_forward_windows_via_fetch,
     build_alert_effectiveness_summary,
+    build_hold_window_cohort_summary,
     build_recent_market_context_snapshot,
     build_recent_symbol_market_signal_snapshot,
+    build_hold_window_intelligence,
     build_signal_cohort_summary,
     build_execution_overlay_snapshot,
     build_signal_review_snapshot,
     fetch_market_alerts_df,
+    fetch_signal_forward_windows_df,
     fetch_signal_events_df,
     get_signal_tracker_db_path,
     init_signal_tracker_db,
@@ -94,6 +99,18 @@ import ui.deps_factory as _deps_factory
 from ui.styles import app_css
 
 build_app_deps = _deps_factory.build_app_deps
+count_market_alerts = getattr(
+    _signal_tracker,
+    "count_market_alerts",
+    lambda *, active_only=False, source=None, db_path=None: len(
+        fetch_market_alerts_df(
+            limit=100000,
+            active_only=active_only,
+            source=source,
+            db_path=db_path,
+        )
+    ),
+)
 direction_key_fallback = getattr(
     _deps_factory,
     "direction_key_fallback",

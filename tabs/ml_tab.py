@@ -953,7 +953,11 @@ def render(ctx: dict) -> None:
                     trend_led_snapshot=trend_led_snapshot,
                     ai_led_snapshot=ai_led_snapshot,
                 )
-                setup_confirm = _setup_confirm_display(action_raw, action_reason=action_reason_code)
+                setup_confirm = _setup_confirm_display(
+                    action_raw,
+                    action_reason=action_reason_code,
+                    direction=str(spot_snapshot.direction or ""),
+                )
                 action_cls = normalize_action_class(action_raw)
                 watch_setup_color = "#7DD3FC"
                 setup_color = (

@@ -147,11 +147,11 @@ def _canonical_pair_base(symbol: str) -> str:
 
 def _setup_confirm_class_key(value: str) -> str:
     s = str(value or "").strip().upper()
-    if "TREND+AI" in s:
+    if "TREND+AI" in s or "T+AI" in s:
         return "ENTER_TREND_AI"
-    if s == "TREND" or s == "TREND-LED" or "TREND-LED" in s:
+    if s == "TREND" or s == "TREND-LED" or "TREND-LED" in s or s.endswith(" TREND"):
         return "ENTER_TREND_LED"
-    if s == "AI" or s == "AI-LED" or "AI-LED" in s:
+    if s == "AI" or s == "AI-LED" or "AI-LED" in s or s.endswith(" AI"):
         return "ENTER_AI_LED"
     return normalize_action_class(s)
 
@@ -167,12 +167,85 @@ def _sortable_float(value: object) -> float:
         return 0.0
 
 
-def _market_result_priority_key(row: dict) -> tuple[float, float, float, float, float, float, float, float, str]:
+def _execution_friction_score(
+    *,
+    mcap_val: float | int | None,
+    volatility_label: str | None,
+    delta_pct: float | None,
+    spike_present: bool,
+    execution_confidence: float | None = None,
+) -> float:
+    score = 58.0
+    mcap = float(max(0.0, float(mcap_val or 0.0)))
+    if mcap >= 200_000_000_000:
+        score += 16.0
+    elif mcap >= 50_000_000_000:
+        score += 12.0
+    elif mcap >= 10_000_000_000:
+        score += 7.0
+    elif mcap >= 2_000_000_000:
+        score += 2.0
+    elif mcap >= 500_000_000:
+        score -= 8.0
+    elif mcap > 0.0:
+        score -= 14.0
+
+    vol_key = str(volatility_label or "").strip().upper()
+    if "LOW" in vol_key:
+        score += 6.0
+    elif "MODERATE" in vol_key:
+        score += 1.0
+    elif "HIGH" in vol_key:
+        score -= 8.0
+    elif "EXTREME" in vol_key:
+        score -= 12.0
+
+    delta_abs = abs(float(delta_pct or 0.0))
+    if delta_abs >= 5.0:
+        score -= 10.0
+    elif delta_abs >= 3.0:
+        score -= 6.0
+    elif delta_abs >= 1.5:
+        score -= 3.0
+
+    if spike_present:
+        score -= 6.0
+
+    exec_conf = _sortable_float(execution_confidence)
+    if exec_conf >= 82.0:
+        score += 2.0
+    elif 0.0 < exec_conf <= 45.0:
+        score -= 2.0
+
+    return max(0.0, min(100.0, score))
+
+
+def _expectancy_bias_score(
+    *,
+    archive_delta: float | None,
+    bucket_resolved: float | None,
+    matched_factors: float | int | None,
+) -> float:
+    delta = max(-8.0, min(8.0, _sortable_float(archive_delta)))
+    if abs(delta) < 0.01:
+        return 50.0
+    bucket_strength = min(1.0, _sortable_float(bucket_resolved) / 36.0)
+    factor_strength = min(1.0, _sortable_float(matched_factors) / 4.0)
+    strength = 0.75 * bucket_strength + 0.25 * factor_strength
+    multiplier = 1.20 + 1.40 * strength
+    score = 50.0 + delta * multiplier
+    return max(30.0, min(70.0, score))
+
+
+def _market_result_priority_key(row: dict) -> tuple[float, float, float, float, float, float, float, float, float, float, str]:
     return (
         -float(_setup_confirm_priority(str(row.get("__action_raw", row.get("Setup Confirm", ""))))),
         -_sortable_float(row.get("__risk_unit_fraction", 0.0)),
+        -_sortable_float(row.get("__execution_friction_score", 50.0)),
+        -_sortable_float(row.get("__expectancy_bias_score", 50.0)),
         -_sortable_float(row.get("__confidence_val", 0.0)),
         -_sortable_float(row.get("__adaptive_edge_score", 50.0)),
+        -_sortable_float(row.get("__actionable_archive_score", 0.0)),
         _sortable_float(row.get("__archive_guardrail_penalty", 0.0)),
         -_sortable_float(row.get("__ai_confidence_val", 0.0)),
         -_sortable_float(row.get("__mcap_val", 0)),
@@ -182,12 +255,14 @@ def _market_result_priority_key(row: dict) -> tuple[float, float, float, float, 
 
 def _actionable_market_result_priority_key(
     row: dict,
-) -> tuple[float, float, float, float, float, float, float, float, float, float, str]:
+) -> tuple[float, float, float, float, float, float, float, float, float, float, float, float, str]:
     return (
         -float(_setup_confirm_priority(str(row.get("__action_raw", row.get("Setup Confirm", ""))))),
         -_sortable_float(row.get("__actionable_context_score", 0.0)),
         -_sortable_float(row.get("__actionable_tactical_score", 0.0)),
         -_sortable_float(row.get("__actionable_setup_score", 0.0)),
+        -_sortable_float(row.get("__expectancy_bias_score", 50.0)),
+        -_sortable_float(row.get("__execution_friction_score", 50.0)),
         -_sortable_float(row.get("__actionable_archive_score", 0.0)),
         -_sortable_float(row.get("__risk_unit_fraction", 0.0)),
         -_sortable_float(row.get("__confidence_val", 0.0)),
@@ -1106,6 +1181,7 @@ def _pick_confidence_leader(df_results: pd.DataFrame) -> tuple[str, float | None
     setup_display = _shared_setup_confirm_display(
         str(best_row.get("__action_raw", best_row.get("Setup Confirm", "")) or ""),
         action_reason=str(best_row.get("__action_reason", "")).strip(),
+        direction=str(best_row.get("Direction", "")).strip(),
     )
     confidence_sub = (
         f"Direction: {best_row.get('Direction', '')} • "
@@ -1181,6 +1257,7 @@ def _pick_best_scalp_opportunity(df_results: pd.DataFrame) -> tuple[str, str]:
     best_action_compact = _shared_setup_confirm_display(
         best_action,
         action_reason=str(best_row.get("__action_reason", "")).strip(),
+        direction=str(best_row.get("Direction", "")).strip(),
     )
 
     sub_parts = [best_state, best_direction]
@@ -2967,8 +3044,8 @@ def render(ctx: dict) -> None:
             return ""
         return f"{rr_val:.2f}"
 
-    def _setup_confirm_display(raw_action: str, action_reason: str | None = None) -> str:
-        return _shared_setup_confirm_display(raw_action, action_reason=action_reason)
+    def _setup_confirm_display(raw_action: str, action_reason: str | None = None, direction: str | None = None) -> str:
+        return _shared_setup_confirm_display(raw_action, action_reason=action_reason, direction=direction)
     def _setup_confirm_class(value: str) -> str:
         return _setup_confirm_class_key(value)
 
@@ -3644,7 +3721,7 @@ def render(ctx: dict) -> None:
             if col == "Setup Confirm":
                 reason_code = str(row.get("__action_reason", "")).strip()
                 raw_action = str(row.get("__action_raw", txt))
-                display_txt = _setup_confirm_display(raw_action, reason_code)
+                display_txt = _setup_confirm_display(raw_action, reason_code, direction=str(row.get("Direction", "")).strip())
                 sc_cls = _setup_confirm_class(raw_action or txt)
                 extra_cls = "mk-chip-action"
                 if sc_cls == "ENTER_TREND_LED":
@@ -5222,7 +5299,7 @@ def render(ctx: dict) -> None:
                     'Δ (%)': format_delta(price_change) if price_change is not None else '',
                     '__delta_pct': float(price_change) if price_change is not None else None,
                     '__delta_note': delta_note if price_change is not None else "",
-                    'Setup Confirm': _setup_confirm_display(action, action_reason_code),
+                    'Setup Confirm': _setup_confirm_display(action, action_reason_code, direction=str(spot_snapshot.direction or "")),
                     '__action_raw': action,
                     '__action_reason': action_reason_code,
                     '__setup_calibrated': True,
@@ -6055,7 +6132,11 @@ def render(ctx: dict) -> None:
                 )
                 row["__action_raw"] = calibrated_action_raw
                 row["__action_reason"] = calibrated_action_reason
-                row["Setup Confirm"] = _setup_confirm_display(calibrated_action_raw, calibrated_action_reason)
+                row["Setup Confirm"] = _setup_confirm_display(
+                    calibrated_action_raw,
+                    calibrated_action_reason,
+                    direction=str(row.get("Direction", "")).strip(),
+                )
                 row["__setup_calibration_delta"] = float(getattr(setup_calibration_snapshot, "delta", 0.0) or 0.0)
                 row["__setup_calibration_note"] = str(getattr(setup_calibration_snapshot, "note", "") or "")
                 row["__setup_calibrated"] = True
@@ -6216,6 +6297,18 @@ def render(ctx: dict) -> None:
                 },
             )
             row["__actionable_archive_score"] = float(getattr(actionable_archive_snapshot, "delta", 0.0) or 0.0)
+            row["__expectancy_bias_score"] = _expectancy_bias_score(
+                archive_delta=getattr(actionable_archive_snapshot, "delta", 0.0),
+                bucket_resolved=getattr(actionable_archive_snapshot, "bucket_resolved", 0.0),
+                matched_factors=getattr(actionable_archive_snapshot, "matched_factors", 0),
+            )
+            row["__execution_friction_score"] = _execution_friction_score(
+                mcap_val=row.get("__mcap_val"),
+                volatility_label=str(row.get("Volatility") or ""),
+                delta_pct=row.get("__delta_pct"),
+                spike_present=bool(str(row.get("Spike Alert") or "").strip() or str(row.get("__spike_dir") or "").strip()),
+                execution_confidence=row.get("__execution_confidence_val"),
+            )
         results = sorted(
             list(results or []),
             key=lambda row: _market_result_priority_key_for_mode(row, scan_mode),

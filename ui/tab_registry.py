@@ -105,6 +105,7 @@ _TAB_DEPS = [
             "_sr_lookback", "_wma", "_debug", "get_scalping_entry_target", "scalp_quality_gate",
             "sanitize_trading_terms",
             *_TRACKER_DEPS, *_ADAPTIVE_DEPS, *_RECENT_MARKET_CONTEXT_DEPS,
+            "fetch_signal_forward_windows_df", "build_hold_window_intelligence",
             "classify_symbol_sector",
         ],
     ),
@@ -120,9 +121,10 @@ _TAB_DEPS = [
     (
         render_signal_review_tab_ui,
         [
-            *_STYLE_DEPS, "_tip", "fetch_ohlcv", "resolve_open_signal_events_via_fetch",
-            *_TRACKER_DEPS, "fetch_market_alerts_df",
+            *_STYLE_DEPS, "_tip", "fetch_ohlcv", "resolve_open_signal_events_via_fetch", "backfill_signal_forward_windows_via_fetch",
+            *_TRACKER_DEPS, "fetch_market_alerts_df", "count_market_alerts",
             "build_signal_review_snapshot", "build_execution_overlay_snapshot", "build_signal_cohort_summary", "build_adaptive_context_model",
+            "fetch_signal_forward_windows_df", "build_hold_window_intelligence", "build_hold_window_cohort_summary",
             "annotate_alert_footprint", "build_alert_effectiveness_summary",
             "build_learning_edge_table", "save_signal_trade_overlay", "save_signal_trade_journal",
             *_SIGNAL_REVIEW_STORAGE_DEPS,

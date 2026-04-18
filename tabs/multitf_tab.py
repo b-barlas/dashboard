@@ -86,8 +86,8 @@ def render(ctx: dict) -> None:
             return "Very Strong"
         return "Extreme"
 
-    def _setup_confirm_display(raw_action: str, action_reason: str | None = None) -> str:
-        return _shared_setup_confirm_display(raw_action, action_reason=action_reason)
+    def _setup_confirm_display(raw_action: str, action_reason: str | None = None, direction: str | None = None) -> str:
+        return _shared_setup_confirm_display(raw_action, action_reason=action_reason, direction=direction)
 
     def _ai_fallback_note(status: str) -> str:
         key = str(status or "").strip().lower()
@@ -419,7 +419,11 @@ def render(ctx: dict) -> None:
                     "Layer": "Timing" if timeframe in {"5m", "15m"} else "Structure",
                     "direction": str(spot_snapshot.direction or "NEUTRAL"),
                     "Delta": format_delta(price_change) if price_change is not None else "—",
-                    "Setup Confirm": _setup_confirm_display(action_raw, action_reason_code),
+                    "Setup Confirm": _setup_confirm_display(
+                        action_raw,
+                        action_reason_code,
+                        direction=str(spot_snapshot.direction or ""),
+                    ),
                     "Direction": direction_label(spot_snapshot.direction),
                     "confidence": float(confidence_snapshot.score),
                     "Confidence": _shared_spot_confidence_display(float(confidence_snapshot.score)),

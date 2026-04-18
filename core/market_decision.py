@@ -163,6 +163,13 @@ def normalize_action_class(action: str) -> str:
         return "ENTER_TREND_LED"
     if "ENTER (AI-LED)" in s:
         return "ENTER_AI_LED"
+    if s.startswith("ENTER"):
+        if "T+AI" in s or ("TREND" in s and "AI" in s):
+            return "ENTER_TREND_AI"
+        if "TREND" in s:
+            return "ENTER_TREND_LED"
+        if "AI" in s:
+            return "ENTER_AI_LED"
     if "EARLY" in s or "PROBE" in s:
         return "PROBE"
     if "WATCH" in s:

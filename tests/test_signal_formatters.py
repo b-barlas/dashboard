@@ -126,13 +126,29 @@ def test_setup_confirm_display_supports_future_neutral_presentation_mode() -> No
     assert setup_confirm_display("ENTER_TREND_LED", audience="neutral") == "High-Quality Setup"
     assert setup_confirm_display("PROBE", audience="neutral") == "Early Setup"
     assert setup_confirm_display("PROBE") == "EARLY"
+    assert setup_confirm_display("WATCH", direction="UPSIDE") == "WATCH ↑"
+    assert setup_confirm_display("WATCH", audience="neutral", direction="DOWNSIDE") == "Developing Downside"
+    assert setup_confirm_display("SKIP", direction="UPSIDE") == "SKIP"
+
+
+def test_setup_confirm_display_can_surface_direction_for_enter_and_early() -> None:
+    assert setup_confirm_display("ENTER_TREND_LED", direction="UPSIDE") == "ENTER ↑ Trend"
+    assert setup_confirm_display("ENTER_AI_LED", direction="DOWNSIDE") == "ENTER ↓ AI"
+    assert (
+        setup_confirm_display("ENTER_TREND_AI", audience="neutral", direction="UPSIDE")
+        == "High-Quality Upside Setup"
+    )
+    assert setup_confirm_display("PROBE", action_reason="PROBE_TREND", direction="UPSIDE") == "EARLY ↑ Trend"
+    assert setup_confirm_display("PROBE", action_reason="PROBE_AI", direction="DOWNSIDE") == "EARLY ↓ AI"
+    assert setup_confirm_display("PROBE", action_reason="PROBE_DUAL", direction="UPSIDE") == "EARLY ↑ T+AI"
+    assert setup_confirm_display("PROBE", action_reason="ARCHIVE_UPGRADE_TO_PROBE", direction="DOWNSIDE") == "EARLY ↓"
 
 
 def test_setup_confirm_display_surfaces_probe_subtypes_when_reason_is_clear() -> None:
-    assert setup_confirm_display("PROBE", action_reason="PROBE_TREND") == "EARLY (Trend-Led)"
-    assert setup_confirm_display("PROBE", action_reason="PROBE_AI") == "EARLY (AI-Led)"
-    assert setup_confirm_display("PROBE", action_reason="PROBE_DUAL") == "EARLY (Trend+AI)"
-    assert setup_confirm_display("PROBE", action_reason="ARCHIVE_UPGRADE_TO_PROBE") == "EARLY (Archive)"
+    assert setup_confirm_display("PROBE", action_reason="PROBE_TREND") == "EARLY Trend"
+    assert setup_confirm_display("PROBE", action_reason="PROBE_AI") == "EARLY AI"
+    assert setup_confirm_display("PROBE", action_reason="PROBE_DUAL") == "EARLY T+AI"
+    assert setup_confirm_display("PROBE", action_reason="ARCHIVE_UPGRADE_TO_PROBE") == "EARLY"
     assert (
         setup_confirm_display("PROBE", audience="neutral", action_reason="PROBE_TREND")
         == "Early Trend-Led Setup"
@@ -147,7 +163,7 @@ def test_setup_confirm_display_surfaces_probe_subtypes_when_reason_is_clear() ->
     )
     assert (
         setup_confirm_display("PROBE", audience="neutral", action_reason="ARCHIVE_DOWNGRADE_TO_PROBE")
-        == "Early Archive-Calibrated Setup"
+        == "Early Setup"
     )
 
 
@@ -162,6 +178,8 @@ def test_setup_confirm_display_uses_global_copy_audience_when_not_overridden() -
     try:
         set_copy_audience("neutral")
         assert setup_confirm_display("PROBE") == "Early Setup"
+        assert setup_confirm_display("PROBE", direction="UPSIDE") == "Early Upside Setup"
+        assert setup_confirm_display("WATCH", direction="UPSIDE") == "Developing Upside"
     finally:
         set_copy_audience(previous)
 
