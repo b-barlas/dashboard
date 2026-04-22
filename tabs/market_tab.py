@@ -11,6 +11,7 @@ from threading import Lock
 from types import SimpleNamespace
 
 import pandas as pd
+import streamlit as st
 from core.ai_spot_bias import (
     ai_spot_bias_consensus_agreement,
     ai_spot_bias_directional_agreement,
@@ -51,6 +52,7 @@ from core.metric_catalog import (
     direction_from_prob,
 )
 from core.adaptive_weighting import (
+    build_adaptive_context_model,
     build_actionable_ranking_model,
     build_actionable_ranking_snapshot,
     build_ai_confidence_calibration_model,
@@ -77,12 +79,14 @@ from core.trading_copy import copy_text
 from tabs.market_scan_helpers import (
     SCAN_MODE_ACTIONABLE as _SCAN_MODE_ACTIONABLE,
     SCAN_MODE_BROAD as _SCAN_MODE_BROAD,
+    SCAN_MODE_EMERGING as _SCAN_MODE_EMERGING,
     _actionable_analysis_batch_size,
     _actionable_context_score,
     _actionable_direction_include,
     _actionable_frame_hunt_score,
     _actionable_setup_score,
     _actionable_tactical_candidate_score,
+    _emerging_candidate_score,
     _candidate_scan_symbols as _candidate_scan_symbols_impl,
     _initial_scan_symbols,
     _next_refill_candidate_batch,
@@ -237,6 +241,68 @@ def _expectancy_bias_score(
     return max(30.0, min(70.0, score))
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _market_archive_bundle(
+    *,
+    _fetch_signal_events_df,
+    db_path: str,
+    decision_version_target: str,
+) -> dict[str, object]:
+    adaptive_history_raw_df = _fetch_signal_events_df(
+        limit=2000,
+        status="RESOLVED",
+        source="Market",
+        db_path=db_path,
+    )
+    adaptive_history_df = prefer_current_decision_version_slice(
+        adaptive_history_raw_df,
+        source="Market",
+    )
+    adaptive_decision_rows = int(adaptive_history_df.attrs.get("decision_version_rows") or 0)
+    adaptive_decision_total_rows = int(
+        adaptive_history_df.attrs.get("decision_version_total_rows") or len(adaptive_history_df)
+    )
+    adaptive_version_series = (
+        adaptive_history_raw_df.get("decision_version", pd.Series(index=adaptive_history_raw_df.index, dtype=object))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    adaptive_current_mask = adaptive_version_series.eq(decision_version_target)
+    adaptive_has_plan = pd.to_numeric(
+        adaptive_history_raw_df.get("has_plan", pd.Series(index=adaptive_history_raw_df.index, dtype=float)),
+        errors="coerce",
+    ).fillna(0).astype(int)
+    adaptive_plan_outcome = (
+        adaptive_history_raw_df.get("plan_outcome", pd.Series(index=adaptive_history_raw_df.index, dtype=object))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+    adaptive_current_scalp_planned_rows = int((_adaptive_current_mask := adaptive_current_mask & adaptive_has_plan.eq(1)).sum())
+    adaptive_current_scalp_resolved_rows = int((_adaptive_current_mask & adaptive_plan_outcome.ne("")).sum())
+
+    return {
+        "raw_df": adaptive_history_raw_df,
+        "df": adaptive_history_df,
+        "decision_mode": str(adaptive_history_df.attrs.get("decision_version_mode") or "mixed_fallback"),
+        "decision_target": str(adaptive_history_df.attrs.get("decision_version_target") or decision_version_target),
+        "decision_rows": adaptive_decision_rows,
+        "decision_total_rows": adaptive_decision_total_rows,
+        "current_scalp_planned_rows": adaptive_current_scalp_planned_rows,
+        "current_scalp_resolved_rows": adaptive_current_scalp_resolved_rows,
+        "adaptive_model": build_adaptive_context_model(adaptive_history_df),
+        "ai_confidence_calibration_model": build_ai_confidence_calibration_model(adaptive_history_df),
+        "confidence_calibration_model": build_confidence_calibration_model(adaptive_history_df),
+        "setup_calibration_model": build_setup_calibration_model(adaptive_history_df),
+        "actionable_ranking_model": build_actionable_ranking_model(adaptive_history_df),
+        "risk_sizing_calibration_model": build_risk_sizing_calibration_model(adaptive_history_df),
+        "trade_gate_calibration_model": build_trade_gate_calibration_model(adaptive_history_df),
+        "scalp_calibration_model": build_scalp_calibration_model(adaptive_history_df),
+    }
+
+
 def _market_result_priority_key(row: dict) -> tuple[float, float, float, float, float, float, float, float, float, float, str]:
     return (
         -float(_setup_confirm_priority(str(row.get("__action_raw", row.get("Setup Confirm", ""))))),
@@ -273,9 +339,31 @@ def _actionable_market_result_priority_key(
     )
 
 
+def _emerging_market_result_priority_key(
+    row: dict,
+) -> tuple[float, float, float, float, float, float, float, float, float, float, str]:
+    lead_active = 1.0 if _signal_tracker_direction_key(row.get("__emerging_direction")) in {"UPSIDE", "DOWNSIDE"} else 0.0
+    return (
+        -float(_setup_confirm_priority(str(row.get("__action_raw", row.get("Setup Confirm", ""))))),
+        -_sortable_float(row.get("__emerging_rank_score", 0.0)),
+        -lead_active,
+        -_sortable_float(row.get("__actionable_frame_score", 0.0)),
+        -_sortable_float(row.get("__actionable_tactical_score", 0.0)),
+        -_sortable_float(row.get("__confidence_val", 0.0)),
+        -_sortable_float(row.get("__execution_friction_score", 50.0)),
+        -_sortable_float(row.get("__expectancy_bias_score", 50.0)),
+        -_sortable_float(row.get("__ai_confidence_val", 0.0)),
+        _sortable_float(row.get("__archive_guardrail_penalty", 0.0)),
+        str(row.get("Coin", "")),
+    )
+
+
 def _market_result_priority_key_for_mode(row: dict, scan_mode: str) -> tuple:
-    if _normalize_scan_mode(scan_mode) == _SCAN_MODE_ACTIONABLE:
+    normalized_mode = _normalize_scan_mode(scan_mode)
+    if normalized_mode == _SCAN_MODE_ACTIONABLE:
         return _actionable_market_result_priority_key(row)
+    if normalized_mode == _SCAN_MODE_EMERGING:
+        return _emerging_market_result_priority_key(row)
     return _market_result_priority_key(row)
 
 
@@ -654,6 +742,148 @@ def _market_signal_log_events(
                 "stop_loss": row.get("__stop_val"),
                 "target_price": row.get("__target_val"),
                 "rr_ratio": row.get("__rr_val"),
+            }
+        )
+    return events
+
+
+def _scalp_signal_log_events(
+    *,
+    rows: list[dict],
+    timeframe: str,
+    scan_mode: str,
+    market_lead_snapshot: MarketLeadSnapshot,
+    market_regime_snapshot,
+    market_trade_gate_snapshot,
+    build_signal_risk_sizing,
+    sector_rotation_snapshot,
+    classify_symbol_sector,
+    market_catalyst_snapshot,
+    market_flow_snapshot,
+    session_fit_snapshot,
+    market_alerts,
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    decision_version = current_decision_version("Market")
+    alert_keys = [
+        str(getattr(alert, "alert_key", "") or "").strip().upper()
+        for alert in list(market_alerts or [])
+        if str(getattr(alert, "alert_key", "") or "").strip()
+    ]
+    alert_keys_text = "|".join(alert_keys)
+    primary_alert = alert_keys[0] if alert_keys else ""
+    for row in rows:
+        scalp_direction = str(row.get("__scalp_direction_raw") or "").strip()
+        scalp_state = str(row.get("__scalp_display_state") or "").strip().upper()
+        if _signal_tracker_direction_key(scalp_direction) not in {"UPSIDE", "DOWNSIDE"}:
+            continue
+        if scalp_state not in {"LIVE", "CONDITIONAL"}:
+            continue
+        event_time = row.get("__event_time")
+        symbol = str(row.get("Coin") or "").strip().upper()
+        if not symbol or event_time is None:
+            continue
+        ai_ensemble = str(row.get("AI Ensemble") or "").strip()
+        sector_tag = classify_symbol_sector(symbol)
+        direction_raw = scalp_direction
+        confidence_val = row.get("__confidence_val", _confidence_value_from_badge(row.get("Confidence")))
+        ai_conf_val = row.get("__ai_confidence_val", _confidence_value_from_badge(row.get("AI Confidence")))
+        lead_direction = str(row.get("__emerging_direction") or "")
+        market_lead_aligned = (
+            _signal_tracker_direction_key(direction_raw) in {"UPSIDE", "DOWNSIDE"}
+            and _signal_tracker_direction_key(direction_raw) == _signal_tracker_direction_key(market_lead_snapshot.label)
+        )
+        risk_sizing_snapshot = build_signal_risk_sizing(
+            market_trade_gate_snapshot=market_trade_gate_snapshot,
+            market_catalyst_snapshot=market_catalyst_snapshot,
+            direction=direction_raw,
+            setup_confirm=str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+            confidence=confidence_val,
+            ai_confidence=ai_conf_val,
+            ai_aligned=(
+                _signal_tracker_direction_key(direction_raw)
+                == _signal_tracker_direction_key(ai_ensemble.split("(", 1)[0].strip())
+            ),
+            market_lead_aligned=market_lead_aligned,
+            lead_active=_signal_tracker_direction_key(lead_direction) in {"UPSIDE", "DOWNSIDE"},
+            rr_ratio=row.get("__scalp_rr_val_raw", row.get("__rr_val")),
+            adaptive_edge_score=row.get("__adaptive_edge_score"),
+            session_fit_score=float(getattr(session_fit_snapshot, "score", 0.0) or 0.0),
+            archive_guardrail_penalty=row.get("__archive_guardrail_penalty"),
+            archive_guardrail_label=row.get("__archive_guardrail_label"),
+            archive_guardrail_note=row.get("__archive_guardrail_note"),
+            archive_risk_delta=row.get("__risk_archive_delta"),
+            archive_risk_note=row.get("__risk_archive_note"),
+            symbol=symbol,
+            sector_tag=str(sector_tag or ""),
+        )
+        risk_label = str(row.get("__risk_tier_label") or getattr(risk_sizing_snapshot, "label", "") or "")
+        risk_fraction = row.get("__risk_unit_fraction")
+        risk_fraction_value = (
+            _sortable_float(risk_fraction)
+            if risk_fraction is not None
+            else float(getattr(risk_sizing_snapshot, "unit_fraction", 0.0) or 0.0)
+        )
+        events.append(
+            {
+                "source": "Scalp",
+                "decision_version": decision_version,
+                "symbol": symbol,
+                "timeframe": str(row.get("__timeframe") or timeframe),
+                "event_time": event_time,
+                "session_bucket": session_bucket_for_timestamp(event_time),
+                "scan_focus": _normalize_scan_mode(scan_mode),
+                "direction": direction_raw,
+                "setup_confirm": str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                "action_reason": scalp_state,
+                "lead_label": str(row.get("__scalp_reason_short") or ""),
+                "lead_direction": lead_direction,
+                "confidence": confidence_val,
+                "ai_ensemble": ai_ensemble,
+                "ai_direction": ai_ensemble.split("(", 1)[0].strip(),
+                "ai_confidence": ai_conf_val,
+                "market_lead_label": market_lead_snapshot.label,
+                "market_lead_score": market_lead_snapshot.score,
+                "market_lead_upside": market_lead_snapshot.upside_leads,
+                "market_lead_downside": market_lead_snapshot.downside_leads,
+                "market_regime": str(getattr(market_regime_snapshot, "label", "") or ""),
+                "market_playbook_key": str(getattr(market_regime_snapshot, "playbook_key", "") or ""),
+                "market_playbook": str(getattr(market_regime_snapshot, "playbook", "") or ""),
+                "market_no_trade": bool(getattr(market_trade_gate_snapshot, "no_trade", False)),
+                "market_trade_gate_key": str(getattr(market_trade_gate_snapshot, "gate_key", "") or ""),
+                "market_trade_gate": str(getattr(market_trade_gate_snapshot, "label", "") or ""),
+                "market_alert_keys": alert_keys_text,
+                "market_primary_alert": primary_alert,
+                "market_no_trade_reason": str(getattr(market_trade_gate_snapshot, "reason_code", "") or ""),
+                "risk_tier": risk_label,
+                "risk_unit_fraction": risk_fraction_value,
+                "sector_tag": str(sector_tag or "").strip(),
+                "market_sector_rotation": str(getattr(sector_rotation_snapshot, "label", "") or ""),
+                "market_catalyst_state": str(getattr(market_catalyst_snapshot, "label", "") or ""),
+                "market_catalyst_event": str(getattr(market_catalyst_snapshot, "next_event", "") or ""),
+                "market_catalyst_blocking": bool(getattr(market_catalyst_snapshot, "blocking", False)),
+                "market_catalyst_category": str(getattr(market_catalyst_snapshot, "category", "") or ""),
+                "market_catalyst_scope": str(getattr(market_catalyst_snapshot, "scope", "") or ""),
+                "market_catalyst_tag": str(getattr(market_catalyst_snapshot, "tag", "") or ""),
+                "market_catalyst_targeted": bool(getattr(market_catalyst_snapshot, "targeted_only", False)),
+                "market_catalyst_window": catalyst_window_label(market_catalyst_snapshot),
+                "market_flow_state": str(getattr(market_flow_snapshot, "label", "") or ""),
+                "market_flow_bias": str(getattr(market_flow_snapshot, "state", "") or ""),
+                "adaptive_edge_label": str(row.get("__adaptive_edge_label") or ""),
+                "adaptive_edge_score": row.get("__adaptive_edge_score"),
+                "actionable_frame_score": row.get("__actionable_frame_score"),
+                "actionable_setup_score": row.get("__actionable_setup_score"),
+                "actionable_context_score": row.get("__actionable_context_score"),
+                "actionable_tactical_score": row.get("__actionable_tactical_score"),
+                "archive_guardrail_label": str(row.get("__archive_guardrail_label") or ""),
+                "archive_guardrail_penalty": row.get("__archive_guardrail_penalty"),
+                "archive_guardrail_note": str(row.get("__archive_guardrail_note") or ""),
+                "price": row.get("__price_val"),
+                "delta_pct": row.get("__delta_pct"),
+                "entry_price": row.get("__scalp_entry_val_raw", row.get("__entry_val")),
+                "stop_loss": row.get("__scalp_stop_val_raw", row.get("__stop_val")),
+                "target_price": row.get("__scalp_target_val_raw", row.get("__target_val")),
+                "rr_ratio": row.get("__scalp_rr_val_raw", row.get("__rr_val")),
             }
         )
     return events
@@ -1312,6 +1542,15 @@ def _build_market_coin_id_map(market_rows: list[dict]) -> dict[str, str]:
     return out
 
 
+def _build_market_row_map(market_rows: list[dict]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for coin in market_rows:
+        symbol = canonical_base_symbol((coin or {}).get("symbol") or "")
+        if symbol and symbol not in out:
+            out[symbol] = dict(coin)
+    return out
+
+
 def _build_custom_scan_universe(
     *,
     custom_bases_applied: list[str],
@@ -1951,6 +2190,487 @@ def _prepare_scan_market_enrichment(market_data: list[dict]) -> tuple[list[dict]
     return unique_market_data, mcap_map
 
 
+def _merge_scan_market_rows(*row_groups: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    for rows in row_groups:
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                merged.append(dict(row))
+    return _dedupe_market_rows(merged)
+
+
+def _merge_breakout_radar_market_rows(*row_groups: list[dict]) -> list[dict]:
+    merged_by_symbol: dict[str, dict] = {}
+    symbol_order: list[str] = []
+    for rows in row_groups:
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            symbol = canonical_base_symbol((row or {}).get("symbol") or "")
+            coin_id = str((row or {}).get("id") or "").strip().lower()
+            if not symbol or "wrapped" in coin_id:
+                continue
+            incoming = dict(row)
+            incoming["symbol"] = symbol.lower()
+            existing = merged_by_symbol.get(symbol)
+            if existing is None:
+                merged_by_symbol[symbol] = incoming
+                symbol_order.append(symbol)
+                continue
+            for key in ("market_cap", "_radar_source_score", "_quote_volume_24h", "_volume_24h"):
+                if _sortable_float(incoming.get(key)) > _sortable_float(existing.get(key)):
+                    existing[key] = incoming.get(key)
+            for key in ("price_change_percentage_24h", "price_change_percentage_24h_in_currency"):
+                if abs(_sortable_float(incoming.get(key))) > abs(_sortable_float(existing.get(key))):
+                    existing[key] = incoming.get(key)
+            if not str(existing.get("id") or "").strip() and str(incoming.get("id") or "").strip():
+                existing["id"] = incoming.get("id")
+            if not str(existing.get("_radar_source_kind") or "").strip() and str(incoming.get("_radar_source_kind") or "").strip():
+                existing["_radar_source_kind"] = incoming.get("_radar_source_kind")
+    return [merged_by_symbol[symbol] for symbol in symbol_order]
+
+
+def _ticker_quote_volume_24h(ticker: object) -> float:
+    if not isinstance(ticker, dict):
+        return 0.0
+    direct = _sortable_float(
+        ticker.get("quoteVolume")
+        if "quoteVolume" in ticker
+        else ticker.get("quote_volume")
+    )
+    if direct > 0:
+        return float(direct)
+    base_vol = _sortable_float(
+        ticker.get("baseVolume")
+        if "baseVolume" in ticker
+        else ticker.get("base_volume")
+    )
+    ref_price = (
+        _sortable_float(ticker.get("vwap"))
+        or _sortable_float(ticker.get("last"))
+        or _sortable_float(ticker.get("close"))
+    )
+    if base_vol > 0 and ref_price > 0:
+        return float(base_vol) * float(ref_price)
+    return 0.0
+
+
+def _ticker_pct_change_24h(ticker: object) -> float:
+    if not isinstance(ticker, dict):
+        return 0.0
+    return _sortable_float(ticker.get("percentage"))
+
+
+def _aligned_breakout_move(pct_change_24h: float, *, direction_filter: str) -> float:
+    direction_key = str(direction_filter or "").strip().upper()
+    move = _sortable_float(pct_change_24h)
+    if direction_key == "UPSIDE":
+        return max(0.0, move)
+    if direction_key == "DOWNSIDE":
+        return max(0.0, -move)
+    return abs(move)
+
+
+def _exchange_breakout_source_score(
+    pct_change_24h: float,
+    *,
+    quote_volume_24h: float,
+    direction_filter: str,
+) -> float:
+    aligned_move = _aligned_breakout_move(pct_change_24h, direction_filter=direction_filter)
+    if aligned_move <= 0.35:
+        return 0.0
+    volume_score = max(0.0, min(1.0, (math.log10(max(quote_volume_24h, 1.0)) - 5.6) / 2.6))
+    if aligned_move < 1.0:
+        move_score = 0.26 + 0.34 * (aligned_move / 1.0)
+    elif aligned_move < 4.0:
+        move_score = 0.60 + 0.32 * ((aligned_move - 1.0) / 3.0)
+    elif aligned_move <= 12.0:
+        move_score = 0.92 - 0.18 * ((aligned_move - 4.0) / 8.0)
+    else:
+        move_score = 0.70 - min(0.24, 0.012 * (aligned_move - 12.0))
+    return max(0.0, min(1.0, 0.62 * move_score + 0.38 * volume_score))
+
+
+def _provider_breakout_source_score(
+    pct_change_24h: float,
+    *,
+    direction_filter: str,
+    market_cap: object = 0.0,
+    trending_rank: object = 0.0,
+    source_kind: str,
+) -> float:
+    aligned_move = _aligned_breakout_move(pct_change_24h, direction_filter=direction_filter)
+    if source_kind == "trending":
+        raw_rank = _sortable_float(trending_rank)
+        if raw_rank > 0:
+            rank_val = max(1.0, raw_rank)
+            rank_score = max(0.0, min(1.0, 1.0 - ((rank_val - 1.0) / 19.0)))
+        else:
+            rank_score = 0.0
+        if aligned_move <= 0.35 and rank_score <= 0.0:
+            return 0.0
+        move_score = max(0.0, min(1.0, aligned_move / 6.0))
+        base_score = 0.58 * rank_score + 0.42 * move_score
+        if aligned_move <= 0.35:
+            return max(0.0, min(0.38, 0.38 * rank_score))
+        return max(0.0, min(1.0, base_score))
+    mcap_score = max(0.0, min(1.0, (_sortable_float(market_cap) / 300_000_000.0)))
+    if aligned_move < 0.5:
+        move_score = 0.18 + 0.24 * (aligned_move / 0.5)
+    elif aligned_move < 3.5:
+        move_score = 0.42 + 0.46 * ((aligned_move - 0.5) / 3.0)
+    elif aligned_move <= 10.0:
+        move_score = 0.88 - 0.18 * ((aligned_move - 3.5) / 6.5)
+    else:
+        move_score = 0.68 - min(0.26, 0.014 * (aligned_move - 10.0))
+    return max(0.0, min(1.0, 0.82 * move_score + 0.18 * mcap_score))
+
+
+def _annotate_breakout_provider_rows(
+    rows: list[dict],
+    *,
+    direction_filter: str,
+    source_kind: str,
+) -> list[dict]:
+    annotated: list[dict] = []
+    for row in list(rows or []):
+        if not isinstance(row, dict):
+            continue
+        base = canonical_base_symbol((row or {}).get("symbol") or "")
+        if not base:
+            continue
+        out = dict(row)
+        out["symbol"] = base.lower()
+        out["_radar_source_kind"] = source_kind
+        out["_radar_source_score"] = _provider_breakout_source_score(
+            _sortable_float(out.get("price_change_percentage_24h")),
+            direction_filter=direction_filter,
+            market_cap=out.get("market_cap"),
+            trending_rank=out.get("_trending_rank", out.get("score", out.get("market_cap_rank"))),
+            source_kind=source_kind,
+        )
+        annotated.append(out)
+    return annotated
+
+
+def _breakout_prescan_profile(scan_timeframe: str) -> tuple[str, int]:
+    tf = str(scan_timeframe or "").strip().lower()
+    if tf in {"4h", "1d"}:
+        return "1h", 96
+    if tf == "1h":
+        return "15m", 96
+    if tf == "15m":
+        return "5m", 96
+    return tf or "5m", 84
+
+
+def _build_breakout_freshness_snapshot(
+    df_eval: pd.DataFrame | None,
+    *,
+    direction_filter: str,
+) -> SimpleNamespace:
+    if df_eval is None or len(df_eval) < 24:
+        return SimpleNamespace(score=0.0, direction="Neutral")
+    try:
+        close = pd.to_numeric(df_eval.get("close"), errors="coerce").dropna()
+        high = pd.to_numeric(df_eval.get("high"), errors="coerce").dropna()
+        low = pd.to_numeric(df_eval.get("low"), errors="coerce").dropna()
+    except Exception:
+        return SimpleNamespace(score=0.0, direction="Neutral")
+    if len(close) < 24 or len(high) < 24 or len(low) < 24:
+        return SimpleNamespace(score=0.0, direction="Neutral")
+
+    current = _sortable_float(close.iloc[-1])
+    prev_3 = _sortable_float(close.iloc[-4]) if len(close) >= 4 else current
+    prev_8 = _sortable_float(close.iloc[-9]) if len(close) >= 9 else prev_3
+    recent_move_pct = ((current / max(prev_3, 1e-9)) - 1.0) * 100.0 if prev_3 > 0 else 0.0
+    prior_move_pct = ((prev_3 / max(prev_8, 1e-9)) - 1.0) * 100.0 if prev_8 > 0 else 0.0
+
+    ema_fast = _sortable_float(close.ewm(span=8, adjust=False).mean().iloc[-1])
+    ema_slow = _sortable_float(close.ewm(span=21, adjust=False).mean().iloc[-1])
+    upper_break = _sortable_float(high.iloc[-13:-1].max())
+    lower_break = _sortable_float(low.iloc[-13:-1].min())
+    avg_abs_move_pct = _sortable_float(close.pct_change().abs().tail(14).mean()) * 100.0
+
+    def _directional_score(side: str) -> float:
+        is_up = side == "UPSIDE"
+        aligned_recent = max(0.0, recent_move_pct) if is_up else max(0.0, -recent_move_pct)
+        aligned_prior = max(0.0, prior_move_pct) if is_up else max(0.0, -prior_move_pct)
+        accel = max(0.0, aligned_recent - aligned_prior)
+        breakout = (
+            current >= upper_break * 0.997 if is_up else current <= lower_break * 1.003
+        )
+        trend_ok = ema_fast >= ema_slow if is_up else ema_fast <= ema_slow
+        extension_pct = (
+            max(0.0, ((current / max(ema_slow, 1e-9)) - 1.0) * 100.0)
+            if is_up
+            else max(0.0, ((ema_slow / max(current, 1e-9)) - 1.0) * 100.0)
+        )
+        extension_cap = max(2.2, avg_abs_move_pct * 5.0)
+        extension_penalty = max(0.0, (extension_pct / max(extension_cap, 1e-9)) - 1.0)
+        score = (
+            0.42 * min(1.0, aligned_recent / 2.8)
+            + 0.26 * min(1.0, accel / 2.2)
+            + 0.20 * (1.0 if breakout else 0.0)
+            + 0.12 * (1.0 if trend_ok else 0.0)
+            - min(0.34, 0.20 * extension_penalty)
+        )
+        return max(0.0, min(1.0, score))
+
+    up_score = _directional_score("UPSIDE")
+    down_score = _directional_score("DOWNSIDE")
+    direction_key = str(direction_filter or "").strip().upper()
+    if direction_key == "UPSIDE":
+        return SimpleNamespace(score=float(up_score), direction="Upside")
+    if direction_key == "DOWNSIDE":
+        return SimpleNamespace(score=float(down_score), direction="Downside")
+    if up_score >= down_score:
+        return SimpleNamespace(score=float(up_score), direction="Upside")
+    return SimpleNamespace(score=float(down_score), direction="Downside")
+
+
+def _enrich_breakout_radar_freshness(
+    *,
+    base_pairs: list[str],
+    market_rows: list[dict],
+    fetch_ohlcv,
+    scan_timeframe: str,
+    direction_filter: str = "Both",
+    max_candidates: int = 18,
+    freshness_cache: dict[tuple[str, str, str], float] | None = None,
+) -> list[dict]:
+    if not callable(fetch_ohlcv) or not market_rows:
+        return list(market_rows or [])
+    pair_map = {str(pair): _canonical_pair_base(pair) for pair in list(base_pairs or []) if isinstance(pair, str)}
+    shortlist: list[tuple[str, dict]] = []
+    for row in list(market_rows or []):
+        if not isinstance(row, dict):
+            continue
+        base = canonical_base_symbol((row or {}).get("symbol") or "")
+        if not base:
+            continue
+        pair = next((pair for pair, pair_base in pair_map.items() if pair_base == base), "")
+        if not pair:
+            continue
+        shortlist.append((pair, row))
+    shortlist.sort(
+        key=lambda item: (
+            -_sortable_float((item[1] or {}).get("_radar_source_score", 0.0)),
+            -max(
+                _sortable_float((item[1] or {}).get("_quote_volume_24h")),
+                _sortable_float((item[1] or {}).get("total_volume")),
+                _sortable_float((item[1] or {}).get("_volume_24h")),
+            ),
+            -abs(_sortable_float((item[1] or {}).get("price_change_percentage_24h"))),
+            str((item[1] or {}).get("symbol") or ""),
+        ),
+    )
+    prescan_timeframe, prescan_limit = _breakout_prescan_profile(scan_timeframe)
+    direction_key = str(direction_filter or "Both").strip().upper()
+    freshness_scores: dict[str, float] = {}
+    fetch_lock = Lock()
+    for pair, row in shortlist[: max(8, int(max_candidates))]:
+        cache_key = (str(pair), str(prescan_timeframe), direction_key)
+        cached_score = freshness_cache.get(cache_key) if isinstance(freshness_cache, dict) else None
+        if cached_score is None:
+            try:
+                raw = _fetch_market_scan_ohlcv(
+                    fetch_ohlcv=fetch_ohlcv,
+                    fetch_coingecko_ohlcv_by_coin_id=lambda *_args, **_kwargs: None,
+                    fetch_lock=fetch_lock,
+                    symbol=pair,
+                    timeframe=prescan_timeframe,
+                    limit=prescan_limit,
+                    fallback_coin_id=None,
+                )
+            except Exception:
+                raw = None
+            prepared = _prepare_closed_frame(raw, min_rows=28)
+            snapshot = _build_breakout_freshness_snapshot(prepared, direction_filter=direction_filter)
+            cached_score = float(snapshot.score or 0.0)
+            if isinstance(freshness_cache, dict):
+                freshness_cache[cache_key] = cached_score
+        base = canonical_base_symbol((row or {}).get("symbol") or "")
+        if base and _sortable_float(cached_score) > 0:
+            freshness_scores[base] = float(cached_score)
+
+    enriched: list[dict] = []
+    for row in list(market_rows or []):
+        if not isinstance(row, dict):
+            continue
+        out = dict(row)
+        base = canonical_base_symbol((row or {}).get("symbol") or "")
+        out["_radar_freshness_score"] = float(freshness_scores.get(base, 0.0))
+        enriched.append(out)
+    return enriched
+
+
+def _build_exchange_breakout_rows(
+    *,
+    fetch_exchange_tickers_snapshot,
+    direction_filter: str,
+    limit: int,
+) -> list[dict]:
+    try:
+        tickers = fetch_exchange_tickers_snapshot()
+    except Exception:
+        tickers = {}
+    if not isinstance(tickers, dict) or not tickers:
+        return []
+
+    rows_by_base: dict[str, dict] = {}
+    for pair, ticker in tickers.items():
+        if not isinstance(pair, str) or "/" not in pair:
+            continue
+        raw_base, raw_quote = pair.split("/", 1)
+        quote = str(raw_quote or "").upper()
+        if quote not in {"USDT", "USD"}:
+            continue
+        base = canonical_base_symbol(raw_base)
+        if not base or is_stable_base_symbol(base):
+            continue
+        quote_volume_24h = _ticker_quote_volume_24h(ticker)
+        if quote_volume_24h <= 125_000:
+            continue
+        pct_change_24h = _ticker_pct_change_24h(ticker)
+        radar_source_score = _exchange_breakout_source_score(
+            pct_change_24h,
+            quote_volume_24h=quote_volume_24h,
+            direction_filter=direction_filter,
+        )
+        if radar_source_score <= 0.20:
+            continue
+        row = {
+            "symbol": base.lower(),
+            "id": "",
+            "market_cap": 0,
+            "price_change_percentage_24h": pct_change_24h,
+            "_quote_volume_24h": quote_volume_24h,
+            "_radar_source_score": radar_source_score,
+            "_radar_source_kind": "exchange_breakout",
+        }
+        existing = rows_by_base.get(base)
+        if existing is None or (
+            _sortable_float(row.get("_radar_source_score")) > _sortable_float(existing.get("_radar_source_score"))
+            or (
+                _sortable_float(row.get("_radar_source_score")) == _sortable_float(existing.get("_radar_source_score"))
+                and _sortable_float(row.get("_quote_volume_24h")) > _sortable_float(existing.get("_quote_volume_24h"))
+            )
+        ):
+            rows_by_base[base] = row
+
+    ranked_rows = sorted(
+        rows_by_base.values(),
+        key=lambda row: (
+            -_sortable_float(row.get("_radar_source_score")),
+            -_sortable_float(row.get("_quote_volume_24h")),
+            -abs(_sortable_float(row.get("price_change_percentage_24h"))),
+            str(row.get("symbol") or ""),
+        ),
+    )
+    return ranked_rows[: max(10, int(limit))]
+
+
+def _build_breakout_radar_universe(
+    *,
+    base_pairs: list[str],
+    base_market_rows: list[dict],
+    fetch_top_gainers_losers,
+    fetch_trending_coins,
+    fetch_exchange_tickers_snapshot,
+    get_market_cap_rows_for_symbols,
+    direction_filter: str,
+    provider_fetch_n: int,
+) -> tuple[list[str], list[dict], dict[str, int]]:
+    radar_bases: list[str] = []
+    seen_bases: set[str] = set()
+
+    def _remember_base(raw_symbol: object) -> None:
+        base = canonical_base_symbol(str(raw_symbol or "").strip())
+        if not base or base in seen_bases:
+            return
+        seen_bases.add(base)
+        radar_bases.append(base)
+
+    for pair in list(base_pairs or []):
+        _remember_base(_canonical_pair_base(pair))
+
+    gainers: list[dict] = []
+    losers: list[dict] = []
+    trending: list[dict] = []
+    exchange_breakouts: list[dict] = []
+    try:
+        gainers, losers = fetch_top_gainers_losers(limit=max(25, min(int(provider_fetch_n), 80)))
+    except Exception:
+        gainers, losers = [], []
+    try:
+        trending = fetch_trending_coins()
+    except Exception:
+        trending = []
+    exchange_breakouts = _build_exchange_breakout_rows(
+        fetch_exchange_tickers_snapshot=fetch_exchange_tickers_snapshot,
+        direction_filter=direction_filter,
+        limit=max(25, min(int(provider_fetch_n), 60)),
+    )
+
+    direction_key = str(direction_filter or "").strip().upper()
+    directional_rows_raw: list[dict] = []
+    if direction_key == "UPSIDE":
+        directional_rows_raw = list(gainers or [])
+    elif direction_key == "DOWNSIDE":
+        directional_rows_raw = list(losers or [])
+    else:
+        directional_rows_raw = [*(gainers or [])[:50], *(losers or [])[:28]]
+    directional_rows = _annotate_breakout_provider_rows(
+        directional_rows_raw,
+        direction_filter=direction_filter,
+        source_kind="gainers_losers",
+    )
+    trending_rows = _annotate_breakout_provider_rows(
+        [
+            {
+                **dict(row),
+                "_trending_rank": idx + 1,
+            }
+            for idx, row in enumerate(list(trending or []))
+        ],
+        direction_filter=direction_filter,
+        source_kind="trending",
+    )
+
+    for row in directional_rows[:80]:
+        _remember_base((row or {}).get("symbol"))
+    for row in trending_rows[:20]:
+        _remember_base((row or {}).get("symbol"))
+    for row in list(exchange_breakouts or [])[:60]:
+        _remember_base((row or {}).get("symbol"))
+
+    targeted_rows = get_market_cap_rows_for_symbols(tuple(radar_bases), vs_currency="usd")
+    merged_market_rows = _merge_breakout_radar_market_rows(
+        base_market_rows,
+        directional_rows,
+        trending_rows,
+        exchange_breakouts,
+        targeted_rows,
+    )
+    merged_pairs: list[str] = []
+    seen_pairs: set[str] = set()
+    for base in radar_bases:
+        pair = f"{base}/USDT"
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        merged_pairs.append(pair)
+
+    merged_mcap_map = _build_market_cap_map(merged_market_rows)
+    return merged_pairs, merged_market_rows, merged_mcap_map
+
+
 def _sync_market_cap_cells(
     rows: list[dict],
     mcap_map: dict[str, int],
@@ -2188,6 +2908,9 @@ def render(ctx: dict) -> None:
     get_major_ohlcv_bundle = get_ctx(ctx, "get_major_ohlcv_bundle")
     ml_ensemble_predict = get_ctx(ctx, "ml_ensemble_predict")
     get_top_volume_usdt_symbols = get_ctx(ctx, "get_top_volume_usdt_symbols")
+    fetch_top_gainers_losers = get_ctx(ctx, "fetch_top_gainers_losers")
+    fetch_trending_coins = get_ctx(ctx, "fetch_trending_coins")
+    fetch_exchange_tickers_snapshot = get_ctx(ctx, "fetch_exchange_tickers_snapshot")
     get_market_cap_rows_for_symbols = get_ctx(ctx, "get_market_cap_rows_for_symbols")
     build_market_regime_snapshot = get_ctx(ctx, "build_market_regime_snapshot")
     build_market_trade_gate = get_ctx(ctx, "build_market_trade_gate")
@@ -2771,13 +3494,20 @@ def render(ctx: dict) -> None:
             format_func=lambda x: "All Directions" if x == "Both" else x,
         )
     with controls[2]:
+        current_scan_mode = str(st.session_state.get("market_scan_mode") or "").strip()
+        if current_scan_mode not in {_SCAN_MODE_BROAD, _SCAN_MODE_EMERGING}:
+            normalized_scan_mode = _normalize_scan_mode(current_scan_mode)
+            if normalized_scan_mode in {_SCAN_MODE_ACTIONABLE, _SCAN_MODE_EMERGING}:
+                st.session_state["market_scan_mode"] = _SCAN_MODE_EMERGING
+            else:
+                st.session_state["market_scan_mode"] = _SCAN_MODE_BROAD
         scan_mode = st.selectbox(
             "Scanner Focus",
-            [_SCAN_MODE_BROAD, _SCAN_MODE_ACTIONABLE],
+            [_SCAN_MODE_BROAD, _SCAN_MODE_EMERGING],
             index=0,
             key="market_scan_mode",
             disabled=custom_mode_active,
-            help="Actionable Setups scans a wider active-liquidity pool and biases candidates toward the selected timeframe and direction.",
+            help="Broad Market stays cleaner. Breakout Radar keeps the same table but pushes earlier breakout and acceleration names forward, with more noise.",
         )
     with controls[3]:
         top_n_default = int(st.session_state.get("market_top_n", 10))
@@ -2828,8 +3558,8 @@ def render(ctx: dict) -> None:
         )
     elif custom_coin_input.strip() and custom_bases_draft:
         st.caption("Custom symbols are ready. Click Run Scan to apply watchlist mode.")
-    elif _normalize_scan_mode(scan_mode) == _SCAN_MODE_ACTIONABLE:
-        st.caption("Actionable Setups widens the universe first, then pre-ranks coins by liquidity, move character, timeframe, and direction fit.")
+    elif _normalize_scan_mode(scan_mode) == _SCAN_MODE_EMERGING:
+        st.caption("Breakout Radar keeps the same scanner table, but reaches further into the active-liquidity universe and surfaces fresher breakout pressure earlier. Expect more noise.")
 
     exclude_stables = st.toggle(
         "Exclude stablecoins",
@@ -4728,50 +5458,28 @@ def render(ctx: dict) -> None:
     live_ranked_out_count = 0
     attempted_symbols: set[str] = set()
     skipped_symbols: list[tuple[str, str]] = []
-    adaptive_history_raw_df = fetch_signal_events_df(
-        limit=2000,
-        status="RESOLVED",
-        source="Market",
+    market_decision_version = current_decision_version("Market")
+    archive_bundle = _market_archive_bundle(
+        _fetch_signal_events_df=fetch_signal_events_df,
         db_path=signal_tracker_db_path,
+        decision_version_target=market_decision_version,
     )
-    adaptive_history_df = prefer_current_decision_version_slice(
-        adaptive_history_raw_df,
-        source="Market",
-    )
-    adaptive_decision_mode = str(adaptive_history_df.attrs.get("decision_version_mode") or "mixed_fallback")
-    adaptive_decision_target = str(adaptive_history_df.attrs.get("decision_version_target") or current_decision_version("Market"))
-    adaptive_decision_rows = int(adaptive_history_df.attrs.get("decision_version_rows") or 0)
-    adaptive_decision_total_rows = int(adaptive_history_df.attrs.get("decision_version_total_rows") or len(adaptive_history_df))
-    _adaptive_version_series = (
-        adaptive_history_raw_df.get("decision_version", pd.Series(index=adaptive_history_raw_df.index, dtype=object))
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-    _adaptive_current_mask = _adaptive_version_series.eq(adaptive_decision_target)
-    _adaptive_has_plan = pd.to_numeric(
-        adaptive_history_raw_df.get("has_plan", pd.Series(index=adaptive_history_raw_df.index, dtype=float)),
-        errors="coerce",
-    ).fillna(0).astype(int)
-    _adaptive_plan_outcome = (
-        adaptive_history_raw_df.get("plan_outcome", pd.Series(index=adaptive_history_raw_df.index, dtype=object))
-        .fillna("")
-        .astype(str)
-        .str.strip()
-        .str.upper()
-    )
-    adaptive_current_scalp_planned_rows = int((_adaptive_current_mask & _adaptive_has_plan.eq(1)).sum())
-    adaptive_current_scalp_resolved_rows = int(
-        (_adaptive_current_mask & _adaptive_has_plan.eq(1) & _adaptive_plan_outcome.ne("")).sum()
-    )
-    adaptive_model = build_adaptive_context_model(adaptive_history_df)
-    ai_confidence_calibration_model = build_ai_confidence_calibration_model(adaptive_history_df)
-    confidence_calibration_model = build_confidence_calibration_model(adaptive_history_df)
-    setup_calibration_model = build_setup_calibration_model(adaptive_history_df)
-    actionable_ranking_model = build_actionable_ranking_model(adaptive_history_df)
-    risk_sizing_calibration_model = build_risk_sizing_calibration_model(adaptive_history_df)
-    trade_gate_calibration_model = build_trade_gate_calibration_model(adaptive_history_df)
-    scalp_calibration_model = build_scalp_calibration_model(adaptive_history_df)
+    adaptive_history_raw_df = archive_bundle["raw_df"]
+    adaptive_history_df = archive_bundle["df"]
+    adaptive_decision_mode = str(archive_bundle["decision_mode"])
+    adaptive_decision_target = str(archive_bundle["decision_target"])
+    adaptive_decision_rows = int(archive_bundle["decision_rows"])
+    adaptive_decision_total_rows = int(archive_bundle["decision_total_rows"])
+    adaptive_current_scalp_planned_rows = int(archive_bundle["current_scalp_planned_rows"])
+    adaptive_current_scalp_resolved_rows = int(archive_bundle["current_scalp_resolved_rows"])
+    adaptive_model = archive_bundle["adaptive_model"]
+    ai_confidence_calibration_model = archive_bundle["ai_confidence_calibration_model"]
+    confidence_calibration_model = archive_bundle["confidence_calibration_model"]
+    setup_calibration_model = archive_bundle["setup_calibration_model"]
+    actionable_ranking_model = archive_bundle["actionable_ranking_model"]
+    risk_sizing_calibration_model = archive_bundle["risk_sizing_calibration_model"]
+    trade_gate_calibration_model = archive_bundle["trade_gate_calibration_model"]
+    scalp_calibration_model = archive_bundle["scalp_calibration_model"]
 
     # Fetch top coins
     if should_scan:
@@ -4779,8 +5487,8 @@ def render(ctx: dict) -> None:
             f"Scanning custom watchlist ({len(custom_bases_applied)}) ({direction_filter}) [{timeframe}] ..."
             if custom_mode_active
             else (
-                f"Scanning actionable setup pool for {top_n} best setups ({direction_filter}) [{timeframe}] ..."
-                if _normalize_scan_mode(scan_mode) == _SCAN_MODE_ACTIONABLE
+                f"Scanning breakout radar for {top_n} early candidates ({direction_filter}) [{timeframe}] ..."
+                if _normalize_scan_mode(scan_mode) == _SCAN_MODE_EMERGING
                 else f"Scanning {top_n} coins ({direction_filter}) [{timeframe}] ..."
             )
         )
@@ -4797,14 +5505,18 @@ def render(ctx: dict) -> None:
             working_symbols: list[str] = []
             usdt_symbols: list[str] = []
             provider_fetch_n: int | None = None
+            breakout_freshness_cache: dict[tuple[str, str, str], float] = {}
 
             def _load_noncustom_scan_universe(
                 target_pool_n: int,
                 *,
                 current_fetch_n: int | None = None,
             ) -> tuple[int, list[str], list[dict], dict[str, int], list[str]]:
-                if _normalize_scan_mode(scan_mode) == _SCAN_MODE_ACTIONABLE:
+                normalized_scan_mode = _normalize_scan_mode(scan_mode)
+                if normalized_scan_mode == _SCAN_MODE_ACTIONABLE:
                     provider_fetch_n_local = min(250, max(int(top_n) * 4, 80))
+                elif normalized_scan_mode == _SCAN_MODE_EMERGING:
+                    provider_fetch_n_local = min(250, max(int(top_n) * 6, 120))
                 else:
                     provider_fetch_n_local = min(250, max(int(top_n), 50))
                 if current_fetch_n is not None:
@@ -4812,6 +5524,27 @@ def render(ctx: dict) -> None:
                 while True:
                     usdt_symbols_local, market_data_local = get_top_volume_usdt_symbols(provider_fetch_n_local)
                     unique_market_data_local, mcap_map_local = _prepare_scan_market_enrichment(market_data_local)
+                    if normalized_scan_mode == _SCAN_MODE_EMERGING:
+                        usdt_symbols_local, unique_market_data_local, radar_mcap_map = _build_breakout_radar_universe(
+                            base_pairs=usdt_symbols_local,
+                            base_market_rows=unique_market_data_local,
+                            fetch_top_gainers_losers=fetch_top_gainers_losers,
+                            fetch_trending_coins=fetch_trending_coins,
+                            fetch_exchange_tickers_snapshot=fetch_exchange_tickers_snapshot,
+                            get_market_cap_rows_for_symbols=get_market_cap_rows_for_symbols,
+                            direction_filter=direction_filter,
+                            provider_fetch_n=provider_fetch_n_local,
+                        )
+                        unique_market_data_local = _enrich_breakout_radar_freshness(
+                            base_pairs=usdt_symbols_local,
+                            market_rows=unique_market_data_local,
+                            fetch_ohlcv=fetch_ohlcv,
+                            scan_timeframe=timeframe,
+                            direction_filter=direction_filter,
+                            max_candidates=max(14, min(int(top_n) * 3, 26)),
+                            freshness_cache=breakout_freshness_cache,
+                        )
+                        mcap_map_local = _merge_market_cap_maps(mcap_map_local, radar_mcap_map)
                     eligible_symbols_local = _candidate_scan_symbols(
                         usdt_symbols=usdt_symbols_local,
                         market_rows=unique_market_data_local,
@@ -4853,6 +5586,7 @@ def render(ctx: dict) -> None:
                 )
                 working_symbols = _initial_scan_symbols(
                     candidate_pool=candidate_symbol_pool,
+                    market_rows=unique_market_data,
                     requested_n=requested_n,
                     scan_pool_n=scan_pool_n,
                     custom_mode_active=False,
@@ -4862,6 +5596,7 @@ def render(ctx: dict) -> None:
 
             has_market_rows = bool(unique_market_data)
             coin_id_map = _build_market_coin_id_map(unique_market_data)
+            market_row_map = _build_market_row_map(unique_market_data)
             used_major_fallback = False
 
             if _should_use_major_fallback(
@@ -4917,7 +5652,23 @@ def render(ctx: dict) -> None:
                         f"Signal tracker resolve failed for {base} ({timeframe}): "
                         f"{e.__class__.__name__}: {str(e).strip()}"
                     )
+                try:
+                    resolve_open_signal_events_for_frame(
+                        symbol=base,
+                        timeframe=timeframe,
+                        df_ohlcv=df_eval,
+                        source="Scalp",
+                        db_path=signal_tracker_db_path,
+                    )
+                except Exception as e:
+                    _debug(
+                        f"Scalp tracker resolve failed for {base} ({timeframe}): "
+                        f"{e.__class__.__name__}: {str(e).strip()}"
+                    )
                 mcap_val = mcap_map.get(base)
+                market_row = market_row_map.get(base) or {}
+                radar_source_score = _sortable_float((market_row or {}).get("_radar_source_score", 0.0))
+                radar_freshness_score = _sortable_float((market_row or {}).get("_radar_freshness_score", 0.0))
                 # Keep price semantics aligned with all decision metrics (closed-candle context).
                 price = float(latest_closed["close"])
                 # Delta source of truth: selected-timeframe closed candles.
@@ -5144,12 +5895,33 @@ def render(ctx: dict) -> None:
                     rr_ratio=setup_rr_val if math.isfinite(setup_rr_val) and setup_rr_val > 0.0 else None,
                     adx_val=float(adx_val_v) if pd.notna(adx_val_v) else float("nan"),
                 )
+                emerging_ai_confidence_snapshot = build_ai_confidence_snapshot(
+                    direction=ai_spot_snapshot.direction,
+                    combined_score=float(ai_spot_snapshot.score),
+                    conviction_quality=float(ai_spot_snapshot.conviction_quality),
+                    timeframe_alignment=float(ai_spot_snapshot.timeframe_alignment),
+                    consensus_quality=float(ai_spot_snapshot.consensus_quality),
+                    support_votes=int(ai_display_votes),
+                    timeframe_conflict=bool(ai_spot_snapshot.timeframe_conflict),
+                    degraded_data=bool(ai_spot_snapshot.degraded_data),
+                    archive_calibration_delta=0.0,
+                    archive_calibration_note="",
+                )
+                emerging_precheck_snapshot = emerging_bias_snapshot(
+                    spot_snapshot=spot_snapshot,
+                    ai_spot_snapshot=ai_spot_snapshot,
+                    ai_confidence_score=float(emerging_ai_confidence_snapshot.score),
+                    tech_confidence_score=float(confidence_snapshot.score),
+                )
                 include = _actionable_direction_include(
                     direction_filter=direction_filter,
                     scan_mode=scan_mode,
                     spot_direction=spot_snapshot.direction,
                     signal_direction=signal_direction,
                     tactical_candidate_score=actionable_tactical_score,
+                    emerging_direction=getattr(emerging_precheck_snapshot, "direction", ""),
+                    frame_hunt_score=frame_hunt_score,
+                    radar_source_score=max(radar_source_score, radar_freshness_score),
                 )
                 if not include:
                     return None
@@ -5260,8 +6032,29 @@ def render(ctx: dict) -> None:
                 emerging_snapshot = emerging_bias_snapshot(
                     spot_snapshot=spot_snapshot,
                     ai_spot_snapshot=ai_spot_snapshot,
-                    ai_confidence_score=float(ai_confidence_snapshot.score),
+                    ai_confidence_score=float(emerging_ai_confidence_snapshot.score),
                     tech_confidence_score=float(confidence_snapshot.score),
+                )
+                emerging_rank_score = _emerging_candidate_score(
+                    timeframe=timeframe,
+                    direction_filter=direction_filter,
+                    spot_direction=spot_snapshot.direction,
+                    signal_direction=signal_direction,
+                    emerging_direction=str(getattr(emerging_snapshot, "direction", "") or ""),
+                    emerging_active=bool(getattr(emerging_snapshot, "active", False)),
+                    frame_hunt_score=float(frame_hunt_score),
+                    tactical_candidate_score=float(actionable_tactical_score),
+                    execution_structure_quality=float(execution_snapshot.structure_quality),
+                    execution_trend_quality=float(execution_snapshot.trend_quality),
+                    execution_location_quality=float(execution_snapshot.location_quality),
+                    tech_confidence_score=float(confidence_snapshot.score),
+                    ai_confidence_score=float(ai_confidence_snapshot.score),
+                    market_cap=mcap_val,
+                    market_pct_change_24h=_sortable_float((market_row or {}).get("price_change_percentage_24h")),
+                    volume_spike=bool(volume_spike),
+                    spike_dir=spike_dir,
+                    radar_source_score=radar_source_score,
+                    radar_freshness_score=radar_freshness_score,
                 )
                 if actionable_tactical_candidate:
                     tactical_note = (
@@ -5367,6 +6160,7 @@ def render(ctx: dict) -> None:
                     '__confidence_val': float(confidence_snapshot.score),
                     '__execution_confidence_val': float(execution_confidence.score),
                     '__execution_conviction_label': str(_conv_lbl),
+                    '__emerging_rank_score': float(emerging_rank_score),
                     '__actionable_frame_score': float(frame_hunt_score),
                     '__actionable_tactical_score': float(actionable_tactical_score),
                     '__actionable_setup_score': _actionable_setup_score(
@@ -5391,8 +6185,9 @@ def render(ctx: dict) -> None:
                 }
 
             def _scan_candidate_batch(symbol_batch: list[str]) -> tuple[list[dict], list[tuple[str, str]], int]:
-                actionable_hunt_active = (
-                    _normalize_scan_mode(scan_mode) == _SCAN_MODE_ACTIONABLE and not custom_mode_active
+                priority_hunt_active = (
+                    _normalize_scan_mode(scan_mode) in {_SCAN_MODE_ACTIONABLE, _SCAN_MODE_EMERGING}
+                    and not custom_mode_active
                 )
                 selected_frames: list[
                     tuple[str, pd.DataFrame, str, str, str, object | None, float]
@@ -5459,7 +6254,7 @@ def render(ctx: dict) -> None:
                     )
 
                 analysis_frames = list(selected_frames)
-                if actionable_hunt_active and analysis_frames:
+                if priority_hunt_active and analysis_frames:
                     analysis_batch_n = _actionable_analysis_batch_size(
                         requested_n=requested_n,
                         fetched_n=len(analysis_frames),
@@ -6473,6 +7268,30 @@ def render(ctx: dict) -> None:
         except Exception as e:
             _debug(
                 f"Signal tracker log failed for Market scan ({timeframe}): "
+                f"{e.__class__.__name__}: {str(e).strip()}"
+            )
+        try:
+            log_signal_events(
+                _scalp_signal_log_events(
+                    rows=list(results or []),
+                    timeframe=str(timeframe),
+                    scan_mode=str(scan_mode),
+                    market_lead_snapshot=market_lead_snapshot,
+                    market_regime_snapshot=market_regime_snapshot,
+                    market_trade_gate_snapshot=display_market_trade_gate_snapshot,
+                    build_signal_risk_sizing=build_signal_risk_sizing,
+                    sector_rotation_snapshot=sector_rotation_snapshot,
+                    classify_symbol_sector=classify_symbol_sector,
+                    market_catalyst_snapshot=market_catalyst_snapshot,
+                    market_flow_snapshot=market_flow_snapshot,
+                    session_fit_snapshot=session_fit_snapshot,
+                    market_alerts=market_alerts,
+                ),
+                db_path=signal_tracker_db_path,
+            )
+        except Exception as e:
+            _debug(
+                f"Signal tracker log failed for Scalp scan ({timeframe}): "
                 f"{e.__class__.__name__}: {str(e).strip()}"
             )
         try:

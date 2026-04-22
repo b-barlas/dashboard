@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from tabs.backtest_tab import render as render_model_lab
 from tabs.scalp_backtest_tab import render as render_scalp_lab
 from tabs.setup_backtest_tab import render as render_setup_lab
 from ui.ctx import get_ctx
@@ -14,8 +13,8 @@ def render(ctx: dict) -> None:
         st,
         title="Labs",
         intro_html=(
-            "Research and simulation workspace. These labs help us test policy ideas on historical candles "
-            "before we change live scanner behavior. They are not live archive screens."
+            "Focused research workspace for setup and scalp policy. "
+            "Setup Lab stays historical; Scalp Lab now pairs live scalp archive truth with closed-candle study."
         ),
     )
 
@@ -25,9 +24,8 @@ def render(ctx: dict) -> None:
             st,
             title="What Lives Here",
             body_html=(
-                "<b>Model Lab</b> diagnoses the raw signal engine on historical candles.<br>"
                 "<b>Setup Lab</b> compares historical setup-class behavior.<br>"
-                "<b>Scalp Lab</b> tests historical scalp planner and gate behavior."
+                "<b>Scalp Lab</b> combines live scalp archive truth with historical planner study."
             ),
             tone="accent",
         )
@@ -36,15 +34,13 @@ def render(ctx: dict) -> None:
             st,
             title="What This Is Not",
             body_html=(
-                "This is not the live tracker archive. "
-                "Use <b>Signal Archive</b> for real logged outcomes, journaled execution, and live learning."
+                "This is not a replacement for <b>Signal Archive</b>. "
+                "Use Signal Archive for the dashboard-wide live archive; use Labs for tighter policy research."
             ),
             tone="neutral",
         )
 
-    model_tab, setup_tab, scalp_tab = st.tabs(["Model Lab", "Setup Lab", "Scalp Lab"])
-    with model_tab:
-        render_model_lab(ctx)
+    setup_tab, scalp_tab = st.tabs(["Setup Lab", "Scalp Lab"])
     with setup_tab:
         render_setup_lab(ctx)
     with scalp_tab:

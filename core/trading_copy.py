@@ -1331,36 +1331,38 @@ Use Signal Archive for:
     },
     "guide.section.scalp_backtest": {
         "trader": """
-Scalp Lab is a historical simulation layer, not a live archive.
+Scalp Lab has 2 layers: live scalp archive truth on top, historical study below.
 
 What it does:
+- reviews what the live dashboard already logged as scalp
+- compares taken / skipped / observed execution outcomes
 - replays the current scalp planner and scalp gate on closed candles
-- tracks TP-first, SL-first, and timeout behavior
-- compares outcome quality by side and by coin
+- tracks TP-first, SL-first, and timeout behavior by side and by coin
 
 Use it for:
-- validating scalp behavior before trusting live scalp labels
-- testing which symbols or directions behave cleaner
+- checking whether live scalp behavior is actually clean
+- stress-testing scalp policy before changing thresholds
 
 Use Signal Archive for:
-- what the live scanner actually logged
-- actual taken trades and execution journal quality
+- broader dashboard-wide tracker history
+- non-scalp setup learning and archive review
 """,
         "neutral": """
-Scalp Lab is a historical simulation layer, not a live archive.
+Scalp Lab has 2 layers: live scalp archive truth on top, historical study below.
 
 What it does:
+- reviews what the live dashboard already logged as scalp
+- compares taken / skipped / observed execution outcomes
 - replays the current scalp planner and scalp gate on closed candles
-- tracks TP-first, SL-first, and timeout behavior
-- compares outcome quality by side and by coin
+- tracks TP-first, SL-first, and timeout behavior by side and by coin
 
 Use it for:
-- validating scalp behavior before trusting live scalp labels
-- testing which symbols or directions behave cleaner
+- checking whether live scalp behavior is actually clean
+- stress-testing scalp policy before changing thresholds
 
 Use Signal Archive for:
-- what the live scanner actually logged
-- actual taken trades and execution journal quality
+- broader dashboard-wide tracker history
+- non-scalp setup learning and archive review
 """,
     },
     "guide.section.workflow": {
@@ -1374,7 +1376,7 @@ Recommended daily flow:
 6. Correlation / Portfolio Scenario: stress-test basket overlap and anchor risk
 7. Fibonacci / Risk Analytics: validate structure and downside risk
 8. Tools: confirm R:R and liquidation distance
-9. Labs: use Setup / Scalp / Model Lab only when validating policy changes or edge hypotheses
+9. Labs: use Setup / Scalp only when validating policy changes or edge hypotheses
 
 Quick rule:
 - If Direction/AI conflict and Health says REDUCE or EXIT, reduce risk first.
@@ -1390,7 +1392,7 @@ Recommended daily flow:
 6. Correlation / Portfolio Scenario: stress-test basket overlap and anchor risk
 7. Fibonacci / Risk Analytics: validate structure and downside risk
 8. Tools: confirm R:R and liquidation distance
-9. Labs: use Setup / Scalp / Model Lab only when validating research ideas or threshold changes
+9. Labs: use Setup / Scalp only when validating research ideas or threshold changes
 """,
     },
     "guide.section.limitations": {

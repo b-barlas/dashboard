@@ -267,8 +267,7 @@ def _hold_guidance_cell(snapshot: Mapping[str, object], *, direction_label: str 
             best_label = f"Best at {best_bar} bars"
         else:
             best_label = str(snapshot.get("best_label") or "").strip() or "around 0 bars"
-        sample = int(snapshot.get("sample") or 0)
-        return f"{best_label} (n={sample})"
+        return best_label
     if resolved_signals > 0:
         return f"Building ({resolved_signals} resolved)"
     return "—"
@@ -859,10 +858,15 @@ def _render_compact_cohort_tables(
     *,
     df_events: pd.DataFrame,
     build_signal_cohort_summary,
-    specs: list[tuple[str, str]],
+    specs: list[tuple[str, str] | tuple[str, str, str]],
 ) -> None:
     visible_specs: list[tuple[str, str, pd.DataFrame]] = []
-    for group_field, title in specs:
+    for spec in specs:
+        if len(spec) == 2:
+            group_field, title = spec
+            display_label = group_field
+        else:
+            group_field, title, display_label = spec
         if group_field not in df_events.columns:
             continue
         summary_df = build_signal_cohort_summary(df_events, group_field)
@@ -871,6 +875,8 @@ def _render_compact_cohort_tables(
         known_summary_df = _prefer_known_summary_rows(summary_df, label_field=group_field)
         if known_summary_df is not None and not known_summary_df.empty:
             summary_df = known_summary_df
+        if display_label != group_field and group_field in summary_df.columns:
+            summary_df = summary_df.rename(columns={group_field: display_label})
         visible_specs.append((group_field, title, summary_df))
     if not visible_specs:
         st.caption("No cohort data is available in this view yet.")
@@ -2075,8 +2081,6 @@ def render(ctx: dict) -> None:
         else pd.DataFrame()
     )
     primary_alert_summary_df = build_alert_effectiveness_summary(df_events, primary_only=True)
-    alert_effectiveness_df = build_alert_effectiveness_summary(df_events, primary_only=False)
-
     works_cards: list[dict[str, str]] = []
     fail_cards: list[dict[str, str]] = []
 
@@ -2161,9 +2165,9 @@ def render(ctx: dict) -> None:
         ).iloc[0]
         works_cards.append(
             {
-                "title": "Best Execution Readiness",
+                "title": "Best Tradeability",
                 "body_html": (
-                    f"<b>{strongest_execution_stance['Execution Readiness']}</b> is the cleanest current readiness state "
+                    f"<b>{strongest_execution_stance['Execution Readiness']}</b> is the cleanest current tradeability state "
                     f"({float(strongest_execution_stance['FollowThroughPct']):.1f}% follow-through across "
                     f"{int(strongest_execution_stance['Resolved'])} resolved signals)."
                 ),
@@ -2174,9 +2178,9 @@ def render(ctx: dict) -> None:
         )
         fail_cards.append(
             {
-                "title": "Weakest Execution Readiness",
+                "title": "Weakest Tradeability",
                 "body_html": (
-                    f"<b>{weakest_execution_stance['Execution Readiness']}</b> is the weakest current readiness state "
+                    f"<b>{weakest_execution_stance['Execution Readiness']}</b> is the weakest current tradeability state "
                     f"({float(weakest_execution_stance['FollowThroughPct']):.1f}% follow-through across "
                     f"{int(weakest_execution_stance['Resolved'])} resolved signals)."
                 ),
@@ -2187,18 +2191,18 @@ def render(ctx: dict) -> None:
         only_stance = qualified_execution_stance_df.iloc[0]
         works_cards.append(
             _archive_building_card(
-                "Execution Readiness History",
+                "Tradeability History",
                 (
                     f"Only <b>{only_stance['Execution Readiness']}</b> has enough resolved history in this view so far "
-                    f"({int(only_stance['Resolved'])} resolved signals). We need more readiness variety before ranking strongest vs weakest."
+                    f"({int(only_stance['Resolved'])} resolved signals). We need more tradeability variety before ranking strongest vs weakest."
                 ),
             )
         )
     else:
         works_cards.append(
             _archive_building_card(
-                "Execution Readiness History",
-                "Execution readiness history is still building. We need more resolved signals before trusting readiness rankings.",
+                "Tradeability History",
+                "Tradeability history is still building. We need more resolved signals before trusting readiness rankings.",
             )
         )
 
@@ -2248,7 +2252,7 @@ def render(ctx: dict) -> None:
         ).iloc[0]
         works_cards.append(
             {
-                "title": "Best Scan Focus",
+                "title": "Best Scanner Focus",
                 "body_html": (
                     f"<b>{strongest_scan_focus['Scan Focus']}</b> is converting best in this view "
                     f"({float(strongest_scan_focus['FollowThroughPct']):.1f}% follow-through across "
@@ -2259,7 +2263,7 @@ def render(ctx: dict) -> None:
         )
         fail_cards.append(
             {
-                "title": "Weakest Scan Focus",
+                "title": "Weakest Scanner Focus",
                 "body_html": (
                     f"<b>{weakest_scan_focus['Scan Focus']}</b> is converting weakest in this view "
                     f"({float(weakest_scan_focus['FollowThroughPct']):.1f}% follow-through across "
@@ -2272,10 +2276,10 @@ def render(ctx: dict) -> None:
         only_focus = qualified_known_scan_focus_df.iloc[0]
         works_cards.append(
             _archive_building_card(
-                "Scan Focus History",
+                "Scanner Focus History",
                 (
                     f"Only <b>{only_focus['Scan Focus']}</b> has enough resolved history in this view so far "
-                    f"({int(only_focus['Resolved'])} resolved signals). We need both Broad Market and Actionable Setups "
+                    f"({int(only_focus['Resolved'])} resolved signals). We need both Broad Market and Breakout Radar "
                     "in the archive before comparing focus quality."
                 ),
             )
@@ -2283,8 +2287,8 @@ def render(ctx: dict) -> None:
     else:
         works_cards.append(
             _archive_building_card(
-                "Scan Focus History",
-                "Scan-focus archive is still building. We need more resolved signals before comparing Broad Market vs Actionable Setups.",
+                "Scanner Focus History",
+                "Scanner-focus archive is still building. We need more resolved signals before comparing Broad Market vs Breakout Radar.",
             )
         )
 
@@ -2498,27 +2502,24 @@ def render(ctx: dict) -> None:
 
     st.markdown("### Deep Dives")
     st.caption("Optional detail.")
-    with st.expander("Market, Setup & Timing", expanded=False):
+    with st.expander("Setup & Market", expanded=False):
         _render_compact_cohort_tables(
             st,
             df_events=df_events,
             build_signal_cohort_summary=build_signal_cohort_summary,
             specs=[
                 ("Setup Confirm", "By Setup Confirm"),
-                ("Lead Status", "By Lead Status"),
-                ("Market Lead", "By Market Lead"),
+                ("direction", "By Direction", "Direction"),
+                ("timeframe", "By Timeframe", "Timeframe"),
                 ("Session", "By Session"),
-                ("timeframe", "By Timeframe"),
                 ("Market Regime", "By Market Regime"),
-                ("Scan Focus", "By Scan Focus"),
+                ("Scan Focus", "By Scanner Focus", "Scanner Focus"),
                 ("Playbook", "By Playbook"),
-                ("Trade Gate", "By Trade Gate"),
                 ("AI Alignment", "By AI Alignment"),
-                ("Learned Edge", "By Learned Edge"),
             ],
         )
 
-    with st.expander("Alerts, Events & Context", expanded=False):
+    with st.expander("Context & Catalysts", expanded=False):
         _render_compact_cohort_tables(
             st,
             df_events=df_events,
@@ -2527,24 +2528,11 @@ def render(ctx: dict) -> None:
                 ("Primary Alert", "By Lead Alert"),
                 ("Catalyst State", "By Catalyst State"),
                 ("Catalyst Window", "By Catalyst Window"),
-                ("Catalyst Scope", "By Catalyst Scope"),
-                ("Catalyst Targeting", "By Catalyst Targeting"),
-                ("Catalyst Category", "By Catalyst Category"),
-                ("Catalyst Tag", "By Catalyst Tag"),
-                ("Flow Read", "By Flow Read"),
-                ("Playbook x Session", "By Playbook x Session"),
-                ("Playbook x Catalyst Window", "By Playbook x Catalyst Window"),
+                ("Flow Read", "By Tape Read", "Tape Read"),
                 ("Sector Rotation", "By Sector Rotation"),
                 ("Sector", "By Sector"),
             ],
         )
-        if not alert_effectiveness_df.empty:
-            st.markdown("##### By Alert Key")
-            st.dataframe(
-                alert_effectiveness_df.rename(columns={"Primary Alert": "Lead Alert"}).round(2),
-                hide_index=True,
-                width="stretch",
-            )
 
     with st.expander("Execution & Journal", expanded=False):
         _render_compact_cohort_tables(
@@ -2552,23 +2540,21 @@ def render(ctx: dict) -> None:
             df_events=df_events,
             build_signal_cohort_summary=build_signal_cohort_summary,
             specs=[
-                ("Execution Readiness", "By Execution Readiness"),
-                ("History Guardrail", "By History Guardrail"),
-                ("History Guardrail Level", "By Guardrail Level"),
+                ("Execution Readiness", "By Tradeability", "Tradeability"),
                 ("Risk Tier", "By Risk Tier"),
-                (copy_text("review.label.no_trade_reason"), copy_text("review.group.no_trade_reason")),
-                ("Trade Decision", "By Trade Decision"),
-                ("Actual Trade Status", "By Actual Trade Status"),
+                ("Trade Decision", "By Action Taken", "Action Taken"),
+                ("Actual Trade Status", "By Journal Status", "Journal Status"),
+                (copy_text("review.label.no_trade_reason"), "By Skip Reason", "Skip Reason"),
                 ("Hold Style", "By Hold Style"),
                 ("Exit Quality", "By Exit Quality"),
-                ("Actual Exit Reason", "By Actual Exit Reason"),
+                ("Actual Exit Reason", "By Exit Reason", "Exit Reason"),
             ],
         )
 
     if hold_guidance_enabled:
-        with st.expander("Hold Window Detail", expanded=False):
+        with st.expander("Hold Guidance Detail", expanded=False):
             st.caption(
-                "These tables stay coin-specific. They use resolved signals in the same view and read their sparse forward checkpoints to suggest a historical hold sweet spot."
+                "These stay coin-specific. They use resolved signals in the current view and read sparse forward checkpoints to suggest a historical hold window."
             )
             _render_hold_window_cohort_tables(
                 st,
@@ -2650,6 +2636,12 @@ def render(ctx: dict) -> None:
         "symbol": "Coin",
         "timeframe": "TF",
         "Primary Alert": "Lead Alert",
+        "Scan Focus": "Scanner Focus",
+        "Lead Status": "Lead Signal",
+        "Market Lead": "AI View",
+        "Flow Read": "Tape Read",
+        "Learned Edge": "Archive Read",
+        "Execution Readiness": "Tradeability",
         "direction": "Direction",
         "confidence": "Confidence",
         "ai_confidence": "AI Confidence",
@@ -2658,11 +2650,11 @@ def render(ctx: dict) -> None:
         "favorable_excursion_pct": "MFE %",
         "adverse_excursion_pct": "MAE %",
         "status": "Status",
-        "adaptive_edge_score": "Learned Score",
-        "actionable_frame_score": "Actionable Hunt Score",
-        "actionable_setup_score": "Actionable Setup Score",
-        "actionable_context_score": "Actionable Context Score",
-        "actionable_tactical_score": "Actionable Tactical Score",
+        "adaptive_edge_score": "Archive Score",
+        "actionable_frame_score": "Hunt Score",
+        "actionable_setup_score": "Setup Score",
+        "actionable_context_score": "Context Score",
+        "actionable_tactical_score": "Tactical Score",
         "trade_note": "Trade Note",
         "actual_trade_side": "Trade Direction",
         "actual_entry_price": "Actual Entry",
@@ -2709,7 +2701,7 @@ def render(ctx: dict) -> None:
             )
 
         if not learned_edges_df.empty:
-            st.markdown("#### Learned Edges")
+            st.markdown("#### Archive Learning")
             st.dataframe(learned_edges_df.round(2), hide_index=True, width="stretch")
 
     _render_tracker_backup_restore(

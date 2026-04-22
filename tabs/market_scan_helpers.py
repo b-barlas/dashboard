@@ -8,6 +8,7 @@ from core.symbols import canonical_base_symbol, is_stable_base_symbol
 
 SCAN_MODE_BROAD = "Broad Market"
 SCAN_MODE_ACTIONABLE = "Actionable Setups"
+SCAN_MODE_EMERGING = "Breakout Radar"
 
 
 def _sortable_float(value: object) -> float:
@@ -36,6 +37,8 @@ def _normalize_scan_mode(value: object) -> str:
     raw = str(value or "").strip().lower()
     if raw in {SCAN_MODE_ACTIONABLE.lower(), "setup hunter"}:
         return SCAN_MODE_ACTIONABLE
+    if raw in {SCAN_MODE_EMERGING.lower(), "early momentum", "emerging", "emerging movers", "breakout radar"}:
+        return SCAN_MODE_EMERGING
     return SCAN_MODE_BROAD
 
 
@@ -156,6 +159,88 @@ def _actionable_universe_market_cap_score(market_cap: object) -> float:
     if mcap > 0:
         return 0.2
     return 0.1
+
+
+def _emerging_universe_profile(timeframe: str) -> tuple[float, float, float, float, float, float]:
+    tf = str(timeframe or "").strip().lower()
+    if tf == "1m":
+        return (0.20, 0.66, 0.06, 0.4, 3.2, 9.2)
+    if tf == "3m":
+        return (0.20, 0.66, 0.06, 0.4, 3.2, 9.0)
+    if tf == "5m":
+        return (0.22, 0.62, 0.06, 0.35, 2.8, 8.5)
+    if tf == "15m":
+        return (0.20, 0.62, 0.08, 0.4, 3.0, 8.8)
+    if tf == "1h":
+        return (0.20, 0.62, 0.08, 0.45, 3.2, 9.0)
+    if tf == "4h":
+        return (0.24, 0.54, 0.10, 0.45, 2.8, 8.0)
+    if tf == "1d":
+        return (0.26, 0.48, 0.12, 0.4, 2.4, 6.5)
+    return (0.20, 0.62, 0.08, 0.4, 3.0, 8.5)
+
+
+def _emerging_universe_movement_score(
+    pct_change_24h: float,
+    *,
+    timeframe: str,
+    direction_filter: str,
+) -> float:
+    _volume_w, _move_w, _mcap_w, min_move, sweet_move, stretch_move = _emerging_universe_profile(timeframe)
+    aligned_move, counter_move = _actionable_aligned_move(
+        pct_change_24h,
+        direction_filter=direction_filter,
+    )
+    if aligned_move < min_move:
+        score = 0.18 + 0.28 * (aligned_move / max(min_move, 1e-9))
+    elif aligned_move < sweet_move:
+        score = 0.46 + 0.46 * ((aligned_move - min_move) / max(sweet_move - min_move, 1e-9))
+    elif aligned_move <= stretch_move:
+        score = 0.92 - 0.22 * ((aligned_move - sweet_move) / max(stretch_move - sweet_move, 1e-9))
+    else:
+        score = 0.62 - min(0.30, 0.015 * (aligned_move - stretch_move))
+    if counter_move > 0:
+        score -= min(0.38, 0.10 + 0.035 * counter_move)
+    return max(0.0, min(1.0, score))
+
+
+def _emerging_universe_market_cap_score(market_cap: object) -> float:
+    mcap = _sortable_float(market_cap)
+    if mcap >= 20_000_000_000:
+        return 1.0
+    if mcap >= 5_000_000_000:
+        return 0.95
+    if mcap >= 1_000_000_000:
+        return 0.88
+    if mcap >= 300_000_000:
+        return 0.76
+    if mcap >= 100_000_000:
+        return 0.62
+    if mcap > 0:
+        return 0.45
+    return 0.25
+
+
+def _emerging_sector_bias_weight(timeframe: str) -> float:
+    tf = str(timeframe or "").strip().lower()
+    if tf in {"4h", "1d"}:
+        return 0.10
+    if tf in {"1m", "3m", "5m", "15m"}:
+        return 0.08
+    return 0.09
+
+
+def _emerging_exploration_ratio(timeframe: str) -> float:
+    tf = str(timeframe or "").strip().lower()
+    if tf in {"1m", "3m"}:
+        return 0.42
+    if tf in {"5m", "15m"}:
+        return 0.36
+    if tf == "1h":
+        return 0.28
+    if tf in {"4h", "1d"}:
+        return 0.18
+    return 0.24
 
 
 def _actionable_sector_bias_weight(timeframe: str) -> float:
@@ -643,6 +728,9 @@ def _actionable_direction_include(
     spot_direction: str,
     signal_direction: str,
     tactical_candidate_score: float,
+    emerging_direction: str = "",
+    frame_hunt_score: float = 0.0,
+    radar_source_score: float = 0.0,
 ) -> bool:
     spot_key = _signal_tracker_direction_key(spot_direction)
     if (
@@ -651,13 +739,30 @@ def _actionable_direction_include(
         or (direction_filter == "Downside" and spot_key == "DOWNSIDE")
     ):
         return True
-    if _normalize_scan_mode(scan_mode) != SCAN_MODE_ACTIONABLE:
+    normalized_mode = _normalize_scan_mode(scan_mode)
+    if normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_EMERGING}:
         return False
     signal_key = _signal_tracker_direction_key(signal_direction)
+    emerging_key = _signal_tracker_direction_key(emerging_direction)
     if direction_filter == "Upside" and signal_key != "UPSIDE":
-        return False
+        if normalized_mode != SCAN_MODE_EMERGING or emerging_key != "UPSIDE":
+            return False
     if direction_filter == "Downside" and signal_key != "DOWNSIDE":
-        return False
+        if normalized_mode != SCAN_MODE_EMERGING or emerging_key != "DOWNSIDE":
+            return False
+    if normalized_mode == SCAN_MODE_EMERGING:
+        if direction_filter == "Upside" and emerging_key == "UPSIDE":
+            return True
+        if direction_filter == "Downside" and emerging_key == "DOWNSIDE":
+            return True
+        if _sortable_float(radar_source_score) >= 0.64 and signal_key in {"UPSIDE", "DOWNSIDE"}:
+            if direction_filter == "Both":
+                return True
+            if direction_filter == "Upside" and signal_key == "UPSIDE":
+                return True
+            if direction_filter == "Downside" and signal_key == "DOWNSIDE":
+                return True
+        return _sortable_float(tactical_candidate_score) >= 64.0 or _sortable_float(frame_hunt_score) >= 68.0
     return _sortable_float(tactical_candidate_score) >= 72.0
 
 
@@ -714,6 +819,76 @@ def _actionable_universe_ordered_symbols(
     return [pair for _idx, pair in ordered_pairs]
 
 
+def _emerging_universe_ordered_symbols(
+    usdt_symbols: list[str],
+    market_rows: list[dict],
+    *,
+    timeframe: str,
+    direction_filter: str,
+    classify_symbol_sector=None,
+) -> list[str]:
+    if not usdt_symbols or not market_rows:
+        return list(usdt_symbols)
+    ranked_rows = _dedupe_market_rows(market_rows)
+    if not ranked_rows:
+        return list(usdt_symbols)
+    volume_weight, move_weight, mcap_weight, _min_move, _sweet_move, _stretch_move = _emerging_universe_profile(timeframe)
+    sector_weight = _emerging_sector_bias_weight(timeframe)
+    sector_scores = _actionable_sector_bias_scores(
+        ranked_rows,
+        direction_filter=direction_filter,
+        classify_symbol_sector=classify_symbol_sector,
+    )
+    score_map: dict[str, float] = {}
+
+    def _emerging_universe_volume_score(row: dict) -> float:
+        quote_volume = max(
+            _sortable_float((row or {}).get("_quote_volume_24h")),
+            _sortable_float((row or {}).get("total_volume")),
+            _sortable_float((row or {}).get("_volume_24h")),
+        )
+        if quote_volume > 0:
+            return max(0.0, min(1.0, (math.log10(max(quote_volume, 1.0)) - 5.2) / 3.1))
+        radar_hint = _sortable_float((row or {}).get("_radar_source_score", 0.0))
+        if radar_hint > 0:
+            return max(0.16, min(0.62, 0.18 + 0.44 * radar_hint))
+        return 0.12
+
+    for row in ranked_rows:
+        base = canonical_base_symbol((row or {}).get("symbol") or "")
+        if not base:
+            continue
+        volume_rank_score = _emerging_universe_volume_score(row)
+        move_score = _emerging_universe_movement_score(
+            _market_row_pct_change(row),
+            timeframe=timeframe,
+            direction_filter=direction_filter,
+        )
+        mcap_score = _emerging_universe_market_cap_score((row or {}).get("market_cap"))
+        sector = str(classify_symbol_sector(base) or "").strip() if callable(classify_symbol_sector) else ""
+        sector_score = _sortable_float(sector_scores.get(sector, 0.5 if sector_scores else 0.0))
+        radar_source_score = _sortable_float((row or {}).get("_radar_source_score", 0.0))
+        freshness_score = _sortable_float((row or {}).get("_radar_freshness_score", 0.0))
+        score_map[base] = (
+            volume_weight * volume_rank_score
+            + move_weight * move_score
+            + mcap_weight * mcap_score
+            + sector_weight * sector_score
+            + 0.18 * radar_source_score
+            + 0.20 * freshness_score
+        )
+
+    indexed_pairs = list(enumerate(usdt_symbols))
+    ordered_pairs = sorted(
+        indexed_pairs,
+        key=lambda item: (
+            -score_map.get(_canonical_pair_base(item[1]), -1.0),
+            item[0],
+        ),
+    )
+    return [pair for _idx, pair in ordered_pairs]
+
+
 def _candidate_scan_symbols(
     *,
     usdt_symbols: list[str],
@@ -729,8 +904,17 @@ def _candidate_scan_symbols(
         candidates = [f"{b}/USDT" for b in custom_bases_applied]
     else:
         candidates = _filter_scan_symbols(usdt_symbols, market_rows)
-        if _normalize_scan_mode(scan_mode) == SCAN_MODE_ACTIONABLE:
+        normalized_mode = _normalize_scan_mode(scan_mode)
+        if normalized_mode == SCAN_MODE_ACTIONABLE:
             candidates = _actionable_universe_ordered_symbols(
+                candidates,
+                market_rows,
+                timeframe=timeframe,
+                direction_filter=direction_filter,
+                classify_symbol_sector=classify_symbol_sector,
+            )
+        elif normalized_mode == SCAN_MODE_EMERGING:
+            candidates = _emerging_universe_ordered_symbols(
                 candidates,
                 market_rows,
                 timeframe=timeframe,
@@ -756,8 +940,11 @@ def _scan_candidate_pool_size(
     requested = max(1, int(requested_n))
     if custom_mode_active:
         return requested
-    if _normalize_scan_mode(scan_mode) == SCAN_MODE_ACTIONABLE:
+    normalized_mode = _normalize_scan_mode(scan_mode)
+    if normalized_mode == SCAN_MODE_ACTIONABLE:
         extra = min(140, max(35, requested * 3))
+    elif normalized_mode == SCAN_MODE_EMERGING:
+        extra = min(180, max(45, requested * 4))
     else:
         extra = min(25, max(10, requested // 2))
     return min(int(max_pool_n), requested + extra)
@@ -782,7 +969,11 @@ def _next_scan_pool_target(
     shortfall = max(1, int(requested_n) - int(produced_n))
     next_pool_n = max(
         int(current_pool_n * 1.5),
-        int(current_pool_n) + max(shortfall, 40 if _normalize_scan_mode(scan_mode) == SCAN_MODE_ACTIONABLE else 25),
+        int(current_pool_n)
+        + max(
+            shortfall,
+            55 if _normalize_scan_mode(scan_mode) == SCAN_MODE_EMERGING else 40 if _normalize_scan_mode(scan_mode) == SCAN_MODE_ACTIONABLE else 25,
+        ),
     )
     return min(int(max_pool_n), int(next_pool_n))
 
@@ -796,14 +987,18 @@ def _initial_scan_batch_size(
     max_initial_n: int = 80,
 ) -> int:
     requested = max(1, int(requested_n))
-    if custom_mode_active or _normalize_scan_mode(scan_mode) != SCAN_MODE_ACTIONABLE:
+    normalized_mode = _normalize_scan_mode(scan_mode)
+    if custom_mode_active or normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_EMERGING}:
         return requested
+    if normalized_mode == SCAN_MODE_EMERGING:
+        return min(int(scan_pool_n), max(int(max_initial_n), 96), max(requested + 18, requested * 3))
     return min(int(scan_pool_n), int(max_initial_n), max(requested + 10, requested * 2))
 
 
 def _initial_scan_symbols(
     *,
     candidate_pool: list[str],
+    market_rows: list[dict] | None = None,
     requested_n: int,
     scan_pool_n: int,
     custom_mode_active: bool,
@@ -816,12 +1011,17 @@ def _initial_scan_symbols(
         custom_mode_active=custom_mode_active,
         scan_mode=scan_mode,
     )
-    if custom_mode_active or _normalize_scan_mode(scan_mode) != SCAN_MODE_ACTIONABLE:
+    normalized_mode = _normalize_scan_mode(scan_mode)
+    if custom_mode_active or normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_EMERGING}:
         return list(candidate_pool[:initial_batch_n])
     if initial_batch_n >= len(candidate_pool):
         return list(candidate_pool[:initial_batch_n])
 
-    exploration_n = max(2, int(round(initial_batch_n * _actionable_exploration_ratio(timeframe))))
+    if normalized_mode == SCAN_MODE_EMERGING:
+        exploration_ratio = _emerging_exploration_ratio(timeframe)
+    else:
+        exploration_ratio = _actionable_exploration_ratio(timeframe)
+    exploration_n = max(2, int(round(initial_batch_n * exploration_ratio)))
     exploration_n = min(exploration_n, max(0, initial_batch_n - int(requested_n)))
     primary_n = max(int(requested_n), int(initial_batch_n) - int(exploration_n))
 
@@ -830,20 +1030,61 @@ def _initial_scan_symbols(
     if not remainder or exploration_n <= 0:
         return list(candidate_pool[:initial_batch_n])
 
+    protected_slice: list[str] = []
+    if normalized_mode == SCAN_MODE_EMERGING and market_rows:
+        radar_map: dict[str, float] = {}
+        for row in list(market_rows or []):
+            if not isinstance(row, dict):
+                continue
+            base = canonical_base_symbol((row or {}).get("symbol") or "")
+            if not base:
+                continue
+            radar_signal = max(
+                _sortable_float((row or {}).get("_radar_source_score", 0.0)),
+                _sortable_float((row or {}).get("_radar_freshness_score", 0.0)),
+            )
+            if radar_signal <= 0.0:
+                continue
+            combined_signal = radar_signal + 0.20 * _sortable_float((row or {}).get("_radar_freshness_score", 0.0))
+            radar_map[base] = max(combined_signal, radar_map.get(base, 0.0))
+
+        if radar_map:
+            remainder_order = {symbol: idx for idx, symbol in enumerate(remainder)}
+            protected_n = min(
+                max(2, int(round(initial_batch_n * 0.12))),
+                exploration_n,
+            )
+            ranked_remainder = sorted(
+                remainder,
+                key=lambda symbol: (
+                    -radar_map.get(_canonical_pair_base(symbol), 0.0),
+                    remainder_order.get(symbol, 0),
+                ),
+            )
+            for symbol in ranked_remainder:
+                if len(protected_slice) >= protected_n:
+                    break
+                if radar_map.get(_canonical_pair_base(symbol), 0.0) < 0.58:
+                    break
+                protected_slice.append(symbol)
+
     exploratory_slice: list[str] = []
-    if exploration_n >= len(remainder):
-        exploratory_slice = remainder
+    protected_set = set(protected_slice)
+    remaining_remainder = [symbol for symbol in remainder if symbol not in protected_set]
+    remaining_exploration_n = max(0, exploration_n - len(protected_slice))
+    if remaining_exploration_n >= len(remaining_remainder):
+        exploratory_slice = remaining_remainder
     else:
-        step = max(1.0, len(remainder) / float(exploration_n))
+        step = max(1.0, len(remaining_remainder) / float(max(remaining_exploration_n, 1)))
         cursor = step / 2.0
-        while len(exploratory_slice) < exploration_n and remainder:
-            idx = min(len(remainder) - 1, int(cursor))
-            exploratory_slice.append(remainder[idx])
+        while len(exploratory_slice) < remaining_exploration_n and remaining_remainder:
+            idx = min(len(remaining_remainder) - 1, int(cursor))
+            exploratory_slice.append(remaining_remainder[idx])
             cursor += step
 
     out: list[str] = []
     seen: set[str] = set()
-    for symbol in [*primary_slice, *exploratory_slice, *remainder]:
+    for symbol in [*primary_slice, *protected_slice, *exploratory_slice, *remaining_remainder]:
         if symbol in seen:
             continue
         seen.add(symbol)
@@ -859,10 +1100,88 @@ def _actionable_analysis_batch_size(
     fetched_n: int,
     scan_mode: str,
 ) -> int:
-    if _normalize_scan_mode(scan_mode) != SCAN_MODE_ACTIONABLE:
+    normalized_mode = _normalize_scan_mode(scan_mode)
+    if normalized_mode == SCAN_MODE_EMERGING:
+        target_n = max(int(requested_n) * 3, int(requested_n) + 24, 40)
+        return min(int(fetched_n), min(target_n, 96))
+    if normalized_mode != SCAN_MODE_ACTIONABLE:
         return int(fetched_n)
     target_n = max(int(requested_n) * 2, int(requested_n) + 12, 28)
     return min(int(fetched_n), min(target_n, 72))
+
+
+def _emerging_candidate_score(
+    *,
+    timeframe: str,
+    direction_filter: str,
+    spot_direction: str,
+    signal_direction: str,
+    emerging_direction: str,
+    emerging_active: bool,
+    frame_hunt_score: float,
+    tactical_candidate_score: float,
+    execution_structure_quality: float,
+    execution_trend_quality: float,
+    execution_location_quality: float,
+    tech_confidence_score: float,
+    ai_confidence_score: float,
+    market_cap: object,
+    market_pct_change_24h: float = 0.0,
+    volume_spike: bool,
+    spike_dir: str,
+    radar_source_score: float = 0.0,
+    radar_freshness_score: float = 0.0,
+) -> float:
+    signal_key = _signal_tracker_direction_key(signal_direction)
+    if signal_key not in {"UPSIDE", "DOWNSIDE"}:
+        return 0.0
+    focus_key = str(direction_filter or "").strip().upper()
+    emerging_key = _signal_tracker_direction_key(emerging_direction)
+    focus_aligned = focus_key == "BOTH" or (
+        focus_key == "UPSIDE" and signal_key == "UPSIDE"
+    ) or (
+        focus_key == "DOWNSIDE" and signal_key == "DOWNSIDE"
+    )
+    lead_aligned = emerging_active and emerging_key in {"UPSIDE", "DOWNSIDE"} and (
+        focus_key == "BOTH"
+        or (focus_key == "UPSIDE" and emerging_key == "UPSIDE")
+        or (focus_key == "DOWNSIDE" and emerging_key == "DOWNSIDE")
+    )
+    score = (
+        0.38 * _sortable_float(frame_hunt_score)
+        + 0.20 * _sortable_float(tactical_candidate_score)
+        + 0.10 * _sortable_float(execution_structure_quality)
+        + 0.08 * _sortable_float(execution_trend_quality)
+        + 0.06 * _sortable_float(execution_location_quality)
+        + 0.10 * _sortable_float(tech_confidence_score)
+        + 0.04 * _sortable_float(ai_confidence_score)
+        + 5.0 * _emerging_universe_market_cap_score(market_cap)
+        + 9.0 * _sortable_float(radar_source_score)
+        + 11.0 * _sortable_float(radar_freshness_score)
+    )
+    aligned_move = (
+        max(0.0, _sortable_float(market_pct_change_24h))
+        if signal_key == "UPSIDE"
+        else max(0.0, -_sortable_float(market_pct_change_24h))
+    )
+    if 0.8 <= aligned_move <= 8.5:
+        score += 3.0
+    elif aligned_move >= 14.0:
+        score -= min(6.0, 0.4 * (aligned_move - 14.0))
+    if lead_aligned:
+        score += 12.0
+    elif bool(emerging_active):
+        score += 6.0
+    if focus_aligned:
+        score += 5.0
+    if _signal_tracker_direction_key(spot_direction) == "NEUTRAL":
+        score += 4.0
+    score += 0.15 * _actionable_spike_adjustment(
+        signal_direction=signal_direction,
+        volume_spike=volume_spike,
+        spike_dir=spike_dir,
+    )
+    return max(0.0, min(100.0, score))
 
 
 def _next_refill_candidate_batch(

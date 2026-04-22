@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 try:
     import pandas as pd
-    from tabs.scalp_backtest_tab import render
+    from tabs.scalp_backtest_tab import _filter_scalp_archive_scope, render
 
     DEPS_OK = True
 except Exception:
@@ -19,7 +19,7 @@ class _DummySt:
     def markdown(self, *args, **kwargs):
         return None
 
-    def columns(self, n):
+    def columns(self, n, *args, **kwargs):
         if isinstance(n, (list, tuple)):
             return [self for _ in range(len(n))]
         return [self for _ in range(int(n))]
@@ -37,6 +37,9 @@ class _DummySt:
         return False
 
     def expander(self, *args, **kwargs):
+        return self
+
+    def form(self, *args, **kwargs):
         return self
 
     def text_input(self, *args, **kwargs):
@@ -61,6 +64,9 @@ class _DummySt:
             return False
         return True
 
+    def form_submit_button(self, *args, **kwargs):
+        return False
+
     def rerun(self):
         return None
 
@@ -82,9 +88,29 @@ class _DummySt:
     def download_button(self, *args, **kwargs):
         return None
 
+    def dataframe(self, *args, **kwargs):
+        return None
+
 
 @unittest.skipUnless(DEPS_OK, "Missing deps for scalp backtest tab contract test")
 class ScalpBacktestTabContractTests(unittest.TestCase):
+    def test_filter_scalp_archive_scope_respects_timeframe_and_custom_bases(self):
+        df = pd.DataFrame(
+            [
+                {"symbol": "BTC", "timeframe": "1h", "status": "OPEN"},
+                {"symbol": "ETH", "timeframe": "1h", "status": "OPEN"},
+                {"symbol": "BTC", "timeframe": "4h", "status": "OPEN"},
+            ]
+        )
+        scoped = _filter_scalp_archive_scope(
+            df,
+            timeframe="1h",
+            custom_bases=["BTC"],
+            exclude_stables=True,
+        )
+        self.assertEqual(list(scoped["symbol"]), ["BTC"])
+        self.assertEqual(list(scoped["timeframe"]), ["1h"])
+
     @patch("tabs.scalp_backtest_tab.live_or_snapshot")
     def test_render_calls_scalp_outcome_builder_with_expected_contract(self, live_or_snapshot_mock):
         st = _DummySt()
@@ -146,6 +172,16 @@ class ScalpBacktestTabContractTests(unittest.TestCase):
             "TEXT_MUTED": "#8CA1B6",
             "POSITIVE": "#06D6A0",
             "WARNING": "#FFB000",
+            "get_signal_tracker_db_path": lambda: "/tmp/signal_tracker_test.sqlite3",
+            "init_signal_tracker_db": lambda path=None: str(path or "/tmp/signal_tracker_test.sqlite3"),
+            "fetch_signal_events_df": lambda **_k: pd.DataFrame(),
+            "fetch_signal_forward_windows_df": lambda **_k: pd.DataFrame(),
+            "build_signal_review_snapshot": lambda _df: {},
+            "build_execution_overlay_snapshot": lambda _df: {},
+            "build_signal_cohort_summary": lambda _df, _group: pd.DataFrame(),
+            "build_hold_window_intelligence": lambda *_a, **_k: {"available": False, "resolved_signals": 0},
+            "save_signal_trade_overlay": lambda *a, **k: True,
+            "save_signal_trade_journal": lambda *a, **k: True,
             "get_top_volume_usdt_symbols": lambda top_n=40, vs_currency="usd": (["BTC/USDT", "ETH/USDT"], []),
             "fetch_ohlcv": lambda *_a, **_k: df,
             "analyse": object(),

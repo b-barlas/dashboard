@@ -187,7 +187,7 @@ class SignalReviewLogicTests(unittest.TestCase):
                     "sample": 12,
                 }
             ),
-            "Best at 4 bars (n=12)",
+            "Best at 4 bars",
         )
         self.assertEqual(
             _hold_guidance_cell(
@@ -199,7 +199,7 @@ class SignalReviewLogicTests(unittest.TestCase):
                     "sample": 10,
                 }
             ),
-            "Best at 4 bars, fades after 6 (n=10)",
+            "Best at 4 bars, fades after 6",
         )
         self.assertEqual(
             _hold_guidance_cell(
@@ -258,9 +258,9 @@ class SignalReviewLogicTests(unittest.TestCase):
             timeframe_filter="All",
         )
         self.assertEqual([row["Timeframe"] for row in rows], ["5M", "1H"])
-        self.assertEqual(rows[0]["Upside Hold"], "Best at 2 bars (n=1)")
-        self.assertEqual(rows[0]["Downside Hold"], "Best at 4 bars (n=1)")
-        self.assertEqual(rows[1]["Upside Hold"], "Best at 6 bars (n=1)")
+        self.assertEqual(rows[0]["Upside Hold"], "Best at 2 bars")
+        self.assertEqual(rows[0]["Downside Hold"], "Best at 4 bars")
+        self.assertEqual(rows[1]["Upside Hold"], "Best at 6 bars")
         self.assertEqual(rows[1]["Downside Hold"], "—")
 
     def test_missing_hold_backfill_count_counts_resolved_without_checkpoints(self) -> None:

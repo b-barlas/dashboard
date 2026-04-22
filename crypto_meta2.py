@@ -59,6 +59,7 @@ from core.services import (
     detect_divergence,
     detect_market_regime,
     fetch_ohlcv,
+    fetch_exchange_tickers_snapshot,
     get_market_flow_proxy_rows,
     get_market_catalyst_events,
     get_market_cap_rows_for_symbols,

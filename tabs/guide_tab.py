@@ -293,14 +293,12 @@ Outputs:
         (
             "16) Labs tab",
             """
-Research and simulation workspace with three sub-tabs:
-- Model Lab
+Research and simulation workspace with two sub-tabs:
 - Setup Lab
 - Scalp Lab
 
-Use Model Lab to diagnose raw signal-engine behavior.
 Use Setup Lab to compare historical setup-class behavior.
-Use Scalp Lab to test historical scalp planner and gate behavior.
+Use Scalp Lab to read live scalp archive truth first, then test the scalp planner on historical candles.
 Use Signal Archive for the real logged tracker history and execution journal.
             """,
             "risk",

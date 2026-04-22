@@ -12,7 +12,6 @@ except Exception:
     DEPS_OK = False
 
 TAB_MODULES = [
-    "tabs.backtest_tab",
     "tabs.correlation_tab",
     "tabs.fibonacci_tab",
     "tabs.guide_tab",

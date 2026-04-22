@@ -5,6 +5,9 @@ from types import SimpleNamespace
 import pandas as pd
 
 from tabs.market_scan_helpers import (
+    SCAN_MODE_ACTIONABLE,
+    SCAN_MODE_BROAD,
+    SCAN_MODE_EMERGING,
     _actionable_analysis_batch_size,
     _actionable_direction_include,
     _actionable_frame_hunt_score,
@@ -12,6 +15,7 @@ from tabs.market_scan_helpers import (
     _actionable_tactical_candidate_score,
     _actionable_universe_movement_score,
     _candidate_scan_symbols,
+    _emerging_candidate_score,
     _initial_scan_batch_size,
     _initial_scan_symbols,
     _next_refill_candidate_batch,
@@ -22,11 +26,14 @@ from tabs.market_tab import (
     _alert_lane_label,
     _alert_archive_label,
     _actionable_market_result_priority_key,
+    _build_breakout_freshness_snapshot,
     _compress_market_alerts_for_display,
     _rank_market_alerts_by_archive,
     _audit_scan_summary_lines,
     _ai_fallback_note,
     _build_custom_scan_universe,
+    _build_breakout_radar_universe,
+    _enrich_breakout_radar_freshness,
     _build_market_cap_map,
     _canonical_pair_base,
     _coingecko_coin_id_fallback_available,
@@ -57,6 +64,7 @@ from tabs.market_tab import (
     _merge_market_cap_maps,
     _market_lead_breadth_component,
     _market_lead_snapshot,
+    _scalp_signal_log_events,
     _market_result_priority_key,
     _market_result_priority_key_for_mode,
     _market_hidden_meta_cols,
@@ -88,6 +96,67 @@ from threading import Lock
 
 
 class MarketTabLogicTests(unittest.TestCase):
+    def test_scalp_signal_log_events_emits_live_and_conditional_scalp_rows(self):
+        rows = [
+            {
+                "Coin": "BTC",
+                "__event_time": "2026-04-20T10:00:00Z",
+                "__scalp_direction_raw": "LONG",
+                "__scalp_display_state": "LIVE",
+                "__scalp_reason_short": "Good R:R",
+                "__action_raw": "ENTER_TREND_AI",
+                "__actionable_frame_score": 72.0,
+                "__price_val": 100.0,
+                "__scalp_entry_val_raw": 100.5,
+                "__scalp_stop_val_raw": 99.0,
+                "__scalp_target_val_raw": 103.0,
+                "__scalp_rr_val_raw": 2.0,
+                "AI Ensemble": "Upside",
+            },
+            {
+                "Coin": "ETH",
+                "__event_time": "2026-04-20T10:00:00Z",
+                "__scalp_direction_raw": "SHORT",
+                "__scalp_display_state": "CONDITIONAL",
+                "__scalp_reason_short": "Gate soft veto",
+                "__action_raw": "WATCH",
+                "__price_val": 200.0,
+                "__scalp_entry_val_raw": 199.0,
+                "__scalp_stop_val_raw": 202.0,
+                "__scalp_target_val_raw": 194.0,
+                "__scalp_rr_val_raw": 1.7,
+                "AI Ensemble": "Downside",
+            },
+            {
+                "Coin": "SOL",
+                "__event_time": "2026-04-20T10:00:00Z",
+                "__scalp_direction_raw": "LONG",
+                "__scalp_display_state": "",
+            },
+        ]
+        events = _scalp_signal_log_events(
+            rows=rows,
+            timeframe="1h",
+            scan_mode="Breakout Radar",
+            market_lead_snapshot=SimpleNamespace(label="Upside", score=68.0, upside_leads=4, downside_leads=1),
+            market_regime_snapshot=SimpleNamespace(label="Trend", playbook_key="trend", playbook="Trend"),
+            market_trade_gate_snapshot=SimpleNamespace(no_trade=False, gate_key="TRADEABLE", label="Tradeable", reason_code=""),
+            build_signal_risk_sizing=lambda **_k: SimpleNamespace(label="Standard", unit_fraction=1.0),
+            sector_rotation_snapshot=SimpleNamespace(label="Risk On"),
+            classify_symbol_sector=lambda _symbol: "L1",
+            market_catalyst_snapshot=SimpleNamespace(label="Clear", next_event="", blocking=False, category="", scope="", tag="", targeted_only=False),
+            market_flow_snapshot=SimpleNamespace(label="Balanced", state=""),
+            session_fit_snapshot=SimpleNamespace(score=60.0),
+            market_alerts=[],
+        )
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[0]["source"], "Scalp")
+        self.assertEqual(events[0]["direction"], "LONG")
+        self.assertEqual(events[0]["action_reason"], "LIVE")
+        self.assertEqual(events[0]["lead_label"], "Good R:R")
+        self.assertEqual(events[0]["scan_focus"], "Breakout Radar")
+        self.assertEqual(events[1]["action_reason"], "CONDITIONAL")
+
     def test_alert_lane_label_uses_trader_facing_terms(self):
         self.assertEqual(
             _alert_lane_label(SimpleNamespace(severity="HIGH", tone="negative")),
@@ -807,7 +876,7 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertTrue(
             _actionable_direction_include(
                 direction_filter="Upside",
-                scan_mode="Actionable Setups",
+                scan_mode=SCAN_MODE_ACTIONABLE,
                 spot_direction="Neutral",
                 signal_direction="Upside",
                 tactical_candidate_score=77.0,
@@ -816,10 +885,46 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertFalse(
             _actionable_direction_include(
                 direction_filter="Upside",
-                scan_mode="Broad Market",
+                scan_mode=SCAN_MODE_BROAD,
                 spot_direction="Neutral",
                 signal_direction="Upside",
                 tactical_candidate_score=77.0,
+            )
+        )
+
+    def test_emerging_direction_include_allows_lead_or_fresh_frame_candidate(self):
+        self.assertTrue(
+            _actionable_direction_include(
+                direction_filter="Upside",
+                scan_mode=SCAN_MODE_EMERGING,
+                spot_direction="Neutral",
+                signal_direction="Neutral",
+                tactical_candidate_score=40.0,
+                emerging_direction="Upside",
+                frame_hunt_score=55.0,
+            )
+        )
+        self.assertTrue(
+            _actionable_direction_include(
+                direction_filter="Upside",
+                scan_mode=SCAN_MODE_EMERGING,
+                spot_direction="Neutral",
+                signal_direction="Upside",
+                tactical_candidate_score=58.0,
+                emerging_direction="Neutral",
+                frame_hunt_score=71.0,
+            )
+        )
+        self.assertTrue(
+            _actionable_direction_include(
+                direction_filter="Upside",
+                scan_mode=SCAN_MODE_EMERGING,
+                spot_direction="Neutral",
+                signal_direction="Upside",
+                tactical_candidate_score=42.0,
+                emerging_direction="Neutral",
+                frame_hunt_score=48.0,
+                radar_source_score=0.72,
             )
         )
 
@@ -854,7 +959,7 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertEqual(ordered[0]["Coin"], "DOGE")
         mode_ordered = sorted(
             [weaker, stronger],
-            key=lambda row: _market_result_priority_key_for_mode(row, "Actionable Setups"),
+            key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_ACTIONABLE),
         )
         self.assertEqual(mode_ordered[0]["Coin"], "DOGE")
 
@@ -973,7 +1078,7 @@ class MarketTabLogicTests(unittest.TestCase):
             top_n=50,
             exclude_stables=True,
             custom_bases_applied=["DOGE"],
-            scan_mode="Actionable Setups",
+            scan_mode=SCAN_MODE_ACTIONABLE,
         )
         second = _market_scan_signature(
             timeframe="1h",
@@ -993,7 +1098,7 @@ class MarketTabLogicTests(unittest.TestCase):
             top_n=50,
             exclude_stables=True,
             custom_bases_applied=["BTC", "ETH"],
-            scan_mode="Actionable Setups",
+            scan_mode=SCAN_MODE_ACTIONABLE,
         )
         second = _market_scan_signature(
             timeframe="1h",
@@ -1013,18 +1118,18 @@ class MarketTabLogicTests(unittest.TestCase):
             top_n=10,
             exclude_stables=True,
             custom_bases_applied=[],
-            scan_mode="Broad Market",
+            scan_mode=SCAN_MODE_BROAD,
         )
-        hunter = _market_scan_signature(
+        radar = _market_scan_signature(
             timeframe="1h",
             direction_filter="Both",
             top_n=10,
             exclude_stables=True,
             custom_bases_applied=[],
-            scan_mode="Actionable Setups",
+            scan_mode=SCAN_MODE_EMERGING,
         )
-        self.assertNotEqual(broad, hunter)
-        self.assertEqual(hunter, ("1h", "Both", 10, True, (), "Actionable Setups"))
+        self.assertNotEqual(broad, radar)
+        self.assertEqual(radar, ("1h", "Both", 10, True, (), "Breakout Radar"))
 
     def test_normalize_custom_bases_dedupes_aliases(self):
         out = _normalize_custom_bases(["BTC", "XBT", "eth/usdt", "ETH"])
@@ -1268,8 +1373,12 @@ class MarketTabLogicTests(unittest.TestCase):
             10,
         )
         self.assertEqual(
-            _scan_candidate_pool_size(10, custom_mode_active=False, scan_mode="Actionable Setups"),
+            _scan_candidate_pool_size(10, custom_mode_active=False, scan_mode=SCAN_MODE_ACTIONABLE),
             45,
+        )
+        self.assertEqual(
+            _scan_candidate_pool_size(10, custom_mode_active=False, scan_mode=SCAN_MODE_EMERGING),
+            55,
         )
 
     def test_initial_scan_batch_size_expands_for_actionable_focus(self):
@@ -1278,7 +1387,7 @@ class MarketTabLogicTests(unittest.TestCase):
                 10,
                 scan_pool_n=35,
                 custom_mode_active=False,
-                scan_mode="Actionable Setups",
+                scan_mode=SCAN_MODE_ACTIONABLE,
             ),
             20,
         )
@@ -1287,9 +1396,18 @@ class MarketTabLogicTests(unittest.TestCase):
                 10,
                 scan_pool_n=35,
                 custom_mode_active=False,
-                scan_mode="Broad Market",
+                scan_mode=SCAN_MODE_BROAD,
             ),
             10,
+        )
+        self.assertEqual(
+            _initial_scan_batch_size(
+                10,
+                scan_pool_n=55,
+                custom_mode_active=False,
+                scan_mode=SCAN_MODE_EMERGING,
+            ),
+            30,
         )
 
     def test_initial_scan_symbols_actionable_focus_mixes_ranked_and_exploratory_candidates(self):
@@ -1298,19 +1416,49 @@ class MarketTabLogicTests(unittest.TestCase):
             requested_n=10,
             scan_pool_n=40,
             custom_mode_active=False,
-            scan_mode="Actionable Setups",
+            scan_mode=SCAN_MODE_ACTIONABLE,
             timeframe="5m",
         )
         self.assertEqual(len(out), 20)
         self.assertEqual(out[:10], [f"COIN{i}/USDT" for i in range(1, 11)])
         self.assertTrue(any(symbol not in [f"COIN{i}/USDT" for i in range(11, 21)] for symbol in out[10:]))
 
+    def test_initial_scan_symbols_breakout_radar_protects_deep_high_signal_candidates(self):
+        candidate_pool = [f"COIN{i}/USDT" for i in range(1, 81)]
+        baseline = _initial_scan_symbols(
+            candidate_pool=candidate_pool,
+            requested_n=10,
+            scan_pool_n=80,
+            custom_mode_active=False,
+            scan_mode=SCAN_MODE_EMERGING,
+            timeframe="1h",
+        )
+        self.assertNotIn("COIN79/USDT", baseline)
+
+        promoted = _initial_scan_symbols(
+            candidate_pool=candidate_pool,
+            market_rows=[
+                {
+                    "symbol": "coin79",
+                    "_radar_source_score": 0.91,
+                    "_radar_freshness_score": 0.82,
+                }
+            ],
+            requested_n=10,
+            scan_pool_n=80,
+            custom_mode_active=False,
+            scan_mode=SCAN_MODE_EMERGING,
+            timeframe="1h",
+        )
+        self.assertIn("COIN79/USDT", promoted)
+        self.assertEqual(len(promoted), 30)
+
     def test_actionable_analysis_batch_size_caps_deep_scan(self):
         self.assertEqual(
             _actionable_analysis_batch_size(
                 10,
                 fetched_n=35,
-                scan_mode="Actionable Setups",
+                scan_mode=SCAN_MODE_ACTIONABLE,
             ),
             28,
         )
@@ -1318,9 +1466,17 @@ class MarketTabLogicTests(unittest.TestCase):
             _actionable_analysis_batch_size(
                 10,
                 fetched_n=35,
-                scan_mode="Broad Market",
+                scan_mode=SCAN_MODE_BROAD,
             ),
             35,
+        )
+        self.assertEqual(
+            _actionable_analysis_batch_size(
+                10,
+                fetched_n=60,
+                scan_mode=SCAN_MODE_EMERGING,
+            ),
+            40,
         )
 
     def test_next_refill_candidate_batch_uses_remaining_pool_after_attrition(self):
@@ -1346,7 +1502,7 @@ class MarketTabLogicTests(unittest.TestCase):
             custom_bases_applied=[],
             timeframe="1h",
             direction_filter="Upside",
-            scan_mode="Actionable Setups",
+            scan_mode=SCAN_MODE_ACTIONABLE,
         )
         self.assertEqual(out[0], "DOGE/USDT")
 
@@ -1362,7 +1518,7 @@ class MarketTabLogicTests(unittest.TestCase):
             custom_bases_applied=[],
             timeframe="1h",
             direction_filter="Upside",
-            scan_mode="Actionable Setups",
+            scan_mode=SCAN_MODE_ACTIONABLE,
             classify_symbol_sector=lambda symbol: {"FET": "AI", "UNI": "DeFi", "AAVE": "DeFi"}.get(str(symbol).upper(), "Other"),
         )
         self.assertEqual(out[0], "FET/USDT")
@@ -1389,9 +1545,272 @@ class MarketTabLogicTests(unittest.TestCase):
             custom_bases_applied=[],
             timeframe="1h",
             direction_filter="Downside",
-            scan_mode="Actionable Setups",
+            scan_mode=SCAN_MODE_ACTIONABLE,
         )
         self.assertEqual(out[0], "DOGE/USDT")
+
+    def test_candidate_scan_symbols_emerging_focus_softens_market_cap_penalty_for_fast_mover(self):
+        out = _candidate_scan_symbols(
+            usdt_symbols=["BTC/USDT", "RAVE/USDT", "XRP/USDT"],
+            market_rows=[
+                {"symbol": "btc", "market_cap": 2_000_000_000_000, "price_change_percentage_24h": 0.7},
+                {"symbol": "rave", "market_cap": 140_000_000, "price_change_percentage_24h": 7.4},
+                {"symbol": "xrp", "market_cap": 120_000_000_000, "price_change_percentage_24h": 1.4},
+            ],
+            exclude_stables=False,
+            custom_bases_applied=[],
+            timeframe="1h",
+            direction_filter="Upside",
+            scan_mode=SCAN_MODE_EMERGING,
+        )
+        self.assertEqual(out[0], "RAVE/USDT")
+
+    def test_candidate_scan_symbols_emerging_focus_uses_real_volume_not_merge_order(self):
+        out = _candidate_scan_symbols(
+            usdt_symbols=["BTC/USDT", "ZETA/USDT"],
+            market_rows=[
+                {"symbol": "btc", "market_cap": 2_000_000_000_000, "price_change_percentage_24h": 0.6, "total_volume": 40_000_000},
+                {"symbol": "zeta", "market_cap": 220_000_000, "price_change_percentage_24h": 5.4, "_quote_volume_24h": 120_000_000, "_radar_source_score": 0.82},
+            ],
+            exclude_stables=False,
+            custom_bases_applied=[],
+            timeframe="1h",
+            direction_filter="Upside",
+            scan_mode=SCAN_MODE_EMERGING,
+        )
+        self.assertEqual(out[0], "ZETA/USDT")
+
+    def test_build_breakout_radar_universe_adds_gainers_and_trending_symbols(self):
+        pairs, rows, mcap_map = _build_breakout_radar_universe(
+            base_pairs=["BTC/USDT", "ETH/USDT"],
+            base_market_rows=[
+                {"symbol": "btc", "market_cap": 2_000_000_000_000, "id": "bitcoin"},
+                {"symbol": "eth", "market_cap": 300_000_000_000, "id": "ethereum"},
+            ],
+            fetch_top_gainers_losers=lambda limit=20: (
+                [{"symbol": "RAVE", "market_cap": 140_000_000, "id": "rave"}],
+                [{"symbol": "BAD", "market_cap": 120_000_000, "id": "bad"}],
+            ),
+            fetch_trending_coins=lambda: [{"symbol": "MOVR"}],
+            fetch_exchange_tickers_snapshot=lambda: {},
+            get_market_cap_rows_for_symbols=lambda symbols, vs_currency="usd": [
+                {"symbol": "rave", "market_cap": 140_000_000, "id": "rave"},
+                {"symbol": "movr", "market_cap": 180_000_000, "id": "movr"},
+            ],
+            direction_filter="Upside",
+            provider_fetch_n=80,
+        )
+        self.assertIn("RAVE/USDT", pairs)
+        self.assertIn("MOVR/USDT", pairs)
+        self.assertNotIn("BAD/USDT", pairs)
+        self.assertIn("RAVE", mcap_map)
+        self.assertIn("MOVR", mcap_map)
+        self.assertTrue(any(str(row.get("symbol")).lower() == "rave" for row in rows))
+        rave_row = next(row for row in rows if str(row.get("symbol")).lower() == "rave")
+        movr_row = next(row for row in rows if str(row.get("symbol")).lower() == "movr")
+        self.assertGreater(float(rave_row.get("_radar_source_score") or 0.0), 0.0)
+        self.assertGreater(float(movr_row.get("_radar_source_score") or 0.0), 0.0)
+
+    def test_build_breakout_radar_universe_adds_exchange_breakout_candidates(self):
+        pairs, rows, mcap_map = _build_breakout_radar_universe(
+            base_pairs=["BTC/USDT"],
+            base_market_rows=[
+                {"symbol": "btc", "market_cap": 2_000_000_000_000, "id": "bitcoin"},
+            ],
+            fetch_top_gainers_losers=lambda limit=20: ([], []),
+            fetch_trending_coins=lambda: [],
+            fetch_exchange_tickers_snapshot=lambda: {
+                "ZETA/USDT": {"percentage": 8.4, "quoteVolume": 4_500_000},
+                "DUST/USDT": {"percentage": 1.1, "quoteVolume": 30_000},
+            },
+            get_market_cap_rows_for_symbols=lambda symbols, vs_currency="usd": [
+                {"symbol": "zeta", "market_cap": 220_000_000, "id": "zeta"},
+            ],
+            direction_filter="Upside",
+            provider_fetch_n=120,
+        )
+        self.assertIn("ZETA/USDT", pairs)
+        zeta_row = next(row for row in rows if str(row.get("symbol")).lower() == "zeta")
+        self.assertGreater(float(zeta_row.get("_radar_source_score") or 0.0), 0.0)
+        self.assertEqual(mcap_map.get("ZETA"), 220_000_000)
+
+    def test_build_breakout_radar_universe_preserves_breakout_signal_for_existing_base(self):
+        _pairs, rows, _mcap_map = _build_breakout_radar_universe(
+            base_pairs=["BTC/USDT"],
+            base_market_rows=[
+                {"symbol": "btc", "market_cap": 2_000_000_000_000, "id": "bitcoin"},
+            ],
+            fetch_top_gainers_losers=lambda limit=20: ([], []),
+            fetch_trending_coins=lambda: [],
+            fetch_exchange_tickers_snapshot=lambda: {
+                "BTC/USDT": {"percentage": 5.1, "quoteVolume": 120_000_000},
+            },
+            get_market_cap_rows_for_symbols=lambda symbols, vs_currency="usd": [],
+            direction_filter="Upside",
+            provider_fetch_n=120,
+        )
+        btc_row = next(row for row in rows if str(row.get("symbol")).lower() == "btc")
+        self.assertGreater(float(btc_row.get("_radar_source_score") or 0.0), 0.0)
+
+    def test_build_breakout_freshness_snapshot_rewards_fresh_breakout(self):
+        close = [100, 100.2, 100.4, 100.5, 100.6, 100.7, 100.9, 101.0, 101.1, 101.3, 101.4, 101.5,
+                 101.6, 101.7, 101.8, 102.0, 102.2, 102.4, 102.5, 102.7, 103.0, 103.6, 104.4, 105.6, 106.8]
+        df = pd.DataFrame(
+            {
+                "open": close,
+                "high": [v * 1.003 for v in close],
+                "low": [v * 0.997 for v in close],
+                "close": close,
+                "volume": [1_000] * len(close),
+            }
+        )
+        snapshot = _build_breakout_freshness_snapshot(df, direction_filter="Upside")
+        self.assertGreater(float(snapshot.score), 0.45)
+        self.assertEqual(snapshot.direction, "Upside")
+
+    def test_enrich_breakout_radar_freshness_adds_score_to_shortlist(self):
+        def _fake_fetch(symbol, timeframe, limit=0):
+            if symbol == "ZETA/USDT":
+                close = [100, 100.2, 100.4, 100.5, 100.6, 100.7, 100.9, 101.0, 101.1, 101.3, 101.4, 101.5,
+                         101.6, 101.7, 101.8, 102.0, 102.2, 102.4, 102.5, 102.7, 103.0, 103.6, 104.4, 105.6, 106.8, 107.1,
+                         107.8, 108.4, 109.1, 109.7]
+            else:
+                close = [100.0] * 30
+            return pd.DataFrame(
+                {
+                    "open": close,
+                    "high": [v * 1.003 for v in close],
+                    "low": [v * 0.997 for v in close],
+                    "close": close,
+                    "volume": [1_000] * len(close),
+                }
+            )
+
+        rows = _enrich_breakout_radar_freshness(
+            base_pairs=["BTC/USDT", "ZETA/USDT"],
+            market_rows=[
+                {"symbol": "btc", "_radar_source_score": 0.44, "total_volume": 40_000_000, "price_change_percentage_24h": 0.7},
+                {"symbol": "zeta", "_radar_source_score": 0.81, "_quote_volume_24h": 8_000_000, "price_change_percentage_24h": 5.4},
+            ],
+            fetch_ohlcv=_fake_fetch,
+            scan_timeframe="1h",
+            max_candidates=8,
+        )
+        zeta_row = next(row for row in rows if str(row.get("symbol")).lower() == "zeta")
+        btc_row = next(row for row in rows if str(row.get("symbol")).lower() == "btc")
+        self.assertGreater(float(zeta_row.get("_radar_freshness_score") or 0.0), 0.0)
+        self.assertGreater(
+            float(zeta_row.get("_radar_freshness_score") or 0.0),
+            float(btc_row.get("_radar_freshness_score") or 0.0),
+        )
+
+    def test_enrich_breakout_radar_freshness_respects_direction_filter(self):
+        close = [100, 100.2, 100.4, 100.5, 100.6, 100.7, 100.9, 101.0, 101.1, 101.3, 101.4, 101.5,
+                 101.6, 101.7, 101.8, 102.0, 102.2, 102.4, 102.5, 102.7, 103.0, 103.6, 104.4, 105.6, 106.8, 107.1,
+                 107.8, 108.4, 109.1, 109.7]
+        frame = pd.DataFrame(
+            {
+                "open": close,
+                "high": [v * 1.003 for v in close],
+                "low": [v * 0.997 for v in close],
+                "close": close,
+                "volume": [1_000] * len(close),
+            }
+        )
+
+        def _fake_fetch(_symbol, _timeframe, limit=0):
+            return frame
+
+        rows = _enrich_breakout_radar_freshness(
+            base_pairs=["ZETA/USDT"],
+            market_rows=[
+                {"symbol": "zeta", "_radar_source_score": 0.81, "_quote_volume_24h": 8_000_000, "price_change_percentage_24h": 5.4},
+            ],
+            fetch_ohlcv=_fake_fetch,
+            scan_timeframe="1h",
+            direction_filter="Downside",
+            max_candidates=8,
+        )
+        zeta_row = next(row for row in rows if str(row.get("symbol")).lower() == "zeta")
+        self.assertEqual(float(zeta_row.get("_radar_freshness_score") or 0.0), 0.0)
+
+    def test_emerging_candidate_score_penalizes_stretched_move_vs_fresher_move(self):
+        fresher = _emerging_candidate_score(
+            timeframe="1h",
+            direction_filter="Upside",
+            spot_direction="Neutral",
+            signal_direction="Upside",
+            emerging_direction="Upside",
+            emerging_active=True,
+            frame_hunt_score=78.0,
+            tactical_candidate_score=70.0,
+            execution_structure_quality=72.0,
+            execution_trend_quality=68.0,
+            execution_location_quality=66.0,
+            tech_confidence_score=74.0,
+            ai_confidence_score=61.0,
+            market_cap=180_000_000,
+            market_pct_change_24h=4.8,
+            volume_spike=True,
+            spike_dir="Upside",
+            radar_source_score=0.72,
+            radar_freshness_score=0.78,
+        )
+        stretched = _emerging_candidate_score(
+            timeframe="1h",
+            direction_filter="Upside",
+            spot_direction="Neutral",
+            signal_direction="Upside",
+            emerging_direction="Upside",
+            emerging_active=True,
+            frame_hunt_score=78.0,
+            tactical_candidate_score=70.0,
+            execution_structure_quality=72.0,
+            execution_trend_quality=68.0,
+            execution_location_quality=66.0,
+            tech_confidence_score=74.0,
+            ai_confidence_score=61.0,
+            market_cap=180_000_000,
+            market_pct_change_24h=22.0,
+            volume_spike=True,
+            spike_dir="Upside",
+            radar_source_score=0.72,
+            radar_freshness_score=0.20,
+        )
+        self.assertGreater(fresher, stretched)
+
+    def test_emerging_market_result_priority_keeps_tradeable_setup_classes_above_skip(self):
+        stronger = {
+            "Coin": "RAVE",
+            "__emerging_rank_score": 62.0,
+            "__emerging_direction": "Upside",
+            "__actionable_frame_score": 58.0,
+            "__actionable_tactical_score": 48.0,
+            "__action_raw": "WATCH",
+            "__confidence_val": 82.0,
+            "__ai_confidence_val": 72.0,
+            "__execution_friction_score": 78.0,
+            "__expectancy_bias_score": 58.0,
+            "__archive_guardrail_penalty": 0.0,
+        }
+        weaker = {
+            "Coin": "BTC",
+            "__emerging_rank_score": 86.0,
+            "__emerging_direction": "Upside",
+            "__actionable_frame_score": 84.0,
+            "__actionable_tactical_score": 76.0,
+            "__action_raw": "SKIP",
+            "__confidence_val": 67.0,
+            "__ai_confidence_val": 55.0,
+            "__execution_friction_score": 43.0,
+            "__expectancy_bias_score": 50.0,
+            "__archive_guardrail_penalty": 0.0,
+        }
+        ordered = sorted(
+            [weaker, stronger],
+            key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_EMERGING),
+        )
+        self.assertEqual(ordered[0]["Coin"], "RAVE")
 
     def test_next_scan_pool_target_grows_after_pool_is_exhausted(self):
         self.assertEqual(
