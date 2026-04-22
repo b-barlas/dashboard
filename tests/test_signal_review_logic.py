@@ -8,7 +8,10 @@ from tabs.signal_review_tab import (
     _annotate_actual_exit_quality,
     _annotate_actual_hold_style,
     _archive_building_card,
+    _best_signal_summary,
+    _build_best_signal_leaderboard,
     _build_coin_hold_guidance_rows,
+    _build_coin_timeframe_intelligence_bundle,
     _build_execution_signal_cards,
     _build_execution_review_cards,
     _build_hold_signal_cards,
@@ -17,17 +20,16 @@ from tabs.signal_review_tab import (
     _format_review_metric,
     _follow_through_horizon_note,
     _hold_guidance_cell,
-    _hold_archive_progress_snapshot,
-    _hold_scope_label,
     _missing_hold_backfill_count,
     _refresh_scope_badge,
-    _review_scope_summary,
     _learning_readiness_summary,
-    _hold_window_note,
+    _ordered_timeframe_scope,
     _prepare_section_cards,
     _prefer_known_summary_rows,
     _qualified_summary_rows,
-    _same_hold_progress,
+    _selected_best_signal_coin,
+    _selected_dataframe_row_index,
+    _select_best_signal_coin,
 )
 
 
@@ -98,18 +100,6 @@ class SignalReviewLogicTests(unittest.TestCase):
             ],
         )
 
-    def test_review_scope_summary_is_compact(self) -> None:
-        summary = _review_scope_summary(
-            status_filter="All",
-            timeframe_filter="All",
-            limit=200,
-            rows_in_view=73,
-            symbol_filter="eth",
-        )
-        self.assertIn("ETH • All TF • All Status", summary)
-        self.assertIn("73 of 200 rows shown", summary)
-        self.assertIn("KPIs and deep dives use this view", summary)
-
     def test_learning_readiness_summary_is_compact(self) -> None:
         body, tone = _learning_readiness_summary(
             mode="current_only",
@@ -118,12 +108,174 @@ class SignalReviewLogicTests(unittest.TestCase):
         )
         self.assertIn("Current-only learning active", body)
         self.assertIn("905 current resolved", body)
-        self.assertIn("1677 loaded", body)
+        self.assertIn("latest 1677 current-version resolved rows", body)
         self.assertEqual(tone, "positive")
 
-    def test_hold_scope_label_formats_coin_and_optional_timeframe(self) -> None:
-        self.assertEqual(_hold_scope_label(symbol_filter="btc", timeframe_filter="All"), "BTC")
-        self.assertEqual(_hold_scope_label(symbol_filter="btc", timeframe_filter="1h"), "BTC 1H")
+    def test_ordered_timeframe_scope_keeps_canonical_order_and_extras(self) -> None:
+        self.assertEqual(
+            _ordered_timeframe_scope(timeframe_filter="All", available_timeframes={"1h", "5m", "30m"}),
+            ["5m", "15m", "1h", "4h", "1d", "30m"],
+        )
+        self.assertEqual(_ordered_timeframe_scope(timeframe_filter="4h", available_timeframes={"1h"}), ["4h"])
+
+    def test_select_best_signal_coin_balances_across_timeframes(self) -> None:
+        df = pd.DataFrame(
+            [
+                {"symbol": "AAA", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 1.0},
+                {"symbol": "AAA", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 1.1},
+                {"symbol": "AAA", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 0.9},
+                {"symbol": "AAA", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 1.2},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.8},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.7},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.9},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.6},
+                {"symbol": "BBB", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 1.0},
+                {"symbol": "BBB", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 1.1},
+                {"symbol": "BBB", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 0.9},
+                {"symbol": "BBB", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 1.2},
+                {"symbol": "BBB", "timeframe": "15m", "status": "RESOLVED", "directional_return_pct": -0.2},
+                {"symbol": "BBB", "timeframe": "15m", "status": "RESOLVED", "directional_return_pct": -0.1},
+                {"symbol": "BBB", "timeframe": "15m", "status": "RESOLVED", "directional_return_pct": 0.0},
+                {"symbol": "BBB", "timeframe": "15m", "status": "RESOLVED", "directional_return_pct": -0.3},
+            ]
+        )
+        selection = _select_best_signal_coin(df_events=df, timeframe_filter="All", min_resolved=4, min_timeframes=2)
+        self.assertTrue(selection["available"])
+        self.assertEqual(selection["symbol"], "AAA")
+        self.assertEqual(selection["mode"], "best_available")
+        self.assertEqual(selection["qualified_timeframes"], 2)
+
+    def test_select_best_signal_coin_marks_cross_timeframe_when_thresholds_are_met(self) -> None:
+        df = pd.DataFrame(
+            [
+                {"symbol": "AAA", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 1.0},
+                {"symbol": "AAA", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 1.1},
+                {"symbol": "AAA", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 0.9},
+                {"symbol": "AAA", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 1.2},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.8},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.7},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.9},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.6},
+                {"symbol": "AAA", "timeframe": "4h", "status": "RESOLVED", "directional_return_pct": 0.5},
+                {"symbol": "AAA", "timeframe": "4h", "status": "RESOLVED", "directional_return_pct": 0.4},
+                {"symbol": "AAA", "timeframe": "4h", "status": "RESOLVED", "directional_return_pct": 0.6},
+                {"symbol": "AAA", "timeframe": "4h", "status": "RESOLVED", "directional_return_pct": 0.3},
+            ]
+        )
+        selection = _select_best_signal_coin(
+            df_events=df,
+            timeframe_filter="All",
+            min_resolved=4,
+            min_timeframes=2,
+            min_total_resolved=8,
+        )
+        self.assertTrue(selection["available"])
+        self.assertEqual(selection["symbol"], "AAA")
+        self.assertEqual(selection["mode"], "cross_timeframe")
+        self.assertEqual(selection["qualified_timeframes"], 3)
+
+    def test_select_best_signal_coin_uses_selected_timeframe(self) -> None:
+        df = pd.DataFrame(
+            [
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.2},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.3},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.4},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.5},
+                {"symbol": "BBB", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 1.2},
+                {"symbol": "BBB", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 1.1},
+                {"symbol": "BBB", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 1.0},
+                {"symbol": "BBB", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.9},
+            ]
+        )
+        selection = _select_best_signal_coin(df_events=df, timeframe_filter="1h", min_resolved=4)
+        self.assertTrue(selection["available"])
+        self.assertEqual(selection["symbol"], "BBB")
+        self.assertEqual(selection["mode"], "timeframe")
+        self.assertEqual(selection["best_timeframe"], "1h")
+
+    def test_best_signal_summary_mentions_cross_timeframe_mode(self) -> None:
+        summary = _best_signal_summary(
+            selection={
+                "symbol": "ETH",
+                "mode": "cross_timeframe",
+                "qualified_timeframes": 3,
+                "follow_through_pct": 62.5,
+                "avg_dir_return_pct": 1.42,
+                "resolved": 34,
+                "best_timeframe": "1h",
+            },
+            timeframe_filter="All",
+            analysis_limit=10000,
+        )
+        self.assertIn("ETH", summary)
+        self.assertIn("balanced follow-through", summary)
+        self.assertIn("1H", summary)
+
+    def test_best_signal_summary_softens_best_available_copy(self) -> None:
+        summary = _best_signal_summary(
+            selection={
+                "symbol": "LDO",
+                "mode": "best_available",
+                "qualified_timeframes": 1,
+                "follow_through_pct": 90.9,
+                "avg_dir_return_pct": 3.25,
+                "resolved": 11,
+                "best_timeframe": "1h",
+            },
+            timeframe_filter="All",
+            analysis_limit=10000,
+        )
+        self.assertIn("Best available archive read", summary)
+        self.assertIn("Only <b>1</b> timeframe", summary)
+
+    def test_build_best_signal_leaderboard_labels_modes(self) -> None:
+        df = pd.DataFrame(
+            [
+                {"symbol": "AAA", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 1.0},
+                {"symbol": "AAA", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 1.1},
+                {"symbol": "AAA", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 0.9},
+                {"symbol": "AAA", "timeframe": "5m", "status": "RESOLVED", "directional_return_pct": 1.2},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.8},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.7},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.9},
+                {"symbol": "AAA", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.6},
+                {"symbol": "AAA", "timeframe": "4h", "status": "RESOLVED", "directional_return_pct": 0.5},
+                {"symbol": "AAA", "timeframe": "4h", "status": "RESOLVED", "directional_return_pct": 0.4},
+                {"symbol": "AAA", "timeframe": "4h", "status": "RESOLVED", "directional_return_pct": 0.6},
+                {"symbol": "AAA", "timeframe": "4h", "status": "RESOLVED", "directional_return_pct": 0.3},
+                {"symbol": "BBB", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 1.2},
+                {"symbol": "BBB", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 1.1},
+                {"symbol": "BBB", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 1.0},
+                {"symbol": "BBB", "timeframe": "1h", "status": "RESOLVED", "directional_return_pct": 0.9},
+            ]
+        )
+        board = _build_best_signal_leaderboard(
+            df_events=df,
+            timeframe_filter="All",
+            limit=5,
+            min_resolved=4,
+            min_timeframes=2,
+            min_total_resolved=8,
+        )
+        self.assertEqual(list(board.columns), ["Coin", "Mode", "Follow-Through", "Resolved", "Best TF", "Avg Dir Return"])
+        self.assertEqual(str(board.iloc[0]["Coin"]), "AAA")
+        self.assertEqual(str(board.iloc[0]["Mode"]), "Best Signal")
+        self.assertEqual(str(board.iloc[1]["Coin"]), "BBB")
+        self.assertEqual(str(board.iloc[1]["Mode"]), "Best Available")
+
+    def test_selected_dataframe_row_index_reads_mapping_state(self) -> None:
+        self.assertEqual(_selected_dataframe_row_index({"selection": {"rows": [2]}}), 2)
+        self.assertIsNone(_selected_dataframe_row_index({"selection": {"rows": []}}))
+
+    def test_selected_best_signal_coin_returns_selected_coin(self) -> None:
+        board = pd.DataFrame(
+            [
+                {"Coin": "TRX", "Mode": "Best Available"},
+                {"Coin": "ETH", "Mode": "Best Signal"},
+            ]
+        )
+        selected = _selected_best_signal_coin(board, {"selection": {"rows": [1]}})
+        self.assertEqual(selected, "ETH")
 
     def test_refresh_scope_badge_uses_selected_scope(self) -> None:
         self.assertEqual(
@@ -156,26 +308,6 @@ class SignalReviewLogicTests(unittest.TestCase):
             _format_review_metric(0.493, available=True, pct=True, signed=True, decimals=2),
             "+0.49%",
         )
-
-    def test_hold_window_note_describes_available_snapshot(self) -> None:
-        note, tone = _hold_window_note(
-            {
-                "available": True,
-                "resolved_signals": 18,
-                "best_bar": 4,
-                "best_label": "around 4 bars",
-                "best_style": "Quick Follow-Through",
-                "sample": 12,
-                "avg_dir_return_pct": 1.42,
-                "follow_through_pct": 62.5,
-                "fade_after_bar": 8,
-            }
-        )
-        self.assertIn("Best at: 4 bars", note)
-        self.assertIn("fade after roughly <b>8</b> bars", note)
-        self.assertIn("Quick Follow-Through", note)
-        self.assertIn("62.5%", note)
-        self.assertEqual(tone, "positive")
 
     def test_hold_guidance_cell_formats_available_and_building_states(self) -> None:
         self.assertEqual(
@@ -258,10 +390,113 @@ class SignalReviewLogicTests(unittest.TestCase):
             timeframe_filter="All",
         )
         self.assertEqual([row["Timeframe"] for row in rows], ["5M", "1H"])
-        self.assertEqual(rows[0]["Upside Hold"], "Best at 2 bars")
-        self.assertEqual(rows[0]["Downside Hold"], "Best at 4 bars")
-        self.assertEqual(rows[1]["Upside Hold"], "Best at 6 bars")
-        self.assertEqual(rows[1]["Downside Hold"], "—")
+
+    def test_build_coin_timeframe_intelligence_bundle_uses_per_timeframe_frames(self) -> None:
+        timeframe_frames = [
+            {
+                "timeframe": "5m",
+                "events": pd.DataFrame(
+                    [
+                        {
+                            "signal_key": "a1",
+                            "symbol": "BTC",
+                            "timeframe": "5m",
+                            "direction": "Upside",
+                            "status": "RESOLVED",
+                            "directional_return_pct": 0.4,
+                        }
+                    ]
+                ),
+                "windows": pd.DataFrame(
+                    [
+                        {"signal_key": "a1", "bars_ahead": 2, "directional_return_pct": 0.4, "adverse_excursion_pct": 0.1}
+                    ]
+                ),
+            },
+            {
+                "timeframe": "1h",
+                "events": pd.DataFrame(
+                    [
+                        {
+                            "signal_key": "b1",
+                            "symbol": "BTC",
+                            "timeframe": "1h",
+                            "direction": "Downside",
+                            "status": "RESOLVED",
+                            "directional_return_pct": 1.2,
+                        }
+                    ]
+                ),
+                "windows": pd.DataFrame(
+                    [
+                        {"signal_key": "b1", "bars_ahead": 6, "directional_return_pct": 1.2, "adverse_excursion_pct": 0.2}
+                    ]
+                ),
+            },
+        ]
+
+        def _fake_summary(df_scope: pd.DataFrame, _group_field: str) -> pd.DataFrame:
+            timeframe = str(df_scope.iloc[0]["timeframe"]).strip().lower()
+            if timeframe == "5m":
+                return pd.DataFrame(
+                    [
+                        {
+                            "timeframe": "5m",
+                            "Resolved": 1,
+                            "FollowThroughPct": 40.0,
+                            "AvgDirReturnPct": 0.4,
+                        }
+                    ]
+                )
+            return pd.DataFrame(
+                [
+                    {
+                        "timeframe": "1h",
+                        "Resolved": 1,
+                        "FollowThroughPct": 70.0,
+                        "AvgDirReturnPct": 1.2,
+                    }
+                ]
+            )
+
+        def _fake_hold_window_intelligence(df_scope: pd.DataFrame, _df_windows: pd.DataFrame) -> dict[str, object]:
+            if df_scope.empty:
+                return {"available": False, "resolved_signals": 0}
+            timeframe = str(df_scope.iloc[0]["timeframe"]).strip().lower()
+            direction = str(df_scope.iloc[0]["direction"]).strip()
+            best_bar = 2 if timeframe == "5m" else 6
+            if direction == "Upside" and timeframe == "5m":
+                return {
+                    "available": True,
+                    "resolved_signals": 1,
+                    "best_bar": best_bar,
+                    "best_label": f"around {best_bar} bars",
+                    "sample": 1,
+                }
+            if direction == "Downside" and timeframe == "1h":
+                return {
+                    "available": True,
+                    "resolved_signals": 1,
+                    "best_bar": best_bar,
+                    "best_label": f"around {best_bar} bars",
+                    "sample": 1,
+                }
+            return {"available": False, "resolved_signals": int(len(df_scope))}
+
+        display_df, summary_df, hold_rows = _build_coin_timeframe_intelligence_bundle(
+            timeframe_frames=timeframe_frames,
+            build_signal_cohort_summary=_fake_summary,
+            build_hold_window_intelligence=_fake_hold_window_intelligence,
+        )
+        self.assertEqual(list(display_df["Timeframe"]), ["5M", "1H"])
+        self.assertEqual(list(summary_df["timeframe"]), ["5m", "1h"])
+        self.assertEqual(display_df.iloc[0]["Upside Hold"], "Best at 2 bars")
+        self.assertEqual(display_df.iloc[1]["Downside Hold"], "Best at 6 bars")
+        self.assertEqual([row["Timeframe"] for row in hold_rows], ["5M", "1H"])
+        self.assertEqual(hold_rows[0]["Upside Hold"], "Best at 2 bars")
+        self.assertEqual(hold_rows[0]["Downside Hold"], "—")
+        self.assertEqual(hold_rows[1]["Upside Hold"], "—")
+        self.assertEqual(hold_rows[1]["Downside Hold"], "Best at 6 bars")
 
     def test_missing_hold_backfill_count_counts_resolved_without_checkpoints(self) -> None:
         df_events = pd.DataFrame(
@@ -277,34 +512,6 @@ class SignalReviewLogicTests(unittest.TestCase):
             ]
         )
         self.assertEqual(_missing_hold_backfill_count(df_events, df_forward_windows), 1)
-
-    def test_hold_archive_progress_snapshot_reports_coverage(self) -> None:
-        df_events = pd.DataFrame(
-            [
-                {"signal_key": "a1", "status": "RESOLVED"},
-                {"signal_key": "a2", "status": "RESOLVED"},
-                {"signal_key": "a3", "status": "RESOLVED"},
-                {"signal_key": "a4", "status": "OPEN"},
-            ]
-        )
-        df_forward_windows = pd.DataFrame(
-            [
-                {"signal_key": "a1", "bars_ahead": 4},
-                {"signal_key": "a3", "bars_ahead": 6},
-            ]
-        )
-        snapshot = _hold_archive_progress_snapshot(df_events, df_forward_windows)
-        self.assertEqual(snapshot["resolved"], 3.0)
-        self.assertEqual(snapshot["ready"], 2.0)
-        self.assertEqual(snapshot["missing"], 1.0)
-        self.assertAlmostEqual(snapshot["coverage_pct"], 66.6666667, places=3)
-
-    def test_same_hold_progress_detects_identical_scope_snapshots(self) -> None:
-        left = {"resolved": 65.0, "ready": 7.0, "missing": 58.0, "coverage_pct": 10.7692308}
-        right = {"resolved": 65.0, "ready": 7.0, "missing": 58.0, "coverage_pct": 10.7692308}
-        other = {"resolved": 65.0, "ready": 8.0, "missing": 57.0, "coverage_pct": 12.3076923}
-        self.assertTrue(_same_hold_progress(left, right))
-        self.assertFalse(_same_hold_progress(left, other))
 
     def test_execution_vs_system_note_says_archive_building_when_no_taken_trades(self) -> None:
         note, tone = _execution_vs_system_note(
