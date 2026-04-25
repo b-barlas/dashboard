@@ -170,7 +170,7 @@ _COPY = {
         "neutral": "What would improve",
     },
     "spot.plan.mode.no_trade": {
-        "trader": "No-Trade",
+        "trader": "Stand Aside",
         "neutral": "Low Alignment",
     },
     "spot.plan.mode.probe": {
@@ -402,8 +402,8 @@ _COPY = {
         "neutral": "CACHED HIGH-QUALITY: {enter_count} • EARLY: {probe_count} • DEVELOPING: {watch_count} • NOT ALIGNED: {skip_count}",
     },
     "market.status.head.degraded_ready": {
-        "trader": "DEGRADED SETUPS",
-        "neutral": "DEGRADED SETUPS",
+        "trader": "PARTIAL-DATA SETUPS",
+        "neutral": "PARTIAL-DATA SETUPS",
     },
     "market.status.head.degraded_probe": {
         "trader": "EARLY-ENTRY TAPE",
@@ -414,8 +414,8 @@ _COPY = {
         "neutral": "NO CLEAN SETUP",
     },
     "market.status.sub.degraded": {
-        "trader": "DEGRADED READY: {enter_count} • EARLY: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}",
-        "neutral": "DEGRADED HIGH-QUALITY: {enter_count} • EARLY: {probe_count} • DEVELOPING: {watch_count} • NOT ALIGNED: {skip_count}",
+        "trader": "PARTIAL-DATA READY: {enter_count} • EARLY: {probe_count} • WATCH: {watch_count} • SKIP: {skip_count}",
+        "neutral": "PARTIAL-DATA HIGH-QUALITY: {enter_count} • EARLY: {probe_count} • DEVELOPING: {watch_count} • NOT ALIGNED: {skip_count}",
     },
     "market.status.head.live_ready": {
         "trader": "SETUPS READY",
@@ -434,7 +434,7 @@ _COPY = {
         "neutral": "HIGH-QUALITY: {enter_count} • EARLY: {probe_count} • DEVELOPING: {watch_count} • NOT ALIGNED: {skip_count}",
     },
     "market.status.label_title": {
-        "trader": "Quick count of how many shown rows are READY, EARLY, WATCH, or SKIP.",
+        "trader": "Quick count of how many shown rows are ready, early, watch-only, or pass.",
         "neutral": "Quick count of how many shown rows are high-quality, early, developing, or not aligned.",
     },
     "market.audit.probe_heavy": {
@@ -442,23 +442,23 @@ _COPY = {
         "neutral": "Early-setup heavy table: many candidates are close, but stronger confirmation is still scarce.",
     },
     "market.audit.watch_heavy": {
-        "trader": "WATCH-heavy table: selected-timeframe execution gates are filtering most names.",
+        "trader": "WATCH-heavy table: selected-timeframe execution checks are filtering most names.",
         "neutral": "Developing-setup heavy table: selected-timeframe execution checks are filtering most names.",
     },
     "market.audit.skip_neutral": {
-        "trader": "SKIP-heavy table: most candidates are being rejected upstream because the HTF Direction is still Neutral.",
-        "neutral": "Not-aligned heavy table: most candidates are being filtered out because the HTF direction is still neutral.",
+        "trader": "SKIP-heavy table: most candidates are being rejected because the higher-timeframe Direction is still Neutral.",
+        "neutral": "Not-aligned heavy table: most candidates are being filtered out because the higher-timeframe direction is still neutral.",
     },
     "market.audit.skip_risk": {
         "trader": "SKIP-heavy table: location/risk filters are rejecting most candidates.",
         "neutral": "Not-aligned heavy table: location/risk filters are rejecting most candidates.",
     },
     "review.label.no_trade_reason": {
-        "trader": "No-Trade Reason",
+        "trader": "Stand-Aside Reason",
         "neutral": "Low-Alignment Reason",
     },
     "review.group.no_trade_reason": {
-        "trader": "By No-Trade Reason",
+        "trader": "By Stand-Aside Reason",
         "neutral": "By Low-Alignment Reason",
     },
     "market.hero.fear_greed_tip": {
@@ -466,29 +466,29 @@ _COPY = {
         "neutral": "Quick sentiment gauge. Lower means fear; higher means greed. Use it as background context, not as a standalone trigger.",
     },
     "market.tooltip.setup_confirm": {
-        "trader": "Final scanner verdict showing whether the setup looks fully ready, worthy of EARLY-size risk only, promising-but-early, or not good enough yet.",
-        "neutral": "Final scanner verdict showing whether the setup looks high-quality, early but interesting, still developing, or not aligned yet.",
+        "trader": "Final table read showing whether the setup is ready, early-only, watch-only, or a pass for now.",
+        "neutral": "Final table read showing whether the setup looks high-quality, early but interesting, still developing, or not aligned yet.",
     },
     "market.tooltip.entry_price": {
-        "trader": "Suggested model entry level for the intraday scalp execution lens. If the scalp is conditional, treat this as a reference level only.",
+        "trader": "Suggested model entry level for the intraday timing lens. If the scalp read is conditional, treat this as a reference level only.",
         "neutral": "Model reference entry level for the intraday timing lens. If the scalp is conditional, treat this as a reference only.",
     },
     "market.tooltip.stop_loss": {
-        "trader": "Risk invalidation level for the intraday scalp execution lens. Conditional scalp rows show this as a reference, not a live trigger.",
+        "trader": "Risk invalidation level for the intraday timing lens. Conditional scalp rows show this as a reference, not a live trigger.",
         "neutral": "Risk reference level showing where the intraday timing setup would break. Conditional rows are reference-only.",
     },
     "market.tooltip.target_price": {
-        "trader": "First target level for the intraday scalp execution lens. Conditional scalp rows show this as a reference target only.",
+        "trader": "First target level for the intraday timing lens. Conditional scalp rows show this as a reference target only.",
         "neutral": "First reference target for the intraday timing lens. Conditional rows stay reference-only.",
     },
     "market.tooltip.scalp_opportunity": {
-        "trader": "Separate intraday execution lens. Live rows passed all scalp gates. Conditional rows found a local scalp structure, but a veto is still active.",
+        "trader": "Separate intraday timing lens. Live rows passed all scalp checks. Conditional rows found a local scalp structure, but a broader veto is still active.",
         "neutral": "Separate intraday timing lens. Live rows passed the scalp checks. Conditional rows found a local setup, but a broader veto is still active.",
     },
     "market.help.scanner_guide_html": {
         "trader": (
             "<b>Read order:</b> <b>Setup Confirm</b> -> <b>Direction + Confidence</b> -> <b>AI Ensemble + AI Confidence</b>.<br>"
-            "<b>Setup Confirm:</b> ENTER = fully ready, EARLY = small-risk only, WATCH = monitor only, SKIP = pass.<br>"
+            "<b>Setup Confirm:</b> ENTER = ready, EARLY = small-risk only, WATCH = monitor only, SKIP = pass.<br>"
             "Price ($) shows the latest candle close.<br>"
             "Δ (%) shows the change from previous closed candle to latest closed candle on selected timeframe.<br>"
             "<b>Tip:</b> use column-header and cell hovers for detailed definitions. Advanced columns are optional."
@@ -506,7 +506,7 @@ _COPY = {
             "<b>1.</b> Start with <b>Setup Snapshot</b>: Δ (%) + Setup Confirm + Direction + Confidence.<br>"
             "<b>2.</b> Read <b>Setup Confirm</b> first: TREND+AI = strongest confirmation, TREND-led = technicals support the move, AI-led = AI support is strong enough, EARLY = small-risk only, WATCH = idea is alive but early, SKIP = leave it alone for now. This uses selected-timeframe execution quality plus a local spot risk model, not the scalp planner.<br>"
             "<b>3.</b> <b>Direction</b> = higher-timeframe spot bias from the adaptive lead/confirm anchor pair. <b>Confidence</b> = quality of that bias.<br>"
-            "<b>4.</b> Validate with <b>AI Ensemble</b> + <b>AI Confidence</b>. AI Ensemble is the higher-timeframe AI bias from the same adaptive anchor pair; AI Confidence scores how reliable that HTF AI verdict is.<br>"
+            "<b>4.</b> Validate with <b>AI Ensemble</b> + <b>AI Confidence</b>. AI Ensemble is the higher-timeframe AI bias from the same adaptive anchor pair; AI Confidence scores how reliable that higher-timeframe AI verdict is.<br>"
             "<b>5.</b> <b>Market Archive Read</b> is a market-history fit check, not a coin-specific proof card. Use it to size aggression, not to override price structure.<br>"
             "<b>6.</b> Use <b>Technical Regime Breakdown</b> only as selected-timeframe confirmation context, not as the main direction engine.<br>"
             "<b>7.</b> If the plan is defensive or SKIP, treat the lower section as reference/reclaim levels, not as an active two-path entry map."
@@ -515,7 +515,7 @@ _COPY = {
             "<b>1.</b> Start with <b>Setup Snapshot</b>: Δ (%) + Setup Confirm + Direction + Confidence.<br>"
             "<b>2.</b> Read <b>Setup Confirm</b> first: Strong = highest-quality confirmation, Early setup = interesting but still early, Developing = monitor, Not aligned = leave it alone for now. This uses selected-timeframe execution quality plus a local spot risk model, not the scalp planner.<br>"
             "<b>3.</b> <b>Direction</b> = higher-timeframe spot bias from the adaptive lead/confirm anchor pair. <b>Confidence</b> = quality of that bias.<br>"
-            "<b>4.</b> Validate with <b>AI Ensemble</b> + <b>AI Confidence</b>. AI Ensemble is the higher-timeframe AI bias from the same adaptive anchor pair; AI Confidence scores how reliable that HTF AI verdict is.<br>"
+            "<b>4.</b> Validate with <b>AI Ensemble</b> + <b>AI Confidence</b>. AI Ensemble is the higher-timeframe AI bias from the same adaptive anchor pair; AI Confidence scores how reliable that higher-timeframe AI verdict is.<br>"
             "<b>5.</b> <b>Market Archive Read</b> is a market-history fit check, not a coin-specific proof card. Use it to size aggression, not to override price structure.<br>"
             "<b>6.</b> Use <b>Technical Regime Breakdown</b> only as selected-timeframe confirmation context, not as the main direction engine.<br>"
             "<b>7.</b> If the plan is defensive or low alignment, treat the lower section as reference/reclaim levels, not as an active two-path setup map."
@@ -542,7 +542,7 @@ _COPY = {
             "<b>3.</b> Check <b>Confirming Confidence</b>. That tells you how strong the supporting timeframes look on their own confidence model.<br>"
             "<b>4.</b> Use <b>Short-TF Timing</b> as confirmation. If 5m/15m disagree with 1h/4h/1d, the structure may still be valid but entry timing is noisy.<br>"
             "<b>5.</b> If coverage is partial, trust the result less. Missing timeframes reduce confidence even when the visible alignment looks clean.<br>"
-            "<b>6.</b> A `*` in <b>AI Ensemble</b> means the ML layer fell back to neutral for safety on that timeframe.<br>"
+            "<b>6.</b> A `*` in <b>AI Ensemble</b> means the ML layer used a neutral safety read on that timeframe.<br>"
             "<b>7.</b> <b>Setup Confirm</b>, <b>Direction</b>, <b>Confidence</b>, <b>AI Ensemble</b>, and <b>AI Confidence</b> use the same spot execution engine family as Market/Spot for that timeframe, with archive calibration when enough history exists. They still support the main read; they are not standalone trade commands."
         ),
         "neutral": (
@@ -551,7 +551,7 @@ _COPY = {
             "<b>3.</b> Check <b>Confirming Confidence</b>. That tells you how strong the supporting timeframes look on their own confidence model.<br>"
             "<b>4.</b> Use <b>Short-TF Timing</b> as confirmation. If 5m/15m disagree with 1h/4h/1d, the structure may still be valid but timing is noisy.<br>"
             "<b>5.</b> If coverage is partial, trust the result less. Missing timeframes reduce confidence even when the visible alignment looks clean.<br>"
-            "<b>6.</b> A `*` in <b>AI Ensemble</b> means the ML layer fell back to neutral for safety on that timeframe.<br>"
+            "<b>6.</b> A `*` in <b>AI Ensemble</b> means the ML layer used a neutral safety read on that timeframe.<br>"
             "<b>7.</b> <b>Setup Confirm</b>, <b>Direction</b>, <b>Confidence</b>, <b>AI Ensemble</b>, and <b>AI Confidence</b> use the same spot execution engine family as Market/Spot for that timeframe, with archive calibration when enough history exists. They still support the main read; they are not standalone action commands."
         ),
     },
@@ -564,10 +564,10 @@ _COPY = {
             "<b>Timeframe</b>: the candle interval being checked.<br>"
             "<b>Role</b>: 5m/15m are timing; 1h/4h/1d are structural.<br>"
             "<b>Δ (%)</b>: last closed-candle change for that timeframe.<br>"
-            "<b>Setup Confirm</b>: the same setup-confirm engine family the scanner would use for that timeframe, then archive-calibrated when enough live history exists.<br>"
+            "<b>Setup Confirm</b>: the same setup-confirm engine family the Market tab uses for that timeframe, then archive-calibrated when enough live history exists.<br>"
             "<b>Direction</b>: the same higher-timeframe spot-bias direction family used in Market/Spot, but built for this row's timeframe.<br>"
             "<b>Confidence</b>: the same spot-confidence family used in Market/Spot for that timeframe, including archive calibration when available.<br>"
-            "<b>AI Ensemble</b>: the same higher-timeframe AI bias family used in Market/Spot for that timeframe. `*` means the AI layer fell back to Neutral for safety.<br>"
+            "<b>AI Ensemble</b>: the same higher-timeframe AI bias family used in Market/Spot for that timeframe. `*` means the AI layer used a neutral safety read.<br>"
             "<b>AI Confidence</b>: the same AI-confidence family used in Market/Spot for that timeframe, including archive calibration when available.<br>"
             "<b>Advanced view</b>: filters advanced columns into Trend, Momentum, or Volatility & Volume subsets."
         ),
@@ -575,10 +575,10 @@ _COPY = {
             "<b>Timeframe</b>: the candle interval being checked.<br>"
             "<b>Role</b>: 5m/15m are timing; 1h/4h/1d are structural.<br>"
             "<b>Δ (%)</b>: last closed-candle change for that timeframe.<br>"
-            "<b>Setup Confirm</b>: the same setup-confirm engine family the scanner would use for that timeframe, then archive-calibrated when enough live history exists.<br>"
+            "<b>Setup Confirm</b>: the same setup-confirm engine family the Market tab uses for that timeframe, then archive-calibrated when enough live history exists.<br>"
             "<b>Direction</b>: the same higher-timeframe spot-bias direction family used in Market/Spot, but built for this row's timeframe.<br>"
             "<b>Confidence</b>: the same spot-confidence family used in Market/Spot for that timeframe, including archive calibration when available.<br>"
-            "<b>AI Ensemble</b>: the same higher-timeframe AI bias family used in Market/Spot for that timeframe. `*` means the AI layer fell back to Neutral for safety.<br>"
+            "<b>AI Ensemble</b>: the same higher-timeframe AI bias family used in Market/Spot for that timeframe. `*` means the AI layer used a neutral safety read.<br>"
             "<b>AI Confidence</b>: the same AI-confidence family used in Market/Spot for that timeframe, including archive calibration when available.<br>"
             "<b>Advanced view</b>: filters advanced columns into Trend, Momentum, or Volatility & Volume subsets."
         ),
@@ -600,8 +600,8 @@ _COPY = {
         "neutral": "Read: low alignment until quality improves.",
     },
     "no_trade.note.degraded_scan": {
-        "trader": "The live scan is degraded, so the market picture is incomplete. Wait for full data before taking fresh risk.",
-        "neutral": "The live scan is degraded, so the market picture is incomplete. Wait for full data before acting on new setups.",
+        "trader": "The live market read is partial, so the picture is incomplete. Wait for full data before taking fresh risk.",
+        "neutral": "The live market read is partial, so the picture is incomplete. Wait for full data before acting on new setups.",
     },
     "no_trade.note.catalyst_block_default": {
         "trader": "A market-wide catalyst is too close to trust fresh risk.",
@@ -700,7 +700,7 @@ _COPY = {
         "neutral": "Catalyst risk is capping size.",
     },
     "risk_sizing.note.market_gate_cap": {
-        "trader": "Current market gate is capping size.",
+        "trader": "Current market stance is capping size.",
         "neutral": "Current market filter is capping size.",
     },
     "risk_sizing.note.probe_only": {
@@ -728,12 +728,12 @@ _COPY = {
         "neutral": "Historically weak alert/playbook timing cluster is forcing smaller size.",
     },
     "risk_sizing.note.archive_guardrail_trim": {
-        "trader": "Archive guardrail is trimming size.",
-        "neutral": "Archive guardrail is trimming size.",
+        "trader": "History caution is trimming size.",
+        "neutral": "History caution is trimming size.",
     },
     "risk_sizing.note.archive_caution_trim": {
-        "trader": "Archive caution is keeping size smaller.",
-        "neutral": "Archive caution is keeping size smaller.",
+        "trader": "History caution is keeping size smaller.",
+        "neutral": "History caution is keeping size smaller.",
     },
     "alert.playbook.supportive.title": {
         "trader": "Active playbook window is lining up",
@@ -748,8 +748,8 @@ _COPY = {
         "neutral": "Active playbook window looks fragile",
     },
     "alert.playbook.fragile.note": {
-        "trader": "{playbook} is active, but the current timing window has been weak for names like {names}. Stay more selective than the raw setup alone suggests.",
-        "neutral": "{playbook} is active, but the current timing window has been weak for names like {names}. Stay more selective than the raw setup alone suggests.",
+        "trader": "{playbook} is active, but the current timing window has been weak for names like {names}. Stay more selective than the setup alone suggests.",
+        "neutral": "{playbook} is active, but the current timing window has been weak for names like {names}. Stay more selective than the setup alone suggests.",
     },
     "alert.catalyst.block.title": {
         "trader": "Stand aside into {title}",
@@ -1023,15 +1023,15 @@ Main table columns:
 - R:R, Entry/Stop/Target, Scalp Opportunity
 - Optional advanced indicator columns
 
-Scanner input modes:
-- Default mode: Top N liquidity scan (market-wide)
-- Custom mode: enter up to 10 symbols in Custom Coins, click Run Scan, and scanner analyzes only that watchlist
+Market scan modes:
+- Broad Market: top-liquidity universe
+- Watchlist: enter up to 10 symbols in Custom Coins, click Run Scan, and the table analyzes only that watchlist
 - Top N control is disabled while custom mode is active
-- Custom watchlist mode does not depend on the live top-volume provider universe; it scans requested symbols directly
-- Selected timeframe controls tactical candle context, levels, scalp gating, and Delta
+- Watchlist mode does not depend on the live top-volume provider universe; it reads requested symbols directly
+- Selected timeframe controls tactical candle context, levels, scalp timing checks, and Delta
 - Visible `Direction` + `Confidence` come from the closed adaptive higher-timeframe anchor pair
 - Visible `AI Ensemble` comes from a separate closed AI bias engine using the same adaptive anchors
-- Visible `AI Confidence` scores the quality of that HTF AI verdict
+- Visible `AI Confidence` scores the quality of that higher-timeframe AI verdict
 
 How the 5 key columns are calculated:
 
@@ -1049,14 +1049,14 @@ How the 5 key columns are calculated:
   - if `1D` and `4H` conflict, Direction becomes Neutral
 
 2. `Confidence`
-- This is the quality score of the same HTF technical spot direction
+- This is the quality score of the same higher-timeframe technical spot direction
 - It scores:
-  - HTF alignment
+  - higher-timeframe alignment
   - structure quality
   - trend quality
   - regime quality
   - location quality
-  - and penalties for conflict / range / degraded data
+  - and penalties for conflict / range / partial data
 
 3. `AI Ensemble`
 - Separate AI bias engine, also using the closed adaptive anchor pair
@@ -1067,11 +1067,11 @@ How the 5 key columns are calculated:
 - The 3 dots show how many models support the final AI direction
 
 4. `AI Confidence`
-- Quality score of the HTF AI verdict
+- Quality score of the higher-timeframe AI verdict
 - Lower when:
   - AI verdict is Neutral
   - `1D` / `4H` AI conflict exists
-  - AI data degraded/fallback is active
+  - AI data is partial or using a neutral safety read
   - model support is weak
 
 5. `Setup Confirm`
@@ -1085,17 +1085,17 @@ How the 5 key columns are calculated:
   - local location quality
   - local spot-style risk/reward from support / resistance / EMA21 / ATR
 - `TREND-led` = pure technical selected-timeframe confirmation
-- `AI-led` = pure AI confirmation, but it still must pass the same execution safety gates
+- `AI-led` = pure AI confirmation, but it still must pass the same execution safety checks
 - `TREND+AI` = both motors are independently strong and also elite together
 - `EARLY` = not fully confirmed yet, but clean enough for small-risk only
 - `WATCH` = the idea is alive, but timing is not clean yet
 - `SKIP` = edge is too weak, too conflicted, or badly located right now
 
 Scalp Opportunity is separate from Setup Confirm.
-It appears only if all execution gates pass:
+It appears only if all execution checks pass:
 - Direction match
 - Timeframe-adaptive R:R / ADX / Confidence thresholds
-- No tech/AI conflict
+- No technical/AI conflict
 - Valid entry/stop/target
 """,
         "neutral": """
@@ -1111,15 +1111,15 @@ Main table columns:
 - R:R, Entry/Stop/Target, Scalp Opportunity
 - Optional advanced indicator columns
 
-Scanner input modes:
-- Default mode: Top N liquidity scan (market-wide)
-- Custom mode: enter up to 10 symbols in Custom Coins, click Run Scan, and scanner analyzes only that watchlist
+Market scan modes:
+- Broad Market: top-liquidity universe
+- Watchlist: enter up to 10 symbols in Custom Coins, click Run Scan, and the table analyzes only that watchlist
 - Top N control is disabled while custom mode is active
-- Custom watchlist mode does not depend on the live top-volume provider universe; it scans requested symbols directly
-- Selected timeframe controls tactical candle context, levels, scalp gating, and Delta
+- Watchlist mode does not depend on the live top-volume provider universe; it reads requested symbols directly
+- Selected timeframe controls tactical candle context, levels, scalp timing checks, and Delta
 - Visible `Direction` + `Confidence` come from the closed adaptive higher-timeframe anchor pair
 - Visible `AI Ensemble` comes from a separate closed AI bias engine using the same adaptive anchors
-- Visible `AI Confidence` scores the quality of that HTF AI verdict
+- Visible `AI Confidence` scores the quality of that higher-timeframe AI verdict
 
 How the 5 key columns are calculated:
 
@@ -1133,14 +1133,14 @@ How the 5 key columns are calculated:
 - The slower anchor leads and the faster anchor confirms
 
 2. `Confidence`
-- This is the quality score of the same HTF technical spot direction
+- This is the quality score of the same higher-timeframe technical spot direction
 
 3. `AI Ensemble`
 - Separate AI bias engine, also using the closed adaptive anchor pair
 - The 3 dots show how many models support the final AI direction
 
 4. `AI Confidence`
-- Quality score of the HTF AI verdict
+- Quality score of the higher-timeframe AI verdict
 
 5. `Setup Confirm`
 - This is **not** the main direction
@@ -1153,10 +1153,10 @@ How the 5 key columns are calculated:
 - `SKIP` = not aligned right now
 
 Scalp Opportunity is separate from Setup Confirm.
-It appears only if all execution gates pass:
+It appears only if all execution checks pass:
 - Direction match
 - Timeframe-adaptive R:R / ADX / Confidence thresholds
-- No tech/AI conflict
+- No technical/AI conflict
 - Valid entry/stop/target
 """,
     },
@@ -1229,22 +1229,22 @@ These 5 columns use the same core logic as Market tab.
         "trader": """
 Live position management tab.
 Main outputs:
-- Raw PnL, levered PnL, funding effect, net PnL
+- Base PnL, levered PnL, funding effect, net PnL
 - Estimated liquidation distance (simple model)
 - Direction / Confidence / AI Ensemble / AI Confidence summary
 - Technical Invalidation Line (hard risk line)
 - Position health decision block (HOLD / REDUCE / EXIT style guidance)
-- Optional scalp setup block with gate reasons when unavailable
+- Optional scalp setup block with context reasons when unavailable
 """,
         "neutral": """
 Live position management tab.
 Main outputs:
-- Raw PnL, levered PnL, funding effect, net PnL
+- Base PnL, levered PnL, funding effect, net PnL
 - Estimated liquidation distance
 - Direction / Confidence / AI summary
 - Technical Invalidation Line (hard risk line)
 - Position read block
-- Optional scalp block with gate reasons when unavailable
+- Optional scalp block with context reasons when unavailable
 """,
     },
     "guide.section.sessions": {
@@ -1269,25 +1269,25 @@ Use it to decide when conditions look cleaner after a setup already exists elsew
     },
     "guide.section.signal_archive": {
         "trader": """
-Live tracker and execution archive.
+Smart signal archive and execution review.
 
 Use it to:
 - review what the dashboard actually logged in production
-- compare scanner output with what you actually took
-- study resolved outcome quality by setup, timeframe, session, and version
-- verify whether adaptive calibration is reading `Current Only` or `Mixed Fallback`
+- compare the market scan with what you actually took
+- inspect a coin directly or let Best Signal surface the strongest learned leader
+- study resolved quality by timeframe, session, execution, and hold timing
 
 This tab is not a live entry screen.
 It is the system's memory and review surface.
 """,
         "neutral": """
-Live tracker and execution archive.
+Smart signal archive and execution review.
 
 Use it to:
 - review what the dashboard actually logged
-- compare scanner output with what was actually executed
-- study resolved outcome quality by setup, timeframe, session, and version
-- verify whether adaptive calibration is reading `Current Only` or `Mixed Fallback`
+- compare the market scan with what was actually executed
+- inspect a coin directly or let Best Signal surface the strongest learned leader
+- study resolved quality by timeframe, session, execution, and hold timing
 
 This tab is not a live action screen.
 It is the system's memory and review surface.
@@ -1336,7 +1336,7 @@ Scalp Lab has 2 layers: live scalp archive truth on top, historical study below.
 What it does:
 - reviews what the live dashboard already logged as scalp
 - compares taken / skipped / observed execution outcomes
-- replays the current scalp planner and scalp gate on closed candles
+- replays the current scalp planner and scalp checks on closed candles
 - tracks TP-first, SL-first, and timeout behavior by side and by coin
 
 Use it for:
@@ -1353,7 +1353,7 @@ Scalp Lab has 2 layers: live scalp archive truth on top, historical study below.
 What it does:
 - reviews what the live dashboard already logged as scalp
 - compares taken / skipped / observed execution outcomes
-- replays the current scalp planner and scalp gate on closed candles
+- replays the current scalp planner and scalp checks on closed candles
 - tracks TP-first, SL-first, and timeout behavior by side and by coin
 
 Use it for:
@@ -1368,7 +1368,7 @@ Use Signal Archive for:
     "guide.section.workflow": {
         "trader": """
 Recommended daily flow:
-1. Market tab: check regime + scanner shortlist
+1. Market tab: check regime + market shortlist
 2. Spot: validate setup and read the Spot Execution Plan
 3. Position: if already in trade, follow Technical Invalidation + decision model first
 4. Sessions: check whether the timing window is actually favorable
@@ -1384,7 +1384,7 @@ Quick rule:
 """,
         "neutral": """
 Recommended daily flow:
-1. Market tab: check regime + scanner shortlist
+1. Market tab: check regime + market shortlist
 2. Spot: validate setup and read the Spot Setup Read
 3. Position: if already in trade, follow Technical Invalidation + decision model first
 4. Sessions: check whether the timing window is actually favorable
@@ -1425,22 +1425,22 @@ This dashboard is **not financial advice**.
 Use this 60-second checklist:
 
 1. **Market tab**
-- Scanner table loads and shows multiple rows
+- Market table loads and shows multiple rows
 - Setup Confirm / Direction / Confidence / AI Ensemble / AI Confidence are not empty
 
 2. **Spot tab**
-- Analyse runs and shows Direction + Confidence + HTF AI + AI Confidence
+- Analyse runs and shows Direction + Confidence + higher-timeframe AI + AI Confidence
 - Spot setup panel appears
 
 3. **Position tab**
-- Raw/Levered PnL and Net PnL render correctly
+- Base/Levered PnL and Net PnL render correctly
 - Technical Invalidation line is visible
 - Excel report downloads without resetting analysis view
 
 4. **AI Workspace**
 - Quick Prediction mode returns Direction / Probability / Agreement in one run
 - Model & Timeframe Matrix mode fills timeframe matrix with plan source fields
-- Debug expander shows AI vs non-AI plan levels
+- Details panel shows AI vs non-AI plan levels
 
 5. **Portfolio Scenario**
 - Basket editor accepts your holdings and anchor target
@@ -1450,22 +1450,22 @@ Use this 60-second checklist:
 Use this 60-second checklist:
 
 1. **Market tab**
-- Scanner table loads and shows multiple rows
+- Market table loads and shows multiple rows
 - Setup Confirm / Direction / Confidence / AI Ensemble / AI Confidence are not empty
 
 2. **Spot tab**
-- Analyse runs and shows Direction + Confidence + HTF AI + AI Confidence
+- Analyse runs and shows Direction + Confidence + higher-timeframe AI + AI Confidence
 - Spot setup panel appears
 
 3. **Position tab**
-- Raw/Levered PnL and Net PnL render correctly
+- Base/Levered PnL and Net PnL render correctly
 - Technical Invalidation line is visible
 - Excel report downloads without resetting analysis view
 
 4. **AI Workspace**
 - Quick Prediction mode returns Direction / Probability / Agreement in one run
 - Model & Timeframe Matrix mode fills timeframe matrix with plan source fields
-- Debug expander shows AI vs non-AI plan levels
+- Details panel shows AI vs non-AI plan levels
 
 5. **Portfolio Scenario**
 - Basket editor accepts your holdings and anchor target
@@ -1659,7 +1659,7 @@ def trade_gate_display(value: object, *, audience: str | None = None) -> str:
     selected_audience = _normalize_audience(audience) if audience is not None else get_copy_audience()
     mapping = {
         "NO_TRADE": {
-            "trader": "No-Trade",
+            "trader": "Stand Aside",
             "neutral": "Low Alignment",
         },
         "DEFENSIVE_ONLY": {

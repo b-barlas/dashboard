@@ -103,7 +103,7 @@ def _top_setup_cluster_alert(rows: list[dict], market_lead_snapshot, market_trad
     severity = "MEDIUM" if enter_count >= 1 else "INFO"
     tone = "positive" if lead_direction == "UPSIDE" else "negative"
     direction_txt = "upside" if lead_direction == "UPSIDE" else "downside"
-    title = f"Actionable {direction_txt} cluster"
+    title = f"Clean {direction_txt} cluster"
     note = (
         f"The current tape is concentrating cleaner {direction_txt} names. "
         f"Best on-screen cluster: {', '.join(top_symbols)}."
@@ -141,10 +141,10 @@ def _learned_edge_alert(rows: list[dict]) -> MarketAlert | None:
             state_signature=f"FAVORED|{'-'.join(names)}|{round(avg_score, 1)}",
             severity="MEDIUM" if avg_score >= 66.0 else "INFO",
             tone="positive",
-            title="Historically favored names are clustering",
+            title="History favors the current cluster",
             note=(
                 f"Live candidates like {', '.join(names)} line up with the strongest resolved history, "
-                "including real execution feedback where available."
+                "including real outcome feedback where available."
             ),
         )
 
@@ -177,7 +177,7 @@ def _session_fit_alert(session_fit_snapshot) -> MarketAlert | None:
             severity="INFO" if score < 4.0 else "MEDIUM",
             tone="positive",
             title="Current session has been supportive",
-            note=note or "The current UTC session has been one of the cleaner windows in recent archive history.",
+            note=note or "The current UTC session has been one of the cleaner windows in recent history.",
         )
     if label == "Session Fragile":
         return MarketAlert(
@@ -213,10 +213,10 @@ def _archive_guardrail_alert(rows: list[dict]) -> MarketAlert | None:
             state_signature=f"GUARDRAIL|{'-'.join(names)}|{round(sum(score for score, _ in guarded[:3]), 1)}",
             severity="MEDIUM",
             tone="warning",
-            title="Archive guardrails are clustering",
+            title="History cautions are clustering",
             note=(
                 f"Names like {', '.join(names)} are lining up with historically weak session, catalyst, "
-                "or trade-gate windows. Stay smaller and more selective."
+                "or market-stance windows. Stay smaller and more selective."
             ),
         )
 
@@ -228,7 +228,7 @@ def _archive_guardrail_alert(rows: list[dict]) -> MarketAlert | None:
             state_signature=f"CAUTION|{'-'.join(names)}|{round(sum(score for score, _ in cautioned[:3]), 1)}",
             severity="INFO",
             tone="warning",
-            title="Archive caution is building",
+            title="History caution is building",
             note=(
                 f"Names like {', '.join(names)} are appearing in softer historical windows. "
                 "They may still work, but they usually deserve tighter standards."
@@ -287,9 +287,9 @@ def _execution_stance_alert(rows: list[dict], market_trade_gate_snapshot, market
             state_signature=f"SUPPORTIVE|{gate_key}|{'-'.join(names)}",
             severity="INFO" if gate_key == "SELECTIVE_ONLY" else "MEDIUM",
             tone="positive",
-            title="Current execution stance is supportive",
+            title="Current market stance is supportive",
             note=(
-                f"Names like {', '.join(names)} are lining up with favorable archive history, cleaner size support, "
+                f"Names like {', '.join(names)} are lining up with favorable history, cleaner size support, "
                 "and a session/catalyst window that has converted well."
             ),
         )
@@ -306,10 +306,10 @@ def _execution_stance_alert(rows: list[dict], market_trade_gate_snapshot, market
             state_signature=f"FRAGILE|{gate_key}|{'-'.join(names)}",
             severity="INFO",
             tone="warning",
-            title="Current execution stance is fragile",
+            title="Current market stance is fragile",
             note=(
-                f"Names like {', '.join(names)} are showing up in a weaker archive window. "
-                "Even if raw setup quality looks fine, this usually argues for less aggression."
+                f"Names like {', '.join(names)} are showing up in a weaker history window. "
+                "Even if setup quality looks fine, this usually argues for less aggression."
             ),
         )
     return None
@@ -428,7 +428,7 @@ def build_market_alerts(
                 state_signature=f"{gate_key}|{gate_reason}",
                 severity="HIGH",
                 tone="negative",
-                title=f"{gate_label or trade_gate_display('NO_TRADE')} gate active",
+                title=f"{gate_label or trade_gate_display('NO_TRADE')} active",
                 note=gate_note or copy_text("alert.trade_gate.no_trade.note"),
             )
         )

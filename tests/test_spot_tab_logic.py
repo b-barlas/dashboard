@@ -10,8 +10,8 @@ from tabs.spot_tab import (
 
 
 def test_spot_ai_fallback_note_maps_known_statuses() -> None:
-    assert _spot_ai_fallback_note({"status": "insufficient_features"}).startswith("AI fallback active")
-    assert _spot_ai_fallback_note({"status": "single_class_window"}).startswith("AI fallback active")
+    assert _spot_ai_fallback_note({"status": "insufficient_features"}).startswith("AI safety read")
+    assert _spot_ai_fallback_note({"status": "single_class_window"}).startswith("AI safety read")
     assert _spot_ai_fallback_note({}) == ""
 
 

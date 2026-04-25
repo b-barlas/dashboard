@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
 
+from core.archive_policy import SCALP_ARCHIVE_WINDOW_ROWS
 from core.backtest import (
     build_scalp_outcome_study,
     summarize_scalp_outcome_study,
@@ -267,7 +268,7 @@ def _build_live_scalp_kpi_rows(
         {
             "label": "Signals in View",
             "value": int(archive_snapshot.get("total") or 0),
-            "subtext": "Current-version live scalp archive window",
+            "subtext": "Latest live scalp archive window",
         },
         {
             "label": "Resolved in View",
@@ -337,7 +338,7 @@ def _build_historical_scalp_kpi_rows(
         {
             "label": "Events in Study",
             "value": occurrences,
-            "subtext": "Scalp-qualified historical events in this simulation window",
+            "subtext": "Scalp-matched historical events in this simulation window",
         },
         {
             "label": "Symbols with Events",
@@ -354,7 +355,7 @@ def _build_historical_scalp_kpi_rows(
             "label": f"Avg Outcome @+{int(forward_bars)}",
             "value": f"{avg_outcome:+.2f}%",
             "value_color": positive if avg_outcome >= 0.0 else negative,
-            "subtext": "Average realized outcome across gate-passing scalp events",
+            "subtext": "Average realized outcome across scalp events that passed quality checks",
         },
     ]
     diagnostics_items = [
@@ -839,8 +840,9 @@ def render(ctx: dict) -> None:
                         f"<td>{_ai_ensemble_chip(str(r.get('AI Direction', 'Neutral')), str(r.get('AI Votes', '0/3')))}</td>"
                     )
                 elif c == "AI Confidence":
+                    ai_data_partial = r.get("AI Data Partial", r.get("AI Degraded", False))
                     cells.append(
-                        f"<td>{_ai_confidence_chip(r.get(c, r.get('AI Confidence')), direction=r.get('AI Direction'), votes_text=r.get('AI Votes'), timeframe_conflict=r.get('AI Timeframe Conflict', False), degraded_data=r.get('AI Degraded', False))}</td>"
+                        f"<td>{_ai_confidence_chip(r.get(c, r.get('AI Confidence')), direction=r.get('AI Direction'), votes_text=r.get('AI Votes'), timeframe_conflict=r.get('AI Timeframe Conflict', False), degraded_data=ai_data_partial)}</td>"
                     )
                 elif c in {"Event Price", "Target", "Stop"}:
                     v = pd.to_numeric(r.get(c), errors="coerce")
@@ -990,7 +992,7 @@ def render(ctx: dict) -> None:
             st,
             title="Shared Engine",
             body_html=(
-                "Both sections use the same <b>entry / stop / target planner</b> and <b>scalp quality gate</b> as the Market scanner."
+                "Both sections use the same <b>entry / stop / target planner</b> and <b>scalp quality checks</b> as the Market tab."
             ),
             tone="positive",
         )
@@ -1077,7 +1079,7 @@ def render(ctx: dict) -> None:
     )
 
     archive_history_df = fetch_signal_events_df(
-        limit=1600,
+        limit=SCALP_ARCHIVE_WINDOW_ROWS,
         source="Scalp",
         timeframe=timeframe,
         decision_version=current_decision_version("Market"),
@@ -1098,7 +1100,7 @@ def render(ctx: dict) -> None:
             else ""
         )
         st.caption(
-            f"No current-version scalp archive rows yet on {timeframe.upper()}{scope_text}. "
+            f"No learned scalp archive rows yet on {timeframe.upper()}{scope_text}. "
             "The tracker will start filling this view from live Market scans."
         )
     else:
@@ -1134,7 +1136,7 @@ def render(ctx: dict) -> None:
         scope_text = (
             f"{', '.join(custom_bases[:6])}" + (f" +{len(custom_bases) - 6} more" if len(custom_bases) > 6 else "")
             if custom_mode_active
-            else "Current scanner universe"
+            else "current Market universe"
         )
         st.caption(
             f"Live tracker truth for {timeframe.upper()} scalp signals. Scope: {scope_text}. "
@@ -1738,13 +1740,13 @@ def render(ctx: dict) -> None:
             capped_n = min(capped_n, len(pairs))
             if capped_n < len(pairs):
                 st.warning(
-                    f"Workload capped for responsiveness: scanning {capped_n}/{len(pairs)} symbols "
+                    f"Workload capped for responsiveness: reading {capped_n}/{len(pairs)} symbols "
                     f"(budget {max_rows_budget:,} rows)."
                 )
                 pairs = pairs[:capped_n]
 
         st.info(
-            f"Fetching candles and scanning scalp-qualified events across {len(pairs)} symbols..."
+            f"Fetching candles and finding scalp-matched events across {len(pairs)} symbols..."
         )
         all_events: list[pd.DataFrame] = []
         started_at = time.time()
@@ -1837,7 +1839,7 @@ def render(ctx: dict) -> None:
 
         if not all_events:
             st.warning(
-                "No scalp-qualified events were found in this window. "
+                "No scalp-matched events were found in this window. "
                 "Try increasing lookback or using a faster timeframe."
             )
             if diag_gate_reject_counts:
@@ -1845,7 +1847,7 @@ def render(ctx: dict) -> None:
                 for reason_code, count in diag_gate_reject_counts.most_common(4):
                     reject_parts.append(f"{_gate_reason_label(reason_code)} {int(count)}")
                 if reject_parts:
-                    st.caption(f"Top gate rejects: {' • '.join(reject_parts)}")
+                    st.caption(f"Top quality rejects: {' • '.join(reject_parts)}")
             if diag_plan_fail_counts:
                 plan_parts = [f"{reason} {int(count)}" for reason, count in diag_plan_fail_counts.most_common(3)]
                 if plan_parts:
@@ -1859,10 +1861,10 @@ def render(ctx: dict) -> None:
                 or diag_analysis_fail
             ):
                 st.caption(
-                    f"Diagnostics: no-data symbols={no_data_symbols}, failed symbols={failed_symbols}, "
+                    f"Support data: no-data symbols={no_data_symbols}, failed symbols={failed_symbols}, "
                     f"cache hits={cache_hits}, bars evaluated={diag_bars_evaluated}, "
                     f"signal-neutral rejects={diag_signal_side_reject}, plan-fail={diag_plan_fail}, "
-                    f"analysis-fail={diag_analysis_fail}, gate-pass candidates={diag_gate_pass_candidates}."
+                    f"analysis-fail={diag_analysis_fail}, quality-pass candidates={diag_gate_pass_candidates}."
                 )
             return
 
@@ -1949,7 +1951,7 @@ def render(ctx: dict) -> None:
     avg_hit_text = f"+{avg_hit:.1f} bars" if np.isfinite(avg_hit) else "N/A"
     median_text = f"{median_outcome:+.2f}%"
     st.markdown("### Historical Study")
-    st.caption("Simulation-only read using the current scalp planner and gate on historical closed candles.")
+    st.caption("Simulation-only read using the current scalp planner and quality checks on historical closed candles.")
     study_badges: list[dict[str, object]] = [
         {"text": "Study complete", "tone": "positive"},
         {"text": f"{int(summary['occurrences'])} events • {symbols_with_events}/{len(pairs)} symbols", "tone": "accent"},
@@ -1979,9 +1981,9 @@ def render(ctx: dict) -> None:
     )
     if no_data_symbols or failed_symbols or cache_hits:
         st.caption(
-            f"Study diagnostics: cache hits={cache_hits}, no-data symbols={no_data_symbols}, "
+            f"Study support data: cache hits={cache_hits}, no-data symbols={no_data_symbols}, "
             f"failed symbols={failed_symbols}, bars evaluated={diag_bars_evaluated}, "
-            f"gate-pass candidates={diag_gate_pass_candidates}."
+            f"quality-pass candidates={diag_gate_pass_candidates}."
         )
     if truncated_by_time:
         st.caption(
@@ -2114,7 +2116,7 @@ def render(ctx: dict) -> None:
                     width="stretch",
                 )
 
-    with st.expander("Advanced Diagnostics", expanded=False):
+    with st.expander("Advanced Study Detail", expanded=False):
         st.markdown("#### Outcome mix")
         outcome = events_df.get("Outcome", pd.Series(dtype=object)).astype(str).str.upper()
         total_n = max(1, len(events_df))

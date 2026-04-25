@@ -774,7 +774,7 @@ def get_market_top_snapshot() -> dict[str, float | int | str | None]:
             cp_payload = _fetch_market_indices_coinpaprika()
             if _indices_payload_ok(cp_payload):
                 indices_payload = cp_payload
-                _debug("Market indices fallback active: CoinPaprika.")
+                _debug("Market indices backup active: CoinPaprika.")
         if _indices_payload_ok(indices_payload):
             (
                 btc_dom,
@@ -1090,7 +1090,7 @@ def _fetch_exchange_tickers_snapshot_uncached() -> dict:
         data = EXCHANGE.fetch_tickers()
         return data if isinstance(data, dict) else {}
     except Exception as e:
-        _debug(f"exchange ticker snapshot fallback unavailable: {e}")
+        _debug(f"exchange ticker snapshot backup unavailable: {e}")
         return {}
 
 

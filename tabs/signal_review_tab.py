@@ -4,6 +4,7 @@ from collections.abc import Mapping
 import time
 
 import pandas as pd
+from core.archive_policy import ARCHIVE_LEARNING_WINDOW_ROWS
 from core.decision_version import current_decision_version
 from core.session_utils import session_bucket_for_timestamp
 from core.trading_copy import copy_text, playbook_display, playbook_key, trade_gate_display, trade_gate_key
@@ -177,8 +178,8 @@ def _coin_view_summary(
         scope_parts.append(str(timeframe_filter).upper())
     return (
         f"<b>{' • '.join(scope_parts)}</b><br>"
-        f"Latest {int(rows_loaded)} of up to {int(analysis_limit)} current-version rows loaded<br>"
-        "Overview and deep dives rank the best pockets for this coin"
+        f"Using {int(rows_loaded)} of the latest {int(analysis_limit)} learned rows in this scope<br>"
+        "Overview and deep dives rank the cleanest pockets for this coin"
     )
 
 
@@ -329,7 +330,7 @@ def _best_signal_summary(
     if str(timeframe_filter or "").strip() and str(timeframe_filter) != "All":
         return (
             f"<b>{symbol}</b><br>"
-            f"Best Signal leader for <b>{str(timeframe_filter).upper()}</b> inside the latest {int(analysis_limit)} current-version resolved rows<br>"
+            f"Best Signal leader for <b>{str(timeframe_filter).upper()}</b> inside the latest {int(analysis_limit)} learned rows<br>"
             f"{follow:.1f}% follow-through • {avg_dir:+.2f}% avg dir return • {resolved} resolved"
         )
     if mode == "best_available":
@@ -340,15 +341,15 @@ def _best_signal_summary(
         )
         return (
             f"<b>{symbol}</b><br>"
-            f"Best available archive read across the latest {int(analysis_limit)} current-version resolved rows<br>"
+            f"Best archive read across the latest {int(analysis_limit)} learned rows<br>"
             f"{follow:.1f}% follow-through • {avg_dir:+.2f}% avg dir return • strongest pocket {best_timeframe.upper() if best_timeframe else 'N/A'} • "
             f"{timeframe_note} currently have enough history for a trustworthy read"
         )
     return (
         f"<b>{symbol}</b><br>"
-        f"Best Signal leader across the latest {int(analysis_limit)} current-version resolved rows<br>"
+        f"Best Signal leader across the latest {int(analysis_limit)} learned rows<br>"
         f"{follow:.1f}% balanced follow-through • {avg_dir:+.2f}% avg dir return • strongest pocket {best_timeframe.upper() if best_timeframe else 'N/A'} • "
-        f"{qualified_timeframes} qualified timeframe pockets"
+        f"{qualified_timeframes} timeframe pockets with enough history"
     )
 
 
@@ -450,7 +451,7 @@ def _build_best_signal_leaderboard(
             "Best Signal"
             if int(row.get("QualifiedTimeframes") or 0) >= int(max(1, min_timeframes))
             and int(row.get("Resolved") or 0) >= int(max(1, min_total_resolved))
-            else "Best Available"
+            else "Best Read"
         ),
         axis=1,
     )
@@ -500,17 +501,17 @@ def _selected_best_signal_coin(leaderboard_df: pd.DataFrame, selection_state: ob
 def _learning_readiness_summary(*, mode: str, current_rows: int, total_rows: int) -> tuple[str, str]:
     if mode == "current_only":
         return (
-            f"<b>Current-only learning active</b><br>{int(current_rows)} current resolved in latest {int(total_rows)} current-version resolved rows",
+            f"<b>Learning active</b><br>{int(current_rows)} learned rows in this archive window",
             "positive",
         )
     if mode == "mixed_fallback":
         return (
-            f"<b>Mixed fallback</b><br>{int(current_rows)} current resolved in latest {int(total_rows)} resolved rows",
+            f"<b>Broader archive learning</b><br>{int(current_rows)} matched rows inside {int(total_rows)} recent resolved rows",
             "warning",
         )
     if mode == "unversioned_fallback":
         return (
-            "<b>Legacy fallback active</b><br>Current scanner history is not isolated yet",
+            "<b>Older archive learning</b><br>Current learning history is not isolated yet",
             "warning",
         )
     if mode == "empty":
@@ -519,15 +520,23 @@ def _learning_readiness_summary(*, mode: str, current_rows: int, total_rows: int
             "neutral",
         )
     return (
-        f"<b>Learning building</b><br>{int(current_rows)} current resolved in latest {int(total_rows)} current-version resolved rows",
+        f"<b>Learning building</b><br>{int(current_rows)} learned rows in this archive window",
         "neutral",
     )
 
 
 def _archive_health_summary(storage_snapshot) -> tuple[str, str]:
-    headline = str(storage_snapshot.durability_label or "Archive OK").strip() or "Archive OK"
+    raw_headline = str(storage_snapshot.durability_label or "Archive OK").strip() or "Archive OK"
+    headline_map = {
+        "Override, Mirror Missing": "Backup Mirror Missing",
+        "Custom Storage Override": "Custom Archive Path",
+        "Deploy-Ready Path": "Archive Protected",
+        "Workspace Storage": "Workspace Archive",
+        "Ephemeral Storage": "Temporary Archive",
+    }
+    headline = headline_map.get(raw_headline, raw_headline)
     recovery = str(storage_snapshot.recovery_status or "Unknown").strip() or "Unknown"
-    body = f"<b>{headline}</b><br>Recovery: {recovery}"
+    body = f"<b>{headline}</b><br>Recovery status: {recovery}"
     tone = str(storage_snapshot.durability_tone or "neutral")
     return body, tone
 
@@ -1777,7 +1786,7 @@ def render(ctx: dict) -> None:
         st.session_state["signal_review_tracker_notice"] = pending_notice
         st.session_state["signal_review_tracker_notice_tone"] = pending_notice_tone
 
-    analysis_limit = 10000
+    analysis_limit = ARCHIVE_LEARNING_WINDOW_ROWS
     recent_table_limit = 250
 
     view_mode = st.radio(
@@ -1822,7 +1831,7 @@ def render(ctx: dict) -> None:
             title="Enter a Coin",
             body_html=(
                 "Add a <b>coin</b> above to unlock the smart archive read. "
-                "Signal Archive will then scan the latest current-version history for that coin, rank the cleanest timeframe pockets, and surface hold/execution reads automatically."
+                "Signal Archive will then read the latest learned history for that coin, rank the cleanest timeframe pockets, and surface hold/execution reads automatically."
             ),
             tone="neutral",
         )
@@ -1883,7 +1892,7 @@ def render(ctx: dict) -> None:
             title="Best Signal Building",
             body_html=(
                 "Signal Archive could not find a trustworthy best-signal leader yet. "
-                "We need more resolved current-version history before auto-selection becomes useful."
+                "We need more resolved learned history before auto-selection becomes useful."
             ),
             tone="neutral",
         )
@@ -1949,7 +1958,7 @@ def render(ctx: dict) -> None:
             (
                 "Coin View"
                 if view_mode == "Coin"
-                else ("Best Available" if str(best_signal_selection.get("mode") or "").strip() == "best_available" else "Best Signal")
+                else ("Best Read" if str(best_signal_selection.get("mode") or "").strip() == "best_available" else "Best Signal")
             ),
             (
                 _coin_view_summary(
@@ -1970,7 +1979,7 @@ def render(ctx: dict) -> None:
         ("Learning Readiness", learning_summary, learning_tone),
     ]
     if show_archive_health:
-        top_card_specs.append(("Archive Alert", archive_health_body, archive_health_tone))
+        top_card_specs.append(("Archive Storage", archive_health_body, archive_health_tone))
 
     top_insight_cols = st.columns(len(top_card_specs), gap="medium")
     for col, (title, body_html, tone) in zip(top_insight_cols, top_card_specs):
@@ -1984,7 +1993,7 @@ def render(ctx: dict) -> None:
 
     if view_mode == "Best Signal" and not best_signal_leaderboard_df.empty:
         st.markdown("### Best Signal Leaderboard")
-        st.caption("Top archive leaders in the same scope. Use this to inspect nearby alternatives quickly.")
+        st.caption("Top archive leaders in the same scope. Select a coin to open its full archive read.")
         leaderboard_state = st.dataframe(
             best_signal_leaderboard_df,
             hide_index=True,
@@ -2224,7 +2233,7 @@ def render(ctx: dict) -> None:
             {
                 "label": "Signals in View",
                 "value": int(snapshot["total"]),
-                "subtext": "Current scanner version archive window",
+                "subtext": "Latest archive window for this scope",
             },
             {
                 "label": "Resolved in View",
@@ -2459,7 +2468,7 @@ def render(ctx: dict) -> None:
             "Show Data Tables",
             value=False,
             key="signal_review_show_data_tables",
-            help="Turn this on when you want raw rows, recent alerts, and archive learning tables.",
+            help="Turn this on when you want source rows, recent alerts, and archive learning tables.",
         )
 
     need_advanced_detail = bool(show_deep_dives or show_data_tables)
@@ -2491,7 +2500,7 @@ def render(ctx: dict) -> None:
     if "market_regime" in advanced_df_events.columns:
         advanced_df_events["Market Regime"] = advanced_df_events["market_regime"].replace("", "Unknown").fillna("Unknown")
     if "scan_focus" in advanced_df_events.columns:
-        advanced_df_events["Scan Focus"] = advanced_df_events["scan_focus"].replace("", "Unknown").fillna("Unknown")
+        advanced_df_events["Scan Mode"] = advanced_df_events["scan_focus"].replace("", "Unknown").fillna("Unknown")
     if "setup_confirm" in advanced_df_events.columns:
         advanced_df_events["Setup Confirm"] = advanced_df_events.apply(
             lambda row: setup_confirm_display(
@@ -2519,18 +2528,18 @@ def render(ctx: dict) -> None:
     if "market_trade_gate_key" in advanced_df_events.columns or "market_trade_gate" in advanced_df_events.columns:
         trade_gate_keys = advanced_df_events.get("market_trade_gate_key", pd.Series(index=advanced_df_events.index, dtype=object))
         trade_gate_display_values = advanced_df_events.get("market_trade_gate", pd.Series(index=advanced_df_events.index, dtype=object))
-        advanced_df_events["Trade Gate"] = pd.Series(trade_gate_keys, index=advanced_df_events.index).fillna("").astype(str).str.strip().map(
+        advanced_df_events["Market Stance"] = pd.Series(trade_gate_keys, index=advanced_df_events.index).fillna("").astype(str).str.strip().map(
             lambda value: trade_gate_display(value) if value else ""
         )
         fallback_trade_gate = pd.Series(trade_gate_display_values, index=advanced_df_events.index).fillna("").astype(str).str.strip()
-        advanced_df_events["Trade Gate"] = advanced_df_events["Trade Gate"].where(advanced_df_events["Trade Gate"].ne(""), fallback_trade_gate)
-        advanced_df_events["Trade Gate"] = advanced_df_events["Trade Gate"].replace("", "Unknown").fillna("Unknown")
-        advanced_df_events["Trade Gate Key"] = pd.Series(trade_gate_keys, index=advanced_df_events.index).fillna("").astype(str).str.strip()
-        advanced_df_events["Trade Gate Key"] = advanced_df_events["Trade Gate Key"].where(
-            advanced_df_events["Trade Gate Key"].ne(""),
+        advanced_df_events["Market Stance"] = advanced_df_events["Market Stance"].where(advanced_df_events["Market Stance"].ne(""), fallback_trade_gate)
+        advanced_df_events["Market Stance"] = advanced_df_events["Market Stance"].replace("", "Unknown").fillna("Unknown")
+        advanced_df_events["Market Stance Key"] = pd.Series(trade_gate_keys, index=advanced_df_events.index).fillna("").astype(str).str.strip()
+        advanced_df_events["Market Stance Key"] = advanced_df_events["Market Stance Key"].where(
+            advanced_df_events["Market Stance Key"].ne(""),
             fallback_trade_gate.map(trade_gate_key),
         )
-        advanced_df_events["Trade Gate Key"] = advanced_df_events["Trade Gate Key"].replace("", "Unknown").fillna("Unknown")
+        advanced_df_events["Market Stance Key"] = advanced_df_events["Market Stance Key"].replace("", "Unknown").fillna("Unknown")
     if "market_no_trade_reason" in advanced_df_events.columns:
         advanced_df_events[copy_text("review.label.no_trade_reason")] = (
             advanced_df_events["market_no_trade_reason"]
@@ -2609,10 +2618,10 @@ def render(ctx: dict) -> None:
                 else ("Caution" if float(value) >= 3.0 else "Clear")
             )
         )
-    if "Trade Gate" in advanced_df_events.columns:
+    if "Market Stance" in advanced_df_events.columns:
         advanced_df_events["Execution Readiness"] = advanced_df_events.apply(
             lambda row: archived_execution_stance_label(
-                trade_gate=str(row.get("Trade Gate") or ""),
+                trade_gate=str(row.get("Market Stance") or ""),
                 adaptive_edge=str(row.get("Learned Edge") or ""),
                 archive_guardrail_severity=str(row.get("History Guardrail Level") or ""),
             ),
@@ -2704,7 +2713,7 @@ def render(ctx: dict) -> None:
             "timeframe",
             "Primary Alert",
             "Alert Footprint",
-            "Scan Focus",
+            "Scan Mode",
             "Setup Confirm",
             "direction",
             "Lead Status",
@@ -2723,7 +2732,7 @@ def render(ctx: dict) -> None:
             "Learned Edge",
             "Execution Readiness",
             "Market Regime",
-            "Trade Gate",
+            "Market Stance",
             "Trade Decision",
             "Actual Trade Status",
             "Hold Style",
@@ -2765,7 +2774,6 @@ def render(ctx: dict) -> None:
             "symbol": "Coin",
             "timeframe": "TF",
             "Primary Alert": "Lead Alert",
-            "Scan Focus": "Scanner Focus",
             "Lead Status": "Lead Signal",
             "Market Lead": "AI View",
             "Flow Read": "Tape Read",
@@ -2794,9 +2802,9 @@ def render(ctx: dict) -> None:
         }
         recent_df = recent_df.rename(columns=rename_map)
         st.markdown("### Data Tables")
-        st.caption("Raw rows and support tables.")
+        st.caption("Source rows and support tables.")
         st.markdown("#### Recent Signals")
-        st.caption(f"Showing latest {min(int(recent_table_limit), int(len(df_events)))} row(s) from the current coin archive window.")
+        st.caption(f"Showing latest {min(int(recent_table_limit), int(len(df_events)))} row(s) from this archive scope.")
         st.dataframe(recent_df.round(2), hide_index=True, width="stretch")
 
         df_alerts = fetch_market_alerts_df(limit=100, source="Market", db_path=db_path)

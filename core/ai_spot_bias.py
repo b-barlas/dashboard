@@ -416,7 +416,7 @@ def analyze_timeframe_ai_bias(
             consensus_quality=float(latest.get("consensus_quality") or 0.0),
             degraded=True,
             status=status,
-            note="AI timeframe context is degraded; fallback output was neutralized.",
+            note="AI timeframe context is incomplete; neutral safety output is shown.",
             model_votes=trace_model_votes,
         )
 

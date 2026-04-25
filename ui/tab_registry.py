@@ -232,6 +232,17 @@ def build_tab_specs(deps: dict) -> list[tuple]:
     return specs
 
 
+def build_tab_spec(deps: dict, title: str) -> tuple:
+    """Build one render spec for the active dashboard tab."""
+    title_text = str(title or "").strip()
+    if title_text not in TAB_TITLES:
+        title_text = TAB_TITLES[0]
+    idx = TAB_TITLES.index(title_text)
+    renderer, keys = _TAB_DEPS[idx]
+    require_keys(deps, set(keys), scope=f"tab_registry.deps.{title_text}")
+    return renderer, {k: get_ctx(deps, k, scope=f"tab_registry.deps.{title_text}") for k in keys}
+
+
 def required_dep_keys() -> set[str]:
     """Return all dependency keys needed by the tab registry."""
     keys: set[str] = set()

@@ -106,9 +106,9 @@ class SignalReviewLogicTests(unittest.TestCase):
             current_rows=905,
             total_rows=1677,
         )
-        self.assertIn("Current-only learning active", body)
-        self.assertIn("905 current resolved", body)
-        self.assertIn("latest 1677 current-version resolved rows", body)
+        self.assertIn("Learning active", body)
+        self.assertIn("905 learned rows", body)
+        self.assertIn("archive window", body)
         self.assertEqual(tone, "positive")
 
     def test_ordered_timeframe_scope_keeps_canonical_order_and_extras(self) -> None:
@@ -225,7 +225,7 @@ class SignalReviewLogicTests(unittest.TestCase):
             timeframe_filter="All",
             analysis_limit=10000,
         )
-        self.assertIn("Best available archive read", summary)
+        self.assertIn("Best archive read", summary)
         self.assertIn("Only <b>1</b> timeframe", summary)
 
     def test_build_best_signal_leaderboard_labels_modes(self) -> None:
@@ -261,7 +261,7 @@ class SignalReviewLogicTests(unittest.TestCase):
         self.assertEqual(str(board.iloc[0]["Coin"]), "AAA")
         self.assertEqual(str(board.iloc[0]["Mode"]), "Best Signal")
         self.assertEqual(str(board.iloc[1]["Coin"]), "BBB")
-        self.assertEqual(str(board.iloc[1]["Mode"]), "Best Available")
+        self.assertEqual(str(board.iloc[1]["Mode"]), "Best Read")
 
     def test_selected_dataframe_row_index_reads_mapping_state(self) -> None:
         self.assertEqual(_selected_dataframe_row_index({"selection": {"rows": [2]}}), 2)
@@ -270,7 +270,7 @@ class SignalReviewLogicTests(unittest.TestCase):
     def test_selected_best_signal_coin_returns_selected_coin(self) -> None:
         board = pd.DataFrame(
             [
-                {"Coin": "TRX", "Mode": "Best Available"},
+                {"Coin": "TRX", "Mode": "Best Read"},
                 {"Coin": "ETH", "Mode": "Best Signal"},
             ]
         )

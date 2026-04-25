@@ -70,7 +70,7 @@ from tabs.market_tab import (
     _market_hidden_meta_cols,
     _pick_best_scalp_opportunity,
     _scan_universe_notice,
-    _pick_confidence_leader,
+    _pick_clearest_direction,
     _prepare_scan_market_enrichment,
     _prepare_closed_frame,
     _remember_last_good_snapshot,
@@ -173,7 +173,7 @@ class MarketTabLogicTests(unittest.TestCase):
 
     def test_compress_market_alerts_for_display_keeps_primary_then_context_summary(self):
         alerts = [
-            SimpleNamespace(alert_key="TRADE_GATE", severity="HIGH", tone="negative", title="No-Trade gate active", note=""),
+            SimpleNamespace(alert_key="TRADE_GATE", severity="HIGH", tone="negative", title="No-Trade active", note=""),
             SimpleNamespace(alert_key="MARKET_LEAD", severity="MEDIUM", tone="positive", title="Upside pressure is building", note=""),
             SimpleNamespace(alert_key="SESSION_FIT", severity="INFO", tone="positive", title="Current session has been supportive", note=""),
             SimpleNamespace(alert_key="FLOW_PROXY", severity="INFO", tone="positive", title="Shorts Crowded in BTC", note=""),
@@ -309,49 +309,112 @@ class MarketTabLogicTests(unittest.TestCase):
             ],
         )
 
-    def test_pick_confidence_leader_prefers_live_setup_over_skip(self):
+    def test_pick_clearest_direction_prefers_advanced_alignment(self):
         df = pd.DataFrame(
             [
                 {
                     "Coin": "BTC",
-                    "__confidence_val": 92.0,
-                    "__action_raw": "SKIP",
-                    "Setup Confirm": "SKIP",
                     "Direction": "Upside",
-                    "__ai_confidence_val": 65.0,
+                    "ADX": 22.0,
+                    "SuperTrend": "Bullish",
+                    "Ichimoku": "Neutral",
+                    "VWAP": "Above",
+                    "PSAR": "Neutral",
+                    "Stochastic RSI": 48.0,
+                    "Williams %R": "Neutral",
+                    "CCI": "Neutral",
+                    "Candle Pattern": "Neutral",
+                    "Bollinger": "Neutral",
+                    "Volatility": "Moderate",
+                    "Spike Alert": "",
+                    "__confidence_val": 98.0,
+                    "__action_raw": "WATCH",
+                    "Setup Confirm": "WATCH",
                 },
                 {
                     "Coin": "ETH",
-                    "__confidence_val": 81.0,
+                    "Direction": "Upside",
+                    "ADX": 35.0,
+                    "SuperTrend": "Bullish",
+                    "Ichimoku": "Bullish",
+                    "VWAP": "Above",
+                    "PSAR": "Bullish",
+                    "Stochastic RSI": 20.0,
+                    "Williams %R": "Oversold",
+                    "CCI": "Neutral",
+                    "Candle Pattern": "Bullish",
+                    "Bollinger": "Near Bottom",
+                    "Volatility": "High",
+                    "Spike Alert": "→ Spike",
+                    "__spike_dir": "UP",
+                    "__confidence_val": 65.0,
                     "__action_raw": "PROBE",
                     "Setup Confirm": "PROBE",
-                    "Direction": "Upside",
-                    "__ai_confidence_val": 52.0,
                 },
             ]
         )
-        coin, score, sub = _pick_confidence_leader(df)
-        self.assertEqual(coin, "ETH")
-        self.assertEqual(score, 81.0)
-        self.assertIn("Setup: EARLY", sub)
+        head, sub = _pick_clearest_direction(df)
+        self.assertEqual(head, "ETH • Upside")
+        self.assertIn("Trend 5/5", sub)
+        self.assertIn("Momentum 3/4", sub)
+        self.assertIn("Activity 3/3", sub)
 
-    def test_pick_confidence_leader_falls_back_to_skip_when_only_skip_exists(self):
+    def test_pick_clearest_direction_can_surface_bearish_alignment(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "Coin": "TRX",
+                    "Direction": "Downside",
+                    "ADX": 41.0,
+                    "SuperTrend": "Bearish",
+                    "Ichimoku": "Bearish",
+                    "VWAP": "Below",
+                    "PSAR": "Bearish",
+                    "Stochastic RSI": 88.0,
+                    "Williams %R": "Overbought",
+                    "CCI": "High",
+                    "Candle Pattern": "Bearish",
+                    "Bollinger": "Near Top",
+                    "Volatility": "Extreme",
+                    "Spike Alert": "→ Spike",
+                    "__spike_dir": "DOWN",
+                    "__confidence_val": 72.0,
+                    "__action_raw": "WATCH",
+                    "Setup Confirm": "WATCH",
+                }
+            ]
+        )
+        head, sub = _pick_clearest_direction(df)
+        self.assertEqual(head, "TRX • Downside")
+        self.assertIn("Trend 5/5", sub)
+        self.assertIn("Momentum 4/4", sub)
+        self.assertIn("Activity 3/3", sub)
+
+    def test_pick_clearest_direction_returns_empty_when_no_alignment(self):
         df = pd.DataFrame(
             [
                 {
                     "Coin": "BTC",
+                    "Direction": "Neutral",
+                    "ADX": 18.0,
+                    "SuperTrend": "Neutral",
+                    "Ichimoku": "Neutral",
+                    "VWAP": "Near VWAP",
+                    "PSAR": "Neutral",
+                    "Stochastic RSI": 50.0,
+                    "Williams %R": "Neutral",
+                    "CCI": "Neutral",
+                    "Candle Pattern": "Neutral",
+                    "Bollinger": "Neutral",
+                    "Volatility": "Moderate",
+                    "Spike Alert": "",
                     "__confidence_val": 92.0,
-                    "__action_raw": "SKIP",
-                    "Setup Confirm": "SKIP",
-                    "Direction": "Upside",
-                    "__ai_confidence_val": 65.0,
                 }
             ]
         )
-        coin, score, sub = _pick_confidence_leader(df)
-        self.assertEqual(coin, "BTC")
-        self.assertEqual(score, 92.0)
-        self.assertIn("Setup: SKIP", sub)
+        head, sub = _pick_clearest_direction(df)
+        self.assertEqual(head, "—")
+        self.assertIn("No clear", sub)
 
     def test_pick_best_scalp_opportunity_prefers_live_over_conditional(self):
         df = pd.DataFrame(
@@ -449,11 +512,11 @@ class MarketTabLogicTests(unittest.TestCase):
     def test_coin_id_unavailable_message_includes_reason_when_present(self):
         self.assertEqual(
             _coingecko_coin_id_unavailable_message("dependency injection missing at app boot"),
-            "no exchange OHLCV data; CoinGecko fallback unavailable (dependency injection missing at app boot)",
+            "no exchange OHLCV data; CoinGecko backup unavailable (dependency injection missing at app boot)",
         )
         self.assertEqual(
             _coingecko_coin_id_unavailable_message(""),
-            "no exchange OHLCV data; CoinGecko fallback unavailable",
+            "no exchange OHLCV data; CoinGecko backup unavailable",
         )
 
     def test_extract_ai_verdict_strips_votes_and_degraded_marker(self):
@@ -525,7 +588,7 @@ class MarketTabLogicTests(unittest.TestCase):
             [{"Coin": "BANANAS31"}],
             [],
         )
-        self.assertEqual(out, [("COS", "no exchange pair; coin-id unresolved for fallback")])
+        self.assertEqual(out, [("COS", "no exchange pair; coin-id unresolved for backup")])
 
     def test_custom_watchlist_missing_status_marks_unavailable_coin_id_fallback(self):
         out = _custom_watchlist_missing_status(
@@ -541,7 +604,7 @@ class MarketTabLogicTests(unittest.TestCase):
             [
                 (
                     "COS",
-                    "no exchange OHLCV data; CoinGecko fallback unavailable "
+                    "no exchange OHLCV data; CoinGecko backup unavailable "
                     "(dependency injection missing at app boot)",
                 )
             ],
@@ -555,7 +618,7 @@ class MarketTabLogicTests(unittest.TestCase):
             coin_id_map={"COS": "contentos"},
             coingecko_coin_id_fallback_available=True,
         )
-        self.assertEqual(out, [("COS", "no exchange OHLCV data; CoinGecko fallback returned empty")])
+        self.assertEqual(out, [("COS", "no exchange OHLCV data; CoinGecko backup returned empty")])
 
     def test_custom_watchlist_fallback_coin_id_only_applies_in_custom_mode(self):
         coin_id_map = {"COS": "contentos", "BANANAS31": "banana-gun"}
@@ -649,10 +712,10 @@ class MarketTabLogicTests(unittest.TestCase):
             "XBT/USD",
         )
 
-    def test_pair_provenance_label_marks_coingecko_fallback(self):
+    def test_pair_provenance_label_marks_coingecko_backup(self):
         self.assertEqual(
             _pair_provenance_label("BTC/USDT", "BTC/USDT", "coingecko"),
-            "BTC/USDT (CoinGecko fallback)",
+            "BTC/USDT (CoinGecko backup)",
         )
 
     def test_delta_fallback_symbol_uses_actual_exchange_pair_only(self):
@@ -662,10 +725,10 @@ class MarketTabLogicTests(unittest.TestCase):
         )
         self.assertIsNone(_delta_fallback_symbol("BTC/USDT", "BTC/USDT", "coingecko"))
 
-    def test_market_data_mode_marks_major_fallback_as_degraded(self):
+    def test_market_data_mode_marks_major_backup_as_partial(self):
         self.assertEqual(
             _market_data_mode(has_market_rows=True, used_major_fallback=True),
-            "MAJOR FALLBACK MODE",
+            "MAJOR BACKUP MODE",
         )
         self.assertEqual(
             _market_data_mode(has_market_rows=False, used_major_fallback=False),
@@ -1046,8 +1109,8 @@ class MarketTabLogicTests(unittest.TestCase):
 
     def test_ai_fallback_note_surfaces_ml_safety_fallback(self):
         note = _ai_fallback_note({"status": "insufficient_features"})
-        self.assertIn("AI fallback active", note)
-        self.assertIn("neutral safety output", note)
+        self.assertIn("AI safety read", note)
+        self.assertIn("neutral output", note)
 
     def test_setup_status_summary_downgrades_cached_and_degraded_sources(self):
         label, head, sub = _setup_status_summary(
@@ -1067,8 +1130,8 @@ class MarketTabLogicTests(unittest.TestCase):
             skip_count=3,
             source_label="LIVE (DEGRADED)",
         )
-        self.assertEqual(degraded_head, "DEGRADED SETUPS")
-        self.assertIn("DEGRADED READY: 1", degraded_sub)
+        self.assertEqual(degraded_head, "PARTIAL-DATA SETUPS")
+        self.assertIn("PARTIAL-DATA READY: 1", degraded_sub)
         self.assertIn("EARLY: 0", degraded_sub)
 
     def test_market_scan_signature_ignores_top_n_in_custom_mode(self):
@@ -1984,7 +2047,7 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertFalse(bool(resolved["has_market_rows"]))
         self.assertEqual(resolved["source_pair_count"], 12)
 
-    def test_underfilled_universe_message_prefers_major_fallback_wording(self):
+    def test_underfilled_universe_message_prefers_major_backup_wording(self):
         out = _underfilled_universe_message(
             custom_mode_active=False,
             used_major_fallback=True,
@@ -1992,7 +2055,7 @@ class MarketTabLogicTests(unittest.TestCase):
             working_count=10,
             requested_n=50,
         )
-        self.assertIn("Hardcoded major fallback universe", out)
+        self.assertIn("Hardcoded major backup universe", out)
         self.assertNotIn("exchange-ranked pairs", out)
 
 

@@ -304,8 +304,9 @@ def render(ctx: dict) -> None:
                         f"<td>{_ai_ensemble_chip(str(r.get('AI Direction', 'Neutral')), str(r.get('AI Votes', '0/3')))}</td>"
                     )
                 elif c == "AI Confidence":
+                    ai_data_partial = r.get("AI Data Partial", r.get("AI Degraded", False))
                     cells.append(
-                        f"<td>{_ai_confidence_chip(r.get(c), direction=r.get('AI Direction'), votes_text=r.get('AI Votes'), timeframe_conflict=r.get('AI Timeframe Conflict', False), degraded_data=r.get('AI Degraded', False))}</td>"
+                        f"<td>{_ai_confidence_chip(r.get(c), direction=r.get('AI Direction'), votes_text=r.get('AI Votes'), timeframe_conflict=r.get('AI Timeframe Conflict', False), degraded_data=ai_data_partial)}</td>"
                     )
                 elif c == "Event Price":
                     v = pd.to_numeric(r.get(c), errors="coerce")
@@ -509,7 +510,7 @@ def render(ctx: dict) -> None:
         intro_html=(
             "Historical setup simulation. "
             "This lab replays the current setup engine on closed candles and measures what happened over the next N bars. "
-            "Use it to compare setup-class behavior before changing live scanner policy."
+            "Use it to compare setup-class behavior before changing live Market policy."
         ),
     )
     intro_cols = st.columns(3)
@@ -920,9 +921,9 @@ def render(ctx: dict) -> None:
             table_id="class-summary",
         )
     with st.expander("Advanced metrics and event details", expanded=False):
-        st.markdown("#### Raw class breakdown")
+        st.markdown("#### Source class breakdown")
         if by_class.empty:
-            st.info("No raw class-level metrics available.")
+            st.info("No source class-level metrics available.")
         else:
             b = by_class.copy()
             if "Setup Confirm" in b.columns:

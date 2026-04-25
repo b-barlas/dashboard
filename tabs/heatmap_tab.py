@@ -118,7 +118,7 @@ def render(ctx: dict) -> None:
             "Live provider temporarily unavailable. Showing last successful heatmap snapshot."
         )
     elif source == "CoinPaprika":
-        st.info("CoinGecko fallback active: data is currently sourced from CoinPaprika.")
+        st.info("CoinGecko backup active: data is currently sourced from CoinPaprika.")
 
     df_all, df_map = _prepare_heatmap_frames(
         rows,

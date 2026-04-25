@@ -6,6 +6,7 @@ import io
 import pandas as pd
 import plotly.graph_objs as go
 import ta
+from core.archive_policy import ARCHIVE_LEARNING_WINDOW_ROWS, ARCHIVE_RECENT_CONTEXT_ROWS
 from core.adaptive_weighting import (
     build_ai_confidence_calibration_model,
     build_ai_confidence_calibration_snapshot,
@@ -185,7 +186,7 @@ def _spot_anchor_pair_label(snapshot) -> str:
     lead = _spot_lead_snapshot(snapshot)
     confirm = _spot_confirm_snapshot(snapshot)
     if lead is None or confirm is None:
-        return "HTF"
+        return "Higher-TF"
     return f"{str(lead.timeframe).upper()} + {str(confirm.timeframe).upper()}"
 
 
@@ -464,7 +465,7 @@ def render(ctx: dict) -> None:
             return
         signal_tracker_db_path = init_signal_tracker_db(get_signal_tracker_db_path())
         adaptive_history_df = fetch_signal_events_df(
-            limit=2000,
+            limit=ARCHIVE_LEARNING_WINDOW_ROWS,
             status="RESOLVED",
             source="Market",
             db_path=signal_tracker_db_path,
@@ -474,7 +475,7 @@ def render(ctx: dict) -> None:
             source="Market",
         )
         recent_market_events_df = fetch_signal_events_df(
-            limit=240,
+            limit=ARCHIVE_RECENT_CONTEXT_ROWS,
             source="Market",
             db_path=signal_tracker_db_path,
         )
@@ -611,7 +612,7 @@ def render(ctx: dict) -> None:
                     f"  <div style='color:{TEXT_MUTED}; font-size:0.9rem; margin-top:6px;'>"
                     f"    Entry: <b style='color:{ACCENT};'>${entry_price:,.4f}</b> | "
                     f"Current: <b style='color:{ACCENT};'>${current_price:,.4f}</b> | "
-                    f"Raw Move: <b style='color:{ACCENT};'>{pnl_percent_raw:+.2f}%</b>"
+                    f"Base Move: <b style='color:{ACCENT};'>{pnl_percent_raw:+.2f}%</b>"
                     f"  </div>"
                     f"</div>",
                     unsafe_allow_html=True,
@@ -1140,7 +1141,7 @@ def render(ctx: dict) -> None:
                         "Leverage (x)": int(leverage),
                         "Margin Used ($)": round(float(margin_used), 2),
                         "Funding Impact (%)": round(float(funding_impact_pct), 5),
-                        "PnL Raw (%)": round(float(pnl_percent_raw), 4),
+                        "PnL Base (%)": round(float(pnl_percent_raw), 4),
                         "PnL Levered (%)": round(float(pnl_percent), 4),
                         "Notional ($)": round(float(notional), 2),
                         "Gross PnL ($)": round(float(gross_pnl_usd), 2),
@@ -1314,7 +1315,7 @@ def render(ctx: dict) -> None:
                                         Model Entry <b style='color:{ACCENT};'>${entry_s:,.4f}</b><br>
                                         Stop <b style='color:{NEGATIVE};'>${stop_s:,.4f}</b> |
                                         Target <b style='color:{POSITIVE};'>${target_s:,.4f}</b><br>
-                                        {'Good setup quality (R:R gate passed).' if rr_ratio >= gate_min_rr else f'R:R is below gate ({gate_min_rr:.2f}).'}
+                                        {'Good setup quality (R:R requirement passed).' if rr_ratio >= gate_min_rr else f'R:R is below requirement ({gate_min_rr:.2f}).'}
                                         {context_line}
                                       </div>
                                     </div>
@@ -1429,7 +1430,7 @@ def render(ctx: dict) -> None:
             except Exception:
                 csv_bytes = report_df.to_csv(index=False).encode("utf-8")
                 st.download_button(
-                    label="Download Decision Report (CSV fallback)",
+                    label="Download Decision Report (CSV backup)",
                     data=csv_bytes,
                     file_name=f"position_report_{coin.replace('/', '_')}.csv",
                     mime="text/csv",

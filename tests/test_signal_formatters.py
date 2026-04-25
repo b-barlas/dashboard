@@ -44,7 +44,7 @@ def test_context_fit_snapshot_returns_aligned_window_for_supportive_stack() -> N
         },
         recent_symbol_market_signal={
             "Lead": "LEAD",
-            "Signal Note": "Recent Market scanner read: 1H | Emerging Upside | Tier 1.",
+            "Signal Note": "Recent Market read: 1H | Emerging Upside | Tier 1.",
         },
     )
     assert snap["label"] == "Tradeable"
@@ -104,10 +104,10 @@ def test_execution_read_note_compacts_duplicate_context_into_shorter_line() -> N
         context_fit={
             "label": "Tradeable",
             "aggression": "Normal aggression",
-            "note": "Playbook: Selective upside rotation | Gate: Selective Only",
+            "note": "Playbook: Selective upside rotation | Stance: Selective Only",
         },
-        market_context_note="Recent market archive: Selective upside rotation | Gate: Selective Only",
-        scanner_signal_note="Recent Market scanner read: 1H | Emerging Upside | Tier 1.",
+        market_context_note="Recent market archive: Selective upside rotation | Stance: Selective Only",
+        scanner_signal_note="Recent Market read: 1H | Emerging Upside | Tier 1.",
     )
     assert "Selective upside rotation" in note
     assert "Stance: Tradeable — Normal aggression." in note

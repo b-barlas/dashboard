@@ -213,8 +213,8 @@ def render(ctx: dict) -> None:
             "It combines search trends, 24h movers, and abnormal volume detection."
             "<br><br><b>1. Trending Coins</b> — CoinGecko search trend leaders.<br>"
             "<b>2. Broad 24h Movers</b> — 24h momentum leaders/laggards from a broader liquid CoinGecko market sample.<br>"
-            "<b>3. Volume Anomaly Scanner</b> — dynamic high-volume universe from exchange-available pairs.<br>"
-            "Scanner uses two checks: "
+            "<b>3. Volume Anomaly Radar</b> — dynamic high-volume universe from exchange-available pairs.<br>"
+            "Radar uses two checks: "
             f"{_tip('Volume Ratio', 'Latest candle volume divided by previous 20-candle average.')} and "
             f"{_tip('Volume Z-Score', 'How many standard deviations the latest volume is above recent mean.')} "
             "to reduce false positives from simple ratio-only spikes."
@@ -349,7 +349,7 @@ def render(ctx: dict) -> None:
             f"(gainers: {_fmt_ts(gainers_ts)}, losers: {_fmt_ts(losers_ts)})."
         )
     elif used_exchange_momentum_fallback:
-        st.caption("CoinGecko momentum providers were unavailable. Showing an exchange-OHLCV fallback snapshot instead.")
+        st.caption("CoinGecko momentum providers were unavailable. Showing an exchange-OHLCV backup snapshot instead.")
     col_g, col_l = st.columns(2)
     with col_g:
         st.markdown(f"<b style='color:{POSITIVE};'>BROAD GAINERS</b>", unsafe_allow_html=True)
@@ -382,8 +382,8 @@ def render(ctx: dict) -> None:
         else:
             st.info("Top losers data temporarily unavailable.")
 
-    # Volume anomaly scanner
-    st.markdown(f"<div class='god-header'><b style='color:{NEON_BLUE};'>Volume Anomaly Scanner</b></div>",
+    # Volume anomaly radar
+    st.markdown(f"<div class='god-header'><b style='color:{NEON_BLUE};'>Volume Anomaly Radar</b></div>",
                 unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -573,10 +573,10 @@ def render(ctx: dict) -> None:
     )
 
     show_diag_cols = st.checkbox(
-        "Show diagnostic columns (Ratio/Z status, raw volumes)",
+        "Show support columns (Ratio/Z status, source volumes)",
         value=False,
         key="whale_show_diag_cols",
-        help="Enable this if you need deeper diagnostics. Keep OFF for cleaner scanning view.",
+        help="Enable this if you need deeper detail. Keep OFF for a cleaner radar view.",
     )
 
     base_cols = ["Symbol", "Level", "Vol Ratio", "Z-Score", "Local Score", "1-Candle %", "24h %"]

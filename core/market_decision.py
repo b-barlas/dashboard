@@ -298,7 +298,7 @@ def emerging_bias_snapshot(
             active=False,
             direction="NEUTRAL",
             label="",
-            note="Confirmed HTF direction already exists, so no emerging leader badge is needed.",
+            note="Confirmed higher-timeframe direction already exists, so no emerging leader badge is needed.",
         )
 
     if bool(getattr(spot_snapshot, "degraded_data", False)):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ui.ctx import get_ctx, get_ctx_callable
 from ui.primitives import render_sidebar_panel, render_sidebar_title, render_status_pill
-from ui.tab_registry import TAB_GROUPS, TAB_TITLES, build_tab_specs
+from ui.tab_registry import TAB_GROUPS, TAB_TITLES, build_tab_spec
 from core.telemetry import snapshot_summary
 from core.trading_copy import get_copy_audience, set_copy_audience
 
@@ -62,19 +62,30 @@ def render_app(deps: dict) -> None:
             refresh_interval = st.slider("Refresh Interval (sec)", 30, 300, 60, key="refresh_interval")
             render_status_pill(st, text=f"LIVE — Refreshing every {refresh_interval}s", tone="positive")
 
-    def _render_tabs_once() -> None:
-        tabs = st.tabs(TAB_TITLES)
-        tab_specs = build_tab_specs(deps)
-        for idx, (renderer, extra_ctx) in enumerate(tab_specs):
-            with tabs[idx]:
-                render_fn = get_ctx_callable({"renderer": renderer}, "renderer", scope=f"tab:{TAB_TITLES[idx]}")
-                render_fn({"st": st, **extra_ctx})
+    active_tab_default = str(st.session_state.get("dashboard_active_tab", TAB_TITLES[0]) or TAB_TITLES[0])
+    if active_tab_default not in TAB_TITLES:
+        st.session_state["dashboard_active_tab"] = TAB_TITLES[0]
+        active_tab_default = TAB_TITLES[0]
+    with st.container(key="dashboard-view-tabs"):
+        active_tab = st.radio(
+            "Dashboard View",
+            TAB_TITLES,
+            index=TAB_TITLES.index(active_tab_default),
+            key="dashboard_active_tab",
+            horizontal=True,
+            label_visibility="collapsed",
+        )
+
+    def _render_active_tab_once() -> None:
+        renderer, extra_ctx = build_tab_spec(deps, str(active_tab))
+        render_fn = get_ctx_callable({"renderer": renderer}, "renderer", scope=f"tab:{active_tab}")
+        render_fn({"st": st, **extra_ctx})
 
     if auto_refresh:
         @st.fragment(run_every=int(st.session_state.get("refresh_interval", 60)))
-        def _render_live_tabs() -> None:
-            _render_tabs_once()
+        def _render_live_view() -> None:
+            _render_active_tab_once()
 
-        _render_live_tabs()
+        _render_live_view()
     else:
-        _render_tabs_once()
+        _render_active_tab_once()

@@ -69,7 +69,7 @@ def scalp_reason_text(
     if code == "SETUP_NOT_READY":
         return "Main setup is not ready enough yet for a scalp entry."
     if code == "MARKET_NO_TRADE":
-        return "Market-wide trade gate is standing aside, so scalp timing stays blocked."
+        return "Market-wide stance is standing aside, so scalp timing stays blocked."
     if code == "MARKET_DEFENSIVE_ONLY":
         return "Market-wide stance is defensive, so scalp timing stays blocked."
     if code == "ARCHIVE_GUARDRAIL":
@@ -101,7 +101,7 @@ def scalp_reason_short_label(reason_code: str | None) -> str:
     code = str(reason_code or "").strip().upper()
     short = {
         "SETUP_NOT_READY": "Setup",
-        "MARKET_NO_TRADE": "No-Trade",
+        "MARKET_NO_TRADE": "Stand Aside",
         "MARKET_DEFENSIVE_ONLY": "Defensive",
         "ARCHIVE_GUARDRAIL": "Archive",
         "ARCHIVE_SCALP_CAUTION": "Archive",

@@ -206,7 +206,7 @@ def render(ctx: dict) -> None:
         st,
         title="AI Workspace",
         intro_html=(
-            "AI-focused diagnostics workspace with two modes. "
+            "AI-focused read workspace with two modes. "
             "<b>Quick Prediction</b> gives a one-shot ensemble read for a single coin and timeframe. "
             "<b>Model & Timeframe Matrix</b> compares agreement, probability, and reference-level context across selected frames."
         ),
@@ -225,7 +225,7 @@ def render(ctx: dict) -> None:
             body_html=(
                 "Fast one-shot ensemble read for a single coin/timeframe. "
                 "Use this mode to see immediate AI direction, probability, and model agreement. "
-                "Treat it as a diagnostic bias read, not a stand-alone execution decision."
+                "Treat it as a support read, not a stand-alone execution decision."
                 f"<br><br>{_tip('Direction', 'Mapped to Upside / Downside / Neutral from ensemble probability thresholds.')} | "
                 f"{_tip('Agreement', 'Effective agreement: directional agreement for Upside/Downside, consensus agreement for Neutral.')} | "
                 f"{_tip('Signal Certainty', 'Quick confidence class from probability distance to neutral band.')}"
@@ -262,17 +262,17 @@ def render(ctx: dict) -> None:
         status = str(details.get("status", ""))
         err_detail = str(details.get("error", "")).strip()
         if status == "single_class_window":
-            st.warning("Window has one-sided history. Showing neutral fallback output for safety.")
+            st.warning("Window has one-sided history. Showing a neutral safety read.")
         elif status == "model_exception":
-            st.warning("Model hit unstable inputs. Showing neutral fallback output for this run.")
+            st.warning("Model hit unstable inputs. Showing a neutral safety read for this run.")
             if err_detail:
                 st.caption(f"Reason: {err_detail}")
         elif status == "insufficient_features":
-            st.warning("Indicators produced insufficient clean rows. Showing neutral fallback output.")
+            st.warning("Indicators produced insufficient clean rows. Showing a neutral safety read.")
             if err_detail:
                 st.caption(f"Reason: {err_detail}")
         elif status == "insufficient_candles":
-            st.warning("Not enough candles for reliable ML. Showing neutral fallback output.")
+            st.warning("Not enough candles for reliable ML. Showing a neutral safety read.")
             if err_detail:
                 st.caption(f"Reason: {err_detail}")
 
@@ -333,7 +333,7 @@ def render(ctx: dict) -> None:
         st,
         title="Model & Timeframe Matrix",
         body_html=(
-            "Multi-timeframe model diagnostics for one coin. Compare direction consistency, probability, "
+            "Multi-timeframe AI read for one coin. Compare direction consistency, probability, "
             "agreement quality, and reference-level context across selected frames."
             f"<br><br>{_tip('Selected Model Prob', 'Upward probability from selected model. Higher implies Upside bias; lower implies Downside bias.')} | "
             f"{_tip('Agreement', 'Effective agreement: directional agreement for Upside/Downside, consensus agreement for Neutral.')} | "

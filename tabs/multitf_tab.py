@@ -3,6 +3,7 @@ from ui.ctx import get_ctx
 import html
 
 import pandas as pd
+from core.archive_policy import ARCHIVE_LEARNING_WINDOW_ROWS
 from core.adaptive_weighting import (
     build_ai_confidence_calibration_model,
     build_ai_confidence_calibration_snapshot,
@@ -248,7 +249,7 @@ def render(ctx: dict) -> None:
 
     signal_tracker_db_path = init_signal_tracker_db(get_signal_tracker_db_path())
     adaptive_history_df = fetch_signal_events_df(
-        limit=2000,
+        limit=ARCHIVE_LEARNING_WINDOW_ROWS,
         status="RESOLVED",
         source="Market",
         db_path=signal_tracker_db_path,

@@ -970,6 +970,79 @@ table.dataframe tbody tr:hover {{
     border-bottom-color: {NEON_BLUE} !important;
 }}
 
+/* Dashboard navigation: original tab-bar look with active-only rendering */
+.st-key-dashboard-view-tabs {{
+    margin: 0.1rem 0 2.1rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.085);
+    overflow: hidden;
+}}
+.st-key-dashboard-view-tabs [data-testid="stRadio"] {{
+    margin: 0 !important;
+}}
+.st-key-dashboard-view-tabs [role="radiogroup"] {{
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    align-items: flex-end !important;
+    gap: 2px !important;
+    width: 100% !important;
+    overflow: hidden !important;
+}}
+.st-key-dashboard-view-tabs [role="radiogroup"] label {{
+    position: relative !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    flex: 0 1 auto !important;
+    min-width: 0 !important;
+    min-height: 3.15rem !important;
+    margin: 0 !important;
+    padding: 0 0.58rem !important;
+    border: 0 !important;
+    border-radius: 8px 8px 0 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    transition: background 0.16s ease, color 0.16s ease, transform 0.16s ease !important;
+}}
+.st-key-dashboard-view-tabs [role="radiogroup"] label > div:first-child {{
+    display: none !important;
+}}
+.st-key-dashboard-view-tabs [role="radiogroup"] label:hover {{
+    background: rgba(10, 18, 30, 0.64) !important;
+}}
+.st-key-dashboard-view-tabs [role="radiogroup"] label:has(input:checked),
+.st-key-dashboard-view-tabs [role="radiogroup"] label:has([aria-checked="true"]) {{
+    background: linear-gradient(180deg, rgba(18, 28, 46, 0.96), rgba(10, 15, 25, 0.96)) !important;
+}}
+.st-key-dashboard-view-tabs [role="radiogroup"] label:has(input:checked)::after,
+.st-key-dashboard-view-tabs [role="radiogroup"] label:has([aria-checked="true"])::after {{
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 3px;
+    border-radius: 999px 999px 0 0;
+    background: {NEGATIVE};
+    box-shadow: 0 0 14px rgba(255, 51, 102, 0.42);
+}}
+.st-key-dashboard-view-tabs [role="radiogroup"] label p,
+.st-key-dashboard-view-tabs [role="radiogroup"] label span {{
+    color: {TEXT_MUTED} !important;
+    font-family: 'Manrope', 'Segoe UI', sans-serif !important;
+    font-size: 0.72rem !important;
+    font-weight: 650 !important;
+    line-height: 1 !important;
+    white-space: nowrap !important;
+}}
+.st-key-dashboard-view-tabs [role="radiogroup"] label:hover p,
+.st-key-dashboard-view-tabs [role="radiogroup"] label:hover span,
+.st-key-dashboard-view-tabs [role="radiogroup"] label:has(input:checked) p,
+.st-key-dashboard-view-tabs [role="radiogroup"] label:has(input:checked) span,
+.st-key-dashboard-view-tabs [role="radiogroup"] label:has([aria-checked="true"]) p,
+.st-key-dashboard-view-tabs [role="radiogroup"] label:has([aria-checked="true"]) span {{
+    color: {TEXT_LIGHT} !important;
+}}
+
 /* Streamlit button styling */
 .stButton > button {{
     background: linear-gradient(135deg, rgba(0, 212, 255, 0.2), rgba(178, 75, 243, 0.2));
@@ -1317,6 +1390,17 @@ div[data-testid="stVerticalBlock"] > div {{
     .stTabs [data-baseweb="tab"] {{
         font-size: 0.72rem;
         padding: 4px 7px;
+    }}
+    .st-key-dashboard-view-tabs {{
+        margin-bottom: 1.65rem;
+    }}
+    .st-key-dashboard-view-tabs [role="radiogroup"] label {{
+        min-height: 2.8rem !important;
+        padding: 0 0.42rem !important;
+    }}
+    .st-key-dashboard-view-tabs [role="radiogroup"] label p,
+    .st-key-dashboard-view-tabs [role="radiogroup"] label span {{
+        font-size: 0.64rem !important;
     }}
     .app-kpi-grid {{
         grid-template-columns: repeat(2, minmax(0, 1fr));

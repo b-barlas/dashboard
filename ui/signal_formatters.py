@@ -196,7 +196,7 @@ def ai_spot_note(snapshot) -> str:
         if lead is not None and confirm is not None:
             pair_label = f"{str(lead.timeframe).upper()} + {str(confirm.timeframe).upper()}"
         else:
-            pair_label = "HTF"
+            pair_label = "Higher-TF"
     return (
         f"AI spot bias ({pair_label}): {spot_bias_label(snapshot.direction)} | "
         f"Combined score {float(snapshot.score):.1f} | "
@@ -218,14 +218,14 @@ def ai_confidence_note(snapshot, score: float, confidence_snapshot=None) -> str:
     if bool(snapshot.timeframe_conflict):
         caps.append("timeframe-conflict cap <=30")
     if bool(snapshot.degraded_data):
-        caps.append("degraded-data cap <=35")
+        caps.append("partial-data cap <=35")
     if direction_key != "NEUTRAL" and int(dots) <= 1:
         caps.append("low-model-support cap <=59")
     cap_text = f" | Active caps: {', '.join(caps)}" if caps else ""
     note = (
         f"AI confidence: {float(score):.1f}% "
         f"({ai_confidence_bucket(float(score), direction=str(snapshot.direction or ''), support_votes=int(dots), timeframe_conflict=bool(snapshot.timeframe_conflict), degraded_data=bool(snapshot.degraded_data)).title()}) | "
-        f"HTF AI verdict {spot_bias_label(snapshot.direction)} | "
+        f"Higher-timeframe AI verdict {spot_bias_label(snapshot.direction)} | "
         f"Combined score {float(snapshot.score):.1f} | "
         f"Conviction quality {float(snapshot.conviction_quality):.0f} | "
         f"Timeframe alignment {float(snapshot.timeframe_alignment):.0f} | "
@@ -313,7 +313,12 @@ def _clean_note_part(value: object) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
-    text = text.replace("Recent market archive: ", "").replace("Recent Market scanner read: ", "").strip()
+    text = (
+        text.replace("Recent market archive: ", "")
+        .replace("Recent Market scanner read: ", "")
+        .replace("Recent Market read: ", "")
+        .strip()
+    )
     text = " ".join(text.split())
     return text.strip(" |")
 
@@ -406,13 +411,15 @@ def context_fit_snapshot(
     if playbook and playbook != "Unknown":
         parts.append(f"Playbook: {playbook}")
     if trade_gate and trade_gate != "Unknown":
-        parts.append(f"Gate: {trade_gate}")
+        parts.append(f"Stance: {trade_gate}")
     if catalyst_window and catalyst_window != "Unknown":
         parts.append(f"Catalyst: {catalyst_window}")
     if flow_proxy and flow_proxy != "Unknown":
         parts.append(f"Flow: {flow_proxy}")
     if signal_note:
-        parts.append(signal_note.replace("Recent Market scanner read: ", "").strip())
+        parts.append(
+            signal_note.replace("Recent Market scanner read: ", "").replace("Recent Market read: ", "").strip()
+        )
     note = " | ".join(parts[:5]) if parts else "Context archive is still building."
 
     return {

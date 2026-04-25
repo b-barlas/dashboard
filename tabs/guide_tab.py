@@ -83,7 +83,7 @@ Ensemble AI (3 models) is used as confirmation:
             "core",
         ),
         (
-            "1) Market tab (Coin Setup Scanner)",
+            "1) Market tab (Market Setup Radar)",
             copy_text("guide.section.market"),
             "core",
         ),
@@ -142,9 +142,9 @@ Shows:
 - Probability
 - Effective agreement (x/3)
 - AI Direction Bias (same market-wide bias logic as Market tab)
-- Plan Entry/Target + Plan Source (AI-filtered vs technical fallback)
+- Plan Entry/Target + Plan Source (AI-filtered vs technical backup)
 
-Use this tab for model diagnostics and confirmation quality checks, not as a standalone execution trigger.
+Use this tab for model detail and confirmation quality checks, not as a standalone execution trigger.
             """,
             "core",
         ),
@@ -156,14 +156,14 @@ Shows:
 - Cap-weighted heatmap
 - Breadth (advancers share), A/D ratio, average change
 - Quick read of market leadership concentration
-- Provider-aware feed state (LIVE/CACHED) with fallback chain
+- Provider-aware feed state (LIVE/CACHED) with backup chain
 - Stablecoin exclusion toggle (default ON for cleaner beta read)
 - Flat classification with a ±0.05% dead-band to reduce micro-noise
 
 Provider order:
 - CoinGecko (primary)
-- CoinPaprika (fallback)
-- Last-good snapshot (temporary cache fallback)
+- CoinPaprika (backup)
+- Last-good snapshot (temporary cache backup)
             """,
             "info",
         ),
@@ -174,9 +174,9 @@ Attention/liquidity proxy tab (not on-chain wallet tracking).
 Combines:
 - Trending coins feed
 - Top gainers / losers snapshots
-- Volume anomaly scanner with adaptive ratio + z-score logic
+- Volume anomaly radar with adaptive ratio + z-score logic
 
-Scanner notes:
+Radar notes:
 - Uses closed candles (reduces partial-candle noise)
 - Trigger = Ratio OR Z-Score threshold; EXTREME = dual confirmation
 - Distinguishes no-data scan from no-anomaly scan
@@ -315,17 +315,17 @@ Use it as:
             "info",
         ),
         (
-            "18) Data sources, fallback policy, and UK-safe exchanges",
+            "18) Data sources, backup policy, and UK-safe exchanges",
             """
-Primary exchange fallback list is intentionally UK-safe for this setup:
+Primary exchange backup list is intentionally UK-safe for this setup:
 - Kraken
 - Coinbase
 - Bitstamp
 
-Scanner/enrichment provider order (when building market universe):
+Market/enrichment provider order (when building market universe):
 1. CoinGecko markets feed (volume-ranked symbols + enrichment)
-2. CoinPaprika tickers fallback (volume-ranked symbols + enrichment)
-3. Exchange-pair fallback (symbols only)
+2. CoinPaprika tickers backup (volume-ranked symbols + enrichment)
+3. Exchange-pair backup (symbols only)
 
 Execution/indicator data order:
 1. Exchange OHLCV/ticker from the active UK-safe exchange
@@ -338,7 +338,7 @@ Enrichment fields (for example Market Cap) may show as `—` in exchange-only mo
 Cache policy:
 - Market tab: cached snapshot is used only for the **same timeframe/filter signature**
   (stale cache from another setting is intentionally blocked).
-- Other analysis tabs: live-or-snapshot fallback is used with TTL guards.
+- Other analysis tabs: live-or-snapshot backup is used with TTL guards.
   Typical cache TTL is 15 minutes for live analysis tabs and 30 minutes for backtest frames.
             """,
             "info",

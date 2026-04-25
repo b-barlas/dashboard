@@ -40,8 +40,13 @@ def render(ctx: dict) -> None:
             tone="neutral",
         )
 
-    setup_tab, scalp_tab = st.tabs(["Setup Lab", "Scalp Lab"])
-    with setup_tab:
+    lab_view = st.selectbox(
+        "Lab View",
+        ["Setup Lab", "Scalp Lab"],
+        key="labs_active_view",
+        help="Only the selected lab is rendered, so the other study does not run in the background.",
+    )
+    if lab_view == "Setup Lab":
         render_setup_lab(ctx)
-    with scalp_tab:
+    else:
         render_scalp_lab(ctx)

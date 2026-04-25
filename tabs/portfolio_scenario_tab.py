@@ -282,7 +282,7 @@ def render(ctx: dict) -> None:
             )
 
         if cached_hits:
-            st.info("Snapshot fallback used for: " + ", ".join(cached_hits))
+            st.info("Snapshot backup used for: " + ", ".join(cached_hits))
         if missing_symbols:
             st.warning("Some symbols could not be modeled and were held flat in basket totals: " + ", ".join(missing_symbols))
         if holdings_meta.get("duplicate_rows", 0):
@@ -354,7 +354,7 @@ def render(ctx: dict) -> None:
             f"Anchor move {_format_pct(result['anchor_move_pct'])}",
             f"Estimated horizon {result['horizon_bars']} bars",
             (
-                f"Raw horizon {result['raw_horizon_bars']} bars"
+                f"Uncapped horizon {result['raw_horizon_bars']} bars"
                 + (" (capped)" if result.get("horizon_capped") else "")
             ),
             f"Typical anchor bar move {result['typical_bar_move_pct']:.2f}%",

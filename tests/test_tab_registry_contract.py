@@ -27,6 +27,14 @@ class TabRegistryContractTests(unittest.TestCase):
             self.assertTrue(callable(renderer))
             self.assertIsInstance(ctx, dict)
 
+    def test_build_tab_spec_returns_only_requested_context(self):
+        deps = _FallbackDict()
+        renderer, ctx = reg.build_tab_spec(deps, "Signal Archive")
+        self.assertTrue(callable(renderer))
+        self.assertIsInstance(ctx, dict)
+        self.assertIn("fetch_signal_events_df", ctx)
+        self.assertNotIn("get_market_top_snapshot", ctx)
+
 
 if __name__ == "__main__":
     unittest.main()

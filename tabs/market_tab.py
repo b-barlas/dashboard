@@ -20,6 +20,7 @@ from core.ai_spot_bias import (
     ai_spot_bias_status,
     build_ai_spot_bias_snapshot,
 )
+from core.archive_policy import ARCHIVE_LEARNING_WINDOW_ROWS
 from core.confidence import (
     ai_confidence_bucket,
     build_ai_confidence_snapshot,
@@ -108,6 +109,7 @@ _LAST_GOOD_MODE_KEY = "market_scan_last_good_mode"
 _LAST_GOOD_REGISTRY_KEY = "market_scan_last_good_by_sig"
 _LAST_HEALTHY_EMPTY_SIG_KEY = "market_scan_last_healthy_empty_sig"
 _LAST_SCAN_ATTEMPT_TS_KEY = "market_scan_last_attempt_ts"
+_DATA_HEALTH_ITEMS_KEY = "market_data_health_items"
 _HEALTHY_EMPTY_HISTORY_LIMIT = 32
 _LAST_GOOD_HISTORY_LIMIT = 32
 _SCAN_REFRESH_TTL_MINUTES = 3
@@ -121,19 +123,19 @@ _SETUP_CONFIRM_PRIORITY = {
     "SKIP": 1,
 }
 _AI_FALLBACK_STATUS_TEXT = {
-    "insufficient_candles": "AI fallback active: not enough candles for reliable ML; neutral safety output is shown.",
-    "insufficient_features": "AI fallback active: indicators produced too few clean ML rows; neutral safety output is shown.",
-    "single_class_window": "AI fallback active: one-sided training window forced neutral safety output.",
-    "model_exception": "AI fallback active: model instability forced neutral safety output.",
+    "insufficient_candles": "AI safety read: not enough candles for reliable ML; neutral output is shown.",
+    "insufficient_features": "AI safety read: indicators produced too few clean ML rows; neutral output is shown.",
+    "single_class_window": "AI safety read: one-sided training window forced neutral output.",
+    "model_exception": "AI safety read: model instability forced neutral output.",
 }
 _ALERT_ARCHIVE_DISPLAY = {
     "CATALYST_BLOCK": "Catalyst Block",
-    "TRADE_GATE": "Trade Gate",
+    "TRADE_GATE": "Market Stance",
     "MARKET_LEAD": "Market Lead",
     "LEARNED_EDGE": "Learned Edge",
     "ACTIONABLE_CLUSTER": "Actionable Cluster",
-    "ARCHIVE_GUARDRAIL": "Archive Guardrail",
-    "EXECUTION_STANCE": "Execution Stance",
+    "ARCHIVE_GUARDRAIL": "History Caution",
+    "EXECUTION_STANCE": "Market Stance",
     "PLAYBOOK_WINDOW": "Playbook Window",
     "SECTOR_ROTATION": "Sector Rotation",
     "SESSION_FIT": "Session Fit",
@@ -141,6 +143,9 @@ _ALERT_ARCHIVE_DISPLAY = {
     "CATALYST_CAUTION": "Catalyst Caution",
 }
 _PROTECTED_ALERT_KEYS = {"CATALYST_BLOCK", "TRADE_GATE", "CATALYST_CAUTION", "ARCHIVE_GUARDRAIL"}
+_CLEAREST_TREND_COLS = ("ADX", "SuperTrend", "Ichimoku", "VWAP", "PSAR")
+_CLEAREST_MOMENTUM_COLS = ("Stochastic RSI", "Williams %R", "CCI", "Candle Pattern")
+_CLEAREST_ACTIVITY_COLS = ("Bollinger", "Volatility", "Spike Alert")
 
 
 def _canonical_pair_base(symbol: str) -> str:
@@ -249,7 +254,7 @@ def _market_archive_bundle(
     decision_version_target: str,
 ) -> dict[str, object]:
     adaptive_history_raw_df = _fetch_signal_events_df(
-        limit=2000,
+        limit=ARCHIVE_LEARNING_WINDOW_ROWS,
         status="RESOLVED",
         source="Market",
         db_path=db_path,
@@ -408,11 +413,11 @@ def _market_hidden_meta_cols(df_columns, display_cols) -> list[str]:
 def _decision_version_mode_label(mode: str) -> str:
     key = str(mode or "").strip().lower()
     if key == "current_only":
-        return "Current Only"
+        return "Current Learning"
     if key == "mixed_fallback":
-        return "Mixed Fallback"
+        return "Broader Archive Backup"
     if key == "unversioned_fallback":
-        return "Legacy Fallback"
+        return "Legacy Archive Backup"
     if key == "empty":
         return "Empty"
     return "Mixed Archive"
@@ -428,41 +433,41 @@ def _market_calibration_diagnostic_lines(
     scalp_resolved_rows: int,
     min_current_rows: int = 80,
 ) -> list[str]:
-    target_label = str(target_version or "Current Version").strip() or "Current Version"
+    target_label = str(target_version or "Current Learning").strip() or "Current Learning"
     lines = [
         f"- Calibration mode: **{_decision_version_mode_label(mode)}**",
-        f"- Current decision version: `{target_label}`",
+        f"- Current learning version: `{target_label}`",
     ]
     if mode == "current_only":
         lines.append(
-            f"- Current-version archive is active: **{int(current_rows)}** resolved rows are driving adaptive calibration directly "
+            f"- Current learning archive is active: **{int(current_rows)}** resolved rows are driving adaptive calibration directly "
             f"(recent resolved pool loaded: **{int(total_rows)}**)."
         )
     elif mode == "mixed_fallback":
         lines.append(
-            f"- Current-version archive is still building: **{int(current_rows)}** of **{int(total_rows)}** recent resolved rows "
-            f"match the new scanner logic, so adaptive calibration still leans on mixed archive history until it reaches **{int(min_current_rows)}**."
+            f"- Current learning archive is still building: **{int(current_rows)}** of **{int(total_rows)}** recent resolved rows "
+            f"match the new market logic, so adaptive calibration still leans on broader archive history until it reaches **{int(min_current_rows)}**."
         )
     elif mode == "unversioned_fallback":
         lines.append(
-            f"- The loaded resolved pool has **{int(total_rows)}** rows, but they do not isolate the current decision version yet, "
-            "so adaptive calibration is still reading legacy archive history."
+            f"- The loaded resolved pool has **{int(total_rows)}** rows, but they do not isolate the current learning version yet, "
+            "so adaptive calibration is still reading older archive history."
         )
     elif mode == "empty":
         lines.append("- No resolved archive rows are available yet, so adaptive calibration has nothing to learn from.")
     else:
         lines.append(
-            f"- Resolved current rows: **{int(current_rows)}** of **{int(total_rows)}** loaded. Adaptive calibration is reading a mixed archive slice."
+            f"- Resolved learned rows: **{int(current_rows)}** of **{int(total_rows)}** loaded. Adaptive calibration is reading a broader archive slice."
         )
 
     if int(scalp_planned_rows) > 0 or int(scalp_resolved_rows) > 0:
         lines.append(
-            f"- Scalp learning sample for the current version: **{int(scalp_planned_rows)}** planned rows, "
+            f"- Scalp learning sample for the current system: **{int(scalp_planned_rows)}** planned rows, "
             f"**{int(scalp_resolved_rows)}** resolved outcomes."
         )
     else:
         lines.append(
-            "- Scalp learning sample for the current version is still empty, so scalp archive calibration is in build-up mode."
+            "- Scalp learning sample for the current system is still empty, so scalp archive calibration is in build-up mode."
         )
     return lines
 
@@ -488,7 +493,7 @@ def _emerging_badge_symbol(direction: str) -> str:
 def _emerging_badge_text(direction: str) -> str:
     key = str(direction or "").strip().upper()
     if key in {"UPSIDE", "DOWNSIDE"}:
-        return "LEAD"
+        return "PUSH"
     return "INFO"
 
 
@@ -1209,7 +1214,7 @@ def _trade_gate_banner_html(label: str, note: str, tone: str, reason_code: str) 
         "negative": "var(--negative, #FF4D7A)",
         "warning": "var(--warning, #FFD166)",
     }.get(tone_key, "var(--warning, #FFD166)")
-    reason = str(reason_code or "").strip().replace("_", " ").title()
+    reason = _market_stance_reason_label(reason_code)
     meta_html = (
         f"<div style='font-size:0.72rem; letter-spacing:0.12em; text-transform:uppercase; color:rgba(255,255,255,0.56);'>{html.escape(reason)}</div>"
         if reason
@@ -1220,7 +1225,7 @@ def _trade_gate_banner_html(label: str, note: str, tone: str, reason_code: str) 
         f"style='border-color:{accent}; box-shadow:0 0 0 1px color-mix(in srgb, {accent} 20%, transparent) inset;'>"
         "<div style='display:flex; align-items:flex-start; justify-content:space-between; gap:14px;'>"
         "<div>"
-        "<div class='app-insight-title'>Execution Stance</div>"
+        "<div class='app-insight-title'>Market Stance</div>"
         f"<div class='app-insight-body'>{html.escape(str(note or '').strip())}</div>"
         "</div>"
         "<div style='display:flex; flex-direction:column; align-items:flex-end; gap:6px;'>"
@@ -1230,6 +1235,36 @@ def _trade_gate_banner_html(label: str, note: str, tone: str, reason_code: str) 
         "</div>"
         "</div>"
     )
+
+
+def _market_stance_reason_label(reason_code: str) -> str:
+    key = str(reason_code or "").strip().upper()
+    labels = {
+        "DEGRADED_SCAN": "Partial Data",
+        "REGIME_NO_TRADE": "Market Not Ready",
+        "CATALYST_BLOCK": "Catalyst Nearby",
+        "PROBE_ONLY_SETUPS": "Early Only",
+        "NO_READY_SETUPS": "No Ready Setups",
+        "WEAK_PARTICIPATION": "Weak Breadth",
+        "ARCHIVE_CLUSTER_NO_TRADE": "History Caution",
+        "RISK_OFF_DEFENSIVE": "Risk-Off",
+        "RISK_OFF_WEAKNESS": "Risk-Off Weakness",
+        "CATALYST_SELECTIVE": "Catalyst Caution",
+        "SESSION_ARCHIVE_WEAK": "Weak Session",
+        "ARCHIVE_GUARDRAIL": "History Caution",
+        "SELECTIVE_FILTER": "Selective",
+        "SELECTIVE_PROBE_WINDOW": "Early Window",
+        "SELECTIVE_SESSION_WEAK": "Weak Session",
+        "SELECTIVE_ARCHIVE_WEAK": "History Caution",
+        "FILTER_HARDER_SESSION_WEAK": "Filter Harder",
+        "FILTER_HARDER_ARCHIVE": "History Caution",
+        "ARCHIVE_GATE_CAUTION": "History Caution",
+        "ARCHIVE_GATE_SUPPORT": "History Support",
+        "RISK_ON_CLEAR": "Risk-On",
+    }
+    if key in labels:
+        return labels[key]
+    return key.replace("_", " ").title()
 
 
 def _compact_alert_note(note: str) -> str:
@@ -1302,8 +1337,8 @@ def _market_alert_strip_html(alerts: list[object], *, total_active: int | None =
         "<div class='app-insight-card app-insight-card--neutral' "
         "style='border-color:rgba(255,255,255,0.06); background:rgba(255,255,255,0.01);'>"
         "<div style='display:flex; align-items:center; justify-content:space-between; gap:12px;'>"
-        "<div class='app-insight-title'>Live Alerts</div>"
-        f"<div style='font-size:0.72rem; letter-spacing:0.12em; text-transform:uppercase; color:rgba(255,255,255,0.56);'>{len(rows_html)} shown • {total_count} active</div>"
+        "<div class='app-insight-title'>Market Notes</div>"
+        f"<div style='font-size:0.72rem; letter-spacing:0.12em; text-transform:uppercase; color:rgba(255,255,255,0.56);'>{len(rows_html)} shown • {total_count} current</div>"
         "</div>"
         "<div style='display:flex; flex-wrap:wrap; gap:10px; margin-top:12px;'>"
         f"{''.join(rows_html)}"
@@ -1373,51 +1408,160 @@ def _extract_confidence_label(value: object) -> str:
     return text or "Unknown"
 
 
-def _pick_confidence_leader(df_results: pd.DataFrame) -> tuple[str, float | None, str]:
-    if "__confidence_val" not in df_results.columns or len(df_results) <= 0:
-        return "—", None, "No confidence data available."
+def _row_direction_vote(row: dict) -> str:
+    direction = _signal_tracker_direction_key(row.get("Direction", row.get("__direction", "")))
+    if direction in {"UPSIDE", "DOWNSIDE"}:
+        return direction
+    return ""
 
-    working = df_results.copy()
-    working["__confidence_num"] = pd.to_numeric(working["__confidence_val"], errors="coerce")
-    working = working.dropna(subset=["__confidence_num"])
-    if working.empty:
-        return "—", None, "No confidence data available."
 
-    if "__action_raw" in working.columns:
-        action_series = working["__action_raw"].astype(str)
-    elif "Setup Confirm" in working.columns:
-        action_series = working["Setup Confirm"].astype(str)
-    else:
-        action_series = pd.Series("", index=working.index, dtype=str)
-    working["__setup_priority"] = action_series.apply(_setup_confirm_priority)
-    working["__ai_conf_num"] = pd.to_numeric(
-        working.get("__ai_confidence_val", pd.Series(index=working.index, dtype=float)),
-        errors="coerce",
-    ).fillna(-1.0)
+def _is_numeric_indicator_active(value: object, *, minimum: float) -> bool:
+    try:
+        numeric = float(value)
+    except Exception:
+        match = re.search(r"(-?\d+(?:\.\d+)?)", str(value or ""))
+        if not match:
+            return False
+        try:
+            numeric = float(match.group(1))
+        except Exception:
+            return False
+    return bool(pd.notna(numeric) and numeric >= minimum)
 
-    scoped = working
-    for min_priority in (3, 2, 1):
-        candidate = working[working["__setup_priority"] >= min_priority]
-        if not candidate.empty:
-            scoped = candidate
-            break
 
-    best_row = scoped.sort_values(
-        ["__confidence_num", "__setup_priority", "__ai_conf_num", "Coin"],
-        ascending=[False, False, False, True],
-    ).iloc[0]
-    confidence_coin = str(best_row.get("Coin", "—"))
-    confidence_val = float(best_row.get("__confidence_num", 0.0))
-    setup_display = _shared_setup_confirm_display(
-        str(best_row.get("__action_raw", best_row.get("Setup Confirm", "")) or ""),
-        action_reason=str(best_row.get("__action_reason", "")).strip(),
-        direction=str(best_row.get("Direction", "")).strip(),
+def _indicator_direction_vote(value: object, *, column: str, row: dict | None = None) -> str:
+    row = row or {}
+    column_key = str(column or "").strip()
+    text = str(value or "").strip()
+    upper = text.upper()
+    if not text or upper in {"NAN", "NONE", "N/A", "UNAVAILABLE", "NEUTRAL", "MIXED"}:
+        return ""
+
+    if column_key == "ADX":
+        if not _is_numeric_indicator_active(value, minimum=25.0) and not any(
+            marker in upper for marker in ("STRONG", "VERY STRONG", "EXTREME", "🔥")
+        ):
+            return ""
+        return _row_direction_vote(row)
+
+    if column_key == "Volatility":
+        if "HIGH" not in upper and "EXTREME" not in upper:
+            return ""
+        return _row_direction_vote(row)
+
+    if column_key == "Spike Alert":
+        spike_dir = str(row.get("__spike_dir", "") or "").strip().upper()
+        if spike_dir in {"UP", "UPSIDE", "BULLISH"}:
+            return "UPSIDE"
+        if spike_dir in {"DOWN", "DOWNSIDE", "BEARISH"}:
+            return "DOWNSIDE"
+        if "SPIKE" not in upper:
+            return ""
+        return _row_direction_vote(row)
+
+    if column_key == "Stochastic RSI":
+        try:
+            numeric = float(value)
+        except Exception:
+            numeric = float("nan")
+        if pd.notna(numeric):
+            if numeric <= 25.0:
+                return "UPSIDE"
+            if numeric >= 75.0:
+                return "DOWNSIDE"
+            return ""
+
+    upside_markers = (
+        "▲",
+        "🟢",
+        "BULLISH",
+        "ABOVE",
+        "OVERSOLD",
+        "NEAR BOTTOM",
+        "LOW",
+        "SUPPORT",
+        "UP SPIKE",
     )
-    confidence_sub = (
-        f"Direction: {best_row.get('Direction', '')} • "
-        f"Setup: {setup_display}"
+    downside_markers = (
+        "▼",
+        "🔴",
+        "BEARISH",
+        "BELOW",
+        "OVERBOUGHT",
+        "NEAR TOP",
+        "HIGH",
+        "RESISTANCE",
+        "DOWN SPIKE",
     )
-    return confidence_coin, confidence_val, confidence_sub
+    neutral_markers = ("NEUTRAL", "MIXED", "BALANCED", "NEAR VWAP", "MID", "MODERATE", "STARTING", "WEAK")
+    if any(marker in upper for marker in neutral_markers):
+        return ""
+    if any(marker in upper for marker in downside_markers):
+        return "DOWNSIDE"
+    if any(marker in upper for marker in upside_markers):
+        return "UPSIDE"
+    return ""
+
+
+def _clearest_direction_group_count(row: dict, columns: tuple[str, ...], target_direction: str) -> int:
+    target = str(target_direction or "").strip().upper()
+    return sum(
+        1
+        for column in columns
+        if _indicator_direction_vote(row.get(column, ""), column=column, row=row) == target
+    )
+
+
+def _pick_clearest_direction(df_results: pd.DataFrame) -> tuple[str, str]:
+    if len(df_results) <= 0:
+        return "—", "No advanced direction data available."
+
+    ranked: list[tuple[float, float, float, float, float, float, str, str, str]] = []
+    for _, row_series in df_results.iterrows():
+        row = row_series.to_dict()
+        votes = [
+            _indicator_direction_vote(row.get(column, ""), column=column, row=row)
+            for column in (*_CLEAREST_TREND_COLS, *_CLEAREST_MOMENTUM_COLS, *_CLEAREST_ACTIVITY_COLS)
+        ]
+        up_votes = sum(1 for vote in votes if vote == "UPSIDE")
+        down_votes = sum(1 for vote in votes if vote == "DOWNSIDE")
+        if up_votes == down_votes or max(up_votes, down_votes) <= 0:
+            continue
+
+        direction = "UPSIDE" if up_votes > down_votes else "DOWNSIDE"
+        dominant_votes = max(up_votes, down_votes)
+        opposing_votes = min(up_votes, down_votes)
+        trend_count = _clearest_direction_group_count(row, _CLEAREST_TREND_COLS, direction)
+        momentum_count = _clearest_direction_group_count(row, _CLEAREST_MOMENTUM_COLS, direction)
+        activity_count = _clearest_direction_group_count(row, _CLEAREST_ACTIVITY_COLS, direction)
+        confidence = _sortable_float(row.get("__confidence_val", 0.0))
+        setup_priority = float(_setup_confirm_priority(str(row.get("__action_raw", row.get("Setup Confirm", "")))))
+        coin = str(row.get("Coin", "—") or "—").strip() or "—"
+        subtext = (
+            f"Trend {trend_count}/{len(_CLEAREST_TREND_COLS)} • "
+            f"Momentum {momentum_count}/{len(_CLEAREST_MOMENTUM_COLS)} • "
+            f"Activity {activity_count}/{len(_CLEAREST_ACTIVITY_COLS)}"
+        )
+        ranked.append(
+            (
+                float(dominant_votes),
+                float(dominant_votes - opposing_votes),
+                float(trend_count),
+                float(momentum_count),
+                float(activity_count),
+                confidence + setup_priority,
+                coin,
+                direction.title(),
+                subtext,
+            )
+        )
+
+    if not ranked:
+        return "—", "No clear advanced direction alignment yet."
+
+    ranked.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], -item[4], -item[5], item[6]))
+    _, _, _, _, _, _, coin, direction, subtext = ranked[0]
+    return f"{coin} • {direction}", subtext
 
 
 def _pick_best_scalp_opportunity(df_results: pd.DataFrame) -> tuple[str, str]:
@@ -1650,14 +1794,14 @@ def _coingecko_coin_id_fallback_reason(fetcher: object) -> str:
         return detail
     if callable(fetcher):
         return "dependency marked unavailable in this session"
-    return "fallback fetcher is not callable"
+    return "backup fetcher is not callable"
 
 
 def _coingecko_coin_id_unavailable_message(reason: str | None) -> str:
     detail = str(reason or "").strip()
     if detail:
-        return f"no exchange OHLCV data; CoinGecko fallback unavailable ({detail})"
-    return "no exchange OHLCV data; CoinGecko fallback unavailable"
+        return f"no exchange OHLCV data; CoinGecko backup unavailable ({detail})"
+    return "no exchange OHLCV data; CoinGecko backup unavailable"
 
 
 def _audit_scan_summary_lines(
@@ -1675,7 +1819,7 @@ def _audit_scan_summary_lines(
     lines = [f"**Rows shown:** `{int(max(0, displayed_rows))}`"]
     if int(max(0, attempted_count)) > 0:
         summary = (
-            f"**Live scan attempt:** attempted `{int(max(0, attempted_count))}`"
+            f"**Live read attempt:** attempted `{int(max(0, attempted_count))}`"
             f" • produced `{int(max(0, produced_count))}`"
             f" • skipped `{int(max(0, skipped_count))}`"
         )
@@ -1683,7 +1827,7 @@ def _audit_scan_summary_lines(
             summary += f" • ranked out `{int(max(0, ranked_out_count))}`"
         lines.append(summary)
     lines.append(
-        f"**Scanner focus:** `{_normalize_scan_mode(scan_mode)}` • **Timeframe:** `{str(timeframe).upper()}` • **Direction:** `{direction_filter}`"
+        f"**Scan mode:** `{_normalize_scan_mode(scan_mode)}` • **Timeframe:** `{str(timeframe).upper()}` • **Direction:** `{direction_filter}`"
     )
     if str(source_label or "").strip().upper().startswith("CACHED"):
         lines.append("_Current table is cached. Live attempt stats reflect the latest refresh attempt, not the cached rows._")
@@ -1718,7 +1862,7 @@ def _spot_anchor_pair_label(snapshot) -> str:
     lead = _spot_lead_snapshot(snapshot)
     confirm = _spot_confirm_snapshot(snapshot)
     if lead is None or confirm is None:
-        return "HTF"
+        return "Higher-TF"
     return f"{str(lead.timeframe).upper()} + {str(confirm.timeframe).upper()}"
 
 
@@ -1761,7 +1905,7 @@ def _confidence_note(snapshot, score: float, confidence_snapshot=None) -> str:
     if float(snapshot.structure_quality) < 40.0:
         caps.append("weak structure")
     if bool(snapshot.degraded_data):
-        caps.append("degraded data")
+        caps.append("partial data")
     if bool(snapshot.range_regime):
         caps.append("range regime")
     cap_text = f" Limits active: {', '.join(caps)}." if caps else ""
@@ -1810,7 +1954,7 @@ def _ai_confidence_note(snapshot, score: float, confidence_snapshot=None) -> str
     if bool(snapshot.timeframe_conflict):
         caps.append("timeframe conflict")
     if bool(snapshot.degraded_data):
-        caps.append("degraded data")
+        caps.append("partial data")
     if str(snapshot.direction or "").strip().upper() != "NEUTRAL" and int(dots) <= 1:
         caps.append("low model support")
     cap_text = f" Limits active: {', '.join(caps)}." if caps else ""
@@ -2055,7 +2199,7 @@ def _pair_provenance_label(requested_symbol: str, actual_symbol: str | None, pro
     if not label:
         label = str(requested_symbol or "").strip()
     if str(provider or "").strip().lower() == "coingecko":
-        return f"{label} (CoinGecko fallback)"
+        return f"{label} (CoinGecko backup)"
     return label
 
 
@@ -2092,7 +2236,7 @@ def _market_data_mode(
                 return "CUSTOM WATCHLIST MODE (PARTIAL ENRICHMENT)"
         return "CUSTOM WATCHLIST MODE" if has_market_rows else "CUSTOM WATCHLIST MODE (EXCHANGE-ONLY)"
     if used_major_fallback:
-        return "MAJOR FALLBACK MODE"
+        return "MAJOR BACKUP MODE"
     return "FULL MARKET MODE" if has_market_rows else "EXCHANGE-ONLY MODE"
 
 
@@ -2105,20 +2249,20 @@ def _underfilled_universe_message(
     requested_n: int,
 ) -> str:
     if custom_mode_active:
-        return f"Custom mode active: scanning {working_count} / {requested_n} requested symbols."
+        return f"Custom mode active: reading {working_count} / {requested_n} requested symbols."
     if used_major_fallback:
         return (
-            f"Hardcoded major fallback universe currently returned {working_count} eligible symbols "
+            f"Hardcoded major backup universe currently returned {working_count} eligible symbols "
             f"(requested {requested_n}). This is not a full live top-volume market sweep."
         )
     if has_market_rows:
         return (
             f"Liquidity universe currently returned {working_count} eligible symbols "
-            f"(requested {requested_n}). Scanner remains strict to top-volume matched pairs."
+            f"(requested {requested_n}). Market read remains strict to top-volume matched pairs."
         )
     return (
         f"Exchange-only universe currently returned {working_count} eligible symbols "
-        f"(requested {requested_n}). Scanner is using exchange-ranked pairs because provider enrichment is unavailable."
+        f"(requested {requested_n}). Market read is using exchange-ranked pairs because provider enrichment is unavailable."
     )
 
 
@@ -2156,12 +2300,12 @@ def _scan_universe_notice(
         return (
             "warning",
             "Provider liquidity universe was available, but strict exchange pair ranking could not resolve "
-            "usable USD/USDT feeds. Hardcoded major fallback was intentionally not used.",
+            "usable USD/USDT feeds. Hardcoded major backup was intentionally not used.",
         )
     return (
         "info",
-        "Liquidity universe was available, but current filters left no eligible scanner symbols. "
-        "Hardcoded major fallback was intentionally not used. "
+        "Liquidity universe was available, but current filters left no eligible market symbols. "
+        "Hardcoded major backup was intentionally not used. "
         f"Source pairs: {int(source_pair_count)}, market rows: {int(market_row_count)}, "
         f"requested top_n: {int(top_n)}.",
     )
@@ -2846,9 +2990,9 @@ def _custom_watchlist_missing_status(
             if fallback_coin_id and not bool(coingecko_coin_id_fallback_available):
                 reason = _coingecko_coin_id_unavailable_message(coingecko_coin_id_fallback_reason)
             elif fallback_coin_id:
-                reason = "no exchange OHLCV data; CoinGecko fallback returned empty"
+                reason = "no exchange OHLCV data; CoinGecko backup returned empty"
             else:
-                reason = "no exchange pair; coin-id unresolved for fallback"
+                reason = "no exchange pair; coin-id unresolved for backup"
         missing.append((base, reason))
     return missing
 
@@ -3027,7 +3171,7 @@ def render(ctx: dict) -> None:
             f"Your market overview dashboard. Shows live BTC/ETH prices, total market cap, "
             f"{_tip('Fear & Greed Index', copy_text('market.hero.fear_greed_tip'))} "
             f"and {_tip('BTC Dominance', 'Bitcoin’s share of the total crypto market. Rising dominance usually means money is hiding in BTC; falling dominance can support altcoins.')}. "
-            f"The scanner runs either on the live top-liquidity universe or on your custom watchlist, then scores symbols with real-time technical signals."
+            f"The Market tab reads either the live top-liquidity universe or your custom watchlist, then scores symbols with real-time technical signals."
         ),
     )
 
@@ -3301,7 +3445,7 @@ def render(ctx: dict) -> None:
         "Direction signal only."
     )
     if behaviour_weight_mode == "equal":
-        ai_bias_tip += " Dominance feed unavailable: equal-weight fallback is active."
+        ai_bias_tip += " Dominance feed unavailable: equal-weight backup read is active."
 
     def _score_tone(v: float) -> tuple[str, str]:
         x = float(v)
@@ -3431,7 +3575,7 @@ def render(ctx: dict) -> None:
 
     # Top coin scanner controls
     st.markdown(
-        f"<div class='market-section-title' style='color:{ACCENT};'>Coin Setup Scanner</div>",
+        f"<div class='market-section-title' style='color:{ACCENT};'>Market Setup Radar</div>",
         unsafe_allow_html=True,
     )
     st.markdown(
@@ -3502,7 +3646,7 @@ def render(ctx: dict) -> None:
             else:
                 st.session_state["market_scan_mode"] = _SCAN_MODE_BROAD
         scan_mode = st.selectbox(
-            "Scanner Focus",
+            "Scan Mode",
             [_SCAN_MODE_BROAD, _SCAN_MODE_EMERGING],
             index=0,
             key="market_scan_mode",
@@ -3551,7 +3695,7 @@ def render(ctx: dict) -> None:
         st.markdown(
             f"<div class='market-note-box' style='border:1px solid rgba(0,212,255,0.34); border-left:4px solid {ACCENT}; "
             f"background:rgba(0,212,255,0.06); color:{TEXT_MUTED}; margin-top:0.25rem;'>"
-            f"<b style='color:{ACCENT};'>Custom Watchlist Mode:</b> scanning {len(custom_bases_applied)} coin(s): "
+            f"<b style='color:{ACCENT};'>Custom Watchlist Mode:</b> reading {len(custom_bases_applied)} coin(s): "
             f"{preview}{more}. Top N is disabled while custom mode is active."
             f"</div>",
             unsafe_allow_html=True,
@@ -3559,13 +3703,13 @@ def render(ctx: dict) -> None:
     elif custom_coin_input.strip() and custom_bases_draft:
         st.caption("Custom symbols are ready. Click Run Scan to apply watchlist mode.")
     elif _normalize_scan_mode(scan_mode) == _SCAN_MODE_EMERGING:
-        st.caption("Breakout Radar keeps the same scanner table, but reaches further into the active-liquidity universe and surfaces fresher breakout pressure earlier. Expect more noise.")
+        st.caption("Breakout Radar keeps the same market table, reaches further into the active-liquidity universe, and surfaces fresher breakout pressure earlier. Expect more noise.")
 
     exclude_stables = st.toggle(
         "Exclude stablecoins",
         value=True,
         key="market_exclude_stables",
-        help="Hide stable/synthetic USD-pegged coins from scanner universe.",
+        help="Hide stable/synthetic USD-pegged coins from the market universe.",
     )
     CACHE_TTL_MINUTES = 15
     gate_min_rr, gate_min_adx, gate_min_confidence = scalp_gate_thresholds(timeframe)
@@ -3989,7 +4133,7 @@ def render(ctx: dict) -> None:
         display_state = str(row.get("__scalp_display_state", "")).strip().upper()
         reason_text = str(title_override or row.get("__scalp_reason_text", "")).strip()
         if not reason_text and display_state == "LIVE":
-            reason_text = "Live scalp passed the current intraday setup, market gate, and quality checks."
+            reason_text = "Live scalp passed the current intraday setup, market stance, and quality checks."
         tone_cls = _tone_css_class(tone_key)
         state_cls = "mk-scalp-live" if display_state == "LIVE" else "mk-scalp-conditional"
         state_symbol = "✓" if display_state == "LIVE" else "!"
@@ -4135,7 +4279,7 @@ def render(ctx: dict) -> None:
 
     def _column_header_tooltip(col: str) -> str:
         return {
-            "Coin": "Asset ticker. If you hover the row value, you can also see the actual feed pair or fallback source.",
+            "Coin": "Asset ticker. If you hover the row value, you can also see the actual feed pair or backup source.",
             "Price ($)": "Latest closed-candle price from the active data feed.",
             "Δ (%)": "Move from the previous closed candle to the latest closed candle on your selected timeframe.",
             "Setup Confirm": copy_text("market.tooltip.setup_confirm"),
@@ -4246,7 +4390,7 @@ def render(ctx: dict) -> None:
         if cls.startswith("ENTER_"):
             meaning = meaning_map["ENTER"]
         else:
-            meaning = meaning_map.get(cls, "Current scanner verdict for this setup.")
+            meaning = meaning_map.get(cls, "Current market read for this setup.")
         parts = [f"{display_txt}: {meaning}"]
         if reason_text:
             parts.append(f"Why: {_compact_hover_note(reason_text, limit=100)}")
@@ -4261,7 +4405,7 @@ def render(ctx: dict) -> None:
             "Upside": "The broader technical trend still leans up.",
             "Downside": "The broader technical trend still leans down.",
             "Neutral": "The broader technical read is mixed, so there is no strong edge yet.",
-        }.get(clean, "This is the broader technical bias from the scanner.")
+        }.get(clean, "This is the broader technical bias from the market scan.")
         return f"Direction from {anchor_label}: {clean}. {meaning}"
 
     def _confidence_cell_title(row: dict, txt: str) -> str:
@@ -4286,8 +4430,9 @@ def render(ctx: dict) -> None:
             "Neutral": "The higher-timeframe AI stack does not see a clear edge.",
         }.get(verdict, "This is the higher-timeframe AI verdict.")
         ai_note = str(row.get("__ai_note", "") or "").strip()
-        parts = [f"HTF AI verdict: {verdict}. {meaning}", f"Model agreement: {votes_n}/3."]
-        if ai_note and "fallback" in ai_note.lower():
+        parts = [f"Higher-timeframe AI verdict: {verdict}. {meaning}", f"Model agreement: {votes_n}/3."]
+        ai_note_l = ai_note.lower()
+        if ai_note and any(token in ai_note_l for token in ("fallback", "safety", "partial", "incomplete")):
             parts.append(_compact_hover_note(ai_note, limit=90))
         return " ".join(parts)
 
@@ -5459,6 +5604,109 @@ def render(ctx: dict) -> None:
     attempted_symbols: set[str] = set()
     skipped_symbols: list[tuple[str, str]] = []
     market_decision_version = current_decision_version("Market")
+    data_health_items = list(st.session_state.get(_DATA_HEALTH_ITEMS_KEY, []))
+    if should_scan:
+        data_health_items = []
+        st.session_state[_DATA_HEALTH_ITEMS_KEY] = []
+
+    def _add_data_health_item(tone: str, title: str, body: str) -> None:
+        item = {
+            "tone": str(tone or "info").strip().lower(),
+            "title": str(title or "").strip(),
+            "body": str(body or "").strip(),
+        }
+        if not item["title"] and not item["body"]:
+            return
+        if item not in data_health_items:
+            data_health_items.append(item)
+
+    def _data_health_display_items(base_items: list[dict], *, source_label_text: str, data_mode_text: str) -> list[dict]:
+        items = [dict(item) for item in base_items if isinstance(item, dict)]
+
+        def add_once(tone: str, title: str, body: str) -> None:
+            item = {"tone": tone, "title": title, "body": body}
+            if item not in items:
+                items.append(item)
+
+        source_up = str(source_label_text or "").upper()
+        mode_up = str(data_mode_text or "").upper()
+        if "DEGRADED" in source_up or "PARTIAL" in source_up:
+            add_once(
+                "warning",
+                "Partial Live Read",
+                "The current table reflects a partial live universe; use the read, but treat coverage as incomplete.",
+            )
+        if source_up.startswith("CACHED"):
+            add_once(
+                "warning",
+                "Cached Snapshot",
+                "The table is using the latest matching snapshot; confirm with a fresh live read before acting.",
+            )
+        if "PARTIAL ENRICHMENT" in mode_up:
+            add_once(
+                "warning",
+                "Partial Enrichment",
+                "Some market-cap fields are unavailable, but exchange candle metrics are live.",
+            )
+        if "EXCHANGE-ONLY" in mode_up:
+            add_once(
+                "warning",
+                "Exchange-Only Feed",
+                "Exchange candles are live; enrichment fields such as market cap may be unavailable.",
+            )
+        if mode_up.startswith("MAJOR BACKUP"):
+            add_once(
+                "warning",
+                "Universe Backup",
+                "The liquidity universe failed, so this is a majors-only backup read rather than a full market sweep.",
+            )
+        return items
+
+    def _render_data_health_band(*, source_chip: str, source_color: str, source_display_label: str, mode_label: str, mode_color: str, items: list[dict]) -> None:
+        warning_items = [item for item in items if str(item.get("tone") or "").lower() == "warning"]
+        if not warning_items:
+            return
+        accent_color = WARNING if warning_items else POSITIVE
+        status_text = "Needs Care" if warning_items else "Healthy"
+        visible_items = items[:4]
+        lines = []
+        for item in visible_items:
+            tone = str(item.get("tone") or "info").lower()
+            item_color = WARNING if tone == "warning" else (POSITIVE if tone == "positive" else ACCENT)
+            title = html.escape(str(item.get("title") or "").strip())
+            body = html.escape(str(item.get("body") or "").strip())
+            if title and body:
+                lines.append(f"<span><b style='color:{item_color};'>{title}:</b> {body}</span>")
+            elif title:
+                lines.append(f"<span><b style='color:{item_color};'>{title}</b></span>")
+            elif body:
+                lines.append(f"<span>{body}</span>")
+        if len(items) > len(visible_items):
+            lines.append(f"<span>+{len(items) - len(visible_items)} more health note(s).</span>")
+        detail_html = (
+            f"<div style='display:flex; flex-direction:column; gap:4px; margin-top:7px; line-height:1.42;'>"
+            f"{''.join(lines)}"
+            f"</div>"
+        )
+        st.markdown(
+            f"<div class='market-note-box' style='border:1px solid rgba(148,163,184,0.20); border-left:4px solid {accent_color}; "
+            f"background:linear-gradient(180deg, rgba(255,255,255,0.026), rgba(255,255,255,0.010)); color:{TEXT_MUTED}; "
+            f"padding:7px 10px; margin:0.18rem 0 0.62rem 0;'>"
+            f"<div style='display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;'>"
+            f"<div style='display:flex; align-items:center; gap:9px; flex-wrap:wrap;'>"
+            f"<span style='color:{accent_color}; font-weight:900; letter-spacing:0.08em; text-transform:uppercase;'>Data Health</span>"
+            f"<span class='market-inline-chip' style='border:1px solid {accent_color}; color:{accent_color}; background:rgba(255,255,255,0.04);'>{status_text}</span>"
+            f"</div>"
+            f"<div style='display:flex; align-items:center; gap:8px; flex-wrap:wrap;'>"
+            f"<span class='market-inline-chip' style='border:1px solid {source_color}; color:{source_color}; background:rgba(255,255,255,0.04);'>{html.escape(source_chip)} • {html.escape(source_display_label)}</span>"
+            f"<span class='market-inline-chip' style='border:1px solid {mode_color}; color:{mode_color}; background:rgba(255,255,255,0.04);'>{html.escape(mode_label)}</span>"
+            f"</div>"
+            f"</div>"
+            f"{detail_html}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
     archive_bundle = _market_archive_bundle(
         _fetch_signal_events_df=fetch_signal_events_df,
         db_path=signal_tracker_db_path,
@@ -5484,12 +5732,12 @@ def render(ctx: dict) -> None:
     # Fetch top coins
     if should_scan:
         spinner_label = (
-            f"Scanning custom watchlist ({len(custom_bases_applied)}) ({direction_filter}) [{timeframe}] ..."
+            f"Reading custom watchlist ({len(custom_bases_applied)}) ({direction_filter}) [{timeframe}] ..."
             if custom_mode_active
             else (
-                f"Scanning breakout radar for {top_n} early candidates ({direction_filter}) [{timeframe}] ..."
+                f"Reading breakout radar for {top_n} early candidates ({direction_filter}) [{timeframe}] ..."
                 if _normalize_scan_mode(scan_mode) == _SCAN_MODE_EMERGING
-                else f"Scanning {top_n} coins ({direction_filter}) [{timeframe}] ..."
+                else f"Reading {top_n} coins ({direction_filter}) [{timeframe}] ..."
             )
         )
         with st.spinner(spinner_label):
@@ -5610,9 +5858,10 @@ def render(ctx: dict) -> None:
                 candidate_symbol_pool = major_fallback_symbols[: min(top_n, len(major_fallback_symbols))]
                 working_symbols = list(candidate_symbol_pool)
                 if working_symbols:
-                    st.warning(
-                        "Primary liquidity universe could not produce usable symbols. "
-                        "Scanner switched to a hardcoded major fallback universe."
+                    _add_data_health_item(
+                        "warning",
+                        "Universe Backup",
+                        "Primary liquidity universe could not produce usable symbols; Market read switched to a hardcoded major backup universe.",
                     )
 
             # Two-phase scan:
@@ -6058,7 +6307,7 @@ def render(ctx: dict) -> None:
                 )
                 if actionable_tactical_candidate:
                     tactical_note = (
-                        "Actionable tactical candidate: selected timeframe is aligned early while HTF direction is still neutral."
+                        "Actionable tactical candidate: selected timeframe is aligned early while higher-timeframe direction is still neutral."
                     )
                     confidence_note = (
                         f"{confidence_note} {tactical_note}".strip()
@@ -6216,9 +6465,9 @@ def render(ctx: dict) -> None:
                                     coingecko_coin_id_fallback_reason
                                 )
                             elif fallback_coin_id:
-                                reason = "no exchange OHLCV data; CoinGecko fallback returned empty"
+                                reason = "no exchange OHLCV data; CoinGecko backup returned empty"
                             else:
-                                reason = "no exchange pair; coin-id unresolved for fallback"
+                                reason = "no exchange pair; coin-id unresolved for backup"
                         fetch_failures.append((sym, reason))
                         continue
                     actual_symbol = str(df.attrs.get("source_symbol") or "").strip() or sym
@@ -6469,18 +6718,16 @@ def render(ctx: dict) -> None:
             )
             if universe_notice is not None:
                 level, message = universe_notice
-                if level == "warning":
-                    st.warning(message)
-                else:
-                    st.info(message)
+                _add_data_health_item(level, "Universe Scope", message)
 
             if skipped_symbols:
                 st.session_state["market_scan_error_count"] = len(skipped_symbols)
                 sample = ", ".join(f"{sym} ({err})" for sym, err in skipped_symbols[:3])
                 more = "" if len(skipped_symbols) <= 3 else f" +{len(skipped_symbols) - 3} more"
-                st.warning(
-                    "Live scan ran in degraded mode and skipped some symbols. "
-                    f"Skipped: {len(skipped_symbols)} / {len(attempted_symbols)} | Sample: {sample}{more}."
+                _add_data_health_item(
+                    "warning",
+                    "Partial Coverage",
+                    f"Skipped {len(skipped_symbols)} / {len(attempted_symbols)} symbols. Sample: {sample}{more}.",
                 )
             else:
                 st.session_state["market_scan_error_count"] = 0
@@ -6492,10 +6739,11 @@ def render(ctx: dict) -> None:
                         if coingecko_coin_id_fallback_reason
                         else ""
                     )
-                    st.warning(
-                        "CoinGecko custom-watchlist fallback is unavailable in this session. "
-                        "Exchange-missing custom symbols may stay hidden until the fallback dependency is restored."
-                        f"{unavailable_reason}"
+                    _add_data_health_item(
+                        "warning",
+                        "Watchlist Backup",
+                        "CoinGecko custom-watchlist backup is unavailable; exchange-missing custom symbols may stay hidden."
+                        f"{unavailable_reason}",
                     )
                 custom_missing = _custom_watchlist_missing_status(
                     custom_bases_applied,
@@ -6507,9 +6755,10 @@ def render(ctx: dict) -> None:
                 )
                 if custom_missing:
                     detail = " • ".join(f"{base}: {reason}" for base, reason in custom_missing)
-                    st.warning(
-                        "Some custom watchlist coins could not be shown in the table. "
-                        f"Hidden: {detail}."
+                    _add_data_health_item(
+                        "warning",
+                        "Hidden Watchlist Coins",
+                        f"Some custom watchlist coins could not be shown. Hidden: {detail}.",
                     )
 
             scan_degraded = bool(skipped_symbols) or (bool(attempted_symbols) and total_fetched_frame_count == 0)
@@ -6598,9 +6847,10 @@ def render(ctx: dict) -> None:
                     source_label = f"CACHED ({ts})"
                     st.session_state["market_scan_source"] = source_label
                     st.session_state["market_data_mode"] = data_mode
-                    st.warning(
-                        f"Live scan returned no rows. Showing last successful snapshot from {ts} "
-                        f"for the same timeframe/filter. Do not execute directly from cache-only view."
+                    _add_data_health_item(
+                        "warning",
+                        "Cached Snapshot",
+                        f"Live scan returned no rows. Showing last successful snapshot from {ts} for the same timeframe/filter.",
                     )
                 else:
                     results = []
@@ -6610,28 +6860,34 @@ def render(ctx: dict) -> None:
                     st.session_state["market_data_mode"] = data_mode
                     has_other_cached_snapshot = bool(last_good_registry) and not bool(last_good_results)
                     if has_other_cached_snapshot:
-                        st.warning(
-                            "Live scan returned no rows for current timeframe/filter. "
-                            "Stale cache from another setting was intentionally not used."
+                        _add_data_health_item(
+                            "warning",
+                            "No Matching Snapshot",
+                            "Live scan returned no rows for the current timeframe/filter; stale cache from another setting was not used.",
                         )
                     elif healthy_empty_seen:
-                        st.info(
-                            "Latest healthy live scan for this timeframe/filter had no candidates. "
-                            "Older cached setups were intentionally suppressed."
+                        _add_data_health_item(
+                            "info",
+                            "Healthy Empty Read",
+                            "Latest healthy live scan for this timeframe/filter had no candidates; older cached setups were suppressed.",
                         )
                     elif scan_degraded and last_good_results:
-                        st.warning(
-                            f"Live scan returned no rows and cache is older than {CACHE_TTL_MINUTES} minutes. "
-                            "Stale snapshot was not used."
+                        _add_data_health_item(
+                            "warning",
+                            "Stale Snapshot Blocked",
+                            f"Live scan returned no rows and cache is older than {CACHE_TTL_MINUTES} minutes; stale snapshot was not used.",
                         )
                     elif scan_degraded:
-                        st.warning(
-                            "Live scan degraded and produced no usable candidates. "
-                            "No last-good snapshot was available for this timeframe/filter."
+                        _add_data_health_item(
+                            "warning",
+                            "Partial Empty Read",
+                            "Live market read was partial and produced no usable candidates; no last-good snapshot was available.",
                         )
                     else:
-                        st.info(
-                            "Live scan completed successfully but found no current candidates for this timeframe/filter."
+                        _add_data_health_item(
+                            "info",
+                            "No Candidates",
+                            "Live scan completed successfully but found no current candidates for this timeframe/filter.",
                         )
                     if not scan_degraded:
                         st.session_state[_LAST_HEALTHY_EMPTY_SIG_KEY] = _remember_healthy_empty_sig(
@@ -6639,89 +6895,34 @@ def render(ctx: dict) -> None:
                             scan_sig,
                         )
             st.session_state[_LAST_SCAN_ATTEMPT_TS_KEY] = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            st.session_state[_DATA_HEALTH_ITEMS_KEY] = list(data_health_items)
 
     # Prepare DataFrame for display
     if results:
         source_is_degraded = "DEGRADED" in source_label.upper()
         source_color = WARNING if (source_is_degraded or source_label.startswith("CACHED")) else POSITIVE
         source_chip = (
-            "LIVE DEGRADED"
+            "PARTIAL LIVE"
             if source_is_degraded
             else ("LIVE FEED" if source_label.startswith("LIVE") else "CACHED SNAPSHOT")
         )
+        source_display_label = str(source_label).replace("DEGRADED", "PARTIAL")
         mode_color = ACCENT if data_mode in {"FULL MARKET MODE", "CUSTOM WATCHLIST MODE"} else WARNING
-        if source_is_degraded:
-            st.markdown(
-                f"<div class='market-note-box' style='border:1px solid rgba(255,209,102,0.4); border-left:4px solid {WARNING}; "
-                f"background:rgba(255,209,102,0.08); color:{TEXT_MUTED};'>"
-                f"<b style='color:{WARNING};'>Degraded Live Scan:</b> The current table reflects a partial live universe. "
-                f"Some symbols were skipped during fetch/analysis, so this is not a complete market sweep."
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-        if source_label.startswith("CACHED"):
-            st.markdown(
-                f"<div class='market-note-box' style='border:1px solid rgba(255,209,102,0.4); border-left:4px solid {WARNING}; "
-                f"background:rgba(255,209,102,0.08); color:{TEXT_MUTED};'>"
-                f"<b style='color:{WARNING};'>Execution Caution:</b> This table is running on cached snapshot data. "
-                f"Confirm with a fresh LIVE scan before placing trades."
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-        if "PARTIAL ENRICHMENT" in data_mode:
-            st.markdown(
-                f"<div class='market-note-box' style='border:1px solid rgba(255,209,102,0.34); border-left:4px solid {WARNING}; "
-                f"background:rgba(255,209,102,0.06); color:{TEXT_MUTED};'>"
-                f"<b style='color:{WARNING};'>Data Mode:</b> Custom watchlist is active, but market-cap enrichment is only available "
-                f"for some requested symbols. Trade metrics remain live from exchange candles."
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-        if "EXCHANGE-ONLY" in data_mode:
-            st.markdown(
-                f"<div class='market-note-box' style='border:1px solid rgba(255,209,102,0.34); border-left:4px solid {WARNING}; "
-                f"background:rgba(255,209,102,0.06); color:{TEXT_MUTED};'>"
-                f"<b style='color:{WARNING};'>Data Mode:</b> "
-                f"{'Custom watchlist is active, but enrichment is currently unavailable. ' if data_mode.startswith('CUSTOM WATCHLIST') else 'Exchange-only feed is active. '}"
-                f"Trade metrics are live from exchange candles; enrichment fields like market cap may show as —."
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-        if data_mode.startswith("MAJOR FALLBACK"):
-            st.markdown(
-                f"<div class='market-note-box' style='border:1px solid rgba(255,209,102,0.34); border-left:4px solid {WARNING}; "
-                f"background:rgba(255,209,102,0.06); color:{TEXT_MUTED};'>"
-                f"<b style='color:{WARNING};'>Universe Fallback:</b> The liquidity universe failed, so the scanner is running on a hardcoded majors list. "
-                f"This is not a true live top-volume market sweep."
-                f"</div>",
-                unsafe_allow_html=True,
-            )
         render_help_details(
             st,
-            summary="Scanner guide (?)",
+            summary="How to read this table (?)",
             body_html=copy_text("market.help.scanner_guide_html"),
         )
-        controls_col, chips_col = st.columns([1.6, 2.4], gap="small")
-        with controls_col:
-            show_advanced = st.toggle("Show advanced columns", value=False, key="market_show_adv_cols")
-            show_diagnostics = bool(st.session_state.get("market_show_diagnostics", False))
-        with chips_col:
-            custom_fallback_chip = ""
-            if custom_mode_active and not coingecko_coin_id_fallback_available:
-                custom_fallback_chip = (
-                    f"<span class='market-inline-chip' style='border:1px solid {WARNING}; color:{WARNING}; "
-                    f"background:rgba(255,209,102,0.08);'>CoinGecko fallback unavailable</span>"
-                )
-            st.markdown(
-                f"<div style='display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding-top:0.18rem;'>"
-                f"<span class='market-inline-chip' style='border:1px solid {source_color}; color:{source_color}; "
-                f"background:rgba(255,255,255,0.04);'>{source_chip} • {source_label}</span>"
-                f"<span class='market-inline-chip' style='border:1px solid {mode_color}; color:{mode_color}; "
-                f"background:rgba(255,255,255,0.04);'>{data_mode}</span>"
-                f"{custom_fallback_chip}"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
+        _render_data_health_band(
+            source_chip=source_chip,
+            source_color=source_color,
+            source_display_label=source_display_label,
+            mode_label=str(data_mode),
+            mode_color=mode_color,
+            items=_data_health_display_items(data_health_items, source_label_text=source_label, data_mode_text=str(data_mode)),
+        )
+        show_advanced = st.toggle("Show advanced columns", value=False, key="market_show_adv_cols")
+        show_diagnostics = bool(st.session_state.get("market_show_diagnostics", False))
 
         df_results = pd.DataFrame(results)
         df_live_produced = pd.DataFrame(live_produced_rows) if live_produced_rows else pd.DataFrame()
@@ -7539,12 +7740,7 @@ def render(ctx: dict) -> None:
 
         best_scalp_coin, best_scalp_sub = _pick_best_scalp_opportunity(df_results)
 
-        confidence_coin, confidence_val_head, confidence_sub = _pick_confidence_leader(df_results)
-        confidence_head = (
-            confidence_coin
-            if confidence_val_head is None
-            else f"{confidence_coin} ({confidence_val_head:.0f}%)"
-        )
+        clearest_direction_head, clearest_direction_sub = _pick_clearest_direction(df_results)
 
         status_label, status_head, status_sub = _setup_status_summary(
             enter_count=enter_count,
@@ -7554,20 +7750,25 @@ def render(ctx: dict) -> None:
             source_label=source_label,
         )
         if emerging_total <= 0:
-            emerging_head = "NO LEAD SIGNAL"
+            emerging_head = "NO CLEAR PRESSURE"
         elif emerging_up_count > 0 and emerging_down_count <= 0:
-            emerging_head = f"{emerging_up_count} UPSIDE LEAD" if emerging_up_count == 1 else f"{emerging_up_count} UPSIDE LEADS"
+            emerging_head = (
+                f"{emerging_up_count} UPSIDE PUSH"
+                if emerging_up_count == 1
+                else f"{emerging_up_count} UPSIDE PUSHES"
+            )
         elif emerging_down_count > 0 and emerging_up_count <= 0:
             emerging_head = (
-                f"{emerging_down_count} DOWNSIDE LEAD"
+                f"{emerging_down_count} DOWNSIDE PUSH"
                 if emerging_down_count == 1
-                else f"{emerging_down_count} DOWNSIDE LEADS"
+                else f"{emerging_down_count} DOWNSIDE PUSHES"
             )
         else:
-            emerging_head = f"{emerging_total} LEAD SIGNALS"
+            emerging_head = f"{emerging_total} PRESSURE MOVES"
         sector_meta = (
-            f" • Sector lead: {sector_rotation_snapshot.leader_sector}"
-            if str(getattr(sector_rotation_snapshot, 'leader_sector', '')).strip() not in {"", "None", "Other"}
+            f" • Sector: {sector_rotation_snapshot.leader_sector}"
+            if emerging_total > 0
+            and str(getattr(sector_rotation_snapshot, 'leader_sector', '')).strip() not in {"", "None", "Other"}
             else ""
         )
         emerging_sub = (
@@ -7583,22 +7784,22 @@ def render(ctx: dict) -> None:
                     "label_title": copy_text("market.status.label_title"),
                 },
                 {
-                    "label": "LEAD Signals",
+                    "label": "Pressure Build",
                     "value": emerging_head,
                     "subtext": emerging_sub,
-                    "label_title": "Quick count of LEAD signals. This shows where early pressure is starting to build.",
+                    "label_title": "Quick count of names where upside or downside pressure is building before full confirmation.",
                 },
                 {
-                    "label": "Best Scalp Opportunity",
+                    "label": "Best Scalp Timing",
                     "value": best_scalp_coin,
                     "subtext": best_scalp_sub,
-                    "label_title": "Best shorter-term execution candidate in the current table.",
+                    "label_title": "Best shorter-term timing candidate in the current table.",
                 },
                 {
-                    "label": "Confidence Leader",
-                    "value": confidence_head,
-                    "subtext": confidence_sub,
-                    "label_title": "Coin with the strongest technical confidence score in the current table.",
+                    "label": "Clearest Direction",
+                    "value": clearest_direction_head,
+                    "subtext": clearest_direction_sub,
+                    "label_title": "Advanced indicators with the clearest upside/downside alignment in the current table.",
                 },
             ],
             columns=4,
@@ -7632,7 +7833,7 @@ def render(ctx: dict) -> None:
         if watch_ratio >= 0.65:
             audit_flags.append(copy_text("market.audit.watch_heavy"))
         if ai_neutral_ratio >= 0.65:
-            audit_flags.append("AI is mostly Neutral: HTF AI sees limited clean edge in the current market regime.")
+            audit_flags.append("AI is mostly Neutral: higher-timeframe AI sees limited clean edge in the current market regime.")
         if skip_ratio >= 0.65:
             if direction_neutral_ratio >= 0.65:
                 audit_flags.append(
@@ -7845,9 +8046,25 @@ def render(ctx: dict) -> None:
             mime="text/csv"
         )
     else:
+        source_is_degraded = "DEGRADED" in str(source_label).upper()
+        source_color = WARNING if (source_is_degraded or str(source_label).startswith("CACHED")) else POSITIVE
+        source_chip = (
+            "PARTIAL LIVE"
+            if source_is_degraded
+            else ("LIVE FEED" if str(source_label).startswith("LIVE") else "CACHED SNAPSHOT")
+        )
+        mode_color = ACCENT if data_mode in {"FULL MARKET MODE", "CUSTOM WATCHLIST MODE"} else WARNING
+        _render_data_health_band(
+            source_chip=source_chip,
+            source_color=source_color,
+            source_display_label=str(source_label).replace("DEGRADED", "PARTIAL"),
+            mode_label=str(data_mode),
+            mode_color=mode_color,
+            items=_data_health_display_items(data_health_items, source_label_text=str(source_label), data_mode_text=str(data_mode)),
+        )
         if "DEGRADED" in str(source_label).upper():
-            st.warning(
-                "No coins were shown because the latest live scan was degraded and did not produce a usable complete result."
+            st.info(
+                "No coins were shown because the latest live market read was partial and did not produce a usable complete result."
             )
         else:
             st.info("No coins matched the criteria.")

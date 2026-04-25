@@ -3,6 +3,7 @@ from ui.ctx import get_ctx
 import pandas as pd
 import plotly.graph_objs as go
 import ta
+from core.archive_policy import ARCHIVE_LEARNING_WINDOW_ROWS, ARCHIVE_RECENT_CONTEXT_ROWS
 from core.adaptive_weighting import (
     build_ai_confidence_calibration_model,
     build_ai_confidence_calibration_snapshot,
@@ -57,13 +58,13 @@ def format_spot_price(v: float) -> str:
 def _spot_ai_fallback_note(details: dict | None) -> str:
     status = str((details or {}).get("status") or "").strip().lower()
     if status == "insufficient_candles":
-        return "AI fallback active: not enough candles for a reliable model vote."
+        return "AI safety read: not enough candles for a reliable model vote."
     if status == "insufficient_features":
-        return "AI fallback active: not enough clean indicator data after warm-up."
+        return "AI safety read: not enough clean indicator data after warm-up."
     if status == "single_class_window":
-        return "AI fallback active: recent training window had only one class."
+        return "AI safety read: recent training window had only one class."
     if status == "model_exception":
-        return "AI fallback active: ensemble model output was unavailable."
+        return "AI safety read: ensemble model output was unavailable."
     return ""
 
 
@@ -153,7 +154,7 @@ def _spot_anchor_pair_label(snapshot) -> str:
     lead = _spot_lead_snapshot(snapshot)
     confirm = _spot_confirm_snapshot(snapshot)
     if lead is None or confirm is None:
-        return "HTF"
+        return "Higher-TF"
     return f"{str(lead.timeframe).upper()} + {str(confirm.timeframe).upper()}"
 
 
@@ -377,7 +378,7 @@ def render(ctx: dict) -> None:
             return
         signal_tracker_db_path = init_signal_tracker_db(get_signal_tracker_db_path())
         adaptive_history_df = fetch_signal_events_df(
-            limit=2000,
+            limit=ARCHIVE_LEARNING_WINDOW_ROWS,
             status="RESOLVED",
             source="Market",
             db_path=signal_tracker_db_path,
@@ -387,7 +388,7 @@ def render(ctx: dict) -> None:
             source="Market",
         )
         recent_market_events_df = fetch_signal_events_df(
-            limit=240,
+            limit=ARCHIVE_RECENT_CONTEXT_ROWS,
             source="Market",
             db_path=signal_tracker_db_path,
         )
@@ -449,7 +450,7 @@ def render(ctx: dict) -> None:
                 fallback = get_price_change(coin)
                 if fallback is not None:
                     price_change = float(fallback)
-                    delta_note = "Fallback source: ticker percentage (closed-candle delta unavailable)."
+                    delta_note = "Backup source: ticker percentage (closed-candle delta unavailable)."
             except Exception as e:
                 _debug(
                     f"Spot delta ticker fallback failed for {coin} ({timeframe}): "
@@ -1054,12 +1055,12 @@ def render(ctx: dict) -> None:
                     {
                         "label": left_zone_label,
                         "value": pullback_zone_text,
-                        "subtext": f"raw support: {_fmt_price(plan_support)}",
+                        "subtext": f"base support: {_fmt_price(plan_support)}",
                     },
                     {
                         "label": trigger_label,
                         "value": _fmt_price(breakout_trigger),
-                        "subtext": f"raw resistance: {_fmt_price(plan_resistance)}",
+                        "subtext": f"base resistance: {_fmt_price(plan_resistance)}",
                     },
                     {"label": f"Stop ({left_stop_context})", "value": _fmt_price(pullback_invalidation)},
                     {"label": f"Stop ({right_stop_context})", "value": _fmt_price(breakout_invalidation)},
@@ -1086,8 +1087,8 @@ def render(ctx: dict) -> None:
                         "label_title": "Latest close of selected timeframe (not live tick).",
                         "value": _fmt_price(current_price),
                     },
-                    {"label": "Raw Support", "value": _fmt_price(plan_support)},
-                    {"label": "Raw Resistance", "value": _fmt_price(plan_resistance)},
+                    {"label": "Base Support", "value": _fmt_price(plan_support)},
+                    {"label": "Base Resistance", "value": _fmt_price(plan_resistance)},
                     {"label": trigger_label, "value": _fmt_price(breakout_trigger)},
                     {"label": f"Protective Stop ({left_stop_context})", "value": _fmt_price(pullback_invalidation)},
                     {"label": f"{right_tp_label} (after reclaim)", "value": breakout_tp_text},
@@ -1391,7 +1392,7 @@ def render(ctx: dict) -> None:
                         y=plan_support,
                         xref="x",
                         yref="y",
-                        text=f"Raw Support {_fmt_price(plan_support)}",
+                        text=f"Base Support {_fmt_price(plan_support)}",
                         showarrow=False,
                         xanchor="left",
                         yshift=12,
@@ -1405,7 +1406,7 @@ def render(ctx: dict) -> None:
                         y=plan_resistance,
                         xref="x",
                         yref="y",
-                        text=f"Raw Resistance {_fmt_price(plan_resistance)}",
+                        text=f"Base Resistance {_fmt_price(plan_resistance)}",
                         showarrow=False,
                         xanchor="right",
                         yshift=12,

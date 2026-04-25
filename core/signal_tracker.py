@@ -1679,7 +1679,7 @@ def build_recent_symbol_market_signal_snapshot(
             "Direction": direction,
             "Adaptive Edge": adaptive_edge,
             "Signal Note": (
-                f"Recent Market scanner read: {' | '.join(note_parts)}."
+                f"Recent Market read: {' | '.join(note_parts)}."
                 if note_parts
                 else ""
             ),

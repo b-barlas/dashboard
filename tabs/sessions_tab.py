@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import plotly.graph_objs as go
+from core.archive_policy import ARCHIVE_LEARNING_WINDOW_ROWS
 from core.session_utils import SESSION_ORDER, session_bucket_for_timestamp
 from core.trading_copy import copy_text, playbook_display, playbook_key, trade_gate_display, trade_gate_key
 
@@ -394,7 +395,7 @@ def render(ctx: dict) -> None:
         ),
     )
     tracker_db_path = init_signal_tracker_db(get_signal_tracker_db_path())
-    tracked_events = fetch_signal_events_df(limit=2000, source="Market", db_path=tracker_db_path)
+    tracked_events = fetch_signal_events_df(limit=ARCHIVE_LEARNING_WINDOW_ROWS, source="Market", db_path=tracker_db_path)
     tracked_session_summary = pd.DataFrame()
     current_playbook = "Unknown"
     current_playbook_key = "Unknown"
@@ -444,10 +445,10 @@ def render(ctx: dict) -> None:
         ),
     )
 
-    with st.expander("Archive & Diagnostics", expanded=False):
+    with st.expander("Archive Detail", expanded=False):
         st.markdown(
             f"<div style='color:{TEXT_MUTED}; font-size:0.88rem; margin-bottom:10px;'>"
-            f"Use this section only when you want the deeper archive view or raw diagnostics."
+            f"Use this section only when you want the deeper archive read or support tables."
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -503,7 +504,7 @@ def render(ctx: dict) -> None:
                 st,
                 items=[
                     {"label": "Current Session", "value": current_session, "subtext": "UTC bucket right now"},
-                    {"label": "Current Playbook", "value": current_playbook, "subtext": f"Gate {current_trade_gate}"},
+                    {"label": "Current Playbook", "value": current_playbook, "subtext": f"Market stance: {current_trade_gate}"},
                     {
                         "label": "Best Follow-Through",
                         "value": str(best_playbook_follow["Session"]),
