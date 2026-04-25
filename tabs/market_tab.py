@@ -87,6 +87,9 @@ from tabs.market_scan_helpers import (
     _actionable_frame_hunt_score,
     _actionable_setup_score,
     _actionable_tactical_candidate_score,
+    _apply_breakout_archive_feedback_to_market_rows,
+    _apply_breakout_memory_to_market_rows,
+    _build_breakout_archive_feedback_map,
     _emerging_candidate_score,
     _candidate_scan_symbols as _candidate_scan_symbols_impl,
     _initial_scan_symbols,
@@ -2720,10 +2723,50 @@ def _build_exchange_breakout_rows(
     return ranked_rows[: max(10, int(limit))]
 
 
+def _breakout_memory_seed_bases(memory_rows: object, *, limit: int = 36) -> list[str]:
+    if memory_rows is None:
+        return []
+    if isinstance(memory_rows, pd.DataFrame):
+        if memory_rows.empty:
+            return []
+        records = [dict(row) for row in memory_rows.to_dict("records")]
+    elif isinstance(memory_rows, list):
+        records = [dict(row) for row in memory_rows if isinstance(row, dict)]
+    else:
+        return []
+
+    best_by_base: dict[str, float] = {}
+    for row in records:
+        base = canonical_base_symbol((row or {}).get("symbol") or "")
+        if not base:
+            continue
+        source_score = _sortable_float(row.get("radar_source_score") or row.get("_radar_source_score"))
+        freshness_score = _sortable_float(row.get("radar_freshness_score") or row.get("_radar_freshness_score"))
+        pct_change = abs(_sortable_float(row.get("pct_change_24h") or row.get("price_change_percentage_24h")))
+        quote_volume = _sortable_float(
+            row.get("quote_volume_24h")
+            or row.get("_quote_volume_24h")
+            or row.get("total_volume")
+            or row.get("_volume_24h")
+        )
+        pressure = max(source_score, freshness_score)
+        if pressure < 0.34 and pct_change < 1.6:
+            continue
+        volume_score = 0.0
+        if quote_volume > 0.0:
+            volume_score = max(0.0, min(0.35, (math.log10(max(quote_volume, 1.0)) - 5.0) / 8.0))
+        score = pressure + min(0.45, pct_change / 16.0) + volume_score
+        best_by_base[base] = max(score, best_by_base.get(base, 0.0))
+
+    ranked = sorted(best_by_base.items(), key=lambda item: (-item[1], item[0]))
+    return [base for base, _score in ranked[: max(0, int(limit))]]
+
+
 def _build_breakout_radar_universe(
     *,
     base_pairs: list[str],
     base_market_rows: list[dict],
+    breakout_memory_rows: object | None = None,
     fetch_top_gainers_losers,
     fetch_trending_coins,
     fetch_exchange_tickers_snapshot,
@@ -2793,6 +2836,8 @@ def _build_breakout_radar_universe(
         _remember_base((row or {}).get("symbol"))
     for row in list(exchange_breakouts or [])[:60]:
         _remember_base((row or {}).get("symbol"))
+    for base in _breakout_memory_seed_bases(breakout_memory_rows, limit=36):
+        _remember_base(base)
 
     targeted_rows = get_market_cap_rows_for_symbols(tuple(radar_bases), vs_currency="usd")
     merged_market_rows = _merge_breakout_radar_market_rows(
@@ -3087,10 +3132,12 @@ def render(ctx: dict) -> None:
     get_signal_tracker_db_path = get_ctx(ctx, "get_signal_tracker_db_path")
     init_signal_tracker_db = get_ctx(ctx, "init_signal_tracker_db")
     fetch_signal_events_df = get_ctx(ctx, "fetch_signal_events_df")
+    fetch_breakout_radar_snapshots_df = get_ctx(ctx, "fetch_breakout_radar_snapshots_df")
     build_adaptive_context_model = get_ctx(ctx, "build_adaptive_context_model")
     build_live_signal_adaptive_snapshot = get_ctx(ctx, "build_live_signal_adaptive_snapshot")
     log_market_alerts = get_ctx(ctx, "log_market_alerts")
     log_signal_events = get_ctx(ctx, "log_signal_events")
+    log_breakout_radar_snapshots = get_ctx(ctx, "log_breakout_radar_snapshots")
     resolve_open_signal_events_for_frame = get_ctx(ctx, "resolve_open_signal_events_for_frame")
     _debug = get_ctx(ctx, "_debug")
     signal_tracker_db_path = init_signal_tracker_db(get_signal_tracker_db_path())
@@ -5714,6 +5761,11 @@ def render(ctx: dict) -> None:
     )
     adaptive_history_raw_df = archive_bundle["raw_df"]
     adaptive_history_df = archive_bundle["df"]
+    breakout_archive_feedback_map = _build_breakout_archive_feedback_map(
+        adaptive_history_df,
+        timeframe=str(timeframe),
+        direction_filter=str(direction_filter),
+    )
     adaptive_decision_mode = str(archive_bundle["decision_mode"])
     adaptive_decision_target = str(archive_bundle["decision_target"])
     adaptive_decision_rows = int(archive_bundle["decision_rows"])
@@ -5754,6 +5806,21 @@ def render(ctx: dict) -> None:
             usdt_symbols: list[str] = []
             provider_fetch_n: int | None = None
             breakout_freshness_cache: dict[tuple[str, str, str], float] = {}
+            breakout_memory_history_df = pd.DataFrame()
+            if _normalize_scan_mode(scan_mode) == _SCAN_MODE_EMERGING and not custom_mode_active:
+                try:
+                    breakout_memory_history_df = fetch_breakout_radar_snapshots_df(
+                        timeframe=str(timeframe),
+                        direction_filter=str(direction_filter),
+                        lookback_hours=72,
+                        limit=6000,
+                        db_path=signal_tracker_db_path,
+                    )
+                except Exception as e:
+                    _debug(
+                        f"Breakout Radar memory unavailable ({timeframe}): "
+                        f"{e.__class__.__name__}: {str(e).strip()}"
+                    )
 
             def _load_noncustom_scan_universe(
                 target_pool_n: int,
@@ -5776,6 +5843,7 @@ def render(ctx: dict) -> None:
                         usdt_symbols_local, unique_market_data_local, radar_mcap_map = _build_breakout_radar_universe(
                             base_pairs=usdt_symbols_local,
                             base_market_rows=unique_market_data_local,
+                            breakout_memory_rows=breakout_memory_history_df,
                             fetch_top_gainers_losers=fetch_top_gainers_losers,
                             fetch_trending_coins=fetch_trending_coins,
                             fetch_exchange_tickers_snapshot=fetch_exchange_tickers_snapshot,
@@ -5791,6 +5859,15 @@ def render(ctx: dict) -> None:
                             direction_filter=direction_filter,
                             max_candidates=max(14, min(int(top_n) * 3, 26)),
                             freshness_cache=breakout_freshness_cache,
+                        )
+                        unique_market_data_local = _apply_breakout_memory_to_market_rows(
+                            unique_market_data_local,
+                            breakout_memory_history_df,
+                            direction_filter=direction_filter,
+                        )
+                        unique_market_data_local = _apply_breakout_archive_feedback_to_market_rows(
+                            unique_market_data_local,
+                            breakout_archive_feedback_map,
                         )
                         mcap_map_local = _merge_market_cap_maps(mcap_map_local, radar_mcap_map)
                     eligible_symbols_local = _candidate_scan_symbols(
@@ -6304,6 +6381,8 @@ def render(ctx: dict) -> None:
                     spike_dir=spike_dir,
                     radar_source_score=radar_source_score,
                     radar_freshness_score=radar_freshness_score,
+                    radar_memory_score=_sortable_float((market_row or {}).get("_radar_memory_score")),
+                    radar_archive_edge_score=_sortable_float((market_row or {}).get("_radar_archive_edge_score")),
                 )
                 if actionable_tactical_candidate:
                     tactical_note = (
@@ -6674,6 +6753,20 @@ def render(ctx: dict) -> None:
                 )
                 if not pending_batch and scan_pool_target_n >= 250:
                     break
+
+            if _normalize_scan_mode(scan_mode) == _SCAN_MODE_EMERGING and not custom_mode_active:
+                try:
+                    log_breakout_radar_snapshots(
+                        unique_market_data,
+                        timeframe=str(timeframe),
+                        direction_filter=str(direction_filter),
+                        db_path=signal_tracker_db_path,
+                    )
+                except Exception as e:
+                    _debug(
+                        f"Breakout Radar memory log failed ({timeframe}): "
+                        f"{e.__class__.__name__}: {str(e).strip()}"
+                    )
 
             display_state = _resolve_display_scan_state(
                 fresh_results=fresh_results,

@@ -24,10 +24,12 @@ from core.signal_tracker import (
     build_execution_overlay_snapshot,
     build_signal_review_snapshot,
     count_market_alerts,
+    fetch_breakout_radar_snapshots_df,
     fetch_market_alerts_df,
     fetch_signal_forward_windows_df,
     fetch_signal_events_df,
     init_signal_tracker_db,
+    log_breakout_radar_snapshots,
     log_market_alerts,
     log_signal_events,
     prefer_current_decision_version_slice,
@@ -113,6 +115,52 @@ class SignalTrackerTests(unittest.TestCase):
         self.assertAlmostEqual(float(df.iloc[0]["actionable_setup_score"]), 81.0, places=4)
         self.assertAlmostEqual(float(df.iloc[0]["actionable_context_score"]), 67.5, places=4)
         self.assertAlmostEqual(float(df.iloc[0]["actionable_tactical_score"]), 74.0, places=4)
+
+    def test_breakout_radar_snapshots_persist_and_filter_current_scope(self) -> None:
+        observed_at = pd.Timestamp.utcnow()
+        rows = [
+            {
+                "symbol": "rave",
+                "_radar_source_kind": "exchange-breakout",
+                "_radar_source_score": 0.82,
+                "_radar_freshness_score": 0.44,
+                "price_change_percentage_24h": 5.8,
+                "_quote_volume_24h": 12_500_000,
+                "market_cap": 140_000_000,
+                "current_price": 0.012,
+            },
+            {
+                "symbol": "trx",
+                "_radar_source_score": 0.38,
+                "_radar_freshness_score": 0.20,
+                "price_change_percentage_24h": 0.4,
+            },
+        ]
+        self.assertEqual(
+            log_breakout_radar_snapshots(
+                rows,
+                timeframe="1H",
+                direction_filter="Upside",
+                observed_at=observed_at,
+                db_path=self.db_path,
+            ),
+            2,
+        )
+
+        scoped = fetch_breakout_radar_snapshots_df(
+            timeframe="1h",
+            direction_filter="Upside",
+            symbols=["RAVE"],
+            lookback_hours=2,
+            db_path=self.db_path,
+        )
+        self.assertEqual(len(scoped), 1)
+        row = scoped.iloc[0]
+        self.assertEqual(str(row["symbol"]), "RAVE")
+        self.assertEqual(str(row["timeframe"]), "1h")
+        self.assertEqual(str(row["direction_filter"]), "Upside")
+        self.assertAlmostEqual(float(row["radar_source_score"]), 0.82, places=4)
+        self.assertAlmostEqual(float(row["quote_volume_24h"]), 12_500_000, places=4)
 
     def test_fetch_signal_events_df_applies_timeframe_filter_before_limit(self) -> None:
         events = []

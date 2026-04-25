@@ -1,3 +1,5 @@
+import ast
+from pathlib import Path
 import unittest
 
 try:
@@ -32,6 +34,25 @@ class DepsFactoryContractTests(unittest.TestCase):
             "dependency injection",
             str(getattr(missing_fetch_coingecko_ohlcv_by_coin_id, "_codex_missing_dep_reason", "")),
         )
+
+    def test_crypto_meta_app_deps_match_tab_registry_contract(self):
+        module = ast.parse(Path("crypto_meta2.py").read_text())
+        app_dep_keys = None
+        for node in module.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            if not any(isinstance(target, ast.Name) and target.id == "APP_DEPS" for target in node.targets):
+                continue
+            self.assertIsInstance(node.value, ast.Dict)
+            app_dep_keys = {
+                key.value
+                for key in node.value.keys
+                if isinstance(key, ast.Constant) and isinstance(key.value, str)
+            }
+            break
+
+        self.assertIsNotNone(app_dep_keys)
+        self.assertEqual(app_dep_keys, required_dep_keys())
 
 
 if __name__ == "__main__":

@@ -221,6 +221,247 @@ def _emerging_universe_market_cap_score(market_cap: object) -> float:
     return 0.25
 
 
+def _breakout_late_chase_penalty(
+    *,
+    timeframe: str,
+    aligned_move: float,
+    radar_freshness_score: float = 0.0,
+    radar_memory_score: float = 0.0,
+) -> float:
+    _volume_w, _move_w, _mcap_w, _min_move, _sweet_move, stretch_move = _emerging_universe_profile(timeframe)
+    move = max(0.0, _sortable_float(aligned_move))
+    if move <= stretch_move:
+        return 0.0
+    extension = move - stretch_move
+    base_penalty = min(13.0, 2.5 + 0.72 * extension)
+    if move >= stretch_move * 1.85:
+        base_penalty += min(4.0, 0.22 * (move - stretch_move * 1.85))
+    freshness_shield = max(
+        _sortable_float(radar_freshness_score),
+        _sortable_float(radar_memory_score),
+    )
+    shield = min(0.70, max(0.0, freshness_shield) * 0.70)
+    return max(0.0, min(16.0, base_penalty * (1.0 - shield)))
+
+
+def _breakout_row_base(row: dict) -> str:
+    return canonical_base_symbol((row or {}).get("symbol") or (row or {}).get("Coin") or "")
+
+
+def _breakout_row_quote_volume(row: dict) -> float:
+    return max(
+        _sortable_float((row or {}).get("_quote_volume_24h")),
+        _sortable_float((row or {}).get("total_volume")),
+        _sortable_float((row or {}).get("_volume_24h")),
+        _sortable_float((row or {}).get("quote_volume_24h")),
+    )
+
+
+def _breakout_memory_history_rows(history_rows: object) -> list[dict]:
+    if history_rows is None:
+        return []
+    if isinstance(history_rows, pd.DataFrame):
+        if history_rows.empty:
+            return []
+        return [dict(row) for row in history_rows.to_dict("records")]
+    if isinstance(history_rows, list):
+        return [dict(row) for row in history_rows if isinstance(row, dict)]
+    return []
+
+
+def _breakout_memory_score_for_row(
+    current_row: dict,
+    history_rows: list[dict],
+    *,
+    direction_filter: str,
+) -> dict[str, float]:
+    if not history_rows:
+        return {}
+    current_source = _sortable_float((current_row or {}).get("_radar_source_score"))
+    current_fresh = _sortable_float((current_row or {}).get("_radar_freshness_score"))
+    current_move, _current_counter = _actionable_aligned_move(
+        _market_row_pct_change(current_row),
+        direction_filter=direction_filter,
+    )
+    current_volume = _breakout_row_quote_volume(current_row)
+
+    prior = history_rows[0]
+    prior_source = _sortable_float(prior.get("radar_source_score") or prior.get("_radar_source_score"))
+    prior_fresh = _sortable_float(prior.get("radar_freshness_score") or prior.get("_radar_freshness_score"))
+    prior_move_raw = (
+        prior.get("pct_change_24h")
+        if "pct_change_24h" in prior
+        else prior.get("price_change_percentage_24h")
+    )
+    prior_move, _prior_counter = _actionable_aligned_move(
+        _sortable_float(prior_move_raw),
+        direction_filter=direction_filter,
+    )
+    prior_volume = _sortable_float(
+        prior.get("quote_volume_24h")
+        or prior.get("_quote_volume_24h")
+        or prior.get("total_volume")
+        or prior.get("_volume_24h")
+    )
+
+    source_jump = min(1.0, max(0.0, current_source - prior_source) / 0.30)
+    freshness_jump = min(1.0, max(0.0, current_fresh - prior_fresh) / 0.35)
+    move_jump = min(1.0, max(0.0, current_move - prior_move) / 4.0)
+    volume_jump = 0.0
+    if current_volume > 0.0 and prior_volume > 0.0:
+        ratio = current_volume / max(prior_volume, 1e-9)
+        if ratio > 1.12:
+            volume_jump = min(1.0, math.log(max(ratio, 1.0)) / math.log(4.0))
+
+    pressure_hits = sum(
+        1
+        for row in history_rows[:6]
+        if max(
+            _sortable_float(row.get("radar_source_score") or row.get("_radar_source_score")),
+            _sortable_float(row.get("radar_freshness_score") or row.get("_radar_freshness_score")),
+        )
+        >= 0.42
+    )
+    persistence = min(1.0, float(pressure_hits) / 3.0)
+    current_pressure = min(1.0, 0.52 * current_source + 0.48 * current_fresh)
+    score = (
+        0.24 * source_jump
+        + 0.22 * freshness_jump
+        + 0.20 * volume_jump
+        + 0.18 * move_jump
+        + 0.10 * persistence
+        + 0.06 * current_pressure
+    )
+    score = max(0.0, min(1.0, score))
+    if score <= 0.04:
+        return {}
+    return {
+        "_radar_memory_score": score,
+        "_radar_memory_source_jump": source_jump,
+        "_radar_memory_freshness_jump": freshness_jump,
+        "_radar_memory_volume_jump": volume_jump,
+        "_radar_memory_move_jump": move_jump,
+        "_radar_memory_hits": float(pressure_hits),
+    }
+
+
+def _apply_breakout_memory_to_market_rows(
+    market_rows: list[dict],
+    history_rows: object,
+    *,
+    direction_filter: str,
+) -> list[dict]:
+    history_list = _breakout_memory_history_rows(history_rows)
+    if not market_rows or not history_list:
+        return list(market_rows or [])
+
+    history_by_base: dict[str, list[dict]] = {}
+    for row in history_list:
+        base = _breakout_row_base(row)
+        if not base:
+            continue
+        history_by_base.setdefault(base, []).append(row)
+
+    for rows in history_by_base.values():
+        rows.sort(key=lambda row: str(row.get("observed_at") or ""), reverse=True)
+
+    enriched: list[dict] = []
+    for row in list(market_rows or []):
+        out = dict(row)
+        base = _breakout_row_base(out)
+        memory = _breakout_memory_score_for_row(
+            out,
+            history_by_base.get(base, []),
+            direction_filter=direction_filter,
+        )
+        out.update(memory)
+        enriched.append(out)
+    return enriched
+
+
+def _build_breakout_archive_feedback_map(
+    events_df: pd.DataFrame,
+    *,
+    timeframe: str,
+    direction_filter: str,
+    min_resolved: int = 3,
+) -> dict[str, dict[str, float]]:
+    if events_df is None or events_df.empty:
+        return {}
+    required = {"symbol", "timeframe", "directional_return_pct"}
+    if not required.issubset(set(events_df.columns)):
+        return {}
+    d = events_df.copy()
+    if "scan_focus" in d.columns:
+        focus_mode = d["scan_focus"].fillna("").astype(str).map(_normalize_scan_mode)
+        d = d[focus_mode.eq(SCAN_MODE_EMERGING)]
+    if d.empty:
+        return {}
+    tf_key = str(timeframe or "").strip().lower()
+    if tf_key:
+        d = d[d["timeframe"].fillna("").astype(str).str.strip().str.lower().eq(tf_key)]
+    direction_key = str(direction_filter or "").strip().upper()
+    if direction_key in {"UPSIDE", "DOWNSIDE"} and "direction" in d.columns:
+        d = d[d["direction"].fillna("").astype(str).str.strip().str.upper().eq(direction_key)]
+    if d.empty:
+        return {}
+    d["__base"] = d["symbol"].fillna("").astype(str).map(canonical_base_symbol)
+    d["__dir_return"] = pd.to_numeric(d["directional_return_pct"], errors="coerce")
+    d = d[d["__base"].astype(bool) & d["__dir_return"].notna()].copy()
+    if d.empty:
+        return {}
+
+    out: dict[str, dict[str, float]] = {}
+    for base, group in d.groupby("__base"):
+        resolved = int(len(group))
+        if resolved <= 0:
+            continue
+        returns = pd.to_numeric(group["__dir_return"], errors="coerce").dropna()
+        if returns.empty:
+            continue
+        follow_through_pct = float((returns > 0).mean() * 100.0)
+        avg_dir_return_pct = float(returns.mean())
+        if resolved < int(min_resolved):
+            edge_score = 0.0
+        else:
+            sample_strength = min(1.0, max(0.0, (resolved - int(min_resolved) + 1) / 22.0))
+            follow_edge = max(-1.0, min(1.0, (follow_through_pct - 50.0) / 35.0))
+            return_edge = max(-1.0, min(1.0, avg_dir_return_pct / 4.0))
+            edge_score = sample_strength * ((0.65 * follow_edge) + (0.35 * return_edge))
+            edge_score = max(-1.0, min(1.0, edge_score))
+        out[str(base)] = {
+            "radar_archive_edge_score": float(edge_score),
+            "radar_archive_resolved": float(resolved),
+            "radar_archive_follow_through_pct": follow_through_pct,
+            "radar_archive_avg_dir_return_pct": avg_dir_return_pct,
+        }
+    return out
+
+
+def _apply_breakout_archive_feedback_to_market_rows(
+    market_rows: list[dict],
+    feedback_map: dict[str, dict[str, float]],
+) -> list[dict]:
+    if not market_rows or not feedback_map:
+        return list(market_rows or [])
+    enriched: list[dict] = []
+    for row in list(market_rows or []):
+        out = dict(row)
+        base = _breakout_row_base(out)
+        feedback = feedback_map.get(base)
+        if feedback:
+            out["_radar_archive_edge_score"] = float(feedback.get("radar_archive_edge_score") or 0.0)
+            out["_radar_archive_resolved"] = float(feedback.get("radar_archive_resolved") or 0.0)
+            out["_radar_archive_follow_through_pct"] = float(
+                feedback.get("radar_archive_follow_through_pct") or 0.0
+            )
+            out["_radar_archive_avg_dir_return_pct"] = float(
+                feedback.get("radar_archive_avg_dir_return_pct") or 0.0
+            )
+        enriched.append(out)
+    return enriched
+
+
 def _emerging_sector_bias_weight(timeframe: str) -> float:
     tf = str(timeframe or "").strip().lower()
     if tf in {"4h", "1d"}:
@@ -869,6 +1110,8 @@ def _emerging_universe_ordered_symbols(
         sector_score = _sortable_float(sector_scores.get(sector, 0.5 if sector_scores else 0.0))
         radar_source_score = _sortable_float((row or {}).get("_radar_source_score", 0.0))
         freshness_score = _sortable_float((row or {}).get("_radar_freshness_score", 0.0))
+        memory_score = _sortable_float((row or {}).get("_radar_memory_score", 0.0))
+        archive_edge_score = _sortable_float((row or {}).get("_radar_archive_edge_score", 0.0))
         score_map[base] = (
             volume_weight * volume_rank_score
             + move_weight * move_score
@@ -876,6 +1119,8 @@ def _emerging_universe_ordered_symbols(
             + sector_weight * sector_score
             + 0.18 * radar_source_score
             + 0.20 * freshness_score
+            + 0.28 * memory_score
+            + 0.18 * archive_edge_score
         )
 
     indexed_pairs = list(enumerate(usdt_symbols))
@@ -1042,10 +1287,16 @@ def _initial_scan_symbols(
             radar_signal = max(
                 _sortable_float((row or {}).get("_radar_source_score", 0.0)),
                 _sortable_float((row or {}).get("_radar_freshness_score", 0.0)),
+                _sortable_float((row or {}).get("_radar_memory_score", 0.0)),
             )
             if radar_signal <= 0.0:
                 continue
-            combined_signal = radar_signal + 0.20 * _sortable_float((row or {}).get("_radar_freshness_score", 0.0))
+            combined_signal = (
+                radar_signal
+                + 0.20 * _sortable_float((row or {}).get("_radar_freshness_score", 0.0))
+                + 0.25 * _sortable_float((row or {}).get("_radar_memory_score", 0.0))
+                + 0.18 * max(0.0, _sortable_float((row or {}).get("_radar_archive_edge_score", 0.0)))
+            )
             radar_map[base] = max(combined_signal, radar_map.get(base, 0.0))
 
         if radar_map:
@@ -1131,6 +1382,8 @@ def _emerging_candidate_score(
     spike_dir: str,
     radar_source_score: float = 0.0,
     radar_freshness_score: float = 0.0,
+    radar_memory_score: float = 0.0,
+    radar_archive_edge_score: float = 0.0,
 ) -> float:
     signal_key = _signal_tracker_direction_key(signal_direction)
     if signal_key not in {"UPSIDE", "DOWNSIDE"}:
@@ -1158,6 +1411,8 @@ def _emerging_candidate_score(
         + 5.0 * _emerging_universe_market_cap_score(market_cap)
         + 9.0 * _sortable_float(radar_source_score)
         + 11.0 * _sortable_float(radar_freshness_score)
+        + 10.0 * _sortable_float(radar_memory_score)
+        + 7.0 * _sortable_float(radar_archive_edge_score)
     )
     aligned_move = (
         max(0.0, _sortable_float(market_pct_change_24h))
@@ -1166,8 +1421,12 @@ def _emerging_candidate_score(
     )
     if 0.8 <= aligned_move <= 8.5:
         score += 3.0
-    elif aligned_move >= 14.0:
-        score -= min(6.0, 0.4 * (aligned_move - 14.0))
+    score -= _breakout_late_chase_penalty(
+        timeframe=timeframe,
+        aligned_move=aligned_move,
+        radar_freshness_score=radar_freshness_score,
+        radar_memory_score=radar_memory_score,
+    )
     if lead_aligned:
         score += 12.0
     elif bool(emerging_active):

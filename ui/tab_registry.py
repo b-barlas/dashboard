@@ -81,6 +81,7 @@ _TAB_DEPS = [
             "format_delta", "format_trend", "format_adx", "format_stochrsi",
             "style_signal", "style_scalp_opp", "style_delta", "sanitize_trading_terms", "_debug",
             "log_signal_events", "resolve_open_signal_events_for_frame",
+            "fetch_breakout_radar_snapshots_df", "log_breakout_radar_snapshots",
             *_TRACKER_DEPS, *_ADAPTIVE_DEPS,
         ],
     ),

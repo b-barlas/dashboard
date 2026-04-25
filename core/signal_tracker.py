@@ -46,6 +46,14 @@ def _signal_key(source: str, symbol: str, timeframe: str, event_time: object) ->
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+def _breakout_radar_snapshot_key(symbol: str, timeframe: str, direction_filter: str, observed_at: object) -> str:
+    raw = (
+        f"breakout-radar|{str(symbol).strip().upper()}|"
+        f"{str(timeframe).strip().lower()}|{str(direction_filter).strip().upper()}|{_utc_iso(observed_at)}"
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
 def _timeframe_horizon_bars(timeframe: str) -> int:
     key = str(timeframe or "").strip().lower()
     if key == "5m":
@@ -450,8 +458,180 @@ def init_signal_tracker_db(db_path: str | None = None) -> str:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_signal_forward_windows_bars ON signal_forward_windows(bars_ahead)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS breakout_radar_snapshots (
+                snapshot_key TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                direction_filter TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                scan_focus TEXT NOT NULL DEFAULT 'Breakout Radar',
+                radar_source_kind TEXT,
+                radar_source_score REAL,
+                radar_freshness_score REAL,
+                pct_change_24h REAL,
+                quote_volume_24h REAL,
+                market_cap REAL,
+                price REAL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_breakout_radar_snapshots_scope ON breakout_radar_snapshots(symbol, timeframe, direction_filter, observed_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_breakout_radar_snapshots_time ON breakout_radar_snapshots(observed_at)"
+        )
         conn.commit()
     return path
+
+
+def _radar_row_pct_change(row: Mapping[str, object]) -> float | None:
+    for key in ("pct_change_24h", "price_change_percentage_24h", "price_change_percentage_24h_in_currency"):
+        value = _float_or_none(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _radar_row_quote_volume(row: Mapping[str, object]) -> float | None:
+    values = [
+        _float_or_none(row.get("quote_volume_24h")),
+        _float_or_none(row.get("_quote_volume_24h")),
+        _float_or_none(row.get("total_volume")),
+        _float_or_none(row.get("_volume_24h")),
+    ]
+    cleaned = [value for value in values if value is not None and value > 0.0]
+    if not cleaned:
+        return None
+    return max(cleaned)
+
+
+def log_breakout_radar_snapshots(
+    rows: Sequence[Mapping[str, object]],
+    *,
+    timeframe: str,
+    direction_filter: str,
+    observed_at: object | None = None,
+    db_path: str | None = None,
+    retention_days: int = 14,
+    max_rows: int = 320,
+) -> int:
+    """Persist Breakout Radar candidate snapshots for acceleration-aware ranking."""
+    if not rows:
+        return 0
+    path = init_signal_tracker_db(db_path)
+    observed_iso = _utc_iso(observed_at)
+    now_iso = _utc_iso()
+    timeframe_key = str(timeframe or "").strip().lower()
+    direction_key = str(direction_filter or "Both").strip() or "Both"
+    written = 0
+    with _connect(path) as conn:
+        for row in list(rows or [])[: max(1, int(max_rows))]:
+            if not isinstance(row, Mapping):
+                continue
+            symbol = _archive_symbol_key(row.get("symbol") or row.get("Coin"))
+            if not symbol or not timeframe_key:
+                continue
+            snapshot_key = _breakout_radar_snapshot_key(symbol, timeframe_key, direction_key, observed_iso)
+            payload = {
+                "snapshot_key": snapshot_key,
+                "symbol": symbol,
+                "timeframe": timeframe_key,
+                "direction_filter": direction_key,
+                "observed_at": observed_iso,
+                "scan_focus": "Breakout Radar",
+                "radar_source_kind": _text_or_empty(row.get("_radar_source_kind") or row.get("radar_source_kind")),
+                "radar_source_score": _float_or_none(row.get("_radar_source_score") or row.get("radar_source_score")),
+                "radar_freshness_score": _float_or_none(row.get("_radar_freshness_score") or row.get("radar_freshness_score")),
+                "pct_change_24h": _radar_row_pct_change(row),
+                "quote_volume_24h": _radar_row_quote_volume(row),
+                "market_cap": _float_or_none(row.get("market_cap")),
+                "price": _float_or_none(row.get("current_price") or row.get("price")),
+                "created_at": now_iso,
+                "updated_at": now_iso,
+            }
+            conn.execute(
+                """
+                INSERT INTO breakout_radar_snapshots (
+                    snapshot_key, symbol, timeframe, direction_filter, observed_at, scan_focus,
+                    radar_source_kind, radar_source_score, radar_freshness_score,
+                    pct_change_24h, quote_volume_24h, market_cap, price, created_at, updated_at
+                ) VALUES (
+                    :snapshot_key, :symbol, :timeframe, :direction_filter, :observed_at, :scan_focus,
+                    :radar_source_kind, :radar_source_score, :radar_freshness_score,
+                    :pct_change_24h, :quote_volume_24h, :market_cap, :price, :created_at, :updated_at
+                )
+                ON CONFLICT(snapshot_key) DO UPDATE SET
+                    radar_source_kind=excluded.radar_source_kind,
+                    radar_source_score=excluded.radar_source_score,
+                    radar_freshness_score=excluded.radar_freshness_score,
+                    pct_change_24h=excluded.pct_change_24h,
+                    quote_volume_24h=excluded.quote_volume_24h,
+                    market_cap=excluded.market_cap,
+                    price=excluded.price,
+                    updated_at=excluded.updated_at
+                """,
+                payload,
+            )
+            written += 1
+        try:
+            cutoff_ts = pd.Timestamp.utcnow() - pd.Timedelta(days=max(1, int(retention_days)))
+            cutoff_iso = cutoff_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+            conn.execute("DELETE FROM breakout_radar_snapshots WHERE observed_at < ?", (cutoff_iso,))
+        except Exception:
+            pass
+        conn.commit()
+    if written:
+        _sync_tracker_mirror(path)
+    return written
+
+
+def fetch_breakout_radar_snapshots_df(
+    *,
+    timeframe: str | None = None,
+    direction_filter: str | None = None,
+    symbols: Sequence[str] | None = None,
+    lookback_hours: int = 72,
+    limit: int = 5000,
+    db_path: str | None = None,
+) -> pd.DataFrame:
+    path = init_signal_tracker_db(db_path)
+    clauses = ["1=1"]
+    params: list[object] = []
+    if timeframe:
+        clauses.append("timeframe = ?")
+        params.append(str(timeframe).strip().lower())
+    direction = str(direction_filter or "").strip()
+    if direction and direction.upper() != "BOTH":
+        clauses.append("UPPER(direction_filter) IN (?, 'BOTH')")
+        params.append(direction.upper())
+    if symbols:
+        normalized = [_archive_symbol_key(symbol) for symbol in symbols]
+        normalized = [symbol for symbol in normalized if symbol]
+        if normalized:
+            placeholders = ",".join("?" for _ in normalized)
+            clauses.append(f"symbol IN ({placeholders})")
+            params.extend(normalized)
+    if lookback_hours and int(lookback_hours) > 0:
+        cutoff_ts = pd.Timestamp.utcnow() - pd.Timedelta(hours=int(lookback_hours))
+        clauses.append("observed_at >= ?")
+        params.append(cutoff_ts.strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    query = f"""
+        SELECT *
+        FROM breakout_radar_snapshots
+        WHERE {' AND '.join(clauses)}
+        ORDER BY observed_at DESC
+        LIMIT ?
+    """
+    params.append(max(1, int(limit)))
+    with _connect(path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return pd.DataFrame([dict(row) for row in rows])
 
 
 def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | None = None) -> int:
