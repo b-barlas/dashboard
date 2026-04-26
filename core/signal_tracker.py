@@ -54,6 +54,21 @@ def _breakout_radar_snapshot_key(symbol: str, timeframe: str, direction_filter: 
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
+def _scanner_trace_key(
+    scan_id: str,
+    symbol: str,
+    timeframe: str,
+    scan_focus: str,
+    direction_filter: str,
+) -> str:
+    raw = (
+        f"scanner-trace|{str(scan_id).strip()}|{str(symbol).strip().upper()}|"
+        f"{str(timeframe).strip().lower()}|{str(scan_focus).strip()}|"
+        f"{str(direction_filter).strip().upper()}"
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
 def _timeframe_horizon_bars(timeframe: str) -> int:
     key = str(timeframe or "").strip().lower()
     if key == "5m":
@@ -138,6 +153,13 @@ def _float_or_none(value: object) -> float | None:
     if not math.isfinite(out):
         return None
     return out
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        return int(value)
+    except Exception:
+        return None
 
 
 def _text_or_empty(value: object) -> str:
@@ -485,6 +507,55 @@ def init_signal_tracker_db(db_path: str | None = None) -> str:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_breakout_radar_snapshots_time ON breakout_radar_snapshots(observed_at)"
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scanner_trace_events (
+                trace_key TEXT PRIMARY KEY,
+                scan_id TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'Market',
+                scan_focus TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                direction_filter TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                pair TEXT,
+                stage TEXT NOT NULL,
+                reason TEXT,
+                candidate_rank INTEGER,
+                shown_rank INTEGER,
+                attempted INTEGER NOT NULL DEFAULT 0,
+                produced INTEGER NOT NULL DEFAULT 0,
+                shown INTEGER NOT NULL DEFAULT 0,
+                skipped INTEGER NOT NULL DEFAULT 0,
+                setup_confirm TEXT,
+                direction TEXT,
+                confidence REAL,
+                ai_confidence REAL,
+                radar_source_kind TEXT,
+                radar_source_score REAL,
+                radar_freshness_score REAL,
+                emerging_rank_score REAL,
+                actionable_frame_score REAL,
+                actionable_tactical_score REAL,
+                market_cap REAL,
+                price REAL,
+                delta_pct REAL,
+                data_mode TEXT,
+                source_label TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scanner_trace_scope ON scanner_trace_events(scan_focus, timeframe, direction_filter, observed_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scanner_trace_symbol_time ON scanner_trace_events(symbol, observed_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scanner_trace_stage_time ON scanner_trace_events(stage, observed_at)"
+        )
         conn.commit()
     return path
 
@@ -632,6 +703,303 @@ def fetch_breakout_radar_snapshots_df(
     with _connect(path) as conn:
         rows = conn.execute(query, params).fetchall()
     return pd.DataFrame([dict(row) for row in rows])
+
+
+def log_scanner_trace_events(
+    events: Sequence[Mapping[str, object]],
+    db_path: str | None = None,
+    *,
+    retention_days: int = 30,
+    max_rows: int = 600,
+) -> int:
+    """Persist passive scanner-stage trace rows for missed-opportunity analysis."""
+    if not events:
+        return 0
+    path = init_signal_tracker_db(db_path)
+    now_iso = _utc_iso()
+    written = 0
+    with _connect(path) as conn:
+        for event in list(events or [])[: max(1, int(max_rows))]:
+            if not isinstance(event, Mapping):
+                continue
+            observed_iso = _utc_iso(event.get("observed_at") or now_iso)
+            source = _text_or_empty(event.get("source") or "Market") or "Market"
+            scan_focus = _text_or_empty(event.get("scan_focus") or event.get("scan_mode") or "Broad Market")
+            timeframe = _text_or_empty(event.get("timeframe")).lower()
+            direction_filter = _text_or_empty(event.get("direction_filter") or "Both") or "Both"
+            symbol = _archive_symbol_key(event.get("symbol") or event.get("Coin"))
+            if not symbol or not timeframe or not scan_focus:
+                continue
+            scan_id = _text_or_empty(event.get("scan_id")) or (
+                f"{source}|{scan_focus}|{timeframe}|{direction_filter}|{observed_iso}"
+            )
+            trace_key = _text_or_empty(event.get("trace_key")) or _scanner_trace_key(
+                scan_id,
+                symbol,
+                timeframe,
+                scan_focus,
+                direction_filter,
+            )
+            stage = _text_or_empty(event.get("stage") or "candidate") or "candidate"
+            payload = {
+                "trace_key": trace_key,
+                "scan_id": scan_id,
+                "observed_at": observed_iso,
+                "source": source,
+                "scan_focus": scan_focus,
+                "timeframe": timeframe,
+                "direction_filter": direction_filter,
+                "symbol": symbol,
+                "pair": _text_or_empty(event.get("pair")),
+                "stage": stage,
+                "reason": _text_or_empty(event.get("reason")),
+                "candidate_rank": _int_or_none(event.get("candidate_rank")),
+                "shown_rank": _int_or_none(event.get("shown_rank")),
+                "attempted": int(bool(event.get("attempted"))),
+                "produced": int(bool(event.get("produced"))),
+                "shown": int(bool(event.get("shown"))),
+                "skipped": int(bool(event.get("skipped"))),
+                "setup_confirm": _text_or_empty(event.get("setup_confirm")),
+                "direction": _direction_key(event.get("direction")),
+                "confidence": _float_or_none(event.get("confidence")),
+                "ai_confidence": _float_or_none(event.get("ai_confidence")),
+                "radar_source_kind": _text_or_empty(event.get("radar_source_kind")),
+                "radar_source_score": _float_or_none(event.get("radar_source_score")),
+                "radar_freshness_score": _float_or_none(event.get("radar_freshness_score")),
+                "emerging_rank_score": _float_or_none(event.get("emerging_rank_score")),
+                "actionable_frame_score": _float_or_none(event.get("actionable_frame_score")),
+                "actionable_tactical_score": _float_or_none(event.get("actionable_tactical_score")),
+                "market_cap": _float_or_none(event.get("market_cap")),
+                "price": _float_or_none(event.get("price")),
+                "delta_pct": _float_or_none(event.get("delta_pct")),
+                "data_mode": _text_or_empty(event.get("data_mode")),
+                "source_label": _text_or_empty(event.get("source_label")),
+                "created_at": now_iso,
+                "updated_at": now_iso,
+            }
+            conn.execute(
+                """
+                INSERT INTO scanner_trace_events (
+                    trace_key, scan_id, observed_at, source, scan_focus, timeframe,
+                    direction_filter, symbol, pair, stage, reason, candidate_rank,
+                    shown_rank, attempted, produced, shown, skipped, setup_confirm,
+                    direction, confidence, ai_confidence, radar_source_kind,
+                    radar_source_score, radar_freshness_score, emerging_rank_score,
+                    actionable_frame_score, actionable_tactical_score, market_cap,
+                    price, delta_pct, data_mode, source_label, created_at, updated_at
+                ) VALUES (
+                    :trace_key, :scan_id, :observed_at, :source, :scan_focus, :timeframe,
+                    :direction_filter, :symbol, :pair, :stage, :reason, :candidate_rank,
+                    :shown_rank, :attempted, :produced, :shown, :skipped, :setup_confirm,
+                    :direction, :confidence, :ai_confidence, :radar_source_kind,
+                    :radar_source_score, :radar_freshness_score, :emerging_rank_score,
+                    :actionable_frame_score, :actionable_tactical_score, :market_cap,
+                    :price, :delta_pct, :data_mode, :source_label, :created_at, :updated_at
+                )
+                ON CONFLICT(trace_key) DO UPDATE SET
+                    stage=excluded.stage,
+                    reason=excluded.reason,
+                    candidate_rank=excluded.candidate_rank,
+                    shown_rank=excluded.shown_rank,
+                    attempted=excluded.attempted,
+                    produced=excluded.produced,
+                    shown=excluded.shown,
+                    skipped=excluded.skipped,
+                    setup_confirm=excluded.setup_confirm,
+                    direction=excluded.direction,
+                    confidence=excluded.confidence,
+                    ai_confidence=excluded.ai_confidence,
+                    radar_source_kind=excluded.radar_source_kind,
+                    radar_source_score=excluded.radar_source_score,
+                    radar_freshness_score=excluded.radar_freshness_score,
+                    emerging_rank_score=excluded.emerging_rank_score,
+                    actionable_frame_score=excluded.actionable_frame_score,
+                    actionable_tactical_score=excluded.actionable_tactical_score,
+                    market_cap=excluded.market_cap,
+                    price=excluded.price,
+                    delta_pct=excluded.delta_pct,
+                    data_mode=excluded.data_mode,
+                    source_label=excluded.source_label,
+                    updated_at=excluded.updated_at
+                """,
+                payload,
+            )
+            written += 1
+        try:
+            cutoff_ts = pd.Timestamp.utcnow() - pd.Timedelta(days=max(1, int(retention_days)))
+            cutoff_iso = cutoff_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+            conn.execute("DELETE FROM scanner_trace_events WHERE observed_at < ?", (cutoff_iso,))
+        except Exception:
+            pass
+        conn.commit()
+    if written:
+        _sync_tracker_mirror(path)
+    return written
+
+
+def fetch_scanner_trace_events_df(
+    *,
+    scan_focus: str | None = None,
+    timeframe: str | None = None,
+    direction_filter: str | None = None,
+    symbols: Sequence[str] | None = None,
+    stages: Sequence[str] | None = None,
+    lookback_hours: int = 72,
+    limit: int = 5000,
+    db_path: str | None = None,
+) -> pd.DataFrame:
+    path = init_signal_tracker_db(db_path)
+    clauses = ["1=1"]
+    params: list[object] = []
+    if scan_focus:
+        clauses.append("scan_focus = ?")
+        params.append(str(scan_focus).strip())
+    if timeframe:
+        clauses.append("timeframe = ?")
+        params.append(str(timeframe).strip().lower())
+    direction = str(direction_filter or "").strip()
+    if direction and direction.upper() != "BOTH":
+        clauses.append("UPPER(direction_filter) IN (?, 'BOTH')")
+        params.append(direction.upper())
+    if symbols:
+        normalized = [_archive_symbol_key(symbol) for symbol in symbols]
+        normalized = [symbol for symbol in normalized if symbol]
+        if normalized:
+            placeholders = ",".join("?" for _ in normalized)
+            clauses.append(f"symbol IN ({placeholders})")
+            params.extend(normalized)
+    if stages:
+        normalized_stages = [str(stage or "").strip() for stage in stages if str(stage or "").strip()]
+        if normalized_stages:
+            placeholders = ",".join("?" for _ in normalized_stages)
+            clauses.append(f"stage IN ({placeholders})")
+            params.extend(normalized_stages)
+    if lookback_hours and int(lookback_hours) > 0:
+        cutoff_ts = pd.Timestamp.utcnow() - pd.Timedelta(hours=int(lookback_hours))
+        clauses.append("observed_at >= ?")
+        params.append(cutoff_ts.strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    query = f"""
+        SELECT *
+        FROM scanner_trace_events
+        WHERE {' AND '.join(clauses)}
+        ORDER BY observed_at DESC, candidate_rank ASC
+        LIMIT ?
+    """
+    params.append(max(1, int(limit)))
+    with _connect(path) as conn:
+        rows = conn.execute(query, params).fetchall()
+    return pd.DataFrame([dict(row) for row in rows])
+
+
+def _scanner_trace_interest_score(row: Mapping[str, object]) -> float:
+    radar_source = _float_or_none(row.get("radar_source_score"))
+    radar_freshness = _float_or_none(row.get("radar_freshness_score"))
+    score = 0.0
+    score += (_float_or_none(row.get("confidence")) or 0.0) * 0.24
+    score += (_float_or_none(row.get("ai_confidence")) or 0.0) * 0.18
+    score += (_float_or_none(row.get("emerging_rank_score")) or 0.0) * 0.22
+    score += (_float_or_none(row.get("actionable_frame_score")) or 0.0) * 0.14
+    score += (_float_or_none(row.get("actionable_tactical_score")) or 0.0) * 0.14
+    score += ((radar_source or 0.0) * 100.0) * 0.05
+    score += ((radar_freshness or 0.0) * 100.0) * 0.03
+    return round(float(score), 2)
+
+
+def _scanner_trace_top_symbols(frame: pd.DataFrame, *, top_n: int) -> list[dict[str, object]]:
+    if frame.empty:
+        return []
+    rows: list[dict[str, object]] = []
+    for row in frame.to_dict("records"):
+        score = _scanner_trace_interest_score(row)
+        rows.append(
+            {
+                "symbol": _archive_symbol_key(row.get("symbol")),
+                "stage": _text_or_empty(row.get("stage")),
+                "reason": _text_or_empty(row.get("reason")),
+                "score": score,
+                "candidate_rank": _int_or_none(row.get("candidate_rank")),
+                "shown_rank": _int_or_none(row.get("shown_rank")),
+                "confidence": _float_or_none(row.get("confidence")),
+                "ai_confidence": _float_or_none(row.get("ai_confidence")),
+            }
+        )
+    rows = [row for row in rows if str(row.get("symbol") or "").strip()]
+    rows.sort(
+        key=lambda row: (
+            -float(row.get("score") or 0.0),
+            int(row.get("candidate_rank") or 999999),
+            str(row.get("symbol") or ""),
+        )
+    )
+    return rows[: max(1, int(top_n))]
+
+
+def build_scanner_trace_summary(
+    trace_rows: pd.DataFrame | Sequence[Mapping[str, object]],
+    *,
+    top_n: int = 5,
+) -> dict[str, object]:
+    """Summarize passive scanner trace coverage without implying trade outcome."""
+    if isinstance(trace_rows, pd.DataFrame):
+        frame = trace_rows.copy()
+    else:
+        frame = pd.DataFrame([dict(row) for row in trace_rows or [] if isinstance(row, Mapping)])
+    if frame.empty:
+        return {
+            "total_rows": 0,
+            "scan_count": 0,
+            "symbol_count": 0,
+            "stage_counts": {},
+            "shown_count": 0,
+            "ranked_out_count": 0,
+            "filtered_out_count": 0,
+            "skipped_count": 0,
+            "candidate_only_count": 0,
+            "shown_rate_pct": 0.0,
+            "top_ranked_out": [],
+            "top_filtered_out": [],
+            "top_skip_reasons": [],
+        }
+
+    for column in ("scan_id", "symbol", "stage", "reason"):
+        if column not in frame.columns:
+            frame[column] = ""
+    stage = frame["stage"].fillna("").astype(str).str.strip().str.lower()
+    total = int(len(frame))
+    stage_counts = {str(key): int(value) for key, value in stage.value_counts(dropna=False).to_dict().items() if str(key)}
+    shown_count = int((stage == "shown").sum())
+    ranked_out_count = int((stage == "ranked_out").sum())
+    filtered_out_count = int((stage == "filtered_out").sum())
+    skipped_count = int((stage == "skipped").sum())
+    candidate_only_count = int((stage == "candidate").sum())
+    scan_count = int(frame["scan_id"].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
+    symbol_count = int(frame["symbol"].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
+
+    skipped = frame[stage == "skipped"].copy()
+    top_skip_reasons: list[dict[str, object]] = []
+    if not skipped.empty:
+        reasons = skipped["reason"].fillna("").astype(str).str.strip().replace("", "unknown")
+        top_skip_reasons = [
+            {"reason": str(reason), "count": int(count)}
+            for reason, count in reasons.value_counts().head(max(1, int(top_n))).to_dict().items()
+        ]
+
+    return {
+        "total_rows": total,
+        "scan_count": scan_count,
+        "symbol_count": symbol_count,
+        "stage_counts": stage_counts,
+        "shown_count": shown_count,
+        "ranked_out_count": ranked_out_count,
+        "filtered_out_count": filtered_out_count,
+        "skipped_count": skipped_count,
+        "candidate_only_count": candidate_only_count,
+        "shown_rate_pct": round((shown_count / total) * 100.0, 1) if total else 0.0,
+        "top_ranked_out": _scanner_trace_top_symbols(frame[stage == "ranked_out"], top_n=top_n),
+        "top_filtered_out": _scanner_trace_top_symbols(frame[stage == "filtered_out"], top_n=top_n),
+        "top_skip_reasons": top_skip_reasons,
+    }
 
 
 def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | None = None) -> int:

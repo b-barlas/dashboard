@@ -237,27 +237,22 @@ class ServicesHttpTests(unittest.TestCase):
         self.assertEqual(source, "CoinGecko")
         self.assertEqual(feed_mode, "LIVE")
 
-    def test_get_market_catalyst_events_merges_manual_and_fmp(self):
+    def test_get_market_catalyst_events_uses_manual_events_only(self):
         with patch(
             "core.services._load_manual_market_catalysts_cached",
             return_value=[{"title": "Token Unlock", "event_time": "2026-04-05T18:00:00Z", "severity": "medium"}],
         ):
-            with patch("core.services._safe_secret_value", return_value="demo-key"):
-                with patch(
-                    "core.services._fetch_fmp_economic_calendar_cached",
-                    return_value=[{"title": "US CPI", "event_time": "2026-04-05T12:30:00Z", "severity": "high"}],
-                ):
-                    rows = svc.get_market_catalyst_events(now="2026-04-05T08:00:00Z")
-        self.assertEqual(len(rows), 2)
-
-    def test_get_market_catalyst_events_works_without_secret(self):
-        with patch(
-            "core.services._load_manual_market_catalysts_cached",
-            return_value=[{"title": "Token Unlock", "event_time": "2026-04-05T18:00:00Z", "severity": "medium"}],
-        ):
-            with patch("core.services._safe_secret_value", return_value=None):
-                rows = svc.get_market_catalyst_events(now="2026-04-05T08:00:00Z")
+            rows = svc.get_market_catalyst_events(now="2026-04-05T08:00:00Z")
         self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["title"], "Token Unlock")
+
+    def test_get_market_catalyst_events_works_when_manual_loader_empty(self):
+        with patch(
+            "core.services._load_manual_market_catalysts_cached",
+            return_value=[],
+        ):
+            rows = svc.get_market_catalyst_events(now="2026-04-05T08:00:00Z")
+        self.assertEqual(rows, [])
 
     def test_get_market_flow_proxy_rows_builds_public_context_rows(self):
         with patch(

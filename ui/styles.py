@@ -1289,7 +1289,7 @@ div[data-testid="stVerticalBlock"] > div {{
     border: 1px solid rgba(255, 255, 255, 0.05);
 }}
 
-/* Whale tracker entry */
+/* Trending coins entry */
 .whale-entry {{
     display: flex;
     align-items: center;

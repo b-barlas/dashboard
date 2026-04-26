@@ -203,13 +203,12 @@ def render(ctx: dict) -> None:
     fetch_top_gainers_losers = get_ctx(ctx, "fetch_top_gainers_losers")
     fetch_ohlcv = get_ctx(ctx, "fetch_ohlcv")
     get_top_volume_usdt_symbols = get_ctx(ctx, "get_top_volume_usdt_symbols")
-    """Whale tracking and momentum signals."""
+    """Trending coin and attention signals."""
     render_page_header(
         st,
-        title="Whale Tracker",
+        title="Trending Coins",
         intro_html=(
             "Tracks market attention and liquidity anomalies using public market data. "
-            "This tab is a <b>whale proxy</b> (not on-chain whale wallet tracking). "
             "It combines search trends, 24h movers, and abnormal volume detection."
             "<br><br><b>1. Trending Coins</b> — CoinGecko search trend leaders.<br>"
             "<b>2. Broad 24h Movers</b> — 24h momentum leaders/laggards from a broader liquid CoinGecko market sample.<br>"
@@ -273,7 +272,7 @@ def render(ctx: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    with st.spinner("Fetching whale & momentum data..."):
+    with st.spinner("Fetching trend & momentum data..."):
         trending_new = fetch_trending_coins()
         gainers_new, losers_new = fetch_top_gainers_losers(15)
 

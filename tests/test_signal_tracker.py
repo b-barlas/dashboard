@@ -20,6 +20,7 @@ from core.signal_tracker import (
     build_hold_window_intelligence,
     build_recent_market_context_snapshot,
     build_recent_symbol_market_signal_snapshot,
+    build_scanner_trace_summary,
     build_signal_cohort_summary,
     build_execution_overlay_snapshot,
     build_signal_review_snapshot,
@@ -27,10 +28,12 @@ from core.signal_tracker import (
     fetch_breakout_radar_snapshots_df,
     fetch_market_alerts_df,
     fetch_signal_forward_windows_df,
+    fetch_scanner_trace_events_df,
     fetch_signal_events_df,
     init_signal_tracker_db,
     log_breakout_radar_snapshots,
     log_market_alerts,
+    log_scanner_trace_events,
     log_signal_events,
     prefer_current_decision_version_slice,
     resolve_open_signal_events_via_fetch,
@@ -161,6 +164,117 @@ class SignalTrackerTests(unittest.TestCase):
         self.assertEqual(str(row["direction_filter"]), "Upside")
         self.assertAlmostEqual(float(row["radar_source_score"]), 0.82, places=4)
         self.assertAlmostEqual(float(row["quote_volume_24h"]), 12_500_000, places=4)
+
+    def test_scanner_trace_events_persist_stages_and_upsert(self) -> None:
+        observed_at = pd.Timestamp.utcnow()
+        events = [
+            {
+                "scan_id": "market|Breakout Radar|1h|Both|test",
+                "observed_at": observed_at,
+                "source": "Market",
+                "scan_focus": "Breakout Radar",
+                "timeframe": "1H",
+                "direction_filter": "Both",
+                "symbol": "RAVE",
+                "pair": "RAVE/USDT",
+                "stage": "shown",
+                "reason": "shown",
+                "candidate_rank": 1,
+                "shown_rank": 1,
+                "attempted": True,
+                "produced": True,
+                "shown": True,
+                "setup_confirm": "WATCH",
+                "direction": "Upside",
+                "confidence": 68.0,
+                "ai_confidence": 72.0,
+                "radar_source_score": 0.88,
+                "market_cap": 140_000_000,
+            },
+            {
+                "scan_id": "market|Breakout Radar|1h|Both|test",
+                "observed_at": observed_at,
+                "source": "Market",
+                "scan_focus": "Breakout Radar",
+                "timeframe": "1h",
+                "direction_filter": "Both",
+                "symbol": "TRX",
+                "stage": "ranked_out",
+                "reason": "top_n_cut",
+                "candidate_rank": 2,
+                "attempted": True,
+                "produced": True,
+            },
+        ]
+        self.assertEqual(log_scanner_trace_events(events, self.db_path), 2)
+
+        updated = dict(events[1])
+        updated["stage"] = "shown"
+        updated["shown"] = True
+        updated["shown_rank"] = 2
+        self.assertEqual(log_scanner_trace_events([updated], self.db_path), 1)
+
+        scoped = fetch_scanner_trace_events_df(
+            scan_focus="Breakout Radar",
+            timeframe="1h",
+            stages=["shown"],
+            lookback_hours=2,
+            db_path=self.db_path,
+        )
+        self.assertEqual(set(scoped["symbol"].astype(str)), {"RAVE", "TRX"})
+        trx = scoped[scoped["symbol"].astype(str) == "TRX"].iloc[0]
+        self.assertEqual(str(trx["stage"]), "shown")
+        self.assertEqual(int(trx["shown_rank"]), 2)
+
+    def test_scanner_trace_summary_reports_coverage_and_candidates(self) -> None:
+        rows = pd.DataFrame(
+            [
+                {
+                    "scan_id": "scan-1",
+                    "symbol": "RAVE",
+                    "stage": "shown",
+                    "confidence": 60.0,
+                    "ai_confidence": 70.0,
+                    "candidate_rank": 1,
+                },
+                {
+                    "scan_id": "scan-1",
+                    "symbol": "TRX",
+                    "stage": "ranked_out",
+                    "confidence": 72.0,
+                    "ai_confidence": 65.0,
+                    "emerging_rank_score": 80.0,
+                    "candidate_rank": 2,
+                },
+                {
+                    "scan_id": "scan-1",
+                    "symbol": "SOL",
+                    "stage": "filtered_out",
+                    "confidence": 52.0,
+                    "actionable_frame_score": 68.0,
+                    "candidate_rank": 3,
+                },
+                {
+                    "scan_id": "scan-1",
+                    "symbol": "DOGE",
+                    "stage": "skipped",
+                    "reason": "no OHLCV data",
+                    "candidate_rank": 4,
+                },
+            ]
+        )
+        summary = build_scanner_trace_summary(rows, top_n=3)
+        self.assertEqual(summary["total_rows"], 4)
+        self.assertEqual(summary["scan_count"], 1)
+        self.assertEqual(summary["symbol_count"], 4)
+        self.assertEqual(summary["shown_count"], 1)
+        self.assertEqual(summary["ranked_out_count"], 1)
+        self.assertEqual(summary["filtered_out_count"], 1)
+        self.assertEqual(summary["skipped_count"], 1)
+        self.assertEqual(summary["shown_rate_pct"], 25.0)
+        self.assertEqual(summary["top_ranked_out"][0]["symbol"], "TRX")
+        self.assertEqual(summary["top_filtered_out"][0]["symbol"], "SOL")
+        self.assertEqual(summary["top_skip_reasons"][0], {"reason": "no OHLCV data", "count": 1})
 
     def test_fetch_signal_events_df_applies_timeframe_filter_before_limit(self) -> None:
         events = []

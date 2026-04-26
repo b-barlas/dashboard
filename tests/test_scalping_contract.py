@@ -91,7 +91,7 @@ class ScalpingContractTests(unittest.TestCase):
     def test_intraday_only_policy_blocks_4h_scalp(self):
         n = 220
         close = pd.Series(np.linspace(100, 130, n) + np.sin(np.linspace(0, 20, n)) * 0.3)
-        timestamps = pd.date_range("2026-01-01", periods=n, freq="4H")
+        timestamps = pd.date_range("2026-01-01", periods=n, freq="4h")
         df = pd.DataFrame(
             {
                 "timestamp": timestamps,

@@ -9,6 +9,7 @@ from core.symbols import canonical_base_symbol, is_stable_base_symbol
 SCAN_MODE_BROAD = "Broad Market"
 SCAN_MODE_ACTIONABLE = "Actionable Setups"
 SCAN_MODE_EMERGING = "Breakout Radar"
+SCAN_MODE_TRENDING = "Trending Coins"
 
 
 def _sortable_float(value: object) -> float:
@@ -39,6 +40,8 @@ def _normalize_scan_mode(value: object) -> str:
         return SCAN_MODE_ACTIONABLE
     if raw in {SCAN_MODE_EMERGING.lower(), "early momentum", "emerging", "emerging movers", "breakout radar"}:
         return SCAN_MODE_EMERGING
+    if raw in {SCAN_MODE_TRENDING.lower(), "whale tracker", "whale flow", "attention radar", "volume radar"}:
+        return SCAN_MODE_TRENDING
     return SCAN_MODE_BROAD
 
 
@@ -458,6 +461,133 @@ def _apply_breakout_archive_feedback_to_market_rows(
             out["_radar_archive_avg_dir_return_pct"] = float(
                 feedback.get("radar_archive_avg_dir_return_pct") or 0.0
             )
+        enriched.append(out)
+    return enriched
+
+
+def _scanner_trace_feedback_rows(trace_rows: object) -> list[dict]:
+    if trace_rows is None:
+        return []
+    if isinstance(trace_rows, pd.DataFrame):
+        if trace_rows.empty:
+            return []
+        return [dict(row) for row in trace_rows.to_dict("records")]
+    if isinstance(trace_rows, list):
+        return [dict(row) for row in trace_rows if isinstance(row, dict)]
+    return []
+
+
+def _scanner_trace_feedback_interest(row: dict) -> float:
+    score = (
+        0.24 * max(0.0, min(1.0, _sortable_float((row or {}).get("confidence")) / 100.0))
+        + 0.18 * max(0.0, min(1.0, _sortable_float((row or {}).get("ai_confidence")) / 100.0))
+        + 0.22 * max(0.0, min(1.0, _sortable_float((row or {}).get("emerging_rank_score")) / 100.0))
+        + 0.14 * max(0.0, min(1.0, _sortable_float((row or {}).get("actionable_frame_score")) / 100.0))
+        + 0.14 * max(0.0, min(1.0, _sortable_float((row or {}).get("actionable_tactical_score")) / 100.0))
+        + 0.04 * max(0.0, min(1.0, _sortable_float((row or {}).get("radar_source_score"))))
+        + 0.04 * max(0.0, min(1.0, _sortable_float((row or {}).get("radar_freshness_score"))))
+    )
+    return max(0.0, min(1.0, float(score)))
+
+
+def _trace_age_hours(value: object, *, now_ts: pd.Timestamp) -> float:
+    ts = pd.to_datetime(value, utc=True, errors="coerce")
+    if pd.isna(ts):
+        return float("inf")
+    try:
+        delta = now_ts - ts
+    except Exception:
+        return float("inf")
+    return max(0.0, float(delta.total_seconds()) / 3600.0)
+
+
+def _build_scanner_trace_feedback_map(
+    trace_rows: object,
+    *,
+    min_interest_score: float = 0.28,
+    max_age_hours: int = 24,
+    now: object | None = None,
+) -> dict[str, dict[str, float]]:
+    rows = _scanner_trace_feedback_rows(trace_rows)
+    if not rows:
+        return {}
+    now_ts = pd.Timestamp.utcnow() if now is None else pd.to_datetime(now, utc=True, errors="coerce")
+    if pd.isna(now_ts):
+        now_ts = pd.Timestamp.utcnow()
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        base = canonical_base_symbol((row or {}).get("symbol") or (row or {}).get("Coin") or "")
+        if not base:
+            continue
+        stage = str((row or {}).get("stage") or "").strip().lower()
+        if stage not in {"ranked_out", "shown"}:
+            continue
+        age_hours = _trace_age_hours((row or {}).get("observed_at"), now_ts=now_ts)
+        if age_hours > float(max_age_hours):
+            continue
+        enriched = dict(row)
+        enriched["_trace_age_hours"] = age_hours
+        enriched["_trace_interest"] = _scanner_trace_feedback_interest(row)
+        grouped.setdefault(base, []).append(enriched)
+
+    out: dict[str, dict[str, float]] = {}
+    for base, base_rows in grouped.items():
+        ranked_out_rows = [
+            row for row in base_rows if str(row.get("stage") or "").strip().lower() == "ranked_out"
+        ]
+        if not ranked_out_rows:
+            continue
+        interests = sorted(
+            [_sortable_float(row.get("_trace_interest")) for row in ranked_out_rows],
+            reverse=True,
+        )
+        best_interest = float(interests[0]) if interests else 0.0
+        if best_interest < float(min_interest_score):
+            continue
+        avg_interest = sum(interests[:3]) / max(1, len(interests[:3]))
+        youngest_age = min(_sortable_float(row.get("_trace_age_hours")) for row in ranked_out_rows)
+        recency_score = max(0.0, min(1.0, 1.0 - (youngest_age / max(1.0, float(max_age_hours)))))
+        repeat_score = min(1.0, len(ranked_out_rows) / 3.0)
+        shown_count = sum(1 for row in base_rows if str(row.get("stage") or "").strip().lower() == "shown")
+        shown_penalty = 0.72 if shown_count > 0 else 1.0
+        boost = (
+            0.46 * best_interest
+            + 0.24 * avg_interest
+            + 0.18 * recency_score
+            + 0.12 * repeat_score
+        ) * shown_penalty
+        boost = max(0.0, min(0.75, boost))
+        if boost <= 0.08:
+            continue
+        out[str(base)] = {
+            "radar_trace_boost_score": float(boost),
+            "radar_trace_ranked_out_count": float(len(ranked_out_rows)),
+            "radar_trace_interest_score": float(best_interest),
+            "radar_trace_age_hours": float(youngest_age),
+        }
+    return out
+
+
+def _apply_scanner_trace_feedback_to_market_rows(
+    market_rows: list[dict],
+    feedback_map: dict[str, dict[str, float]],
+) -> list[dict]:
+    if not market_rows or not feedback_map:
+        return list(market_rows or [])
+    enriched: list[dict] = []
+    for row in list(market_rows or []):
+        out = dict(row)
+        base = _breakout_row_base(out)
+        feedback = feedback_map.get(base)
+        if feedback:
+            out["_radar_trace_boost_score"] = max(
+                _sortable_float(out.get("_radar_trace_boost_score")),
+                _sortable_float(feedback.get("radar_trace_boost_score")),
+            )
+            out["_radar_trace_ranked_out_count"] = float(feedback.get("radar_trace_ranked_out_count") or 0.0)
+            out["_radar_trace_interest_score"] = float(feedback.get("radar_trace_interest_score") or 0.0)
+            out["_radar_trace_age_hours"] = float(feedback.get("radar_trace_age_hours") or 0.0)
         enriched.append(out)
     return enriched
 
@@ -981,17 +1111,17 @@ def _actionable_direction_include(
     ):
         return True
     normalized_mode = _normalize_scan_mode(scan_mode)
-    if normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_EMERGING}:
+    if normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
         return False
     signal_key = _signal_tracker_direction_key(signal_direction)
     emerging_key = _signal_tracker_direction_key(emerging_direction)
     if direction_filter == "Upside" and signal_key != "UPSIDE":
-        if normalized_mode != SCAN_MODE_EMERGING or emerging_key != "UPSIDE":
+        if normalized_mode not in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING} or emerging_key != "UPSIDE":
             return False
     if direction_filter == "Downside" and signal_key != "DOWNSIDE":
-        if normalized_mode != SCAN_MODE_EMERGING or emerging_key != "DOWNSIDE":
+        if normalized_mode not in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING} or emerging_key != "DOWNSIDE":
             return False
-    if normalized_mode == SCAN_MODE_EMERGING:
+    if normalized_mode in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
         if direction_filter == "Upside" and emerging_key == "UPSIDE":
             return True
         if direction_filter == "Downside" and emerging_key == "DOWNSIDE":
@@ -1112,6 +1242,7 @@ def _emerging_universe_ordered_symbols(
         freshness_score = _sortable_float((row or {}).get("_radar_freshness_score", 0.0))
         memory_score = _sortable_float((row or {}).get("_radar_memory_score", 0.0))
         archive_edge_score = _sortable_float((row or {}).get("_radar_archive_edge_score", 0.0))
+        trace_boost_score = _sortable_float((row or {}).get("_radar_trace_boost_score", 0.0))
         score_map[base] = (
             volume_weight * volume_rank_score
             + move_weight * move_score
@@ -1121,6 +1252,7 @@ def _emerging_universe_ordered_symbols(
             + 0.20 * freshness_score
             + 0.28 * memory_score
             + 0.18 * archive_edge_score
+            + 0.12 * trace_boost_score
         )
 
     indexed_pairs = list(enumerate(usdt_symbols))
@@ -1158,7 +1290,7 @@ def _candidate_scan_symbols(
                 direction_filter=direction_filter,
                 classify_symbol_sector=classify_symbol_sector,
             )
-        elif normalized_mode == SCAN_MODE_EMERGING:
+        elif normalized_mode in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
             candidates = _emerging_universe_ordered_symbols(
                 candidates,
                 market_rows,
@@ -1188,7 +1320,7 @@ def _scan_candidate_pool_size(
     normalized_mode = _normalize_scan_mode(scan_mode)
     if normalized_mode == SCAN_MODE_ACTIONABLE:
         extra = min(140, max(35, requested * 3))
-    elif normalized_mode == SCAN_MODE_EMERGING:
+    elif normalized_mode in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
         extra = min(180, max(45, requested * 4))
     else:
         extra = min(25, max(10, requested // 2))
@@ -1217,7 +1349,7 @@ def _next_scan_pool_target(
         int(current_pool_n)
         + max(
             shortfall,
-            55 if _normalize_scan_mode(scan_mode) == SCAN_MODE_EMERGING else 40 if _normalize_scan_mode(scan_mode) == SCAN_MODE_ACTIONABLE else 25,
+            55 if _normalize_scan_mode(scan_mode) in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING} else 40 if _normalize_scan_mode(scan_mode) == SCAN_MODE_ACTIONABLE else 25,
         ),
     )
     return min(int(max_pool_n), int(next_pool_n))
@@ -1233,9 +1365,9 @@ def _initial_scan_batch_size(
 ) -> int:
     requested = max(1, int(requested_n))
     normalized_mode = _normalize_scan_mode(scan_mode)
-    if custom_mode_active or normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_EMERGING}:
+    if custom_mode_active or normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
         return requested
-    if normalized_mode == SCAN_MODE_EMERGING:
+    if normalized_mode in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
         return min(int(scan_pool_n), max(int(max_initial_n), 96), max(requested + 18, requested * 3))
     return min(int(scan_pool_n), int(max_initial_n), max(requested + 10, requested * 2))
 
@@ -1257,12 +1389,12 @@ def _initial_scan_symbols(
         scan_mode=scan_mode,
     )
     normalized_mode = _normalize_scan_mode(scan_mode)
-    if custom_mode_active or normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_EMERGING}:
+    if custom_mode_active or normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
         return list(candidate_pool[:initial_batch_n])
     if initial_batch_n >= len(candidate_pool):
         return list(candidate_pool[:initial_batch_n])
 
-    if normalized_mode == SCAN_MODE_EMERGING:
+    if normalized_mode in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
         exploration_ratio = _emerging_exploration_ratio(timeframe)
     else:
         exploration_ratio = _actionable_exploration_ratio(timeframe)
@@ -1276,7 +1408,7 @@ def _initial_scan_symbols(
         return list(candidate_pool[:initial_batch_n])
 
     protected_slice: list[str] = []
-    if normalized_mode == SCAN_MODE_EMERGING and market_rows:
+    if normalized_mode in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING} and market_rows:
         radar_map: dict[str, float] = {}
         for row in list(market_rows or []):
             if not isinstance(row, dict):
@@ -1288,6 +1420,7 @@ def _initial_scan_symbols(
                 _sortable_float((row or {}).get("_radar_source_score", 0.0)),
                 _sortable_float((row or {}).get("_radar_freshness_score", 0.0)),
                 _sortable_float((row or {}).get("_radar_memory_score", 0.0)),
+                _sortable_float((row or {}).get("_radar_trace_boost_score", 0.0)),
             )
             if radar_signal <= 0.0:
                 continue
@@ -1296,6 +1429,7 @@ def _initial_scan_symbols(
                 + 0.20 * _sortable_float((row or {}).get("_radar_freshness_score", 0.0))
                 + 0.25 * _sortable_float((row or {}).get("_radar_memory_score", 0.0))
                 + 0.18 * max(0.0, _sortable_float((row or {}).get("_radar_archive_edge_score", 0.0)))
+                + 0.16 * _sortable_float((row or {}).get("_radar_trace_boost_score", 0.0))
             )
             radar_map[base] = max(combined_signal, radar_map.get(base, 0.0))
 
@@ -1352,7 +1486,7 @@ def _actionable_analysis_batch_size(
     scan_mode: str,
 ) -> int:
     normalized_mode = _normalize_scan_mode(scan_mode)
-    if normalized_mode == SCAN_MODE_EMERGING:
+    if normalized_mode in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
         target_n = max(int(requested_n) * 3, int(requested_n) + 24, 40)
         return min(int(fetched_n), min(target_n, 96))
     if normalized_mode != SCAN_MODE_ACTIONABLE:
@@ -1384,6 +1518,7 @@ def _emerging_candidate_score(
     radar_freshness_score: float = 0.0,
     radar_memory_score: float = 0.0,
     radar_archive_edge_score: float = 0.0,
+    radar_trace_boost_score: float = 0.0,
 ) -> float:
     signal_key = _signal_tracker_direction_key(signal_direction)
     if signal_key not in {"UPSIDE", "DOWNSIDE"}:
@@ -1413,6 +1548,7 @@ def _emerging_candidate_score(
         + 11.0 * _sortable_float(radar_freshness_score)
         + 10.0 * _sortable_float(radar_memory_score)
         + 7.0 * _sortable_float(radar_archive_edge_score)
+        + 4.5 * _sortable_float(radar_trace_boost_score)
     )
     aligned_move = (
         max(0.0, _sortable_float(market_pct_change_24h))

@@ -25,7 +25,7 @@ from tabs.whale_tab import render as render_whale_tab_ui
 
 TAB_TITLES = [
     "Market", "Spot", "Position", "Sessions", "Signal Archive",
-    "Multi-TF", "AI Workspace", "Heatmap", "Whale Tracker", "Risk Analytics",
+    "Multi-TF", "AI Workspace", "Heatmap", "Trending Coins", "Risk Analytics",
     "Monte Carlo", "Fibonacci", "Correlation", "Portfolio Scenario",
     "Tools", "Labs", "Analysis Guide",
 ]
@@ -38,7 +38,7 @@ TAB_GROUPS = [
     (
         "Research & Labs",
         [
-            "Multi-TF", "AI Workspace", "Heatmap", "Whale Tracker", "Risk Analytics",
+            "Multi-TF", "AI Workspace", "Heatmap", "Trending Coins", "Risk Analytics",
             "Monte Carlo", "Fibonacci", "Correlation", "Portfolio Scenario", "Labs",
         ],
     ),
@@ -82,6 +82,7 @@ _TAB_DEPS = [
             "style_signal", "style_scalp_opp", "style_delta", "sanitize_trading_terms", "_debug",
             "log_signal_events", "resolve_open_signal_events_for_frame",
             "fetch_breakout_radar_snapshots_df", "log_breakout_radar_snapshots",
+            "fetch_scanner_trace_events_df", "build_scanner_trace_summary", "log_scanner_trace_events",
             *_TRACKER_DEPS, *_ADAPTIVE_DEPS,
         ],
     ),

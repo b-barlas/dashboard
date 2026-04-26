@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import html
 import math
 import re
+import time
 from threading import Lock
 from types import SimpleNamespace
 
@@ -81,6 +82,7 @@ from tabs.market_scan_helpers import (
     SCAN_MODE_ACTIONABLE as _SCAN_MODE_ACTIONABLE,
     SCAN_MODE_BROAD as _SCAN_MODE_BROAD,
     SCAN_MODE_EMERGING as _SCAN_MODE_EMERGING,
+    SCAN_MODE_TRENDING as _SCAN_MODE_TRENDING,
     _actionable_analysis_batch_size,
     _actionable_context_score,
     _actionable_direction_include,
@@ -89,7 +91,9 @@ from tabs.market_scan_helpers import (
     _actionable_tactical_candidate_score,
     _apply_breakout_archive_feedback_to_market_rows,
     _apply_breakout_memory_to_market_rows,
+    _apply_scanner_trace_feedback_to_market_rows,
     _build_breakout_archive_feedback_map,
+    _build_scanner_trace_feedback_map,
     _emerging_candidate_score,
     _candidate_scan_symbols as _candidate_scan_symbols_impl,
     _initial_scan_symbols,
@@ -98,6 +102,7 @@ from tabs.market_scan_helpers import (
     _normalize_scan_mode,
     _scan_candidate_pool_size,
 )
+from tabs.whale_tab import _compute_scan_thresholds, _run_volume_anomaly_scan
 from ui.primitives import render_help_details, render_kpi_grid, render_page_header
 from ui.signal_formatters import (
     setup_confirm_display as _shared_setup_confirm_display,
@@ -113,8 +118,11 @@ _LAST_GOOD_REGISTRY_KEY = "market_scan_last_good_by_sig"
 _LAST_HEALTHY_EMPTY_SIG_KEY = "market_scan_last_healthy_empty_sig"
 _LAST_SCAN_ATTEMPT_TS_KEY = "market_scan_last_attempt_ts"
 _DATA_HEALTH_ITEMS_KEY = "market_data_health_items"
+_TRENDING_VOLUME_CACHE_KEY = "market_trending_volume_anomaly_cache"
 _HEALTHY_EMPTY_HISTORY_LIMIT = 32
 _LAST_GOOD_HISTORY_LIMIT = 32
+_TRENDING_VOLUME_CACHE_LIMIT = 8
+_TRENDING_VOLUME_CACHE_TTL_SECONDS = 300
 _SCAN_REFRESH_TTL_MINUTES = 3
 _RECOVERY_RETRY_BACKOFF_SECONDS = 30
 _SETUP_CONFIRM_PRIORITY = {
@@ -370,7 +378,7 @@ def _market_result_priority_key_for_mode(row: dict, scan_mode: str) -> tuple:
     normalized_mode = _normalize_scan_mode(scan_mode)
     if normalized_mode == _SCAN_MODE_ACTIONABLE:
         return _actionable_market_result_priority_key(row)
-    if normalized_mode == _SCAN_MODE_EMERGING:
+    if normalized_mode in {_SCAN_MODE_EMERGING, _SCAN_MODE_TRENDING}:
         return _emerging_market_result_priority_key(row)
     return _market_result_priority_key(row)
 
@@ -1837,6 +1845,234 @@ def _audit_scan_summary_lines(
     return lines
 
 
+def _scanner_trace_diagnostic_lines(summary: dict[str, object]) -> list[str]:
+    total = int(summary.get("total_rows") or 0)
+    if total <= 0:
+        return ["- Coverage trace has no rows yet for this scope. Run a fresh scan to start collecting it."]
+    scans = int(summary.get("scan_count") or 0)
+    symbols = int(summary.get("symbol_count") or 0)
+    lines = [
+        (
+            f"- Trace rows: **{total}** across **{scans}** recent scan(s), "
+            f"covering **{symbols}** symbol(s). Shown rate: **{float(summary.get('shown_rate_pct') or 0.0):.1f}%**."
+        ),
+        (
+            f"- Stages: shown **{int(summary.get('shown_count') or 0)}**"
+            f" • ranked out **{int(summary.get('ranked_out_count') or 0)}**"
+            f" • filtered out **{int(summary.get('filtered_out_count') or 0)}**"
+            f" • skipped **{int(summary.get('skipped_count') or 0)}**"
+            f" • not scanned this pass **{int(summary.get('candidate_only_count') or 0)}**."
+        ),
+    ]
+    top_ranked_out = list(summary.get("top_ranked_out") or [])
+    if top_ranked_out:
+        formatted = []
+        for row in top_ranked_out[:5]:
+            symbol = str(row.get("symbol") or "").strip()
+            score = float(row.get("score") or 0.0)
+            rank = row.get("candidate_rank")
+            rank_text = f"#{int(rank)}" if rank is not None else "unranked"
+            formatted.append(f"{symbol} ({score:.1f}, {rank_text})")
+        lines.append(f"- Strongest Top N cuts: {', '.join(formatted)}.")
+    top_filtered_out = list(summary.get("top_filtered_out") or [])
+    if top_filtered_out:
+        formatted = []
+        for row in top_filtered_out[:5]:
+            symbol = str(row.get("symbol") or "").strip()
+            score = float(row.get("score") or 0.0)
+            formatted.append(f"{symbol} ({score:.1f})")
+        lines.append(f"- Strongest gate-filtered candidates: {', '.join(formatted)}.")
+    top_skip_reasons = list(summary.get("top_skip_reasons") or [])
+    if top_skip_reasons:
+        formatted = [
+            f"{str(row.get('reason') or 'unknown')} ({int(row.get('count') or 0)})"
+            for row in top_skip_reasons[:5]
+        ]
+        lines.append(f"- Top skip reasons: {', '.join(formatted)}.")
+    return lines
+
+
+def _archive_learning_rows(
+    *,
+    visible_rows: list[dict],
+    produced_rows: list[dict],
+) -> list[dict]:
+    source_rows = list(produced_rows or []) if produced_rows else list(visible_rows or [])
+    out: list[dict] = []
+    seen: set[tuple[object, ...]] = set()
+    for idx, row in enumerate(source_rows):
+        if not isinstance(row, dict):
+            continue
+        key = (
+            str(row.get("Coin") or "").strip().upper(),
+            str(row.get("__timeframe") or "").strip(),
+            str(row.get("__event_time") or "").strip(),
+        )
+        if not any(key):
+            key = ("__idx__", idx)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
+
+
+def _scanner_trace_base(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    if "(" in text:
+        text = text.split("(", 1)[0].strip()
+    if "/" in text:
+        text = text.split("/", 1)[0].strip()
+    for separator in ("-", "_", " "):
+        if separator in text:
+            text = text.split(separator, 1)[0].strip()
+            break
+    for suffix in ("USDT", "USDC", "FDUSD", "BUSD", "USD"):
+        if text.endswith(suffix) and len(text) > len(suffix) + 1:
+            text = text[: -len(suffix)].strip()
+            break
+    text = re.sub(r"[^A-Z0-9]", "", text)
+    return canonical_base_symbol(text)
+
+
+def _scanner_trace_row_base(row: dict) -> str:
+    for key in ("Coin", "symbol", "base", "pair"):
+        base = _scanner_trace_base(row.get(key))
+        if base:
+            return base
+    return ""
+
+
+def _scanner_trace_events(
+    *,
+    candidate_symbols: list[str],
+    attempted_symbols: set[str],
+    skipped_symbols: list[tuple[str, str]],
+    produced_rows: list[dict],
+    visible_rows: list[dict],
+    market_rows: list[dict],
+    timeframe: str,
+    scan_mode: str,
+    direction_filter: str,
+    observed_at: object,
+    source_label: str,
+    data_mode: str,
+) -> list[dict[str, object]]:
+    """Build passive scanner-stage audit rows without changing scanner behavior."""
+
+    def rows_by_base(rows: list[dict]) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            base = _scanner_trace_row_base(row)
+            if base and base not in out:
+                out[base] = row
+        return out
+
+    candidate_pairs: dict[str, str] = {}
+    candidate_rank: dict[str, int] = {}
+    ordered_bases: list[str] = []
+    for idx, symbol in enumerate(candidate_symbols or [], start=1):
+        base = _scanner_trace_base(symbol)
+        if not base:
+            continue
+        if base not in candidate_rank:
+            candidate_rank[base] = idx
+            candidate_pairs[base] = str(symbol or "").strip()
+            ordered_bases.append(base)
+
+    attempted_bases = {
+        base
+        for base in (_scanner_trace_base(symbol) for symbol in attempted_symbols or set())
+        if base
+    }
+    skipped_by_base: dict[str, str] = {}
+    for symbol, reason in skipped_symbols or []:
+        base = _scanner_trace_base(symbol)
+        if base and base not in skipped_by_base:
+            skipped_by_base[base] = str(reason or "").strip()
+
+    produced_by_base = rows_by_base(produced_rows or [])
+    visible_by_base = rows_by_base(visible_rows or [])
+    market_by_base = rows_by_base(market_rows or [])
+    shown_rank = {
+        _scanner_trace_row_base(row): idx
+        for idx, row in enumerate(visible_rows or [], start=1)
+        if isinstance(row, dict) and _scanner_trace_row_base(row)
+    }
+
+    for base in [*produced_by_base.keys(), *visible_by_base.keys(), *skipped_by_base.keys(), *attempted_bases]:
+        if base and base not in candidate_rank and base not in ordered_bases:
+            ordered_bases.append(base)
+
+    scan_focus = _normalize_scan_mode(scan_mode)
+    tf = str(timeframe or "").strip().lower()
+    direction_text = str(direction_filter or "Both").strip() or "Both"
+    scan_id = f"market|{scan_focus}|{tf}|{direction_text}|{pd.to_datetime(observed_at, utc=True, errors='coerce')}"
+    events: list[dict[str, object]] = []
+    for base in ordered_bases:
+        produced = base in produced_by_base
+        shown = base in visible_by_base
+        skipped = base in skipped_by_base
+        attempted = base in attempted_bases or produced or shown or skipped
+        if shown:
+            stage = "shown"
+            reason = "shown"
+        elif produced:
+            stage = "ranked_out"
+            reason = "top_n_cut"
+        elif skipped:
+            stage = "skipped"
+            reason = skipped_by_base.get(base, "")
+        elif attempted:
+            stage = "filtered_out"
+            reason = "direction_or_quality_gate"
+        else:
+            stage = "candidate"
+            reason = "not_scanned_this_pass"
+
+        row = produced_by_base.get(base) or visible_by_base.get(base) or market_by_base.get(base) or {}
+        events.append(
+            {
+                "scan_id": scan_id,
+                "observed_at": observed_at,
+                "source": "Market",
+                "scan_focus": scan_focus,
+                "timeframe": tf,
+                "direction_filter": direction_text,
+                "symbol": base,
+                "pair": candidate_pairs.get(base) or str(row.get("pair") or row.get("symbol") or ""),
+                "stage": stage,
+                "reason": reason,
+                "candidate_rank": candidate_rank.get(base),
+                "shown_rank": shown_rank.get(base),
+                "attempted": attempted,
+                "produced": produced,
+                "shown": shown,
+                "skipped": skipped,
+                "setup_confirm": str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                "direction": str(row.get("Direction") or row.get("__signal_direction_raw") or ""),
+                "confidence": row.get("__confidence_val", _confidence_value_from_badge(row.get("Confidence"))),
+                "ai_confidence": row.get("__ai_confidence_val", _confidence_value_from_badge(row.get("AI Confidence"))),
+                "radar_source_kind": row.get("_radar_source_kind") or row.get("radar_source_kind"),
+                "radar_source_score": row.get("_radar_source_score") or row.get("radar_source_score"),
+                "radar_freshness_score": row.get("_radar_freshness_score") or row.get("radar_freshness_score"),
+                "emerging_rank_score": row.get("__emerging_rank_score") or row.get("_emerging_rank_score"),
+                "actionable_frame_score": row.get("__actionable_frame_score"),
+                "actionable_tactical_score": row.get("__actionable_tactical_score"),
+                "market_cap": row.get("__mcap_val") or row.get("market_cap"),
+                "price": row.get("__price_val") or row.get("current_price") or row.get("price"),
+                "delta_pct": row.get("__delta_pct") or row.get("price_change_percentage_24h"),
+                "data_mode": data_mode,
+                "source_label": source_label,
+            }
+        )
+    return events
+
+
 def _spot_bias_label(direction: str) -> str:
     return _shared_spot_bias_label(direction)
 
@@ -2103,6 +2339,45 @@ def _normalize_custom_bases(custom_bases: list[str] | tuple[str, ...], *, sort_o
     if sort_output:
         out = sorted(out)
     return out
+
+
+def _parse_market_custom_bases(raw: str, limit: int = 10) -> list[str]:
+    tokens = re.split(r"[\s,;\n]+", str(raw or "").upper().strip())
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in tokens:
+        t = tok.strip()
+        if not t:
+            continue
+        if "/" in t:
+            t = t.split("/", 1)[0].strip()
+        for suf in ("-USDT", "_USDT", "USDT", "-USD", "_USD", "USD"):
+            if t.endswith(suf) and len(t) > len(suf):
+                t = t[: -len(suf)]
+                break
+        t = re.sub(r"[^A-Z0-9]", "", t)
+        if len(t) < 2 or len(t) > 15:
+            continue
+        canonical = canonical_base_symbol(t)
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        out.append(canonical)
+        if len(out) >= int(limit):
+            break
+    return out
+
+
+def _apply_market_custom_input_state(
+    session_state: dict,
+    *,
+    raw_value: str | None = None,
+    limit: int = 10,
+) -> list[str]:
+    raw = session_state.get("market_custom_coin_input", "") if raw_value is None else raw_value
+    parsed = _parse_market_custom_bases(str(raw or ""), limit=limit)
+    session_state["market_custom_bases_applied"] = parsed
+    return parsed
 
 
 def _market_scan_signature(
@@ -2860,6 +3135,252 @@ def _build_breakout_radar_universe(
     return merged_pairs, merged_market_rows, merged_mcap_map
 
 
+def _trending_scan_timeframe(scan_timeframe: str) -> str:
+    tf = str(scan_timeframe or "").strip().lower()
+    if tf in {"5m", "15m", "1h", "4h"}:
+        return tf
+    return "4h"
+
+
+def _trending_direction_allows(pct_change: object, *, direction_filter: str) -> bool:
+    direction_key = str(direction_filter or "Both").strip().upper()
+    if direction_key == "BOTH":
+        return True
+    move = _sortable_float(pct_change)
+    if direction_key == "UPSIDE":
+        return move >= -0.15
+    if direction_key == "DOWNSIDE":
+        return move <= 0.15
+    return True
+
+
+def _volume_anomaly_rows_from_surges(
+    surges: list[dict],
+    *,
+    direction_filter: str,
+) -> list[dict]:
+    rows: list[dict] = []
+    for row in list(surges or []):
+        if not isinstance(row, dict):
+            continue
+        base = canonical_base_symbol(row.get("Symbol") or "")
+        if not base or is_stable_base_symbol(base):
+            continue
+        pct_24h = _sortable_float(row.get("24h %"))
+        pct_1 = _sortable_float(row.get("1-Candle %"))
+        pct_ref = pct_24h if abs(pct_24h) >= 0.01 else pct_1
+        if not _trending_direction_allows(pct_ref, direction_filter=direction_filter):
+            continue
+        anomaly_score = max(0.0, min(1.0, _sortable_float(row.get("Score"))))
+        rows.append(
+            {
+                "symbol": base.lower(),
+                "id": "",
+                "market_cap": 0,
+                "price_change_percentage_24h": pct_ref,
+                "_volume_24h": _sortable_float(row.get("Last Vol")),
+                "_radar_source_kind": "volume_anomaly",
+                "_radar_source_score": max(0.28, min(1.0, anomaly_score)),
+            }
+        )
+    return rows
+
+
+def _trending_volume_cache_key(
+    *,
+    symbols: list[str],
+    scan_tf: str,
+    ratio_gate: float,
+    z_gate: float,
+    extreme_ratio_gate: float,
+    extreme_z_gate: float,
+) -> tuple[object, ...]:
+    return (
+        str(scan_tf or "").strip().lower(),
+        tuple(str(symbol or "").strip().upper() for symbol in list(symbols or [])),
+        round(float(ratio_gate), 3),
+        round(float(z_gate), 3),
+        round(float(extreme_ratio_gate), 3),
+        round(float(extreme_z_gate), 3),
+    )
+
+
+def _get_cached_trending_volume_surges(
+    cache: dict | None,
+    cache_key: tuple[object, ...],
+    *,
+    now_ts: float,
+    ttl_seconds: int,
+) -> list[dict] | None:
+    if not isinstance(cache, dict):
+        return None
+    item = cache.get(cache_key)
+    if not isinstance(item, dict):
+        return None
+    try:
+        item_ts = float(item.get("ts") or 0.0)
+    except Exception:
+        item_ts = 0.0
+    if item_ts <= 0.0 or (float(now_ts) - item_ts) > float(ttl_seconds):
+        cache.pop(cache_key, None)
+        return None
+    surges = item.get("surges")
+    if not isinstance(surges, list):
+        return None
+    return [dict(row) for row in surges if isinstance(row, dict)]
+
+
+def _remember_trending_volume_surges(
+    cache: dict | None,
+    cache_key: tuple[object, ...],
+    surges: list[dict],
+    *,
+    now_ts: float,
+    max_entries: int = _TRENDING_VOLUME_CACHE_LIMIT,
+) -> None:
+    if not isinstance(cache, dict):
+        return
+    cache[cache_key] = {
+        "ts": float(now_ts),
+        "surges": [dict(row) for row in list(surges or []) if isinstance(row, dict)],
+    }
+    if len(cache) <= int(max_entries):
+        return
+    ranked_keys = sorted(
+        list(cache.keys()),
+        key=lambda key: float(cache.get(key, {}).get("ts") or 0.0) if isinstance(cache.get(key), dict) else 0.0,
+    )
+    for old_key in ranked_keys[: max(0, len(cache) - int(max_entries))]:
+        cache.pop(old_key, None)
+
+
+def _build_trending_scan_universe(
+    *,
+    base_market_rows: list[dict],
+    fetch_trending_coins,
+    fetch_top_gainers_losers,
+    get_top_volume_usdt_symbols,
+    get_market_cap_rows_for_symbols,
+    fetch_ohlcv,
+    direction_filter: str,
+    scan_timeframe: str,
+    provider_fetch_n: int,
+    volume_anomaly_cache: dict | None = None,
+    cache_now_ts: float | None = None,
+) -> tuple[list[str], list[dict], dict[str, int]]:
+    trending_bases: list[str] = []
+    seen_bases: set[str] = set()
+
+    def _remember_base(raw_symbol: object) -> None:
+        base = canonical_base_symbol(str(raw_symbol or "").strip())
+        if not base or base in seen_bases or is_stable_base_symbol(base):
+            return
+        seen_bases.add(base)
+        trending_bases.append(base)
+
+    try:
+        trending = fetch_trending_coins()
+    except Exception:
+        trending = []
+    try:
+        gainers, losers = fetch_top_gainers_losers(limit=max(20, min(int(provider_fetch_n), 60)))
+    except Exception:
+        gainers, losers = [], []
+
+    direction_key = str(direction_filter or "Both").strip().upper()
+    if direction_key == "UPSIDE":
+        momentum_raw = list(gainers or [])
+    elif direction_key == "DOWNSIDE":
+        momentum_raw = list(losers or [])
+    else:
+        momentum_raw = [*(gainers or [])[:35], *(losers or [])[:20]]
+
+    trending_rows = _annotate_breakout_provider_rows(
+        [
+            {
+                **dict(row),
+                "_trending_rank": idx + 1,
+            }
+            for idx, row in enumerate(list(trending or []))
+        ],
+        direction_filter=direction_filter,
+        source_kind="trending",
+    )
+    momentum_rows = _annotate_breakout_provider_rows(
+        momentum_raw,
+        direction_filter=direction_filter,
+        source_kind="gainers_losers",
+    )
+
+    volume_rows: list[dict] = []
+    try:
+        anomaly_symbols, _raw = get_top_volume_usdt_symbols(max(24, min(60, int(provider_fetch_n))))
+        scan_tf = _trending_scan_timeframe(scan_timeframe)
+        ratio_gate, z_gate, extreme_ratio_gate, extreme_z_gate = _compute_scan_thresholds(scan_tf, 1.5, 2.0)
+        scan_symbols = list(anomaly_symbols or [])[: max(20, min(50, int(provider_fetch_n)))]
+        now_ts = float(cache_now_ts) if cache_now_ts is not None else time.time()
+        cache_key = _trending_volume_cache_key(
+            symbols=scan_symbols,
+            scan_tf=scan_tf,
+            ratio_gate=ratio_gate,
+            z_gate=z_gate,
+            extreme_ratio_gate=extreme_ratio_gate,
+            extreme_z_gate=extreme_z_gate,
+        )
+        surges = _get_cached_trending_volume_surges(
+            volume_anomaly_cache,
+            cache_key,
+            now_ts=now_ts,
+            ttl_seconds=_TRENDING_VOLUME_CACHE_TTL_SECONDS,
+        )
+        if surges is None:
+            surges, _diag = _run_volume_anomaly_scan(
+                scan_symbols,
+                fetch_ohlcv=fetch_ohlcv,
+                scan_tf=scan_tf,
+                ratio_gate=ratio_gate,
+                z_gate=z_gate,
+                extreme_ratio_gate=extreme_ratio_gate,
+                extreme_z_gate=extreme_z_gate,
+            )
+            _remember_trending_volume_surges(
+                volume_anomaly_cache,
+                cache_key,
+                surges,
+                now_ts=now_ts,
+            )
+        volume_rows = _volume_anomaly_rows_from_surges(surges, direction_filter=direction_filter)
+    except Exception:
+        volume_rows = []
+
+    for row in volume_rows[:40]:
+        _remember_base((row or {}).get("symbol"))
+    for row in trending_rows[:20]:
+        _remember_base((row or {}).get("symbol"))
+    for row in momentum_rows[:55]:
+        _remember_base((row or {}).get("symbol"))
+
+    targeted_rows = get_market_cap_rows_for_symbols(tuple(trending_bases), vs_currency="usd")
+    merged_market_rows = _merge_breakout_radar_market_rows(
+        base_market_rows,
+        volume_rows,
+        trending_rows,
+        momentum_rows,
+        targeted_rows,
+    )
+    merged_pairs: list[str] = []
+    seen_pairs: set[str] = set()
+    for base in trending_bases:
+        pair = f"{base}/USDT"
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        merged_pairs.append(pair)
+
+    merged_mcap_map = _build_market_cap_map(merged_market_rows)
+    return merged_pairs, merged_market_rows, merged_mcap_map
+
+
 def _sync_market_cap_cells(
     rows: list[dict],
     mcap_map: dict[str, int],
@@ -3133,11 +3654,14 @@ def render(ctx: dict) -> None:
     init_signal_tracker_db = get_ctx(ctx, "init_signal_tracker_db")
     fetch_signal_events_df = get_ctx(ctx, "fetch_signal_events_df")
     fetch_breakout_radar_snapshots_df = get_ctx(ctx, "fetch_breakout_radar_snapshots_df")
+    fetch_scanner_trace_events_df = get_ctx(ctx, "fetch_scanner_trace_events_df")
+    build_scanner_trace_summary = get_ctx(ctx, "build_scanner_trace_summary")
     build_adaptive_context_model = get_ctx(ctx, "build_adaptive_context_model")
     build_live_signal_adaptive_snapshot = get_ctx(ctx, "build_live_signal_adaptive_snapshot")
     log_market_alerts = get_ctx(ctx, "log_market_alerts")
     log_signal_events = get_ctx(ctx, "log_signal_events")
     log_breakout_radar_snapshots = get_ctx(ctx, "log_breakout_radar_snapshots")
+    log_scanner_trace_events = get_ctx(ctx, "log_scanner_trace_events")
     resolve_open_signal_events_for_frame = get_ctx(ctx, "resolve_open_signal_events_for_frame")
     _debug = get_ctx(ctx, "_debug")
     signal_tracker_db_path = init_signal_tracker_db(get_signal_tracker_db_path())
@@ -3636,31 +4160,8 @@ def render(ctx: dict) -> None:
         unsafe_allow_html=True,
     )
 
-    def _parse_custom_bases(raw: str, limit: int = 10) -> list[str]:
-        tokens = re.split(r"[\s,;\n]+", str(raw or "").upper().strip())
-        out: list[str] = []
-        seen: set[str] = set()
-        for tok in tokens:
-            t = tok.strip()
-            if not t:
-                continue
-            if "/" in t:
-                t = t.split("/", 1)[0].strip()
-            for suf in ("-USDT", "_USDT", "USDT", "-USD", "_USD", "USD"):
-                if t.endswith(suf) and len(t) > len(suf):
-                    t = t[: -len(suf)]
-                    break
-            t = re.sub(r"[^A-Z0-9]", "", t)
-            if len(t) < 2 or len(t) > 15:
-                continue
-            canonical = canonical_base_symbol(t)
-            if not canonical or canonical in seen:
-                continue
-            seen.add(canonical)
-            out.append(canonical)
-            if len(out) >= int(limit):
-                break
-        return out
+    def _apply_custom_coin_input() -> None:
+        _apply_market_custom_input_state(st.session_state, limit=10)
 
     _consume_market_custom_clear(st.session_state)
     custom_bases_applied = _normalize_custom_bases(list(st.session_state.get("market_custom_bases_applied", [])))
@@ -3686,19 +4187,21 @@ def render(ctx: dict) -> None:
         )
     with controls[2]:
         current_scan_mode = str(st.session_state.get("market_scan_mode") or "").strip()
-        if current_scan_mode not in {_SCAN_MODE_BROAD, _SCAN_MODE_EMERGING}:
+        if current_scan_mode not in {_SCAN_MODE_BROAD, _SCAN_MODE_EMERGING, _SCAN_MODE_TRENDING}:
             normalized_scan_mode = _normalize_scan_mode(current_scan_mode)
             if normalized_scan_mode in {_SCAN_MODE_ACTIONABLE, _SCAN_MODE_EMERGING}:
                 st.session_state["market_scan_mode"] = _SCAN_MODE_EMERGING
+            elif normalized_scan_mode == _SCAN_MODE_TRENDING:
+                st.session_state["market_scan_mode"] = _SCAN_MODE_TRENDING
             else:
                 st.session_state["market_scan_mode"] = _SCAN_MODE_BROAD
         scan_mode = st.selectbox(
             "Scan Mode",
-            [_SCAN_MODE_BROAD, _SCAN_MODE_EMERGING],
+            [_SCAN_MODE_BROAD, _SCAN_MODE_EMERGING, _SCAN_MODE_TRENDING],
             index=0,
             key="market_scan_mode",
             disabled=custom_mode_active,
-            help="Broad Market stays cleaner. Breakout Radar keeps the same table but pushes earlier breakout and acceleration names forward, with more noise.",
+            help="Broad Market is the clean base read. Breakout Radar hunts acceleration. Trending Coins reads attention, momentum, and volume anomaly candidates in the same table.",
         )
     with controls[3]:
         top_n_default = int(st.session_state.get("market_top_n", 10))
@@ -3717,6 +4220,7 @@ def render(ctx: dict) -> None:
             key="market_custom_coin_input",
             placeholder="BTC, ETH, SOL",
             help="Optional watchlist mode. Enter up to 10 symbols separated by comma.",
+            on_change=_apply_custom_coin_input,
         )
     with controls[5]:
         run_scan = st.button("Run Scan", type="primary", width="stretch")
@@ -3727,9 +4231,13 @@ def render(ctx: dict) -> None:
             key="market_clear_custom",
         )
 
-    custom_bases_draft = _parse_custom_bases(custom_coin_input, limit=10)
+    custom_bases_draft = _parse_market_custom_bases(custom_coin_input, limit=10)
     if run_scan:
-        st.session_state["market_custom_bases_applied"] = custom_bases_draft
+        custom_bases_draft = _apply_market_custom_input_state(
+            st.session_state,
+            raw_value=custom_coin_input,
+            limit=10,
+        )
         custom_bases_applied = list(custom_bases_draft)
         custom_mode_active = bool(custom_bases_applied)
     if clear_custom:
@@ -3751,6 +4259,8 @@ def render(ctx: dict) -> None:
         st.caption("Custom symbols are ready. Click Run Scan to apply watchlist mode.")
     elif _normalize_scan_mode(scan_mode) == _SCAN_MODE_EMERGING:
         st.caption("Breakout Radar keeps the same market table, reaches further into the active-liquidity universe, and surfaces fresher breakout pressure earlier. Expect more noise.")
+    elif _normalize_scan_mode(scan_mode) == _SCAN_MODE_TRENDING:
+        st.caption("Trending Coins keeps the same market table, but starts from search trend, 24h momentum, and volume-anomaly candidates.")
 
     exclude_stables = st.toggle(
         "Exclude stablecoins",
@@ -5766,6 +6276,23 @@ def render(ctx: dict) -> None:
         timeframe=str(timeframe),
         direction_filter=str(direction_filter),
     )
+    scanner_trace_feedback_map: dict[str, dict[str, float]] = {}
+    if _normalize_scan_mode(scan_mode) in {_SCAN_MODE_EMERGING, _SCAN_MODE_TRENDING}:
+        try:
+            scanner_trace_rows = fetch_scanner_trace_events_df(
+                scan_focus=str(_normalize_scan_mode(scan_mode)),
+                timeframe=str(timeframe),
+                direction_filter=str(direction_filter),
+                lookback_hours=24,
+                limit=2400,
+                db_path=signal_tracker_db_path,
+            )
+            scanner_trace_feedback_map = _build_scanner_trace_feedback_map(scanner_trace_rows)
+        except Exception as e:
+            _debug(
+                f"Scanner trace feedback unavailable ({timeframe}): "
+                f"{e.__class__.__name__}: {str(e).strip()}"
+            )
     adaptive_decision_mode = str(archive_bundle["decision_mode"])
     adaptive_decision_target = str(archive_bundle["decision_target"])
     adaptive_decision_rows = int(archive_bundle["decision_rows"])
@@ -5789,7 +6316,11 @@ def render(ctx: dict) -> None:
             else (
                 f"Reading breakout radar for {top_n} early candidates ({direction_filter}) [{timeframe}] ..."
                 if _normalize_scan_mode(scan_mode) == _SCAN_MODE_EMERGING
-                else f"Reading {top_n} coins ({direction_filter}) [{timeframe}] ..."
+                else (
+                    f"Reading trending coins for {top_n} attention candidates ({direction_filter}) [{timeframe}] ..."
+                    if _normalize_scan_mode(scan_mode) == _SCAN_MODE_TRENDING
+                    else f"Reading {top_n} coins ({direction_filter}) [{timeframe}] ..."
+                )
             )
         )
         with st.spinner(spinner_label):
@@ -5807,6 +6338,10 @@ def render(ctx: dict) -> None:
             provider_fetch_n: int | None = None
             breakout_freshness_cache: dict[tuple[str, str, str], float] = {}
             breakout_memory_history_df = pd.DataFrame()
+            trending_volume_cache = st.session_state.get(_TRENDING_VOLUME_CACHE_KEY)
+            if not isinstance(trending_volume_cache, dict):
+                trending_volume_cache = {}
+                st.session_state[_TRENDING_VOLUME_CACHE_KEY] = trending_volume_cache
             if _normalize_scan_mode(scan_mode) == _SCAN_MODE_EMERGING and not custom_mode_active:
                 try:
                     breakout_memory_history_df = fetch_breakout_radar_snapshots_df(
@@ -5832,6 +6367,8 @@ def render(ctx: dict) -> None:
                     provider_fetch_n_local = min(250, max(int(top_n) * 4, 80))
                 elif normalized_scan_mode == _SCAN_MODE_EMERGING:
                     provider_fetch_n_local = min(250, max(int(top_n) * 6, 120))
+                elif normalized_scan_mode == _SCAN_MODE_TRENDING:
+                    provider_fetch_n_local = min(180, max(int(top_n) * 5, 80))
                 else:
                     provider_fetch_n_local = min(250, max(int(top_n), 50))
                 if current_fetch_n is not None:
@@ -5870,6 +6407,34 @@ def render(ctx: dict) -> None:
                             breakout_archive_feedback_map,
                         )
                         mcap_map_local = _merge_market_cap_maps(mcap_map_local, radar_mcap_map)
+                    elif normalized_scan_mode == _SCAN_MODE_TRENDING:
+                        usdt_symbols_local, unique_market_data_local, trending_mcap_map = _build_trending_scan_universe(
+                            base_market_rows=unique_market_data_local,
+                            fetch_trending_coins=fetch_trending_coins,
+                            fetch_top_gainers_losers=fetch_top_gainers_losers,
+                            get_top_volume_usdt_symbols=get_top_volume_usdt_symbols,
+                            get_market_cap_rows_for_symbols=get_market_cap_rows_for_symbols,
+                            fetch_ohlcv=fetch_ohlcv,
+                            direction_filter=direction_filter,
+                            scan_timeframe=timeframe,
+                            provider_fetch_n=provider_fetch_n_local,
+                            volume_anomaly_cache=trending_volume_cache,
+                        )
+                        unique_market_data_local = _enrich_breakout_radar_freshness(
+                            base_pairs=usdt_symbols_local,
+                            market_rows=unique_market_data_local,
+                            fetch_ohlcv=fetch_ohlcv,
+                            scan_timeframe=timeframe,
+                            direction_filter=direction_filter,
+                            max_candidates=max(10, min(int(top_n) * 2, 18)),
+                            freshness_cache=breakout_freshness_cache,
+                        )
+                        mcap_map_local = _merge_market_cap_maps(mcap_map_local, trending_mcap_map)
+                    if normalized_scan_mode in {_SCAN_MODE_EMERGING, _SCAN_MODE_TRENDING}:
+                        unique_market_data_local = _apply_scanner_trace_feedback_to_market_rows(
+                            unique_market_data_local,
+                            scanner_trace_feedback_map,
+                        )
                     eligible_symbols_local = _candidate_scan_symbols(
                         usdt_symbols=usdt_symbols_local,
                         market_rows=unique_market_data_local,
@@ -6383,6 +6948,7 @@ def render(ctx: dict) -> None:
                     radar_freshness_score=radar_freshness_score,
                     radar_memory_score=_sortable_float((market_row or {}).get("_radar_memory_score")),
                     radar_archive_edge_score=_sortable_float((market_row or {}).get("_radar_archive_edge_score")),
+                    radar_trace_boost_score=_sortable_float((market_row or {}).get("_radar_trace_boost_score")),
                 )
                 if actionable_tactical_candidate:
                     tactical_note = (
@@ -6489,6 +7055,7 @@ def render(ctx: dict) -> None:
                     '__execution_confidence_val': float(execution_confidence.score),
                     '__execution_conviction_label': str(_conv_lbl),
                     '__emerging_rank_score': float(emerging_rank_score),
+                    '__radar_trace_boost_score': _sortable_float((market_row or {}).get("_radar_trace_boost_score")),
                     '__actionable_frame_score': float(frame_hunt_score),
                     '__actionable_tactical_score': float(actionable_tactical_score),
                     '__actionable_setup_score': _actionable_setup_score(
@@ -6514,7 +7081,7 @@ def render(ctx: dict) -> None:
 
             def _scan_candidate_batch(symbol_batch: list[str]) -> tuple[list[dict], list[tuple[str, str]], int]:
                 priority_hunt_active = (
-                    _normalize_scan_mode(scan_mode) in {_SCAN_MODE_ACTIONABLE, _SCAN_MODE_EMERGING}
+                    _normalize_scan_mode(scan_mode) in {_SCAN_MODE_ACTIONABLE, _SCAN_MODE_EMERGING, _SCAN_MODE_TRENDING}
                     and not custom_mode_active
                 )
                 selected_frames: list[
@@ -6884,6 +7451,31 @@ def render(ctx: dict) -> None:
                 key=lambda row: _market_result_priority_key_for_mode(row, scan_mode),
             )[:limit_n]
             live_ranked_out_count = max(0, live_result_count_before_limit - len(fresh_results))
+            scan_observed_at = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            trace_source_label = "LIVE (DEGRADED)" if scan_degraded else "LIVE"
+            try:
+                log_scanner_trace_events(
+                    _scanner_trace_events(
+                        candidate_symbols=list(candidate_symbol_pool or []),
+                        attempted_symbols=set(attempted_symbols or set()),
+                        skipped_symbols=list(skipped_symbols or []),
+                        produced_rows=list(live_produced_rows or []),
+                        visible_rows=list(fresh_results or []),
+                        market_rows=list(unique_market_data or []),
+                        timeframe=str(timeframe),
+                        scan_mode=str(scan_mode),
+                        direction_filter=str(direction_filter),
+                        observed_at=scan_observed_at,
+                        source_label=trace_source_label,
+                        data_mode=str(data_mode),
+                    ),
+                    db_path=signal_tracker_db_path,
+                )
+            except Exception as e:
+                _debug(
+                    f"Scanner trace log failed for Market scan ({timeframe}): "
+                    f"{e.__class__.__name__}: {str(e).strip()}"
+                )
             if fresh_results:
                 st.session_state["market_scan_results"] = fresh_results
                 st.session_state["market_scan_sig"] = scan_sig
@@ -6987,7 +7579,7 @@ def render(ctx: dict) -> None:
                             healthy_empty_registry,
                             scan_sig,
                         )
-            st.session_state[_LAST_SCAN_ATTEMPT_TS_KEY] = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+            st.session_state[_LAST_SCAN_ATTEMPT_TS_KEY] = scan_observed_at
             st.session_state[_DATA_HEALTH_ITEMS_KEY] = list(data_health_items)
 
     # Prepare DataFrame for display
@@ -7193,7 +7785,11 @@ def render(ctx: dict) -> None:
             market_trade_gate_snapshot,
             market_catalyst_snapshot,
         )
-        for row in list(results or []):
+        archive_log_rows = _archive_learning_rows(
+            visible_rows=list(results or []),
+            produced_rows=list(live_produced_rows or []),
+        )
+        for row in archive_log_rows:
             direction_raw = str(row.get("Direction") or "")
             ai_ensemble = str(row.get("AI Ensemble") or "").strip()
             ai_direction = ai_ensemble.split("(", 1)[0].strip()
@@ -7543,7 +8139,7 @@ def render(ctx: dict) -> None:
         try:
             log_signal_events(
                 _market_signal_log_events(
-                    rows=list(results or []),
+                    rows=list(archive_log_rows or []),
                     timeframe=str(timeframe),
                     scan_mode=str(scan_mode),
                     market_lead_snapshot=market_lead_snapshot,
@@ -7567,7 +8163,7 @@ def render(ctx: dict) -> None:
         try:
             log_signal_events(
                 _scalp_signal_log_events(
-                    rows=list(results or []),
+                    rows=list(archive_log_rows or []),
                     timeframe=str(timeframe),
                     scan_mode=str(scan_mode),
                     market_lead_snapshot=market_lead_snapshot,
@@ -7961,6 +8557,24 @@ def render(ctx: dict) -> None:
                     direction_filter=direction_filter,
                 ):
                     st.markdown(line)
+                st.markdown("**Coverage Trace**")
+                try:
+                    trace_rows = fetch_scanner_trace_events_df(
+                        scan_focus=str(_normalize_scan_mode(scan_mode)),
+                        timeframe=str(timeframe),
+                        direction_filter=str(direction_filter),
+                        lookback_hours=24,
+                        limit=1200,
+                        db_path=signal_tracker_db_path,
+                    )
+                    trace_summary = build_scanner_trace_summary(trace_rows, top_n=5)
+                    for line in _scanner_trace_diagnostic_lines(trace_summary):
+                        st.markdown(line)
+                    st.caption(
+                        "Coverage Trace is passive: it shows scanner coverage and Top N cuts, but does not change ranking yet."
+                    )
+                except Exception as e:
+                    st.markdown(f"- Coverage trace unavailable: `{e.__class__.__name__}`.")
                 st.markdown("**Shown rows**")
                 st.markdown(f"Setup Confirm: {_share_line(setup_counts, ['Ready', 'Probe', 'Watch', 'Skip'])}")
                 st.markdown(f"Direction: {_share_line(direction_counts, ['Upside', 'Downside', 'Neutral'])}")

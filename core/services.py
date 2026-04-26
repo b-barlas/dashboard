@@ -263,22 +263,6 @@ def get_fear_greed():
         return None, "Unavailable"
 
 
-def _safe_secret_value(key: str) -> str | None:
-    try:
-        secrets = getattr(st, "secrets", None)
-        if secrets is None:
-            return None
-        if hasattr(secrets, "get"):
-            value = secrets.get(key)
-        elif key in secrets:
-            value = secrets[key]
-        else:
-            value = None
-        return str(value).strip() if value else None
-    except Exception:
-        return None
-
-
 def _manual_catalyst_path() -> Path:
     return Path(__file__).resolve().parents[1] / "data" / "market_catalysts.json"
 
@@ -288,64 +272,12 @@ def _load_manual_market_catalysts_cached() -> list[dict]:
     return load_manual_catalyst_events(_manual_catalyst_path())
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def _fetch_fmp_economic_calendar_cached(api_key: str, start_date: str, end_date: str) -> list[dict]:
-    payload = _http_get_json(
-        "https://financialmodelingprep.com/stable/economic-calendar",
-        params={
-            "from": start_date,
-            "to": end_date,
-            "apikey": api_key,
-        },
-        timeout=12,
-        retries=2,
-    )
-    if not isinstance(payload, list):
-        return []
-    rows: list[dict] = []
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("event") or item.get("name") or "").strip()
-        when_raw = item.get("date") or item.get("datetime")
-        if not title or when_raw is None:
-            continue
-        impact = str(item.get("impact") or item.get("importance") or "medium").strip().lower()
-        if impact not in {"high", "medium", "low"}:
-            impact = "medium"
-        rows.append(
-            {
-                "title": title,
-                "event_time": when_raw,
-                "severity": impact,
-                "category": "macro",
-                "scope": "market",
-                "source": "FMP",
-                "tag": str(item.get("country") or "").strip(),
-            }
-        )
-    return rows
-
-
 def get_market_catalyst_events(now: object | None = None) -> list[dict]:
-    ts_now = pd.Timestamp.utcnow() if now is None else pd.to_datetime(now, utc=True, errors="coerce")
-    if pd.isna(ts_now):
-        ts_now = pd.Timestamp.utcnow()
-    start_date = ts_now.strftime("%Y-%m-%d")
-    end_date = (ts_now + pd.Timedelta(days=4)).strftime("%Y-%m-%d")
-
     events: list[dict] = []
     try:
         events.extend(_load_manual_market_catalysts_cached())
     except Exception as e:
         _debug(f"manual catalyst load failed: {e}")
-
-    api_key = _safe_secret_value("FMP_API_KEY")
-    if api_key:
-        try:
-            events.extend(_fetch_fmp_economic_calendar_cached(api_key, start_date, end_date))
-        except Exception as e:
-            _debug(f"FMP economic calendar fetch failed: {e}")
 
     return events
 

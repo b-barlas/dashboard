@@ -168,9 +168,9 @@ Provider order:
             "info",
         ),
         (
-            "9) Whale Tracker tab",
+            "9) Trending Coins tab",
             """
-Attention/liquidity proxy tab (not on-chain wallet tracking).
+Attention/liquidity tab based on public market data.
 Combines:
 - Trending coins feed
 - Top gainers / losers snapshots
