@@ -105,7 +105,7 @@ def _top_setup_cluster_alert(rows: list[dict], market_lead_snapshot, market_trad
     direction_txt = "upside" if lead_direction == "UPSIDE" else "downside"
     title = f"Clean {direction_txt} cluster"
     note = (
-        f"The current tape is concentrating cleaner {direction_txt} names. "
+        f"The current market is concentrating cleaner {direction_txt} names. "
         f"Best on-screen cluster: {', '.join(top_symbols)}."
     )
     return MarketAlert(

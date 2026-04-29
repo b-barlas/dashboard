@@ -596,6 +596,24 @@ class SignalTrackerTests(unittest.TestCase):
         self.assertEqual(str(snapshot["best_style"]), "Quick Follow-Through")
         self.assertEqual(int(snapshot["fade_after_bar"]), 6)
 
+    def test_fetch_signal_forward_windows_chunks_large_key_lists(self) -> None:
+        many_keys = [f"sig-{idx}" for idx in range(1205)]
+
+        with patch("core.signal_tracker.pd.read_sql_query") as read_sql:
+            read_sql.side_effect = [
+                pd.DataFrame({"signal_key": ["sig-799"], "bars_ahead": [1]}),
+                pd.DataFrame({"signal_key": ["sig-1204"], "bars_ahead": [2]}),
+            ]
+
+            out = fetch_signal_forward_windows_df(signal_keys=many_keys, db_path=self.db_path)
+
+        self.assertEqual(read_sql.call_count, 2)
+        first_params = list(read_sql.call_args_list[0].kwargs["params"])
+        second_params = list(read_sql.call_args_list[1].kwargs["params"])
+        self.assertEqual(len(first_params), 800)
+        self.assertEqual(len(second_params), 405)
+        self.assertEqual(set(out["signal_key"]), {"sig-799", "sig-1204"})
+
     def test_build_hold_window_intelligence_reports_building_when_resolved_rows_exist_without_windows(self) -> None:
         events = [
             {

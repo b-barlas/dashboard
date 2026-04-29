@@ -350,8 +350,8 @@ _COPY = {
         "neutral": "Spot stays defensive here. Use these as reclaim and protection references, not as an active two-path setup map.",
     },
     "market.trade_gate.summary.tradeable": {
-        "trader": "The tape is open for normal-quality setups.",
-        "neutral": "The tape is supportive enough for normal-quality setups.",
+        "trader": "Market conditions are open for normal-quality setups.",
+        "neutral": "Market conditions are supportive enough for normal-quality setups.",
     },
     "market.trade_gate.summary.selective_probe": {
         "trader": "Nothing is fully ready yet, but early-entry setups are live.",
@@ -366,8 +366,8 @@ _COPY = {
         "neutral": "Conditions are defensive; new exposure should stay small.",
     },
     "market.trade_gate.summary.stand_aside": {
-        "trader": "Stand aside until the tape improves.",
-        "neutral": "Wait until the tape improves.",
+        "trader": "Stand aside until market conditions improve.",
+        "neutral": "Wait until market conditions improve.",
     },
     "market.trade_gate.summary.size_cap": {
         "trader": "Size cap: {size_label}.",
@@ -406,8 +406,8 @@ _COPY = {
         "neutral": "PARTIAL-DATA SETUPS",
     },
     "market.status.head.degraded_probe": {
-        "trader": "EARLY-ENTRY TAPE",
-        "neutral": "EARLY-SETUP TAPE",
+        "trader": "PARTIAL-DATA EARLY SETUPS",
+        "neutral": "PARTIAL-DATA EARLY SETUPS",
     },
     "market.status.head.degraded_none": {
         "trader": "NO CLEAN SETUP",
@@ -488,13 +488,15 @@ _COPY = {
     "market.help.scanner_guide_html": {
         "trader": (
             "<b>Read order:</b> <b>Setup Confirm</b> -> <b>Direction + Confidence</b> -> <b>AI Ensemble + AI Confidence</b>.<br>"
-            "<b>Setup Confirm:</b> ENTER = ready, EARLY = small-risk only, WATCH = monitor only, SKIP = pass.<br>"
+            "<b>Scan modes:</b> Broad Market = cleaner liquid universe, Breakout Radar = early acceleration hunt, Trending Coins = attention + momentum + volume anomaly candidates, Custom Coins = your watchlist. For Custom Coins, type symbols and press Enter or Scan.<br>"
+            "<b>Setup Confirm:</b> ENTER = ready, EARLY = small-risk only, WATCH = monitor only, SKIP = leave it alone for now.<br>"
             "Price ($) shows the latest candle close.<br>"
             "Δ (%) shows the change from previous closed candle to latest closed candle on selected timeframe.<br>"
             "<b>Tip:</b> use column-header and cell hovers for detailed definitions. Advanced columns are optional."
         ),
         "neutral": (
             "<b>Read order:</b> <b>Setup Confirm</b> -> <b>Direction + Confidence</b> -> <b>AI Ensemble + AI Confidence</b>.<br>"
+            "<b>Scan modes:</b> Broad Market = cleaner liquid universe, Breakout Radar = early acceleration read, Trending Coins = attention + momentum + volume anomaly candidates, Custom Coins = your watchlist. For Custom Coins, type symbols and press Enter or Scan.<br>"
             "<b>Setup Confirm:</b> High-quality = strongest class, Early setup = interesting but not fully confirmed, Developing = monitor, Not aligned = pass.<br>"
             "Price ($) shows the latest candle close.<br>"
             "Δ (%) shows the change from previous closed candle to latest closed candle on selected timeframe.<br>"
@@ -612,8 +614,8 @@ _COPY = {
         "neutral": "Nothing is fully ready yet, but a few early setups are interesting. Stay selective and keep size small until stronger confirmation appears.",
     },
     "no_trade.note.no_ready_setups": {
-        "trader": "Nothing is truly ready right now. Most names are still being filtered out, so patience is the edge.",
-        "neutral": "Nothing is truly aligned right now. Most names are still being filtered out, so patience is the edge.",
+        "trader": "Nothing is truly ready right now. Most names are still being filtered out, so patience is the cleaner decision.",
+        "neutral": "Nothing is truly aligned right now. Most names are still being filtered out, so patience is the cleaner decision.",
     },
     "no_trade.note.weak_participation": {
         "trader": "Participation is too weak and leadership is unclear. This is a poor environment for pressing new ideas.",
@@ -628,16 +630,16 @@ _COPY = {
         "neutral": "Downside pressure is still leading. Stay defensive and avoid forcing fresh upside exposure.",
     },
     "no_trade.note.risk_off_weakness": {
-        "trader": "The tape is still defensive without a clean directional edge worth acting on. Capital preservation comes first.",
-        "neutral": "The tape is still defensive without a clean directional edge worth leaning on. Capital preservation comes first.",
+        "trader": "The market is still defensive without a clean directional read worth acting on. Capital preservation comes first.",
+        "neutral": "The market is still defensive without a clean directional read worth leaning on. Capital preservation comes first.",
     },
     "no_trade.note.selective_clean": {
         "trader": "Setups can work, but only the cleanest aligned leaders deserve attention. Treat everything else as noise.",
         "neutral": "Setups can work, but only the clearest aligned leaders deserve attention. Treat everything else as noise.",
     },
     "no_trade.note.selective_probe": {
-        "trader": "This is still a selective tape, but early-entry setups are showing up. Small risk is fine; save normal size for cleaner confirmation.",
-        "neutral": "This is still a selective tape, but early setups are showing up. Keep size small and wait for cleaner confirmation before doing more.",
+        "trader": "This is still a selective market, but early-entry setups are showing up. Small risk is fine; save normal size for cleaner confirmation.",
+        "neutral": "This is still a selective market, but early setups are showing up. Keep size small and wait for cleaner confirmation before doing more.",
     },
     "no_trade.note.selective_catalyst_default": {
         "trader": "Setups can work, but a market catalyst is close enough that we should stay selective.",
@@ -652,16 +654,16 @@ _COPY = {
         "neutral": "Setups can work, but matched archive history is weak enough to keep us extra selective.",
     },
     "no_trade.note.tradeable_catalyst_default": {
-        "trader": "A near market catalyst is close enough to keep the tape selective instead of fully tradeable.",
-        "neutral": "A near market catalyst is close enough to keep the tape selective instead of fully supportive.",
+        "trader": "A nearby market catalyst is close enough to keep conditions selective instead of fully tradeable.",
+        "neutral": "A nearby market catalyst is close enough to keep conditions selective instead of fully supportive.",
     },
     "no_trade.note.tradeable_session_prefix": {
-        "trader": "The broader tape is supportive, but the current session archive is weak enough to avoid full aggression.",
-        "neutral": "The broader tape is supportive, but the current session archive is weak enough to avoid full aggression.",
+        "trader": "The broader market is supportive, but the current session archive is weak enough to avoid full aggression.",
+        "neutral": "The broader market is supportive, but the current session archive is weak enough to avoid full aggression.",
     },
     "no_trade.note.tradeable_archive_default": {
-        "trader": "The tape looks open, but matched playbook history is weak enough to avoid full aggression.",
-        "neutral": "The tape looks open, but matched playbook history is weak enough to avoid full aggression.",
+        "trader": "Market conditions look open, but matched playbook history is weak enough to avoid full aggression.",
+        "neutral": "Market conditions look open, but matched playbook history is weak enough to avoid full aggression.",
     },
     "no_trade.note.tradeable_base": {
         "trader": "Conditions are supportive enough to hunt normal-quality setups. Keep confirmation discipline, but the market is open for business.",
@@ -1024,25 +1026,27 @@ Main table columns:
 - Optional advanced indicator columns
 
 Market scan modes:
-- Broad Market: top-liquidity universe
-- Watchlist: enter up to 10 symbols in Custom Coins, click Run Scan, and the table analyzes only that watchlist
+- Broad Market: cleaner liquid-universe scan
+- Breakout Radar: broader early-acceleration scan using liquidity, momentum, volume, and archive feedback
+- Trending Coins: attention + momentum + volume-anomaly candidates shown in the same table
+- Watchlist: enter up to 10 symbols in Custom Coins and press Enter or Scan; the table analyzes only that watchlist
 - Top N control is disabled while custom mode is active
-- Watchlist mode does not depend on the live top-volume provider universe; it reads requested symbols directly
+- Watchlist mode reads requested symbols directly and does not depend on the broad provider universe
 - Selected timeframe controls tactical candle context, levels, scalp timing checks, and Delta
-- Visible `Direction` + `Confidence` come from the closed adaptive higher-timeframe anchor pair
+- Visible `Direction` + `Confidence` come from closed higher-timeframe anchor candles
 - Visible `AI Ensemble` comes from a separate closed AI bias engine using the same adaptive anchors
 - Visible `AI Confidence` scores the quality of that higher-timeframe AI verdict
 
 How the 5 key columns are calculated:
 
 1. `Direction` (main spot direction)
-- Uses only closed adaptive lead/confirm anchor candles
+- Uses only closed higher-timeframe anchor candles
 - Technical engine builds a score for each timeframe from:
   - structure
   - trend
   - momentum
   - regime / location
-- The slower anchor leads and the faster anchor confirms
+- A slower anchor sets the broader bias and a faster anchor confirms it
 - Final logic is intentionally strict:
   - if `1D` is Neutral, final Direction becomes Neutral
   - if `1D` is strong and `4H` is aligned, direction is confirmed
@@ -1089,7 +1093,7 @@ How the 5 key columns are calculated:
 - `TREND+AI` = both motors are independently strong and also elite together
 - `EARLY` = not fully confirmed yet, but clean enough for small-risk only
 - `WATCH` = the idea is alive, but timing is not clean yet
-- `SKIP` = edge is too weak, too conflicted, or badly located right now
+- `SKIP` = quality is too weak, too conflicted, or badly located right now
 
 Scalp Opportunity is separate from Setup Confirm.
 It appears only if all execution checks pass:
@@ -1112,25 +1116,27 @@ Main table columns:
 - Optional advanced indicator columns
 
 Market scan modes:
-- Broad Market: top-liquidity universe
-- Watchlist: enter up to 10 symbols in Custom Coins, click Run Scan, and the table analyzes only that watchlist
+- Broad Market: cleaner liquid-universe scan
+- Breakout Radar: broader early-acceleration scan using liquidity, momentum, volume, and archive feedback
+- Trending Coins: attention + momentum + volume-anomaly candidates shown in the same table
+- Watchlist: enter up to 10 symbols in Custom Coins and press Enter or Scan; the table analyzes only that watchlist
 - Top N control is disabled while custom mode is active
-- Watchlist mode does not depend on the live top-volume provider universe; it reads requested symbols directly
+- Watchlist mode reads requested symbols directly and does not depend on the broad provider universe
 - Selected timeframe controls tactical candle context, levels, scalp timing checks, and Delta
-- Visible `Direction` + `Confidence` come from the closed adaptive higher-timeframe anchor pair
+- Visible `Direction` + `Confidence` come from closed higher-timeframe anchor candles
 - Visible `AI Ensemble` comes from a separate closed AI bias engine using the same adaptive anchors
 - Visible `AI Confidence` scores the quality of that higher-timeframe AI verdict
 
 How the 5 key columns are calculated:
 
 1. `Direction` (main spot direction)
-- Uses only closed adaptive lead/confirm anchor candles
+- Uses only closed higher-timeframe anchor candles
 - Technical engine builds a score for each timeframe from:
   - structure
   - trend
   - momentum
   - regime / location
-- The slower anchor leads and the faster anchor confirms
+- A slower anchor sets the broader bias and a faster anchor confirms it
 
 2. `Confidence`
 - This is the quality score of the same higher-timeframe technical spot direction

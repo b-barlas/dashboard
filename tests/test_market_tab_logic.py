@@ -32,6 +32,10 @@ from tabs.market_tab import (
     _alert_lane_label,
     _alert_archive_label,
     _actionable_market_result_priority_key,
+    _auto_timeframe_learning_event_from_frame,
+    _auto_learning_state,
+    _mark_auto_learning_attempt,
+    _select_auto_learning_timeframe,
     _build_breakout_freshness_snapshot,
     _compress_market_alerts_for_display,
     _rank_market_alerts_by_archive,
@@ -107,6 +111,80 @@ from threading import Lock
 
 
 class MarketTabLogicTests(unittest.TestCase):
+    def test_auto_learning_selector_prioritizes_missing_timeframe(self):
+        now = "2026-04-28T12:00:00Z"
+        df_events = pd.DataFrame(
+            [
+                {"timeframe": "5m", "event_time": "2026-04-28T11:50:00Z"},
+                {"timeframe": "15m", "event_time": "2026-04-28T11:30:00Z"},
+                {"timeframe": "1h", "event_time": "2026-04-28T11:00:00Z"},
+                {"timeframe": "1d", "event_time": "2026-04-27T00:00:00Z"},
+            ]
+        )
+
+        selected = _select_auto_learning_timeframe(
+            df_events,
+            _auto_learning_state({}),
+            now=now,
+            current_timeframe="1h",
+        )
+
+        self.assertEqual(selected, "4h")
+
+    def test_auto_learning_selector_respects_cooldown(self):
+        now = "2026-04-28T12:00:00Z"
+        state = _mark_auto_learning_attempt({}, timeframe="4h", now="2026-04-28T11:59:30Z")
+
+        selected = _select_auto_learning_timeframe(
+            pd.DataFrame(),
+            state,
+            now=now,
+            current_timeframe="1h",
+        )
+
+        self.assertIsNone(selected)
+
+    def test_auto_timeframe_learning_event_uses_closed_frame_signal(self):
+        timestamps = pd.date_range("2026-04-28T00:00:00Z", periods=80, freq="h")
+        closes = pd.Series([100 + i * 0.2 for i in range(80)], dtype=float)
+        df_eval = pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "open": closes - 0.05,
+                "high": closes + 0.2,
+                "low": closes - 0.2,
+                "close": closes,
+                "volume": [1000 + i for i in range(80)],
+            }
+        )
+
+        def direction_key(value):
+            text = str(value or "").upper()
+            if text in {"LONG", "BUY", "UPSIDE"}:
+                return "UPSIDE"
+            if text in {"SHORT", "SELL", "DOWNSIDE"}:
+                return "DOWNSIDE"
+            return "NEUTRAL"
+
+        event = _auto_timeframe_learning_event_from_frame(
+            symbol="BTC/USDT",
+            timeframe="4h",
+            df_eval=df_eval,
+            analyse=lambda _df: SimpleNamespace(signal="BUY", bias=82.0, adx=24.0),
+            ml_ensemble_predict=lambda _df: (0.69, "LONG", {"directional_agreement": 0.72}),
+            signal_plain=lambda signal: "LONG" if str(signal).upper() == "BUY" else "WAIT",
+            direction_key=direction_key,
+        )
+
+        self.assertIsNotNone(event)
+        assert event is not None
+        self.assertEqual(event["source"], "Market")
+        self.assertEqual(event["symbol"], "BTC")
+        self.assertEqual(event["timeframe"], "4h")
+        self.assertEqual(event["direction"], "UPSIDE")
+        self.assertEqual(event["setup_confirm"], "ENTER_TREND_AI")
+        self.assertEqual(event["scan_focus"], "Auto Timeframe Sweep")
+
     def test_archive_learning_rows_prefers_full_produced_set(self):
         visible = [
             {"Coin": "BTC", "__timeframe": "1h", "__event_time": "2026-04-20T10:00:00Z"},
@@ -472,7 +550,7 @@ class MarketTabLogicTests(unittest.TestCase):
             ]
         )
         head, sub = _pick_clearest_direction(df)
-        self.assertEqual(head, "—")
+        self.assertEqual(head, "No clear direction")
         self.assertIn("No clear", sub)
 
     def test_pick_best_scalp_opportunity_prefers_live_over_conditional(self):
@@ -1188,7 +1266,7 @@ class MarketTabLogicTests(unittest.TestCase):
             skip_count=0,
             source_label="CACHED (2026-03-07 10:00:00 UTC)",
         )
-        self.assertEqual(label, "Setup Status")
+        self.assertEqual(label, "Setup Readiness")
         self.assertEqual(head, "CACHED SETUPS")
         self.assertIn("CACHED READY: 2", sub)
         self.assertIn("EARLY: 0", sub)

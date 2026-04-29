@@ -71,6 +71,21 @@ class MarketTablePriceDeltaContractTests(unittest.TestCase):
             msg="Column guide must explain selected-timeframe closed-candle delta semantics.",
         )
 
+    def test_market_scanner_copy_names_current_scan_modes(self):
+        guide = copy_text("market.help.scanner_guide_html")
+        self.assertIn("Breakout Radar", guide)
+        self.assertIn("Trending Coins", guide)
+        self.assertIn("Custom Coins", guide)
+        self.assertIn("press Enter or Scan", guide)
+        self.assertNotIn("Run Scan", guide)
+
+    def test_market_tab_copy_does_not_show_retired_diagnostics(self):
+        self.assertNotIn("Coverage Trace is passive", self.text)
+        self.assertNotIn("LEAD:", self.text)
+        self.assertNotIn("No Clear Lead", self.text)
+        self.assertNotIn("Select timeframe", self.text)
+        self.assertNotIn("Click Run Scan", self.text)
+
 
 if __name__ == "__main__":
     unittest.main()

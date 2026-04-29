@@ -1767,13 +1767,33 @@ def fetch_signal_forward_windows_df(
     db_path: str | None = None,
 ) -> pd.DataFrame:
     path = init_signal_tracker_db(db_path)
+    cleaned_keys = list(dict.fromkeys(str(value).strip() for value in list(signal_keys or []) if str(value).strip()))
+    if cleaned_keys:
+        chunks: list[pd.DataFrame] = []
+        chunk_size = 800
+        with _connect(path) as conn:
+            for start in range(0, len(cleaned_keys), chunk_size):
+                key_chunk = cleaned_keys[start : start + chunk_size]
+                placeholders = ",".join("?" for _ in key_chunk)
+                query = (
+                    "SELECT * FROM signal_forward_windows WHERE signal_key IN "
+                    f"({placeholders}) ORDER BY signal_key DESC, bars_ahead ASC"
+                )
+                chunks.append(pd.read_sql_query(query, conn, params=key_chunk))
+        if not chunks:
+            return pd.DataFrame()
+        out = pd.concat(chunks, ignore_index=True)
+        if out.empty:
+            return out
+        sort_cols = [col for col in ["signal_key", "bars_ahead"] if col in out.columns]
+        if sort_cols:
+            ascending = [False, True][: len(sort_cols)]
+            out = out.sort_values(sort_cols, ascending=ascending).reset_index(drop=True)
+        if limit is not None:
+            out = out.head(int(limit)).reset_index(drop=True)
+        return out
     query = "SELECT * FROM signal_forward_windows WHERE 1=1"
     params: list[object] = []
-    cleaned_keys = [str(value).strip() for value in list(signal_keys or []) if str(value).strip()]
-    if cleaned_keys:
-        placeholders = ",".join("?" for _ in cleaned_keys)
-        query += f" AND signal_key IN ({placeholders})"
-        params.extend(cleaned_keys)
     query += " ORDER BY signal_key DESC, bars_ahead ASC"
     if limit is not None:
         query += " LIMIT ?"

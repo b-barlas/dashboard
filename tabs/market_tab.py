@@ -125,6 +125,25 @@ _TRENDING_VOLUME_CACHE_LIMIT = 8
 _TRENDING_VOLUME_CACHE_TTL_SECONDS = 300
 _SCAN_REFRESH_TTL_MINUTES = 3
 _RECOVERY_RETRY_BACKOFF_SECONDS = 30
+_AUTO_TIMEFRAME_LEARNING_STATE_KEY = "market_auto_timeframe_learning_state"
+_AUTO_TIMEFRAME_LEARNING_TIMEFRAMES = ("5m", "15m", "1h", "4h", "1d")
+_AUTO_TIMEFRAME_LEARNING_SCAN_FOCUS = "Auto Timeframe Sweep"
+_AUTO_TIMEFRAME_LEARNING_GLOBAL_COOLDOWN_SECONDS = 45
+_AUTO_TIMEFRAME_LEARNING_FETCH_N = 80
+_AUTO_TIMEFRAME_LEARNING_MIN_INTERVAL_SECONDS = {
+    "5m": 8 * 60,
+    "15m": 15 * 60,
+    "1h": 30 * 60,
+    "4h": 2 * 60 * 60,
+    "1d": 6 * 60 * 60,
+}
+_AUTO_TIMEFRAME_LEARNING_SYMBOL_LIMITS = {
+    "5m": 6,
+    "15m": 8,
+    "1h": 8,
+    "4h": 8,
+    "1d": 6,
+}
 _SETUP_CONFIRM_PRIORITY = {
     "ENTER_TREND_AI": 6,
     "ENTER_TREND_LED": 5,
@@ -979,8 +998,8 @@ def _market_lead_snapshot(
         note = "Early downside pressure is building before full confirmation."
     elif abs(signed_score) < 10.0 and (upside_leads + downside_leads) < 3:
         state = "NONE"
-        label = "No Clear Lead"
-        note = "No meaningful early lead is building yet."
+        label = "No Clear Pressure"
+        note = "No meaningful early pressure is building yet."
     else:
         state = "BALANCED"
         label = "Balanced"
@@ -1041,7 +1060,7 @@ def _setup_status_summary(
     source_label: str | None,
 ) -> tuple[str, str, str]:
     source = str(source_label or "").strip().upper()
-    label = "Setup Status"
+    label = "Setup Readiness"
     if source.startswith("CACHED"):
         head = (
             copy_text("market.status.head.cached_ready")
@@ -1165,7 +1184,7 @@ def _compress_market_alerts_for_display(alerts: list[object], *, max_items: int 
             note=(
                 f"Also watching {', '.join(summary_titles)}."
                 if summary_titles
-                else "Several secondary context reads are weakening the tape."
+                else "Several secondary context reads are weakening the market."
             ),
         )
     else:
@@ -1178,7 +1197,7 @@ def _compress_market_alerts_for_display(alerts: list[object], *, max_items: int 
             note=(
                 f"Also watching {', '.join(summary_titles)}."
                 if summary_titles
-                else "Several secondary context reads are supporting the active tape."
+                else "Several secondary context reads are supporting the current market."
             ),
         )
     display.append(summary)
@@ -1525,7 +1544,7 @@ def _clearest_direction_group_count(row: dict, columns: tuple[str, ...], target_
 
 def _pick_clearest_direction(df_results: pd.DataFrame) -> tuple[str, str]:
     if len(df_results) <= 0:
-        return "—", "No advanced direction data available."
+        return "No direction read", "Current table has no advanced indicator data yet."
 
     ranked: list[tuple[float, float, float, float, float, float, str, str, str]] = []
     for _, row_series in df_results.iterrows():
@@ -1568,7 +1587,7 @@ def _pick_clearest_direction(df_results: pd.DataFrame) -> tuple[str, str]:
         )
 
     if not ranked:
-        return "—", "No clear advanced direction alignment yet."
+        return "No clear direction", "No clear advanced indicator alignment in the current table."
 
     ranked.sort(key=lambda item: (-item[0], -item[1], -item[2], -item[3], -item[4], -item[5], item[6]))
     _, _, _, _, _, _, coin, direction, subtext = ranked[0]
@@ -1577,7 +1596,7 @@ def _pick_clearest_direction(df_results: pd.DataFrame) -> tuple[str, str]:
 
 def _pick_best_scalp_opportunity(df_results: pd.DataFrame) -> tuple[str, str]:
     if "Scalp Opportunity" not in df_results.columns or len(df_results) <= 0:
-        return "—", ""
+        return "No scalp read", "Current table has no scalp timing data yet."
 
     working = df_results.copy()
     working["__scalp_state"] = (
@@ -1592,7 +1611,7 @@ def _pick_best_scalp_opportunity(df_results: pd.DataFrame) -> tuple[str, str]:
     )
     working = working[working["Scalp Opportunity"].astype(str).isin(["Upside", "Downside"])]
     if working.empty:
-        return "—", ""
+        return "No clean scalp", "No live or conditional scalp candidate in the current table."
 
     live_count = int(working["__scalp_state"].eq("LIVE").sum())
     conditional_count = int(working["__scalp_state"].eq("CONDITIONAL").sum())
@@ -1620,7 +1639,7 @@ def _pick_best_scalp_opportunity(df_results: pd.DataFrame) -> tuple[str, str]:
     working = working[working["__rr"] > 0]
     if working.empty:
         count_sub = f"Live: {live_count} • Conditional: {conditional_count}"
-        return "—", count_sub
+        return "No valid R:R", count_sub
 
     scoped = working[working["__scalp_state"] == "LIVE"].copy()
     if scoped.empty:
@@ -1765,6 +1784,424 @@ def _prepare_closed_frame(df: pd.DataFrame | None, *, min_rows: int = 55) -> pd.
     if len(df_eval) < int(min_rows):
         return None
     return df_eval
+
+
+def _auto_learning_ts(value: object | None = None) -> pd.Timestamp | None:
+    if value is None or str(value).strip() == "":
+        return None
+    ts = pd.to_datetime(value, utc=True, errors="coerce")
+    if pd.isna(ts):
+        return None
+    return pd.Timestamp(ts)
+
+
+def _auto_learning_state(raw_state: object) -> dict[str, object]:
+    state = dict(raw_state) if isinstance(raw_state, dict) else {}
+    attempts = state.get("last_attempt_by_timeframe")
+    if not isinstance(attempts, dict):
+        attempts = {}
+    results = state.get("last_result_by_timeframe")
+    if not isinstance(results, dict):
+        results = {}
+    return {
+        "running": bool(state.get("running")),
+        "last_attempt_at": str(state.get("last_attempt_at") or ""),
+        "last_attempt_by_timeframe": {
+            str(k).strip().lower(): str(v or "")
+            for k, v in attempts.items()
+            if str(k).strip().lower() in _AUTO_TIMEFRAME_LEARNING_TIMEFRAMES
+        },
+        "last_result_by_timeframe": {
+            str(k).strip().lower(): dict(v)
+            for k, v in results.items()
+            if str(k).strip().lower() in _AUTO_TIMEFRAME_LEARNING_TIMEFRAMES and isinstance(v, dict)
+        },
+    }
+
+
+def _auto_learning_timeframe_stats(df_events: pd.DataFrame | None) -> dict[str, dict[str, object]]:
+    stats: dict[str, dict[str, object]] = {
+        tf: {"rows": 0, "last_event": None}
+        for tf in _AUTO_TIMEFRAME_LEARNING_TIMEFRAMES
+    }
+    if df_events is None or df_events.empty or "timeframe" not in df_events.columns:
+        return stats
+    d = df_events.copy()
+    d["__tf"] = d["timeframe"].fillna("").astype(str).str.strip().str.lower()
+    event_col = "event_time" if "event_time" in d.columns else ("updated_at" if "updated_at" in d.columns else "")
+    if event_col:
+        d["__event_ts"] = pd.to_datetime(d[event_col], utc=True, errors="coerce")
+    else:
+        d["__event_ts"] = pd.NaT
+    for tf in _AUTO_TIMEFRAME_LEARNING_TIMEFRAMES:
+        group = d[d["__tf"].eq(tf)]
+        if group.empty:
+            continue
+        last_event = group["__event_ts"].dropna().max()
+        stats[tf] = {
+            "rows": int(len(group)),
+            "last_event": None if pd.isna(last_event) else pd.Timestamp(last_event),
+        }
+    return stats
+
+
+def _select_auto_learning_timeframe(
+    df_events: pd.DataFrame | None,
+    state: dict[str, object] | None,
+    *,
+    now: object | None = None,
+    current_timeframe: str | None = None,
+) -> str | None:
+    state = _auto_learning_state(state)
+    now_ts = _auto_learning_ts(now) or pd.Timestamp.now(tz="UTC")
+    last_global = _auto_learning_ts(state.get("last_attempt_at"))
+    if last_global is not None:
+        global_age = (now_ts - last_global).total_seconds()
+        if global_age < _AUTO_TIMEFRAME_LEARNING_GLOBAL_COOLDOWN_SECONDS:
+            return None
+
+    stats = _auto_learning_timeframe_stats(df_events)
+    attempts = state.get("last_attempt_by_timeframe")
+    attempts = attempts if isinstance(attempts, dict) else {}
+    current_tf = str(current_timeframe or "").strip().lower()
+    ranked: list[tuple[float, int, str]] = []
+    for idx, tf in enumerate(_AUTO_TIMEFRAME_LEARNING_TIMEFRAMES):
+        interval = float(_AUTO_TIMEFRAME_LEARNING_MIN_INTERVAL_SECONDS.get(tf, 1800))
+        last_attempt = _auto_learning_ts(attempts.get(tf))
+        attempt_age = float("inf") if last_attempt is None else (now_ts - last_attempt).total_seconds()
+        if attempt_age < interval:
+            continue
+        frame_stats = stats.get(tf, {})
+        row_count = int(frame_stats.get("rows") or 0)
+        last_event = frame_stats.get("last_event")
+        last_event_ts = last_event if isinstance(last_event, pd.Timestamp) else _auto_learning_ts(last_event)
+        event_age = float("inf") if last_event_ts is None else max(0.0, (now_ts - last_event_ts).total_seconds())
+        missing_bonus = 10_000.0 if row_count <= 0 else 0.0
+        stale_bonus = min(2_000.0, event_age / max(interval, 1.0) * 120.0)
+        scarcity_bonus = min(800.0, 800.0 / max(1.0, float(row_count)))
+        current_penalty = 25.0 if tf == current_tf else 0.0
+        priority = missing_bonus + stale_bonus + scarcity_bonus - current_penalty
+        ranked.append((priority, -idx, tf))
+    if not ranked:
+        return None
+    ranked.sort(reverse=True)
+    return ranked[0][2]
+
+
+def _mark_auto_learning_attempt(
+    state: dict[str, object] | None,
+    *,
+    timeframe: str,
+    now: object | None = None,
+    written: int = 0,
+    resolved: int = 0,
+    errors: int = 0,
+) -> dict[str, object]:
+    next_state = _auto_learning_state(state)
+    tf = str(timeframe or "").strip().lower()
+    now_ts = _auto_learning_ts(now) or pd.Timestamp.now(tz="UTC")
+    now_iso = now_ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    attempts = dict(next_state.get("last_attempt_by_timeframe") or {})
+    results = dict(next_state.get("last_result_by_timeframe") or {})
+    if tf:
+        attempts[tf] = now_iso
+        results[tf] = {
+            "written": int(written),
+            "resolved": int(resolved),
+            "errors": int(errors),
+            "updated_at": now_iso,
+        }
+    next_state["last_attempt_at"] = now_iso
+    next_state["last_attempt_by_timeframe"] = attempts
+    next_state["last_result_by_timeframe"] = results
+    return next_state
+
+
+def _auto_timeframe_learning_event_from_frame(
+    *,
+    symbol: str,
+    timeframe: str,
+    df_eval: pd.DataFrame,
+    analyse,
+    ml_ensemble_predict,
+    signal_plain,
+    direction_key,
+) -> dict[str, object] | None:
+    if df_eval is None or df_eval.empty or len(df_eval) < 60:
+        return None
+    if "timestamp" not in df_eval.columns or "close" not in df_eval.columns:
+        return None
+    base = _canonical_pair_base(symbol)
+    if not base or is_stable_base_symbol(base):
+        return None
+    latest = df_eval.iloc[-1]
+    event_time = latest.get("timestamp")
+    event_ts = _auto_learning_ts(event_time)
+    if event_ts is None:
+        return None
+    price = _sortable_float(latest.get("close"))
+    if price <= 0:
+        return None
+    prev_close = _sortable_float(df_eval["close"].iloc[-2]) if len(df_eval) >= 2 else 0.0
+    delta_pct = ((price / prev_close) - 1.0) * 100.0 if prev_close > 0 else None
+
+    analysis = analyse(df_eval)
+    prob_up, ai_direction_raw, ai_details = ml_ensemble_predict(df_eval)
+    bias = _sortable_float(getattr(analysis, "bias", 50.0))
+    tech_direction = direction_key(signal_plain(getattr(analysis, "signal", "")))
+    if tech_direction == "NEUTRAL":
+        if bias >= 72.0:
+            tech_direction = "UPSIDE"
+        elif bias <= 28.0:
+            tech_direction = "DOWNSIDE"
+    ai_direction = direction_key(ai_direction_raw)
+    tech_confidence = float(bias_confidence_from_bias(bias))
+    try:
+        prob = float(prob_up)
+    except Exception:
+        prob = 0.5
+    ai_confidence = float(max(0.0, min(100.0, 50.0 + abs(prob - 0.5) * 100.0)))
+    directional_agreement = 0.0
+    if isinstance(ai_details, dict):
+        directional_agreement = _sortable_float(ai_details.get("directional_agreement"))
+
+    direction = "NEUTRAL"
+    reason = ""
+    confidence = 0.0
+    if tech_direction in {"UPSIDE", "DOWNSIDE"} and tech_direction == ai_direction:
+        direction = tech_direction
+        confidence = min(100.0, max(tech_confidence, ai_confidence) + 5.0)
+        reason = "AUTO_ALIGNED"
+    elif tech_direction in {"UPSIDE", "DOWNSIDE"} and tech_confidence >= 62.0:
+        direction = tech_direction
+        confidence = tech_confidence
+        reason = "AUTO_TECHNICAL"
+    elif ai_direction in {"UPSIDE", "DOWNSIDE"} and ai_confidence >= 62.0 and directional_agreement >= 0.50:
+        direction = ai_direction
+        confidence = ai_confidence
+        reason = "AUTO_AI"
+    if direction not in {"UPSIDE", "DOWNSIDE"} or confidence < 55.0:
+        return None
+
+    adx_val = _sortable_float(getattr(analysis, "adx", 0.0))
+    setup_confirm = "WATCH"
+    if reason == "AUTO_ALIGNED" and confidence >= 78.0 and adx_val >= 20.0:
+        setup_confirm = "ENTER_TREND_AI"
+    elif confidence >= 66.0 and (adx_val >= 17.0 or reason == "AUTO_ALIGNED"):
+        setup_confirm = "PROBE"
+
+    return {
+        "source": "Market",
+        "decision_version": current_decision_version("Market"),
+        "symbol": base,
+        "timeframe": str(timeframe or "").strip().lower(),
+        "event_time": event_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "session_bucket": session_bucket_for_timestamp(event_ts),
+        "scan_focus": _AUTO_TIMEFRAME_LEARNING_SCAN_FOCUS,
+        "direction": direction,
+        "setup_confirm": setup_confirm,
+        "action_reason": reason,
+        "lead_label": "Auto timeframe sweep",
+        "lead_direction": direction,
+        "confidence": confidence,
+        "ai_ensemble": str(ai_direction_raw or "NEUTRAL"),
+        "ai_direction": ai_direction,
+        "ai_confidence": ai_confidence,
+        "market_lead_label": "",
+        "market_lead_score": None,
+        "market_lead_upside": 0,
+        "market_lead_downside": 0,
+        "market_regime": "",
+        "market_playbook_key": "",
+        "market_playbook": "",
+        "market_no_trade": False,
+        "market_trade_gate_key": "",
+        "market_trade_gate": "",
+        "market_alert_keys": "",
+        "market_primary_alert": "",
+        "market_no_trade_reason": "",
+        "risk_tier": "",
+        "risk_unit_fraction": None,
+        "sector_tag": "",
+        "market_sector_rotation": "",
+        "market_catalyst_state": "",
+        "market_catalyst_event": "",
+        "market_catalyst_blocking": False,
+        "market_catalyst_category": "",
+        "market_catalyst_scope": "",
+        "market_catalyst_tag": "",
+        "market_catalyst_targeted": False,
+        "market_catalyst_window": "",
+        "market_flow_state": "",
+        "market_flow_bias": "",
+        "adaptive_edge_label": "",
+        "adaptive_edge_score": None,
+        "actionable_frame_score": None,
+        "actionable_setup_score": None,
+        "actionable_context_score": None,
+        "actionable_tactical_score": None,
+        "archive_guardrail_label": "",
+        "archive_guardrail_penalty": None,
+        "archive_guardrail_note": "",
+        "price": price,
+        "delta_pct": delta_pct,
+        "entry_price": None,
+        "stop_loss": None,
+        "target_price": None,
+        "rr_ratio": None,
+    }
+
+
+def _run_auto_timeframe_learning_sweep(
+    *,
+    session_state,
+    current_timeframe: str,
+    exclude_stables: bool,
+    get_top_volume_usdt_symbols,
+    fetch_ohlcv,
+    analyse,
+    ml_ensemble_predict,
+    signal_plain,
+    direction_key,
+    fetch_signal_events_df,
+    log_signal_events,
+    resolve_open_signal_events_for_frame,
+    db_path: str,
+    debug,
+) -> dict[str, object]:
+    state = _auto_learning_state(session_state.get(_AUTO_TIMEFRAME_LEARNING_STATE_KEY))
+    if bool(state.get("running")):
+        return {"ran": False, "reason": "already_running"}
+    try:
+        df_recent = fetch_signal_events_df(
+            limit=ARCHIVE_LEARNING_WINDOW_ROWS,
+            source="Market",
+            decision_version=current_decision_version("Market"),
+            db_path=db_path,
+        )
+    except Exception as e:
+        if callable(debug):
+            debug(f"Auto timeframe learning scope unavailable: {e.__class__.__name__}: {str(e).strip()}")
+        return {"ran": False, "reason": "scope_unavailable"}
+
+    now_ts = pd.Timestamp.now(tz="UTC")
+    timeframe = _select_auto_learning_timeframe(
+        df_recent,
+        state,
+        now=now_ts,
+        current_timeframe=current_timeframe,
+    )
+    if not timeframe:
+        session_state[_AUTO_TIMEFRAME_LEARNING_STATE_KEY] = state
+        return {"ran": False, "reason": "not_due"}
+
+    state["running"] = True
+    state = _mark_auto_learning_attempt(state, timeframe=timeframe, now=now_ts)
+    session_state[_AUTO_TIMEFRAME_LEARNING_STATE_KEY] = state
+    written = 0
+    resolved = 0
+    errors = 0
+    try:
+        try:
+            candidate_pairs, _market_rows = get_top_volume_usdt_symbols(_AUTO_TIMEFRAME_LEARNING_FETCH_N)
+        except Exception as e:
+            errors += 1
+            if callable(debug):
+                debug(f"Auto timeframe learning universe failed ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
+            candidate_pairs = []
+        symbols: list[str] = []
+        seen: set[str] = set()
+        for pair in list(candidate_pairs or []):
+            base = _canonical_pair_base(str(pair or ""))
+            if not base or base in seen:
+                continue
+            if bool(exclude_stables) and is_stable_base_symbol(base):
+                continue
+            seen.add(base)
+            symbols.append(str(pair or f"{base}/USDT"))
+            if len(symbols) >= int(_AUTO_TIMEFRAME_LEARNING_SYMBOL_LIMITS.get(timeframe, 8)):
+                break
+
+        events: list[dict[str, object]] = []
+        fetch_lock = Lock()
+        for symbol in symbols:
+            try:
+                with fetch_lock:
+                    df = fetch_ohlcv(symbol, timeframe, limit=260)
+            except Exception as e:
+                errors += 1
+                if callable(debug):
+                    debug(f"Auto timeframe learning OHLCV failed for {symbol} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
+                continue
+            df_eval = _prepare_closed_frame(df, min_rows=60)
+            if df_eval is None:
+                continue
+            base = _canonical_pair_base(symbol)
+            try:
+                resolved += int(
+                    resolve_open_signal_events_for_frame(
+                        symbol=base,
+                        timeframe=timeframe,
+                        df_ohlcv=df_eval,
+                        source="Market",
+                        db_path=db_path,
+                    )
+                )
+                resolved += int(
+                    resolve_open_signal_events_for_frame(
+                        symbol=base,
+                        timeframe=timeframe,
+                        df_ohlcv=df_eval,
+                        source="Scalp",
+                        db_path=db_path,
+                    )
+                )
+            except Exception as e:
+                errors += 1
+                if callable(debug):
+                    debug(f"Auto timeframe learning resolve failed for {base} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
+            try:
+                event = _auto_timeframe_learning_event_from_frame(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    df_eval=df_eval,
+                    analyse=analyse,
+                    ml_ensemble_predict=ml_ensemble_predict,
+                    signal_plain=signal_plain,
+                    direction_key=direction_key,
+                )
+            except Exception as e:
+                errors += 1
+                if callable(debug):
+                    debug(f"Auto timeframe learning event failed for {base} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
+                event = None
+            if event:
+                events.append(event)
+        if events:
+            written = int(log_signal_events(events, db_path=db_path))
+    finally:
+        state = _mark_auto_learning_attempt(
+            state,
+            timeframe=timeframe,
+            now=now_ts,
+            written=written,
+            resolved=resolved,
+            errors=errors,
+        )
+        state["running"] = False
+        session_state[_AUTO_TIMEFRAME_LEARNING_STATE_KEY] = state
+    if callable(debug):
+        debug(
+            f"Auto timeframe learning sweep {timeframe}: "
+            f"written={written}, resolved={resolved}, errors={errors}."
+        )
+    return {
+        "ran": True,
+        "timeframe": timeframe,
+        "written": written,
+        "resolved": resolved,
+        "errors": errors,
+    }
 
 
 def _direction_fetch_symbol(symbol: str, actual_symbol: str, source_provider: str) -> str:
@@ -2516,6 +2953,23 @@ def _market_data_mode(
     if used_major_fallback:
         return "MAJOR BACKUP MODE"
     return "FULL MARKET MODE" if has_market_rows else "EXCHANGE-ONLY MODE"
+
+
+def _market_data_mode_display(mode_label: str) -> str:
+    mode_up = str(mode_label or "").strip().upper()
+    if mode_up == "FULL MARKET MODE":
+        return "Full Market Data"
+    if mode_up == "CUSTOM WATCHLIST MODE":
+        return "Watchlist Data"
+    if mode_up == "CUSTOM WATCHLIST MODE (PARTIAL ENRICHMENT)":
+        return "Watchlist Data (Partial)"
+    if mode_up == "CUSTOM WATCHLIST MODE (EXCHANGE-ONLY)":
+        return "Watchlist Data (Exchange Only)"
+    if mode_up == "MAJOR BACKUP MODE":
+        return "Major Backup Data"
+    if mode_up == "EXCHANGE-ONLY MODE":
+        return "Exchange-Only Data"
+    return str(mode_label or "").strip() or "Data Mode"
 
 
 def _underfilled_universe_message(
@@ -3742,7 +4196,7 @@ def render(ctx: dict) -> None:
             f"Your market overview dashboard. Shows live BTC/ETH prices, total market cap, "
             f"{_tip('Fear & Greed Index', copy_text('market.hero.fear_greed_tip'))} "
             f"and {_tip('BTC Dominance', 'Bitcoin’s share of the total crypto market. Rising dominance usually means money is hiding in BTC; falling dominance can support altcoins.')}. "
-            f"The Market tab reads either the live top-liquidity universe or your custom watchlist, then scores symbols with real-time technical signals."
+            f"The Market tab scans Broad Market, Breakout Radar, Trending Coins, or your custom watchlist, then scores each symbol with closed-candle technical and AI context."
         ),
     )
 
@@ -3854,7 +4308,7 @@ def render(ctx: dict) -> None:
                 title="Bitcoin Price",
                 value_text=f"${btc_price:,.2f}" if btc_price is not None and btc_price > 0 else "N/A",
                 delta_pct=btc_change,
-                context_label="BTC is leading the tape right now.",
+                context_label="BTC is setting the market tone right now.",
                 unavailable=not (btc_price is not None and btc_price > 0),
             ),
             unsafe_allow_html=True,
@@ -4173,10 +4627,11 @@ def render(ctx: dict) -> None:
         # prediction card updates when this value changes.  The key ensures
         # the selection is stored under 'market_timeframe'.
         timeframe = st.selectbox(
-            "Select timeframe",
+            "Timeframe",
             ['5m', '15m', '1h', '4h', '1d'],
             index=2,
-            key="market_timeframe"
+            key="market_timeframe",
+            help="Controls candle delta, tactical levels, scalp timing, and selected-timeframe setup checks.",
         )
     with controls[1]:
         direction_filter = st.selectbox(
@@ -4184,6 +4639,7 @@ def render(ctx: dict) -> None:
             ['Upside', 'Downside', 'Both'],
             index=2,
             format_func=lambda x: "All Directions" if x == "Both" else x,
+            help="Filter table candidates by intended direction. All Directions shows both upside and downside reads.",
         )
     with controls[2]:
         current_scan_mode = str(st.session_state.get("market_scan_mode") or "").strip()
@@ -4201,7 +4657,7 @@ def render(ctx: dict) -> None:
             index=0,
             key="market_scan_mode",
             disabled=custom_mode_active,
-            help="Broad Market is the clean base read. Breakout Radar hunts acceleration. Trending Coins reads attention, momentum, and volume anomaly candidates in the same table.",
+            help="Broad Market is the clean liquid-universe read. Breakout Radar hunts early acceleration. Trending Coins starts from attention, momentum, and volume anomaly candidates.",
         )
     with controls[3]:
         top_n_default = int(st.session_state.get("market_top_n", 10))
@@ -4212,6 +4668,7 @@ def render(ctx: dict) -> None:
             value=top_n_default,
             key="market_top_n",
             disabled=custom_mode_active,
+            help="How many ranked rows to show. Disabled in Custom Coins mode because the watchlist size controls the table.",
         )
     with controls[4]:
         custom_coin_input = st.text_input(
@@ -4219,13 +4676,13 @@ def render(ctx: dict) -> None:
             value=st.session_state.get("market_custom_coin_input", ""),
             key="market_custom_coin_input",
             placeholder="BTC, ETH, SOL",
-            help="Optional watchlist mode. Enter up to 10 symbols separated by comma.",
+            help="Optional watchlist mode. Enter up to 10 symbols separated by comma, then press Enter or Scan.",
             on_change=_apply_custom_coin_input,
         )
     with controls[5]:
-        run_scan = st.button("Run Scan", type="primary", width="stretch")
+        run_scan = st.button("Scan", type="primary", width="stretch")
         clear_custom = st.button(
-            "Clear Custom",
+            "Clear",
             width="stretch",
             disabled=not bool(st.session_state.get("market_custom_bases_applied", [])),
             key="market_clear_custom",
@@ -4250,17 +4707,17 @@ def render(ctx: dict) -> None:
         st.markdown(
             f"<div class='market-note-box' style='border:1px solid rgba(0,212,255,0.34); border-left:4px solid {ACCENT}; "
             f"background:rgba(0,212,255,0.06); color:{TEXT_MUTED}; margin-top:0.25rem;'>"
-            f"<b style='color:{ACCENT};'>Custom Watchlist Mode:</b> reading {len(custom_bases_applied)} coin(s): "
+            f"<b style='color:{ACCENT};'>Watchlist Mode:</b> reading {len(custom_bases_applied)} coin(s): "
             f"{preview}{more}. Top N is disabled while custom mode is active."
             f"</div>",
             unsafe_allow_html=True,
         )
     elif custom_coin_input.strip() and custom_bases_draft:
-        st.caption("Custom symbols are ready. Click Run Scan to apply watchlist mode.")
+        st.caption("Custom symbols are ready. Press Enter or Scan to apply watchlist mode.")
     elif _normalize_scan_mode(scan_mode) == _SCAN_MODE_EMERGING:
-        st.caption("Breakout Radar keeps the same market table, reaches further into the active-liquidity universe, and surfaces fresher breakout pressure earlier. Expect more noise.")
+        st.caption("Breakout Radar uses the same table, reaches deeper into active-liquidity names, and looks for earlier acceleration. Expect more noise than Broad Market.")
     elif _normalize_scan_mode(scan_mode) == _SCAN_MODE_TRENDING:
-        st.caption("Trending Coins keeps the same market table, but starts from search trend, 24h momentum, and volume-anomaly candidates.")
+        st.caption("Trending Coins uses the same table, but starts from search trend, 24h momentum, and volume-anomaly candidates.")
 
     exclude_stables = st.toggle(
         "Exclude stablecoins",
@@ -4836,15 +5293,15 @@ def render(ctx: dict) -> None:
 
     def _column_header_tooltip(col: str) -> str:
         return {
-            "Coin": "Asset ticker. If you hover the row value, you can also see the actual feed pair or backup source.",
+            "Coin": "Asset ticker. Hover the row value to see the feed pair or backup source when one is used.",
             "Price ($)": "Latest closed-candle price from the active data feed.",
             "Δ (%)": "Move from the previous closed candle to the latest closed candle on your selected timeframe.",
             "Setup Confirm": copy_text("market.tooltip.setup_confirm"),
-            "Direction": "Main higher-timeframe technical bias from the adaptive lead/confirm anchor pair.",
+            "Direction": "Main higher-timeframe technical bias from closed anchor candles.",
             "Confidence": "How strong and trustworthy that Direction call is.",
             "AI Ensemble": "Higher-timeframe AI view. Dots show how many models agree.",
             "AI Confidence": "How trustworthy the AI verdict is.",
-            "R:R": "Reward-to-risk ratio for the scalp execution lens, not the main Setup Confirm verdict.",
+            "R:R": "Reward-to-risk ratio for the separate scalp timing lens, not the main Setup Confirm verdict.",
             "Entry Price": copy_text("market.tooltip.entry_price"),
             "Stop Loss": copy_text("market.tooltip.stop_loss"),
             "Target Price": copy_text("market.tooltip.target_price"),
@@ -4961,7 +5418,7 @@ def render(ctx: dict) -> None:
         meaning = {
             "Upside": "The broader technical trend still leans up.",
             "Downside": "The broader technical trend still leans down.",
-            "Neutral": "The broader technical read is mixed, so there is no strong edge yet.",
+            "Neutral": "The broader technical read is mixed, so there is no strong directional read yet.",
         }.get(clean, "This is the broader technical bias from the market scan.")
         return f"Direction from {anchor_label}: {clean}. {meaning}"
 
@@ -4984,7 +5441,7 @@ def render(ctx: dict) -> None:
         meaning = {
             "Upside": "The higher-timeframe AI stack leans up.",
             "Downside": "The higher-timeframe AI stack leans down.",
-            "Neutral": "The higher-timeframe AI stack does not see a clear edge.",
+            "Neutral": "The higher-timeframe AI stack does not see a clear directional read.",
         }.get(verdict, "This is the higher-timeframe AI verdict.")
         ai_note = str(row.get("__ai_note", "") or "").strip()
         parts = [f"Higher-timeframe AI verdict: {verdict}. {meaning}", f"Model agreement: {votes_n}/3."]
@@ -6191,31 +6648,31 @@ def render(ctx: dict) -> None:
             add_once(
                 "warning",
                 "Partial Live Read",
-                "The current table reflects a partial live universe; use the read, but treat coverage as incomplete.",
+                "The fresh scan is usable, but coverage is incomplete.",
             )
         if source_up.startswith("CACHED"):
             add_once(
                 "warning",
                 "Cached Snapshot",
-                "The table is using the latest matching snapshot; confirm with a fresh live read before acting.",
+                "Showing the latest matching saved scan because the fresh read was incomplete.",
             )
         if "PARTIAL ENRICHMENT" in mode_up:
             add_once(
                 "warning",
                 "Partial Enrichment",
-                "Some market-cap fields are unavailable, but exchange candle metrics are live.",
+                "Some market-cap fields are missing; candle and indicator reads are still live.",
             )
         if "EXCHANGE-ONLY" in mode_up:
             add_once(
                 "warning",
                 "Exchange-Only Feed",
-                "Exchange candles are live; enrichment fields such as market cap may be unavailable.",
+                "Exchange candles are live; enrichment fields such as market cap may be blank.",
             )
         if mode_up.startswith("MAJOR BACKUP"):
             add_once(
                 "warning",
                 "Universe Backup",
-                "The liquidity universe failed, so this is a majors-only backup read rather than a full market sweep.",
+                "The broad liquidity list failed, so this is a majors-only backup read.",
             )
         return items
 
@@ -6225,6 +6682,13 @@ def render(ctx: dict) -> None:
             return
         accent_color = WARNING if warning_items else POSITIVE
         status_text = "Needs Care" if warning_items else "Healthy"
+        source_detail = str(source_display_label or "").strip()
+        if source_detail.upper() in {"LIVE", "LIVE (PARTIAL)", "LIVE PARTIAL"}:
+            source_text = str(source_chip or "Live Data")
+        elif source_detail:
+            source_text = f"{source_chip} • {source_detail}"
+        else:
+            source_text = str(source_chip or "Data Source")
         visible_items = items[:4]
         lines = []
         for item in visible_items:
@@ -6255,7 +6719,7 @@ def render(ctx: dict) -> None:
             f"<span class='market-inline-chip' style='border:1px solid {accent_color}; color:{accent_color}; background:rgba(255,255,255,0.04);'>{status_text}</span>"
             f"</div>"
             f"<div style='display:flex; align-items:center; gap:8px; flex-wrap:wrap;'>"
-            f"<span class='market-inline-chip' style='border:1px solid {source_color}; color:{source_color}; background:rgba(255,255,255,0.04);'>{html.escape(source_chip)} • {html.escape(source_display_label)}</span>"
+            f"<span class='market-inline-chip' style='border:1px solid {source_color}; color:{source_color}; background:rgba(255,255,255,0.04);'>{html.escape(source_text)}</span>"
             f"<span class='market-inline-chip' style='border:1px solid {mode_color}; color:{mode_color}; background:rgba(255,255,255,0.04);'>{html.escape(mode_label)}</span>"
             f"</div>"
             f"</div>"
@@ -7587,9 +8051,9 @@ def render(ctx: dict) -> None:
         source_is_degraded = "DEGRADED" in source_label.upper()
         source_color = WARNING if (source_is_degraded or source_label.startswith("CACHED")) else POSITIVE
         source_chip = (
-            "PARTIAL LIVE"
+            "Partial Live"
             if source_is_degraded
-            else ("LIVE FEED" if source_label.startswith("LIVE") else "CACHED SNAPSHOT")
+            else ("Live Data" if source_label.startswith("LIVE") else "Cached Snapshot")
         )
         source_display_label = str(source_label).replace("DEGRADED", "PARTIAL")
         mode_color = ACCENT if data_mode in {"FULL MARKET MODE", "CUSTOM WATCHLIST MODE"} else WARNING
@@ -7602,7 +8066,7 @@ def render(ctx: dict) -> None:
             source_chip=source_chip,
             source_color=source_color,
             source_display_label=source_display_label,
-            mode_label=str(data_mode),
+            mode_label=_market_data_mode_display(str(data_mode)),
             mode_color=mode_color,
             items=_data_health_display_items(data_health_items, source_label_text=source_label, data_mode_text=str(data_mode)),
         )
@@ -7727,7 +8191,7 @@ def render(ctx: dict) -> None:
         market_archive_guardrail_snapshot = build_archive_guardrail_snapshot(
             adaptive_model,
             signal={
-                "Market Lead": str(getattr(market_lead_snapshot, "label", "") or "No Clear Lead"),
+                "Market Lead": str(getattr(market_lead_snapshot, "label", "") or "No Clear Pressure"),
                 "Market Regime": str(getattr(market_regime_snapshot, "label", "") or "Unknown"),
                 "Playbook Key": str(getattr(market_regime_snapshot, "playbook_key", "") or "Unknown"),
                 "Playbook": str(getattr(market_regime_snapshot, "playbook", "") or "Unknown"),
@@ -7880,7 +8344,7 @@ def render(ctx: dict) -> None:
                         and _signal_tracker_direction_key(direction_raw) == _signal_tracker_direction_key(ai_direction)
                         else "Not aligned"
                     ),
-                    "Market Lead": str(getattr(market_lead_snapshot, "label", "") or "No Clear Lead"),
+                    "Market Lead": str(getattr(market_lead_snapshot, "label", "") or "No Clear Pressure"),
                     "Market Regime": str(getattr(market_regime_snapshot, "label", "") or "Unknown"),
                     "Playbook Key": str(getattr(market_regime_snapshot, "playbook_key", "") or "Unknown"),
                     "Playbook": str(getattr(market_regime_snapshot, "playbook", "") or "Unknown"),
@@ -8314,7 +8778,7 @@ def render(ctx: dict) -> None:
             with g3:
                 st.markdown(
                     _render_market_orbital_card(
-                        title="Market Lead",
+                        title="Early Pressure",
                         title_hover=market_lead_hover,
                         value_text=f"{int(round(market_lead_snapshot.score)):d}",
                         unit="/100",
@@ -8421,7 +8885,7 @@ def render(ctx: dict) -> None:
             )
         st.markdown("<div style='height:0.55rem;'></div>", unsafe_allow_html=True)
         lead_bundle = shown_bundle
-        lead_scope_label = "Shown rows"
+        lead_scope_label = "Current table"
         emerging_counts = dict(lead_bundle["emerging_counts"])
         emerging_up_count = int(emerging_counts.get("Emerging Upside", 0))
         emerging_down_count = int(emerging_counts.get("Emerging Downside", 0))
@@ -8476,13 +8940,13 @@ def render(ctx: dict) -> None:
                     "label": "Pressure Build",
                     "value": emerging_head,
                     "subtext": emerging_sub,
-                    "label_title": "Quick count of names where upside or downside pressure is building before full confirmation.",
+                    "label_title": "Names in the current table where early upside or downside pressure is building before full confirmation.",
                 },
                 {
                     "label": "Best Scalp Timing",
                     "value": best_scalp_coin,
                     "subtext": best_scalp_sub,
-                    "label_title": "Best shorter-term timing candidate in the current table.",
+                    "label_title": "Best separate short-term timing candidate in the current table. This is not the main setup verdict.",
                 },
                 {
                     "label": "Clearest Direction",
@@ -8571,11 +9035,11 @@ def render(ctx: dict) -> None:
                     for line in _scanner_trace_diagnostic_lines(trace_summary):
                         st.markdown(line)
                     st.caption(
-                        "Coverage Trace is passive: it shows scanner coverage and Top N cuts, but does not change ranking yet."
+                        "Coverage Trace shows scanner coverage and recent Top N cuts. Breakout Radar and Trending Coins use it as a small capped ranking nudge."
                     )
                 except Exception as e:
                     st.markdown(f"- Coverage trace unavailable: `{e.__class__.__name__}`.")
-                st.markdown("**Shown rows**")
+                st.markdown("**Current table**")
                 st.markdown(f"Setup Confirm: {_share_line(setup_counts, ['Ready', 'Probe', 'Watch', 'Skip'])}")
                 st.markdown(f"Direction: {_share_line(direction_counts, ['Upside', 'Downside', 'Neutral'])}")
                 st.markdown(f"AI Ensemble: {_share_line(ai_ensemble_counts, ['Upside', 'Downside', 'Neutral'])}")
@@ -8583,11 +9047,11 @@ def render(ctx: dict) -> None:
                     f"AI Confidence: {_share_line(ai_confidence_counts, ['High', 'Medium', 'Low', 'Very Low'])}"
                 )
                 st.markdown(
-                    f"LEAD: {_share_line_against_total(dict(shown_bundle['emerging_counts']), ['Emerging Upside', 'Emerging Downside'], total_rows)}"
+                    f"Pressure Build: {_share_line_against_total(dict(shown_bundle['emerging_counts']), ['Emerging Upside', 'Emerging Downside'], total_rows)}"
                 )
                 if int(produced_bundle["total"]) > 0 and int(produced_bundle["total"]) != total_rows:
                     produced_total = int(produced_bundle["total"])
-                    st.markdown("**Live produced before Top N**")
+                    st.markdown("**Analyzed before Top N**")
                     st.markdown(
                         f"Setup Confirm: {_share_line(dict(produced_bundle['setup_counts']), ['Ready', 'Probe', 'Watch', 'Skip'])}"
                     )
@@ -8601,10 +9065,10 @@ def render(ctx: dict) -> None:
                         f"AI Confidence: {_share_line(dict(produced_bundle['ai_confidence_counts']), ['High', 'Medium', 'Low', 'Very Low'])}"
                     )
                     st.markdown(
-                        f"LEAD: {_share_line_against_total(dict(produced_bundle['emerging_counts']), ['Emerging Upside', 'Emerging Downside'], produced_total)}"
+                        f"Pressure Build: {_share_line_against_total(dict(produced_bundle['emerging_counts']), ['Emerging Upside', 'Emerging Downside'], produced_total)}"
                     )
                     if produced_total != total_rows:
-                        st.caption("Skew flags below are based on the live produced rows before the Top N cut.")
+                        st.caption("Skew flags below are based on all analyzed rows before the Top N cut.")
                 if audit_flags:
                     for flag in audit_flags:
                         st.markdown(f"- {flag}")
@@ -8756,22 +9220,39 @@ def render(ctx: dict) -> None:
         source_is_degraded = "DEGRADED" in str(source_label).upper()
         source_color = WARNING if (source_is_degraded or str(source_label).startswith("CACHED")) else POSITIVE
         source_chip = (
-            "PARTIAL LIVE"
+            "Partial Live"
             if source_is_degraded
-            else ("LIVE FEED" if str(source_label).startswith("LIVE") else "CACHED SNAPSHOT")
+            else ("Live Data" if str(source_label).startswith("LIVE") else "Cached Snapshot")
         )
         mode_color = ACCENT if data_mode in {"FULL MARKET MODE", "CUSTOM WATCHLIST MODE"} else WARNING
         _render_data_health_band(
             source_chip=source_chip,
             source_color=source_color,
             source_display_label=str(source_label).replace("DEGRADED", "PARTIAL"),
-            mode_label=str(data_mode),
+            mode_label=_market_data_mode_display(str(data_mode)),
             mode_color=mode_color,
             items=_data_health_display_items(data_health_items, source_label_text=str(source_label), data_mode_text=str(data_mode)),
         )
         if "DEGRADED" in str(source_label).upper():
             st.info(
-                "No coins were shown because the latest live market read was partial and did not produce a usable complete result."
+                "No coins were shown because the latest live market read was incomplete and did not produce a usable table."
             )
         else:
-            st.info("No coins matched the criteria.")
+            st.info("No coins matched this scan. Try All Directions, a higher Top N, or a different timeframe.")
+
+    _run_auto_timeframe_learning_sweep(
+        session_state=st.session_state,
+        current_timeframe=str(timeframe),
+        exclude_stables=bool(exclude_stables),
+        get_top_volume_usdt_symbols=get_top_volume_usdt_symbols,
+        fetch_ohlcv=fetch_ohlcv,
+        analyse=analyse,
+        ml_ensemble_predict=ml_ensemble_predict,
+        signal_plain=signal_plain,
+        direction_key=direction_key,
+        fetch_signal_events_df=fetch_signal_events_df,
+        log_signal_events=log_signal_events,
+        resolve_open_signal_events_for_frame=resolve_open_signal_events_for_frame,
+        db_path=signal_tracker_db_path,
+        debug=_debug,
+    )

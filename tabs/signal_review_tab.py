@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import html
 import time
 
 import pandas as pd
@@ -17,6 +18,7 @@ from ui.primitives import render_insight_card, render_kpi_grid, render_page_head
 _BEST_SIGNAL_MIN_RESOLVED = 12
 _BEST_SIGNAL_MIN_TIMEFRAMES = 2
 _BEST_SIGNAL_MIN_TOTAL_RESOLVED = 24
+_BEST_SIGNAL_LEADERBOARD_LIMIT = 10
 _MIN_SIGNAL_ARCHIVE_ROWS = _BEST_SIGNAL_MIN_RESOLVED
 _MIN_EXECUTION_ARCHIVE_ROWS = 3
 
@@ -81,7 +83,7 @@ def _annotate_actual_hold_style(df_events: pd.DataFrame) -> pd.DataFrame:
         status = str(row.get("actual_trade_status") or "").strip().upper()
         hold_hours = row.get("Actual Hold Hours")
         if status != "CLOSED":
-            return "Open / Unjournaled"
+            return "Open / Not Closed"
         if pd.isna(hold_hours):
             return "Unknown Hold"
         if float(hold_hours) <= 6.0:
@@ -107,7 +109,7 @@ def _annotate_actual_exit_quality(df_events: pd.DataFrame) -> pd.DataFrame:
     def _quality_for_row(row: pd.Series) -> str:
         status = str(row.get("actual_trade_status") or "").strip().upper()
         if status != "CLOSED":
-            return "Open / Unjournaled"
+            return "Open / Not Closed"
         pnl = row.get("actual_pnl_pct")
         if pd.isna(pnl):
             return "Unknown Exit"
@@ -156,12 +158,9 @@ def _refresh_scope_badge(*, symbol_filter: str, timeframe_filter: str, resolved_
 def _follow_through_horizon_note(timeframe_filter: str) -> str:
     tf_key = str(timeframe_filter or "").strip().lower()
     if tf_key in _FOLLOW_THROUGH_HORIZONS:
-        return (
-            f"Follow-through here resolves on the archive horizon for {tf_key.upper()}: "
-            f"{_FOLLOW_THROUGH_HORIZONS[tf_key]} bars after the signal."
-        )
+        return f"Timing window: {tf_key.upper()} signals are measured after {_FOLLOW_THROUGH_HORIZONS[tf_key]} candles."
     return (
-        "Follow-through uses the archive horizon after each signal: "
+        "Timing windows: "
         "5m = 12 bars, 15m = 16 bars, 1h = 12 bars, 4h = 12 bars, 1d = 10 bars."
     )
 
@@ -178,16 +177,79 @@ def _coin_view_summary(
         scope_parts.append(str(timeframe_filter).upper())
     return (
         f"<b>{' • '.join(scope_parts)}</b><br>"
-        f"Using {int(rows_loaded)} of the latest {int(analysis_limit)} learned rows in this scope<br>"
-        "Overview and deep dives rank the cleanest pockets for this coin"
+        f"{int(rows_loaded)} signals loaded from the latest {int(analysis_limit)}<br>"
+        "Shows timing, expected path, and execution quality for this coin"
     )
+
+
+def _archive_direction_key(value: object) -> str:
+    side = str(value or "").strip().upper()
+    if side in {"UPSIDE", "LONG", "BUY", "BULLISH", "STRONG BUY"}:
+        return "UPSIDE"
+    if side in {"DOWNSIDE", "SHORT", "SELL", "BEARISH", "STRONG SELL"}:
+        return "DOWNSIDE"
+    return ""
+
+
+def _filter_directional_signal_rows(df_events: pd.DataFrame) -> pd.DataFrame:
+    if df_events is None or df_events.empty or "direction" not in df_events.columns:
+        return pd.DataFrame()
+    d = df_events.copy()
+    d["__direction_key"] = d["direction"].map(_archive_direction_key)
+    d = d[d["__direction_key"].isin({"UPSIDE", "DOWNSIDE"})].copy()
+    return d
+
+
+def _merge_path_sample_counts(
+    grouped: pd.DataFrame,
+    df_events: pd.DataFrame,
+    df_forward_windows: pd.DataFrame | None,
+) -> tuple[pd.DataFrame, bool]:
+    if df_forward_windows is None:
+        return grouped.copy(), False
+    out = grouped.copy()
+    out["PathSamples"] = 0
+    required_group_cols = {"symbol", "timeframe", "__direction_key"}
+    if (
+        out.empty
+        or df_events is None
+        or df_events.empty
+        or df_forward_windows.empty
+        or not required_group_cols.issubset(df_events.columns)
+        or "signal_key" not in df_events.columns
+        or "signal_key" not in df_forward_windows.columns
+    ):
+        return out, True
+    window_keys = set(df_forward_windows["signal_key"].fillna("").astype(str).str.strip())
+    window_keys.discard("")
+    if not window_keys:
+        return out, True
+    event_scope = df_events.copy()
+    event_scope["signal_key"] = event_scope["signal_key"].fillna("").astype(str).str.strip()
+    event_scope = event_scope[event_scope["signal_key"].isin(window_keys)].copy()
+    if event_scope.empty:
+        return out, True
+    path_counts = (
+        event_scope.groupby(["symbol", "timeframe", "__direction_key"], dropna=False)["signal_key"]
+        .nunique()
+        .reset_index(name="PathSamples")
+    )
+    out = out.drop(columns=["PathSamples"], errors="ignore").merge(
+        path_counts,
+        on=["symbol", "timeframe", "__direction_key"],
+        how="left",
+    )
+    out["PathSamples"] = pd.to_numeric(out["PathSamples"], errors="coerce").fillna(0).astype(int)
+    return out, True
 
 
 def _select_best_signal_coin(
     *,
     df_events: pd.DataFrame,
+    df_forward_windows: pd.DataFrame | None = None,
     timeframe_filter: str,
     min_resolved: int = _BEST_SIGNAL_MIN_RESOLVED,
+    min_path_samples: int = 8,
     min_timeframes: int = _BEST_SIGNAL_MIN_TIMEFRAMES,
     min_total_resolved: int = _BEST_SIGNAL_MIN_TOTAL_RESOLVED,
 ) -> dict[str, object]:
@@ -211,14 +273,19 @@ def _select_best_signal_coin(
     d = d[d["status"].eq("RESOLVED")].copy()
     if d.empty:
         return empty
+    d = _filter_directional_signal_rows(d)
+    if d.empty:
+        return empty
     d["symbol"] = d["symbol"].fillna("").astype(str).str.strip().str.upper()
     d["timeframe"] = d["timeframe"].fillna("").astype(str).str.strip().str.lower()
     d = d[d["symbol"].ne("") & d["timeframe"].ne("")].copy()
     if d.empty:
         return empty
+    if "signal_key" in d.columns:
+        d["signal_key"] = d["signal_key"].fillna("").astype(str).str.strip()
     d["directional_return_pct"] = pd.to_numeric(d.get("directional_return_pct"), errors="coerce")
     grouped = (
-        d.groupby(["symbol", "timeframe"], dropna=False)
+        d.groupby(["symbol", "timeframe", "__direction_key"], dropna=False)
         .agg(
             Resolved=("symbol", "count"),
             FollowThroughPct=(
@@ -238,7 +305,12 @@ def _select_best_signal_coin(
         ),
         axis=1,
     )
+    grouped, path_filter_active = _merge_path_sample_counts(grouped, d, df_forward_windows)
+    if not path_filter_active and "PathSamples" not in grouped.columns:
+        grouped["PathSamples"] = grouped["Resolved"]
     qualified = grouped[grouped["Resolved"] >= int(max(1, min_resolved))].copy()
+    if path_filter_active:
+        qualified = qualified[qualified["PathSamples"] >= int(max(1, min_path_samples))].copy()
     if qualified.empty:
         return empty
 
@@ -248,8 +320,8 @@ def _select_best_signal_coin(
         if qualified.empty:
             return empty
         best = qualified.sort_values(
-            ["QualityScore", "FollowThroughPct", "AvgDirReturnPct", "Resolved"],
-            ascending=[False, False, False, False],
+            ["QualityScore", "FollowThroughPct", "AvgDirReturnPct", "PathSamples", "Resolved"],
+            ascending=[False, False, False, False, False],
         ).iloc[0]
         return {
             "available": True,
@@ -269,6 +341,7 @@ def _select_best_signal_coin(
             AvgFollowThroughPct=("FollowThroughPct", "mean"),
             AvgDirReturnPct=("AvgDirReturnPct", "mean"),
             Resolved=("Resolved", "sum"),
+            PathSamples=("PathSamples", "sum"),
         )
         .reset_index()
     )
@@ -294,13 +367,13 @@ def _select_best_signal_coin(
     if preferred.empty:
         return empty
     best_symbol_row = preferred.sort_values(
-        ["QualityScore", "AvgFollowThroughPct", "AvgDirReturnPct", "QualifiedTimeframes", "Resolved"],
-        ascending=[False, False, False, False, False],
+        ["QualityScore", "AvgFollowThroughPct", "AvgDirReturnPct", "QualifiedTimeframes", "PathSamples", "Resolved"],
+        ascending=[False, False, False, False, False, False],
     ).iloc[0]
     best_symbol = str(best_symbol_row["symbol"]).strip().upper()
     best_timeframe_row = qualified[qualified["symbol"].eq(best_symbol)].sort_values(
-        ["QualityScore", "FollowThroughPct", "AvgDirReturnPct", "Resolved"],
-        ascending=[False, False, False, False],
+        ["QualityScore", "FollowThroughPct", "AvgDirReturnPct", "PathSamples", "Resolved"],
+        ascending=[False, False, False, False, False],
     ).iloc[0]
     return {
         "available": True,
@@ -330,8 +403,8 @@ def _best_signal_summary(
     if str(timeframe_filter or "").strip() and str(timeframe_filter) != "All":
         return (
             f"<b>{symbol}</b><br>"
-            f"Best Signal leader for <b>{str(timeframe_filter).upper()}</b> inside the latest {int(analysis_limit)} learned rows<br>"
-            f"{follow:.1f}% follow-through • {avg_dir:+.2f}% avg dir return • {resolved} resolved"
+            f"Best leader with enough history for <b>{str(timeframe_filter).upper()}</b><br>"
+            f"{follow:.1f}% follow-through • {avg_dir:+.2f}% avg move • {resolved} completed"
         )
     if mode == "best_available":
         timeframe_note = (
@@ -341,24 +414,26 @@ def _best_signal_summary(
         )
         return (
             f"<b>{symbol}</b><br>"
-            f"Best archive read across the latest {int(analysis_limit)} learned rows<br>"
-            f"{follow:.1f}% follow-through • {avg_dir:+.2f}% avg dir return • strongest pocket {best_timeframe.upper() if best_timeframe else 'N/A'} • "
-            f"{timeframe_note} currently have enough history for a trustworthy read"
+            "Best available read with enough history<br>"
+            f"{follow:.1f}% follow-through • {avg_dir:+.2f}% avg move • best TF {best_timeframe.upper() if best_timeframe else 'N/A'} • "
+            f"{timeframe_note} ready"
         )
     return (
         f"<b>{symbol}</b><br>"
-        f"Best Signal leader across the latest {int(analysis_limit)} learned rows<br>"
-        f"{follow:.1f}% balanced follow-through • {avg_dir:+.2f}% avg dir return • strongest pocket {best_timeframe.upper() if best_timeframe else 'N/A'} • "
-        f"{qualified_timeframes} timeframe pockets with enough history"
+        "Best leader with enough history<br>"
+        f"{follow:.1f}% follow-through • {avg_dir:+.2f}% avg move • best TF {best_timeframe.upper() if best_timeframe else 'N/A'} • "
+        f"{qualified_timeframes} timeframe pockets ready"
     )
 
 
 def _build_best_signal_leaderboard(
     *,
     df_events: pd.DataFrame,
+    df_forward_windows: pd.DataFrame | None = None,
     timeframe_filter: str,
-    limit: int = 5,
+    limit: int = _BEST_SIGNAL_LEADERBOARD_LIMIT,
     min_resolved: int = _BEST_SIGNAL_MIN_RESOLVED,
+    min_path_samples: int = 8,
     min_timeframes: int = _BEST_SIGNAL_MIN_TIMEFRAMES,
     min_total_resolved: int = _BEST_SIGNAL_MIN_TOTAL_RESOLVED,
 ) -> pd.DataFrame:
@@ -372,14 +447,19 @@ def _build_best_signal_leaderboard(
     d = d[d["status"].eq("RESOLVED")].copy()
     if d.empty:
         return pd.DataFrame()
+    d = _filter_directional_signal_rows(d)
+    if d.empty:
+        return pd.DataFrame()
     d["symbol"] = d["symbol"].fillna("").astype(str).str.strip().str.upper()
     d["timeframe"] = d["timeframe"].fillna("").astype(str).str.strip().str.lower()
     d = d[d["symbol"].ne("") & d["timeframe"].ne("")].copy()
     if d.empty:
         return pd.DataFrame()
+    if "signal_key" in d.columns:
+        d["signal_key"] = d["signal_key"].fillna("").astype(str).str.strip()
     d["directional_return_pct"] = pd.to_numeric(d.get("directional_return_pct"), errors="coerce")
     grouped = (
-        d.groupby(["symbol", "timeframe"], dropna=False)
+        d.groupby(["symbol", "timeframe", "__direction_key"], dropna=False)
         .agg(
             Resolved=("symbol", "count"),
             FollowThroughPct=(
@@ -399,7 +479,12 @@ def _build_best_signal_leaderboard(
         ),
         axis=1,
     )
+    grouped, path_filter_active = _merge_path_sample_counts(grouped, d, df_forward_windows)
+    if not path_filter_active and "PathSamples" not in grouped.columns:
+        grouped["PathSamples"] = grouped["Resolved"]
     qualified = grouped[grouped["Resolved"] >= int(max(1, min_resolved))].copy()
+    if path_filter_active:
+        qualified = qualified[qualified["PathSamples"] >= int(max(1, min_path_samples))].copy()
     if qualified.empty:
         return pd.DataFrame()
     timeframe_text = str(timeframe_filter or "").strip().lower()
@@ -407,16 +492,24 @@ def _build_best_signal_leaderboard(
         qualified = qualified[qualified["timeframe"].eq(timeframe_text)].copy()
         if qualified.empty:
             return pd.DataFrame()
-        board = qualified.sort_values(
-            ["QualityScore", "FollowThroughPct", "AvgDirReturnPct", "Resolved"],
-            ascending=[False, False, False, False],
+        board = (
+            qualified.sort_values(
+                ["QualityScore", "FollowThroughPct", "AvgDirReturnPct", "PathSamples", "Resolved"],
+                ascending=[False, False, False, False, False],
+            )
+            .groupby("symbol", dropna=False)
+            .head(1)
+        )
+        board = board.sort_values(
+            ["QualityScore", "FollowThroughPct", "AvgDirReturnPct", "PathSamples", "Resolved"],
+            ascending=[False, False, False, False, False],
         ).head(int(limit)).copy()
         board["Mode"] = "Best Signal"
         board["Best TF"] = board["timeframe"].astype(str).str.upper()
         board["Follow-Through"] = board["FollowThroughPct"].map(lambda value: f"{float(value):.1f}%")
-        board["Avg Dir Return"] = board["AvgDirReturnPct"].map(lambda value: f"{float(value):+.2f}%")
+        board["Avg Move"] = board["AvgDirReturnPct"].map(lambda value: f"{float(value):+.2f}%")
         board = board.rename(columns={"symbol": "Coin"})
-        return board[["Coin", "Mode", "Follow-Through", "Resolved", "Best TF", "Avg Dir Return"]].reset_index(drop=True)
+        return board[["Coin", "Mode", "Follow-Through", "Resolved", "Best TF", "Avg Move"]].reset_index(drop=True)
 
     symbol_scores = (
         qualified.groupby("symbol", dropna=False)
@@ -425,6 +518,7 @@ def _build_best_signal_leaderboard(
             AvgFollowThroughPct=("FollowThroughPct", "mean"),
             AvgDirReturnPct=("AvgDirReturnPct", "mean"),
             Resolved=("Resolved", "sum"),
+            PathSamples=("PathSamples", "sum"),
         )
         .reset_index()
     )
@@ -440,7 +534,10 @@ def _build_best_signal_leaderboard(
         axis=1,
     )
     best_timeframes = (
-        qualified.sort_values(["QualityScore", "FollowThroughPct", "AvgDirReturnPct", "Resolved"], ascending=[False, False, False, False])
+        qualified.sort_values(
+            ["QualityScore", "FollowThroughPct", "AvgDirReturnPct", "PathSamples", "Resolved"],
+            ascending=[False, False, False, False, False],
+        )
         .groupby("symbol", dropna=False)
         .head(1)[["symbol", "timeframe"]]
         .rename(columns={"timeframe": "best_timeframe"})
@@ -456,14 +553,14 @@ def _build_best_signal_leaderboard(
         axis=1,
     )
     board = board.sort_values(
-        ["QualityScore", "AvgFollowThroughPct", "AvgDirReturnPct", "QualifiedTimeframes", "Resolved"],
-        ascending=[False, False, False, False, False],
+        ["QualityScore", "AvgFollowThroughPct", "AvgDirReturnPct", "QualifiedTimeframes", "PathSamples", "Resolved"],
+        ascending=[False, False, False, False, False, False],
     ).head(int(limit)).copy()
     board["Best TF"] = board["best_timeframe"].fillna("").astype(str).str.upper()
     board["Follow-Through"] = board["AvgFollowThroughPct"].map(lambda value: f"{float(value):.1f}%")
-    board["Avg Dir Return"] = board["AvgDirReturnPct"].map(lambda value: f"{float(value):+.2f}%")
+    board["Avg Move"] = board["AvgDirReturnPct"].map(lambda value: f"{float(value):+.2f}%")
     board = board.rename(columns={"symbol": "Coin"})
-    return board[["Coin", "Mode", "Follow-Through", "Resolved", "Best TF", "Avg Dir Return"]].reset_index(drop=True)
+    return board[["Coin", "Mode", "Follow-Through", "Resolved", "Best TF", "Avg Move"]].reset_index(drop=True)
 
 
 def _selected_dataframe_row_index(selection_state: object) -> int | None:
@@ -501,26 +598,26 @@ def _selected_best_signal_coin(leaderboard_df: pd.DataFrame, selection_state: ob
 def _learning_readiness_summary(*, mode: str, current_rows: int, total_rows: int) -> tuple[str, str]:
     if mode == "current_only":
         return (
-            f"<b>Learning active</b><br>{int(current_rows)} learned rows in this archive window",
+            f"<b>Learning active</b><br>{int(current_rows)} signals in this history window",
             "positive",
         )
     if mode == "mixed_fallback":
         return (
-            f"<b>Broader archive learning</b><br>{int(current_rows)} matched rows inside {int(total_rows)} recent resolved rows",
+            f"<b>Broader archive read</b><br>{int(current_rows)} matching signals inside {int(total_rows)} recent completed signals",
             "warning",
         )
     if mode == "unversioned_fallback":
         return (
-            "<b>Older archive learning</b><br>Current learning history is not isolated yet",
+            "<b>Older archive read</b><br>Current-version history is still separating",
             "warning",
         )
     if mode == "empty":
         return (
-            "<b>No resolved history yet</b><br>Learning turns on after the first resolved archive rows",
+            "<b>No completed history yet</b><br>Learning turns on after the first completed signals",
             "neutral",
         )
     return (
-        f"<b>Learning building</b><br>{int(current_rows)} learned rows in this archive window",
+        f"<b>Learning building</b><br>{int(current_rows)} signals in this history window",
         "neutral",
     )
 
@@ -547,15 +644,504 @@ def _hold_guidance_cell(snapshot: Mapping[str, object], *, direction_label: str 
         best_bar = int(snapshot.get("best_bar") or 0)
         fade_after_bar = int(snapshot.get("fade_after_bar") or 0)
         if best_bar > 0 and fade_after_bar > best_bar:
-            best_label = f"Best at {best_bar} bars, fades after {fade_after_bar}"
+            best_label = f"Best at {_format_bar_count(best_bar)}, fades after {_format_bar_count(fade_after_bar)}"
         elif best_bar > 0:
-            best_label = f"Best at {best_bar} bars"
+            best_label = f"Best at {_format_bar_count(best_bar)}"
         else:
             best_label = str(snapshot.get("best_label") or "").strip() or "around 0 bars"
         return best_label
     if resolved_signals > 0:
-        return f"Building ({resolved_signals} resolved)"
+        return f"Building ({resolved_signals} completed)"
     return "—"
+
+
+def _projection_float(value: object, default: float = 0.0) -> float:
+    try:
+        out = float(value)
+    except Exception:
+        return float(default)
+    if pd.isna(out):
+        return float(default)
+    return float(out)
+
+
+def _format_projection_price(value: object) -> str:
+    price = _projection_float(value, 0.0)
+    if price <= 0:
+        return ""
+    if price >= 1000:
+        return f"${price:,.2f}"
+    if price >= 1:
+        return f"${price:,.4f}"
+    if price >= 0.01:
+        return f"${price:,.6f}"
+    if price >= 0.0001:
+        return f"${price:,.8f}"
+    return f"${price:,.10f}"
+
+
+def _format_projection_pct(value: object, *, signed: bool = True) -> str:
+    number = _projection_float(value, 0.0)
+    return f"{number:+.2f}%" if signed else f"{number:.2f}%"
+
+
+def _format_bar_count(value: object) -> str:
+    bars = int(_projection_float(value, 0.0))
+    return f"{bars} bar" if bars == 1 else f"{bars} bars"
+
+
+def _format_directional_projection_range(low_pct: object, high_pct: object, direction_key: str) -> str:
+    low = abs(_projection_float(low_pct, 0.0))
+    high = abs(_projection_float(high_pct, 0.0))
+    low, high = sorted([low, high])
+    if str(direction_key or "").strip().upper() == "DOWNSIDE":
+        return f"-{low:.2f}% to -{high:.2f}%"
+    return f"+{low:.2f}% to +{high:.2f}%"
+
+
+def _projection_direction_key(value: object) -> str:
+    return _archive_direction_key(value)
+
+
+def _expected_path_read_quality(sample: int) -> str:
+    if int(sample) >= 32:
+        return "Strong"
+    if int(sample) >= 16:
+        return "Good"
+    return "Thin"
+
+
+def _with_expected_path_reference_price(
+    snapshot: Mapping[str, object],
+    reference_price: object,
+    reference_label: str = "latest close",
+) -> dict[str, object]:
+    out = dict(snapshot)
+    ref_price = _projection_float(reference_price, 0.0)
+    if ref_price <= 0:
+        return out
+
+    direction_key = str(out.get("direction") or "").strip().upper()
+    lower_return = abs(_projection_float(out.get("best_zone_low_pct"), 0.0))
+    upper_return = abs(_projection_float(out.get("best_zone_high_pct"), 0.0))
+    lower_return, upper_return = sorted([lower_return, upper_return])
+    normal_pullback = max(0.0, abs(_projection_float(out.get("normal_pullback_pct"), 0.0)))
+
+    if direction_key == "DOWNSIDE":
+        p1 = ref_price * (1.0 - lower_return / 100.0)
+        p2 = ref_price * (1.0 - upper_return / 100.0)
+        pullback_price = ref_price * (1.0 + normal_pullback / 100.0)
+    else:
+        p1 = ref_price * (1.0 + lower_return / 100.0)
+        p2 = ref_price * (1.0 + upper_return / 100.0)
+        pullback_price = ref_price * (1.0 - normal_pullback / 100.0)
+
+    price_low, price_high = sorted([p1, p2])
+    out.update(
+        {
+            "reference_price": ref_price,
+            "reference_price_label": str(reference_label or "latest close").strip() or "latest close",
+            "price_zone_label": f"{_format_projection_price(price_low)} - {_format_projection_price(price_high)}",
+            "pullback_price_label": _format_projection_price(pullback_price),
+        }
+    )
+    return out
+
+
+def _fetch_expected_path_reference_price(fetch_ohlcv, symbol: str, timeframe: str) -> tuple[float | None, str]:
+    if not callable(fetch_ohlcv):
+        return None, ""
+    symbol_text = str(symbol or "").strip().upper()
+    timeframe_text = str(timeframe or "").strip().lower()
+    if not symbol_text or not timeframe_text or timeframe_text == "all":
+        return None, ""
+    symbol_candidates = [symbol_text]
+    if "/" not in symbol_text:
+        symbol_candidates.extend([f"{symbol_text}/USDT", f"{symbol_text}/USD"])
+    seen: set[str] = set()
+    for candidate in symbol_candidates:
+        candidate = str(candidate or "").strip().upper()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            df = fetch_ohlcv(candidate, timeframe_text, limit=6)
+        except Exception:
+            continue
+        if df is None or getattr(df, "empty", True) or "close" not in getattr(df, "columns", []):
+            continue
+        closes = pd.to_numeric(df["close"], errors="coerce").dropna()
+        if closes.empty:
+            continue
+        return float(closes.iloc[-1]), "latest close"
+    return None, ""
+
+
+def _format_archive_reference_label(ts: object, *, stale: bool) -> str:
+    prefix = "last archived price" if stale else "latest archived price"
+    parsed = pd.to_datetime(ts, utc=True, errors="coerce")
+    if pd.isna(parsed):
+        return prefix
+    return f"{prefix}, {pd.Timestamp(parsed).strftime('%b %d')}"
+
+
+def _expected_path_timing_label(snapshot: Mapping[str, object]) -> str:
+    bars = int(snapshot.get("best_bar") or 0)
+    timeframe = str(snapshot.get("timeframe") or "").strip().upper()
+    if bars <= 0 or not timeframe:
+        return ""
+    candle_label = "candle" if bars == 1 else "candles"
+    return f"next {bars} {candle_label} on {timeframe}"
+
+
+def _expected_path_reference_price(
+    df_events: pd.DataFrame,
+    *,
+    timeframe: str,
+    direction: str,
+    now: object | None = None,
+    max_age_hours: int = 48,
+) -> tuple[float | None, str]:
+    if df_events is None or df_events.empty or "price" not in df_events.columns:
+        return None, ""
+    d = df_events.copy()
+    if "timeframe" in d.columns:
+        d = d[d["timeframe"].fillna("").astype(str).str.strip().str.lower().eq(str(timeframe).lower())].copy()
+    if "direction" in d.columns:
+        d["__direction"] = d["direction"].map(_projection_direction_key)
+        d = d[d["__direction"].eq(str(direction).upper())].copy()
+    d["__price"] = pd.to_numeric(d.get("price"), errors="coerce")
+    d = d[d["__price"].notna() & (d["__price"] > 0)].copy()
+    if d.empty:
+        return None, ""
+    if "event_time" in d.columns:
+        d["__event_ts"] = pd.to_datetime(d["event_time"], utc=True, errors="coerce")
+        d = d.sort_values("__event_ts", ascending=False)
+        latest = d.iloc[0]
+        ts = latest.get("__event_ts")
+        if pd.notna(ts):
+            now_ts = pd.to_datetime(now, utc=True, errors="coerce") if now is not None else pd.Timestamp.now(tz="UTC")
+            if pd.notna(now_ts):
+                age_hours = max(0.0, float((pd.Timestamp(now_ts) - pd.Timestamp(ts)).total_seconds()) / 3600.0)
+                return (
+                    float(latest["__price"]),
+                    _format_archive_reference_label(ts, stale=age_hours > float(max_age_hours)),
+                )
+    latest_price = float(d.iloc[0]["__price"])
+    return latest_price, "latest archived price"
+
+
+def _expected_path_snapshot_for_group(
+    *,
+    events_df: pd.DataFrame,
+    windows_df: pd.DataFrame,
+    symbol_filter: str,
+    timeframe: str,
+    direction: str,
+    min_samples: int,
+    now: object | None = None,
+) -> dict[str, object]:
+    empty = {
+        "available": False,
+        "symbol": str(symbol_filter or "").strip().upper(),
+        "timeframe": str(timeframe or "").strip().lower(),
+        "direction": str(direction or "").strip().upper(),
+        "sample": 0,
+    }
+    if events_df is None or events_df.empty or windows_df is None or windows_df.empty:
+        return empty
+    required_event_cols = {"signal_key", "timeframe", "direction"}
+    required_window_cols = {"signal_key", "bars_ahead", "directional_return_pct", "adverse_excursion_pct"}
+    if not required_event_cols.issubset(events_df.columns) or not required_window_cols.issubset(windows_df.columns):
+        return empty
+
+    e = events_df.copy()
+    e["signal_key"] = e["signal_key"].fillna("").astype(str).str.strip()
+    e["timeframe"] = e["timeframe"].fillna("").astype(str).str.strip().str.lower()
+    e["__direction"] = e["direction"].map(_projection_direction_key)
+    status = e.get("status", pd.Series(index=e.index, dtype=object)).fillna("").astype(str).str.upper()
+    e = e[
+        e["signal_key"].ne("")
+        & e["timeframe"].eq(str(timeframe).strip().lower())
+        & e["__direction"].eq(str(direction).strip().upper())
+        & status.eq("RESOLVED")
+    ].copy()
+    if e.empty:
+        return empty
+
+    w = windows_df.copy()
+    w["signal_key"] = w["signal_key"].fillna("").astype(str).str.strip()
+    w["bars_ahead"] = pd.to_numeric(w["bars_ahead"], errors="coerce")
+    w["directional_return_pct"] = pd.to_numeric(w["directional_return_pct"], errors="coerce")
+    w["adverse_excursion_pct"] = pd.to_numeric(w["adverse_excursion_pct"], errors="coerce")
+    w = w[
+        w["signal_key"].ne("")
+        & w["bars_ahead"].notna()
+        & w["directional_return_pct"].notna()
+        & w["adverse_excursion_pct"].notna()
+    ].copy()
+    if w.empty:
+        return empty
+
+    merged = w.merge(e[["signal_key", "timeframe", "__direction", "price", "event_time"] if {"price", "event_time"}.issubset(e.columns) else ["signal_key", "timeframe", "__direction"]], on="signal_key", how="inner")
+    if merged.empty:
+        return empty
+    sample = int(merged["signal_key"].nunique())
+    if sample < int(min_samples):
+        out = dict(empty)
+        out.update({"sample": sample, "read_quality": "Building"})
+        return out
+
+    by_bar_rows: list[dict[str, object]] = []
+    for bar, group in merged.groupby("bars_ahead", dropna=True):
+        bar_sample = int(group["signal_key"].nunique())
+        if bar_sample < max(3, min(int(min_samples), 8)):
+            continue
+        returns = pd.to_numeric(group["directional_return_pct"], errors="coerce").dropna()
+        adverse = pd.to_numeric(group["adverse_excursion_pct"], errors="coerce").dropna()
+        if returns.empty:
+            continue
+        median_return = float(returns.median())
+        if median_return <= 0.0:
+            continue
+        adverse_median = float(adverse.median()) if not adverse.empty else 0.0
+        follow_through = float((returns > 0.0).mean() * 100.0)
+        path_score = median_return - (0.30 * adverse_median) + ((follow_through - 50.0) / 100.0)
+        by_bar_rows.append(
+            {
+                "bars_ahead": int(bar),
+                "sample": bar_sample,
+                "median_return": median_return,
+                "lower_return": float(returns.quantile(0.40)),
+                "upper_return": float(returns.quantile(0.75)),
+                "normal_pullback": max(0.0, float(adverse.quantile(0.65)) if not adverse.empty else 0.0),
+                "follow_through": follow_through,
+                "path_score": path_score,
+            }
+        )
+    if not by_bar_rows:
+        out = dict(empty)
+        out.update({"sample": sample, "read_quality": _expected_path_read_quality(sample)})
+        return out
+
+    by_bar_rows.sort(key=lambda row: (float(row["path_score"]), float(row["median_return"]), int(row["sample"])), reverse=True)
+    best = by_bar_rows[0]
+    best_bar = int(best["bars_ahead"])
+    best_median = float(best["median_return"])
+    fade_after_bar = 0
+    for row in sorted([r for r in by_bar_rows if int(r["bars_ahead"]) > best_bar], key=lambda r: int(r["bars_ahead"])):
+        if float(row["median_return"]) <= max(0.05, best_median * 0.65) or float(row["follow_through"]) < 50.0:
+            fade_after_bar = int(row["bars_ahead"])
+            break
+
+    ref_price, ref_label = _expected_path_reference_price(
+        merged,
+        timeframe=str(timeframe).strip().lower(),
+        direction=str(direction).strip().upper(),
+        now=now,
+    )
+    lower_return = float(min(best["lower_return"], best["upper_return"]))
+    upper_return = float(max(best["lower_return"], best["upper_return"]))
+    normal_pullback = float(best["normal_pullback"])
+
+    score = (
+        float(best["path_score"])
+        + min(1.5, sample / 24.0)
+        + (0.25 if _expected_path_read_quality(sample) == "Strong" else 0.0)
+    )
+    snapshot = {
+        "available": True,
+        "symbol": str(symbol_filter or "").strip().upper(),
+        "timeframe": str(timeframe or "").strip().lower(),
+        "direction": str(direction or "").strip().upper(),
+        "sample": sample,
+        "read_quality": _expected_path_read_quality(sample),
+        "best_bar": best_bar,
+        "fade_after_bar": fade_after_bar,
+        "best_zone_low_pct": lower_return,
+        "best_zone_high_pct": upper_return,
+        "normal_pullback_pct": normal_pullback,
+        "follow_through_pct": float(best["follow_through"]),
+        "score": float(score),
+        "reference_price": ref_price,
+        "reference_price_label": ref_label,
+        "price_zone_label": "",
+        "pullback_price_label": "",
+    }
+    return _with_expected_path_reference_price(snapshot, ref_price, ref_label)
+
+
+def _build_expected_path_projection(
+    *,
+    df_events: pd.DataFrame,
+    df_forward_windows: pd.DataFrame,
+    symbol_filter: str,
+    timeframe_filter: str,
+    min_samples: int = 8,
+    now: object | None = None,
+) -> dict[str, object]:
+    empty = {"available": False, "symbol": str(symbol_filter or "").strip().upper(), "sample": 0}
+    if df_events is None or df_events.empty or df_forward_windows is None or df_forward_windows.empty:
+        return empty
+    if "timeframe" not in df_events.columns or "direction" not in df_events.columns:
+        return empty
+    timeframe_text = str(timeframe_filter or "").strip().lower()
+    available_timeframes = set(df_events["timeframe"].fillna("").astype(str).str.strip().str.lower().tolist())
+    available_timeframes.discard("")
+    timeframes = _ordered_timeframe_scope(
+        timeframe_filter=timeframe_filter,
+        available_timeframes=available_timeframes,
+    )
+    if timeframe_text and timeframe_text != "all":
+        timeframes = [timeframe_text]
+    snapshots: list[dict[str, object]] = []
+    for timeframe in timeframes:
+        for direction in ("UPSIDE", "DOWNSIDE"):
+            snap = _expected_path_snapshot_for_group(
+                events_df=df_events,
+                windows_df=df_forward_windows,
+                symbol_filter=symbol_filter,
+                timeframe=timeframe,
+                direction=direction,
+                min_samples=min_samples,
+                now=now,
+            )
+            if bool(snap.get("available")):
+                snapshots.append(snap)
+    if not snapshots:
+        return empty
+    snapshots.sort(
+        key=lambda snap: (
+            float(snap.get("score") or 0.0),
+            float(snap.get("follow_through_pct") or 0.0),
+            int(snap.get("sample") or 0),
+        ),
+        reverse=True,
+    )
+    return snapshots[0]
+
+
+def _expected_path_body_html(snapshot: Mapping[str, object]) -> str:
+    if not bool(snapshot.get("available")):
+        return ""
+    symbol = html.escape(str(snapshot.get("symbol") or "").strip().upper() or "Coin")
+    timeframe = html.escape(str(snapshot.get("timeframe") or "").strip().upper())
+    direction_key = str(snapshot.get("direction") or "").strip().upper()
+    direction = "Upside" if direction_key == "UPSIDE" else ("Downside" if direction_key == "DOWNSIDE" else "Direction")
+    direction_escaped = html.escape(direction)
+    move_hint = "usual upside window" if direction_key == "UPSIDE" else "usual downside window"
+    move_pct = _format_directional_projection_range(
+        snapshot.get("best_zone_low_pct"),
+        snapshot.get("best_zone_high_pct"),
+        direction_key,
+    )
+    price_zone = str(snapshot.get("price_zone_label") or "").strip()
+    pullback_pct = _projection_float(snapshot.get("normal_pullback_pct"), 0.0)
+    if direction_key == "DOWNSIDE":
+        pullback_pct_label = f"+{pullback_pct:.2f}% against the setup"
+    else:
+        pullback_pct_label = f"-{pullback_pct:.2f}%"
+    pullback = pullback_pct_label
+    pullback_price = str(snapshot.get("pullback_price_label") or "").strip()
+    if pullback_price:
+        pullback = f"{pullback} ({html.escape(pullback_price)})"
+    fade_after = int(snapshot.get("fade_after_bar") or 0)
+    fade_text = _format_bar_count(fade_after) if fade_after > 0 else "not clear yet"
+    quality = html.escape(str(snapshot.get("read_quality") or "Thin"))
+    sample = int(snapshot.get("sample") or 0)
+    reference_price = _projection_float(snapshot.get("reference_price"), 0.0)
+    reference_label = html.escape(str(snapshot.get("reference_price_label") or "latest close"))
+    timing_label = html.escape(_expected_path_timing_label(snapshot))
+    timing_html = f"Timing: <b>{timing_label}</b><br>" if timing_label else ""
+    if price_zone and reference_price > 0:
+        return (
+            f"<b>{symbol} {timeframe} {direction_escaped}</b><br>"
+            f"Reference price: <b>{_format_projection_price(reference_price)}</b> "
+            f"<span style='opacity:0.70;'>({reference_label})</span><br>"
+            f"Expected zone: <b>{html.escape(price_zone)}</b><br>"
+            f"{timing_html.replace('Timing:', 'Best path window:', 1)}"
+            f"Move from that price: <b>{html.escape(move_pct)}</b> "
+            f"<span style='opacity:0.70;'>({html.escape(move_hint)})</span><br>"
+            f"Normal shakeout: <b>{html.escape(pullback_price or pullback)}</b> "
+            f"<span style='opacity:0.70;'>({html.escape(pullback_pct_label)}, can still be normal)</span><br>"
+            f"Path weakens after: <b>{html.escape(fade_text)}</b><br>"
+            f"History depth: <b>{quality}</b> ({sample} similar signals)<br>"
+            "<span style='opacity:0.72;'>Price path from similar past signals, not a price target. Hold window above is the efficiency read.</span>"
+        )
+    return (
+        f"<b>{symbol} {timeframe} {direction_escaped}</b><br>"
+        f"Expected move: <b>{html.escape(move_pct)}</b> "
+        f"<span style='opacity:0.70;'>({html.escape(move_hint)})</span><br>"
+        f"{timing_html.replace('Timing:', 'Best path window:', 1)}"
+        f"Normal shakeout: <b>{pullback}</b> "
+        "<span style='opacity:0.70;'>(can still be normal)</span><br>"
+        f"Path weakens after: <b>{html.escape(fade_text)}</b><br>"
+        f"History depth: <b>{quality}</b> ({sample} similar signals)<br>"
+        "<span style='opacity:0.72;'>Price path from similar past signals, not a price target. Hold window above is the efficiency read.</span>"
+    )
+
+
+def _expected_path_building_body_html(
+    *,
+    symbol_filter: str,
+    timeframe_filter: str,
+    df_events: pd.DataFrame,
+    df_forward_windows: pd.DataFrame,
+    min_samples: int = 8,
+) -> str:
+    symbol = html.escape(str(symbol_filter or "").strip().upper() or "Coin")
+    timeframe_text = str(timeframe_filter or "").strip()
+    scope_label = timeframe_text.upper() if timeframe_text and timeframe_text != "All" else "this scope"
+    if df_events is None or df_events.empty:
+        return (
+            f"<b>{symbol} path is still building.</b><br>"
+            f"No completed signals are loaded for <b>{html.escape(scope_label)}</b> yet."
+        )
+    if "timeframe" not in df_events.columns or "direction" not in df_events.columns:
+        return (
+            f"<b>{symbol} path is still building.</b><br>"
+            "This view does not have enough timing data yet."
+        )
+    d = df_events.copy()
+    d["timeframe"] = d["timeframe"].fillna("").astype(str).str.strip().str.lower()
+    d["__direction_key"] = d["direction"].map(_archive_direction_key)
+    status = d.get("status", pd.Series(index=d.index, dtype=object)).fillna("").astype(str).str.upper()
+    d = d[status.eq("RESOLVED") & d["__direction_key"].isin({"UPSIDE", "DOWNSIDE"})].copy()
+    timeframe_key = timeframe_text.lower()
+    if timeframe_key and timeframe_key != "all":
+        d = d[d["timeframe"].eq(timeframe_key)].copy()
+    if d.empty:
+        return (
+            f"<b>{symbol} path is still building.</b><br>"
+            f"No upside/downside history is ready for <b>{html.escape(scope_label)}</b> yet."
+        )
+    if "signal_key" not in d.columns:
+        return (
+            f"<b>{symbol} path is still building.</b><br>"
+            "History exists, but timing is not linked yet."
+        )
+    directional_count = int(d["signal_key"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique())
+    window_keys: set[str] = set()
+    if df_forward_windows is not None and not df_forward_windows.empty and "signal_key" in df_forward_windows.columns:
+        window_keys = set(df_forward_windows["signal_key"].fillna("").astype(str).str.strip())
+        window_keys.discard("")
+    checkpoint_count = int(
+        d[d["signal_key"].fillna("").astype(str).str.strip().isin(window_keys)]["signal_key"].nunique()
+        if window_keys
+        else 0
+    )
+    need = int(max(1, min_samples))
+    if checkpoint_count < need:
+        return (
+            f"<b>{symbol} path is still building.</b><br>"
+            f"<b>{html.escape(scope_label)}</b> has <b>{checkpoint_count}/{need}</b> timed examples ready "
+            f"(<b>{directional_count}</b> completed signals found). "
+            "Expected Path appears once enough similar signals finish their timing window."
+        )
+    return (
+        f"<b>{symbol} path is still building.</b><br>"
+        f"<b>{html.escape(scope_label)}</b> has enough timed examples, but no clean price zone passed the quality filter yet."
+    )
 
 
 def _missing_hold_backfill_count(df_events: pd.DataFrame, df_forward_windows: pd.DataFrame) -> int:
@@ -726,9 +1312,9 @@ def _build_coin_timeframe_intelligence_bundle(
             {
                 "_order": timeframe_order.get(timeframe_key, 999),
                 "Timeframe": timeframe_label,
-                "Resolved": resolved,
+                "Completed": resolved,
                 "Follow-Through": f"{follow_through_pct:.1f}%" if resolved > 0 else "N/A",
-                "Avg Dir Return": f"{avg_dir_return_pct:+.2f}%" if resolved > 0 else "N/A",
+                "Avg Move": f"{avg_dir_return_pct:+.2f}%" if resolved > 0 else "N/A",
                 "Upside Hold": str(hold_row.get("Upside Hold") or "—"),
                 "Downside Hold": str(hold_row.get("Downside Hold") or "—"),
             }
@@ -737,7 +1323,7 @@ def _build_coin_timeframe_intelligence_bundle(
     display_df = pd.DataFrame(display_rows)
     if not display_df.empty:
         display_df = (
-            display_df.sort_values(["_order", "Resolved"], ascending=[True, False])
+            display_df.sort_values(["_order", "Completed"], ascending=[True, False])
             .drop(columns=["_order"])
             .reset_index(drop=True)
         )
@@ -777,6 +1363,14 @@ def _load_coin_timeframe_frames(
     for timeframe_key in timeframe_scope:
         if str(timeframe_filter or "").strip() != "All" and isinstance(base_events, pd.DataFrame):
             tf_events = base_events.copy()
+            if not tf_events.empty and "timeframe" in tf_events.columns:
+                tf_events = tf_events[
+                    tf_events["timeframe"].fillna("").astype(str).str.strip().str.lower().eq(timeframe_key)
+                ].copy()
+            if str(status_filter or "").strip() != "All" and not tf_events.empty and "status" in tf_events.columns:
+                tf_events = tf_events[
+                    tf_events["status"].fillna("").astype(str).str.upper().eq(str(status_filter).strip().upper())
+                ].copy()
         else:
             tf_events = fetch_signal_events_df(
                 limit=int(analysis_limit),
@@ -878,8 +1472,7 @@ def _prepare_section_cards(
             {
                 "title": "Still Building",
                 "body_html": (
-                    f"Still building: <b>{preview}</b>{extra}. "
-                    "These need more resolved signals or journaled closed trades before they become trustworthy."
+                    f"Still building: <b>{preview}</b>{extra}. More completed signals or closed trades needed."
                 ),
                 "tone": "neutral",
             }
@@ -893,12 +1486,12 @@ def _execution_vs_system_note(execution_snapshot: dict[str, float]) -> tuple[str
     actual_closed = float(execution_snapshot.get("actual_closed", 0.0) or 0.0)
     if taken <= 0.0 and actual_closed <= 0.0:
         return (
-            "Execution journal is still building. The system archive is live, but you have not journaled any taken trades yet.",
+            "Execution journal is empty. Mark taken trades to compare your execution with the system.",
             "neutral",
         )
     if taken_resolved < _MIN_EXECUTION_ARCHIVE_ROWS or actual_closed < _MIN_EXECUTION_ARCHIVE_ROWS:
         return (
-            "Execution archive is still thin. Use this section directionally for now, but wait for more journaled trades before trusting hard conclusions.",
+            "Execution sample is still thin. Use this as a rough read for now.",
             "neutral",
         )
     return (
@@ -931,7 +1524,7 @@ def _build_execution_review_cards(execution_snapshot: dict[str, float]) -> list[
         return [
             _archive_building_card(
                 "Manual Marking",
-                "No signals are in this view yet, so execution review is still waiting for archive data.",
+                "No signals are in this view yet, so execution review is still waiting for history.",
             )
         ]
 
@@ -939,7 +1532,7 @@ def _build_execution_review_cards(execution_snapshot: dict[str, float]) -> list[
         cards.append(
             _archive_building_card(
                 "Manual Marking",
-                "No setups in this view have been tagged as <b>Taken</b>, <b>Skipped</b>, or <b>Observed</b> yet. Start there before reading execution conclusions.",
+                "No setups are tagged yet. Mark them as <b>Taken</b>, <b>Skipped</b>, or <b>Observed</b> before reading execution quality.",
             )
         )
     elif overlay_coverage_pct < 50.0:
@@ -949,7 +1542,7 @@ def _build_execution_review_cards(execution_snapshot: dict[str, float]) -> list[
                 "body_html": (
                     f"Only <b>{overlay_marked}/{total}</b> setups in this view are tagged "
                     f"(<b>{overlay_coverage_pct:.1f}% coverage</b>). "
-                    "Tag more setups first so skipped-winner and execution-gap reads become trustworthy."
+                    "Tag more setups first so the execution read becomes reliable."
                 ),
                 "tone": "warning",
             }
@@ -970,7 +1563,7 @@ def _build_execution_review_cards(execution_snapshot: dict[str, float]) -> list[
         cards.append(
             _archive_building_card(
                 "Trade Journal",
-                "You have not marked any setups as <b>Taken</b> in this view yet, so the real execution archive is still building.",
+                "No setups are marked as <b>Taken</b> yet. Add taken trades before reading real execution quality.",
             )
         )
     elif actual_closed < _MIN_EXECUTION_ARCHIVE_ROWS:
@@ -978,8 +1571,8 @@ def _build_execution_review_cards(execution_snapshot: dict[str, float]) -> list[
             _archive_building_card(
                 "Trade Journal",
                 (
-                    f"<b>{taken}</b> taken setup(s) are marked, but only <b>{actual_closed}</b> closed trade(s) are journaled. "
-                    "Add real exits before trusting realized PnL or win-rate conclusions."
+                    f"<b>{taken}</b> taken setup(s) are marked, but only <b>{actual_closed}</b> closed trade(s) have an exit. "
+                    "Add real exits before reading PnL or win rate."
                 ),
             )
         )
@@ -989,7 +1582,7 @@ def _build_execution_review_cards(execution_snapshot: dict[str, float]) -> list[
                 "title": "Trade Journal",
                 "body_html": (
                     f"Closed-trade journaling is improving, but only <b>{journal_coverage_pct:.1f}% of taken setups</b> in this view have a recorded exit. "
-                    "A few more real exits would make the execution read materially stronger."
+                    "A few more exits will make this read stronger."
                 ),
                 "tone": "warning",
             }
@@ -1009,35 +1602,35 @@ def _build_execution_review_cards(execution_snapshot: dict[str, float]) -> list[
     if taken_resolved < _MIN_EXECUTION_ARCHIVE_ROWS or actual_closed < _MIN_EXECUTION_ARCHIVE_ROWS:
         cards.append(
             _archive_building_card(
-                "Execution Edge",
-                "Execution edge is still building. We need more taken setups to resolve and more closed real trades before comparing system quality to realized execution cleanly.",
+                "Execution Quality",
+                "Execution quality is still building. Add more completed taken setups and closed trades before comparing your results with the signal.",
             )
         )
     else:
         if execution_gap_pct >= 0.5:
             tone = "positive"
             edge_read = (
-                f"Real execution is running <b>{execution_gap_pct:+.2f}% ahead</b> of the signal's directional return on taken trades."
+                f"Your closed trades are running <b>{execution_gap_pct:+.2f}% ahead</b> of the matching signal move."
             )
         elif execution_gap_pct <= -0.5:
             tone = "warning"
             edge_read = (
-                f"Real execution is trailing the signal edge by <b>{execution_gap_pct:+.2f}%</b> on taken trades."
+                f"Your closed trades are trailing the matching signal move by <b>{execution_gap_pct:+.2f}%</b>."
             )
         else:
             tone = "neutral"
             edge_read = (
-                f"Real execution is broadly aligned with the signal edge at <b>{execution_gap_pct:+.2f}%</b>."
+                f"Your closed trades are broadly aligned with the matching signal move at <b>{execution_gap_pct:+.2f}%</b>."
             )
         skipped_read = (
-            f" Skipped winners: <b>{skipped_winners}</b> out of <b>{skipped_resolved}</b> skipped resolved setups "
+            f" Skipped setups that worked: <b>{skipped_winners}</b> out of <b>{skipped_resolved}</b> "
             f"(<b>{skipped_winner_rate:.1f}%</b>)."
             if skipped_resolved > 0
             else ""
         )
         cards.append(
             {
-                "title": "Execution Edge",
+                "title": "Execution Quality",
                 "body_html": edge_read + skipped_read,
                 "tone": tone,
             }
@@ -1064,9 +1657,9 @@ def _build_execution_signal_cards(execution_snapshot: Mapping[str, object]) -> t
         if journal_coverage_pct >= 60.0 and actual_closed >= _MIN_EXECUTION_ARCHIVE_ROWS:
             works_cards.append(
                 {
-                    "title": "Journal Coverage",
+                    "title": "Journal Complete",
                     "body_html": (
-                        f"Real execution archive is usable here: <b>{actual_closed}</b> closed trade(s) across "
+                        f"Trade journal is usable here: <b>{actual_closed}</b> closed trade(s) across "
                         f"<b>{taken}</b> taken setups (<b>{journal_coverage_pct:.1f}% coverage</b>)."
                     ),
                     "tone": "positive",
@@ -1075,11 +1668,11 @@ def _build_execution_signal_cards(execution_snapshot: Mapping[str, object]) -> t
         elif journal_coverage_pct > 0.0:
             fail_cards.append(
                 {
-                    "title": "Thin Journal Coverage",
+                    "title": "Thin Journal",
                     "body_html": (
                         f"Only <b>{journal_coverage_pct:.1f}%</b> of taken setups have a recorded exit "
                         f"(<b>{actual_closed}</b> closed trade(s) across <b>{taken}</b> taken setups). "
-                        "Journal more exits before trusting realized execution conclusions."
+                        "Add more exits before reading real execution quality."
                     ),
                     "tone": "warning",
                 }
@@ -1089,9 +1682,9 @@ def _build_execution_signal_cards(execution_snapshot: Mapping[str, object]) -> t
         if execution_gap_pct >= 0.5:
             works_cards.append(
                 {
-                    "title": "Execution Edge",
+                    "title": "Execution Quality",
                     "body_html": (
-                        f"Taken trades are running <b>{execution_gap_pct:+.2f}%</b> ahead of the signal edge, "
+                        f"Taken trades are running <b>{execution_gap_pct:+.2f}%</b> ahead of the matching signal move, "
                         f"with <b>{actual_win_rate:.1f}%</b> realized win rate across closed trades."
                     ),
                     "tone": "positive",
@@ -1102,8 +1695,8 @@ def _build_execution_signal_cards(execution_snapshot: Mapping[str, object]) -> t
                 {
                     "title": "Execution Drag",
                     "body_html": (
-                        f"Taken trades are trailing the signal edge by <b>{execution_gap_pct:+.2f}%</b>. "
-                        "The system is finding edge, but realized execution is giving some of it back."
+                        f"Taken trades are trailing the matching signal move by <b>{execution_gap_pct:+.2f}%</b>. "
+                        "The signal worked better than the real trade result."
                     ),
                     "tone": "warning",
                 }
@@ -1114,9 +1707,9 @@ def _build_execution_signal_cards(execution_snapshot: Mapping[str, object]) -> t
             {
                 "title": "Missed Winners",
                 "body_html": (
-                    f"<b>{skipped_winners}</b> of <b>{skipped_resolved}</b> skipped resolved setups were winners "
+                    f"<b>{skipped_winners}</b> of <b>{skipped_resolved}</b> skipped setups ended up working "
                     f"(<b>{skipped_winner_rate:.1f}%</b>). "
-                    "Selection discipline may be leaving too much valid edge on the table."
+                    "Your selection filter may be too strict in this pocket."
                 ),
                 "tone": "warning",
             }
@@ -1172,13 +1765,13 @@ def _build_hold_signal_cards(
     )[0]
     works_cards.append(
         {
-            "title": "Best Hold Edge",
+            "title": "Best Hold Window",
             "body_html": (
                 f"<b>{symbol_label} {best_record['timeframe']} {best_record['direction']}</b> has the cleanest hold profile so far "
                 f"({best_record['best_label']}, {best_record['best_style']}, "
                 f"<b>{best_record['follow_through_pct']:.1f}%</b> follow-through, "
-                f"<b>{best_record['avg_dir_return_pct']:+.2f}%</b> avg directional return across "
-                f"<b>{int(best_record['sample'])}</b> checkpoint-matched resolved signals)."
+                f"<b>{best_record['avg_dir_return_pct']:+.2f}%</b> avg move across "
+                    f"<b>{int(best_record['sample'])}</b> similar signals)."
             ),
             "tone": "positive" if float(best_record["avg_dir_return_pct"]) > 0.0 else "neutral",
         }
@@ -1200,13 +1793,13 @@ def _build_hold_signal_cards(
     ):
         fail_cards.append(
             {
-                "title": "Weakest Hold Edge",
+                "title": "Weakest Hold Window",
                 "body_html": (
                     f"<b>{symbol_label} {weakest_record['timeframe']} {weakest_record['direction']}</b> is the weakest current hold profile "
                     f"({weakest_record['best_label']}, {weakest_record['best_style']}, "
                     f"<b>{weakest_record['follow_through_pct']:.1f}%</b> follow-through, "
-                    f"<b>{weakest_record['avg_dir_return_pct']:+.2f}%</b> avg directional return across "
-                    f"<b>{int(weakest_record['sample'])}</b> checkpoint-matched resolved signals)."
+                    f"<b>{weakest_record['avg_dir_return_pct']:+.2f}%</b> avg move across "
+                    f"<b>{int(weakest_record['sample'])}</b> similar signals)."
                 ),
                 "tone": "warning" if float(weakest_record["avg_dir_return_pct"]) < 0.0 or float(weakest_record["follow_through_pct"]) < 45.0 else "neutral",
             }
@@ -1256,7 +1849,7 @@ def _render_compact_cohort_tables(
             summary_df = summary_df.rename(columns={group_field: display_label})
         visible_specs.append((group_field, title, summary_df))
     if not visible_specs:
-        st.caption("No cohort data is available in this view yet.")
+        st.caption("No breakdown data is available in this view yet.")
         return
     cols = st.columns(2, gap="medium")
     for idx, (_, title, summary_df) in enumerate(visible_specs):
@@ -1289,7 +1882,7 @@ def _render_hold_window_cohort_tables(
             summary_df = known_summary_df
         visible_specs.append((group_field, title, summary_df))
     if not visible_specs:
-        st.caption("Hold history is still building in this view. We need more resolved signals with checkpoint history.")
+        st.caption("Timing history is still building in this view.")
         return
     cols = st.columns(2, gap="medium")
     for idx, (_, title, summary_df) in enumerate(visible_specs):
@@ -1312,7 +1905,7 @@ def _render_execution_review_section(
     muted_color: str,
 ) -> None:
     st.markdown("### Execution Review")
-    st.caption("Use this section after the top-level read. It separates system quality from your own execution decisions.")
+    st.caption("Mark what you did and compare it with the system signal.")
     review_cards = _build_execution_review_cards(execution_snapshot)
     _render_insight_card_grid(st, review_cards, columns=3)
     trade_overlay_count = int(execution_snapshot.get("overlay_marked", 0.0) or 0.0)
@@ -1331,8 +1924,7 @@ def _render_execution_review_section(
             f"<div class='market-note-box' style='border:1px solid rgba(0,212,255,0.26); border-left:4px solid {positive_color};"
             " background:rgba(0,212,255,0.04); margin:0.35rem 0 1rem 0;'>"
             f"<b style='color:{positive_color};'>Workflow:</b> "
-            "First tag the setup as Taken, Skipped, or Observed. Then, if you actually took it, add the real entry and exit. "
-            "That keeps system signal quality separate from your own execution."
+            "Tag the setup first. If you took it, add the real entry and exit."
             "</div>"
         ),
         unsafe_allow_html=True,
@@ -1342,23 +1934,23 @@ def _render_execution_review_section(
         st,
         items=[
             {
-                "label": "Overlay Coverage",
+                "label": "Tagged Setups",
                 "value": f"{trade_overlay_count}/{total_signals}",
                 "value_color": positive_color if trade_overlay_count > 0 else muted_color,
-                "subtext": f"{overlay_coverage_pct:.1f}% of this view has a manual execution tag",
+                "subtext": f"{overlay_coverage_pct:.1f}% of this view is tagged",
             },
             {
-                "label": "Journal Coverage",
+                "label": "Journal Complete",
                 "value": f"{closed_trade_count}/{taken_count}",
                 "value_color": positive_color if closed_trade_count > 0 else muted_color,
                 "subtext": (
-                    f"{journal_coverage_pct:.1f}% of taken setups now have a recorded exit"
+                    f"{journal_coverage_pct:.1f}% of taken setups have an exit"
                     if taken_count > 0
                     else "No taken setups in this view yet"
                 ),
             },
             {
-                "label": "Execution Gap",
+                "label": "Real vs Signal",
                 "value": _format_review_metric(
                     execution_gap_pct,
                     available=closed_trade_count > 0,
@@ -1372,9 +1964,9 @@ def _render_execution_review_section(
                     else (negative_color if closed_trade_count > 0 else muted_color)
                 ),
                 "subtext": (
-                    "Avg realized PnL vs signal directional return on taken trades"
+                    "Closed trade result vs matching signal move"
                     if closed_trade_count > 0
-                    else "Execution gap appears after you journal closed trades"
+                    else "Appears after closed trades"
                 ),
             },
             {
@@ -1382,9 +1974,9 @@ def _render_execution_review_section(
                 "value": skipped_winners,
                 "value_color": warning_color if skipped_winners > 0 else muted_color,
                 "subtext": (
-                    f"{skipped_winner_rate:.1f}% of skipped resolved setups were winners"
+                    f"{skipped_winner_rate:.1f}% of skipped setups worked"
                     if skipped_resolved > 0
-                    else "No skipped resolved setups in this view yet"
+                    else "Appears after skipped setups resolve"
                 ),
             },
         ],
@@ -1408,16 +2000,16 @@ def _render_execution_review_section(
                     else (negative_color if closed_trade_count > 0 else muted_color)
                 ),
                 "subtext": (
-                    "Average realized result across journaled closed trades"
+                    "Average result across closed trades"
                     if closed_trade_count > 0
-                    else "Realized PnL appears after you journal closed trades"
+                    else "Appears after closed trades"
                 ),
             },
             {
-                "label": "Taken Resolved",
+                "label": "Taken Completed",
                 "value": int(execution_snapshot.get("taken_resolved", 0.0) or 0.0),
                 "value_color": positive_color if int(execution_snapshot.get("taken_resolved", 0.0) or 0.0) > 0 else muted_color,
-                "subtext": "Taken setups that have already resolved on the archive horizon",
+                "subtext": "Taken setups that reached the timing window",
             },
             {
                 "label": "Taken Follow-Through",
@@ -1434,9 +2026,9 @@ def _render_execution_review_section(
                     else (warning_color if int(execution_snapshot.get("taken_resolved", 0.0) or 0.0) > 0 else muted_color)
                 ),
                 "subtext": (
-                    "Signal follow-through rate across taken resolved setups"
+                    "Follow-through rate across completed taken setups"
                     if int(execution_snapshot.get("taken_resolved", 0.0) or 0.0) > 0
-                    else "Follow-through appears after taken setups resolve"
+                    else "Appears after taken setups complete"
                 ),
             },
             {
@@ -1453,9 +2045,9 @@ def _render_execution_review_section(
                     else (warning_color if closed_trade_count > 0 else muted_color)
                 ),
                 "subtext": (
-                    "Win rate across journaled closed trades"
+                    "Win rate across closed trades"
                     if closed_trade_count > 0
-                    else "Win rate appears after you journal closed trades"
+                    else "Appears after closed trades"
                 ),
             },
         ],
@@ -1768,13 +2360,14 @@ def render(ctx: dict) -> None:
         st,
         title="Signal Archive",
         intro_html=(
-            "Live signal and execution archive. Use this page to review what the dashboard actually logged, "
-            "what you actually took, and whether the gap is in the system or in execution, not as a live entry screen."
+            "Review logged market signals, expected path, and your execution quality. "
+            "This is an archive read, not a live entry screen."
         ),
     )
 
     pending_view_mode = str(st.session_state.pop("signal_review_pending_view_mode", "") or "").strip()
     pending_symbol = _normalize_symbol_filter(st.session_state.pop("signal_review_pending_symbol", ""))
+    pending_timeframe = str(st.session_state.pop("signal_review_pending_timeframe", "") or "").strip()
     pending_notice = str(st.session_state.pop("signal_review_pending_notice", "") or "").strip()
     pending_notice_tone = str(st.session_state.pop("signal_review_pending_notice_tone", "info") or "info")
     if pending_view_mode:
@@ -1782,6 +2375,8 @@ def render(ctx: dict) -> None:
         st.session_state.pop("signal_review_best_signal_leaderboard", None)
     if pending_symbol:
         st.session_state["signal_review_symbol"] = pending_symbol
+    if pending_timeframe in {"5m", "15m", "1h", "4h", "1d"}:
+        st.session_state["signal_review_tf"] = pending_timeframe
     if pending_notice:
         st.session_state["signal_review_tracker_notice"] = pending_notice
         st.session_state["signal_review_tracker_notice_tone"] = pending_notice_tone
@@ -1794,7 +2389,7 @@ def render(ctx: dict) -> None:
         ["Coin", "Best Signal"],
         horizontal=True,
         key="signal_review_view_mode",
-        help="Coin lets you pick the coin yourself. Best Signal auto-selects the strongest follow-through leader.",
+        help="Pick a coin yourself or let the archive choose the strongest coin with enough history.",
     )
     coin_filter_input = ""
     if view_mode == "Coin":
@@ -1803,7 +2398,7 @@ def render(ctx: dict) -> None:
             value="",
             key="signal_review_symbol",
             placeholder="BTC",
-            help="Enter one coin symbol and Signal Archive will build the best coin-specific archive read automatically.",
+            help="Type one coin symbol to load its history.",
         )
     symbol_filter = _normalize_symbol_filter(coin_filter_input)
     timeframe_options = ["All", "5m", "15m", "1h", "4h", "1d"]
@@ -1813,9 +2408,9 @@ def render(ctx: dict) -> None:
         index=0,
         key="signal_review_tf",
         help=(
-            "Best Signal uses this timeframe scope to find the strongest archive leader. All means cross-timeframe search."
+            "All searches every timeframe. A specific timeframe limits Best Signal to that view."
             if view_mode == "Best Signal"
-            else "Coin view uses this timeframe scope to read the archive for your selected coin. All means cross-timeframe read."
+            else "All gives the broadest read. A specific timeframe narrows the coin view."
         ),
     )
     status_filter = "Resolved" if view_mode == "Best Signal" else "All"
@@ -1823,6 +2418,7 @@ def render(ctx: dict) -> None:
     current_market_version = current_decision_version("Market")
     best_signal_selection: dict[str, object] = {"available": False}
     best_signal_scope_df = pd.DataFrame()
+    best_signal_windows_df = pd.DataFrame()
     refresh_limit_pairs = None
 
     if view_mode == "Coin" and not symbol_filter:
@@ -1830,8 +2426,7 @@ def render(ctx: dict) -> None:
             st,
             title="Enter a Coin",
             body_html=(
-                "Add a <b>coin</b> above to unlock the smart archive read. "
-                "Signal Archive will then read the latest learned history for that coin, rank the cleanest timeframe pockets, and surface hold/execution reads automatically."
+                "Type a <b>coin</b> above. Signal Archive will load its timing, expected path, and execution read."
             ),
             tone="neutral",
         )
@@ -1868,8 +2463,22 @@ def render(ctx: dict) -> None:
                 decision_version=current_market_version,
                 db_path=db_path,
             )
+            best_signal_scope_keys = (
+                best_signal_scope_df["signal_key"].fillna("").astype(str).str.strip().drop_duplicates().tolist()
+                if not best_signal_scope_df.empty and "signal_key" in best_signal_scope_df.columns
+                else []
+            )
+            best_signal_windows_df = (
+                fetch_signal_forward_windows_df(
+                    signal_keys=best_signal_scope_keys,
+                    db_path=db_path,
+                )
+                if best_signal_scope_keys
+                else pd.DataFrame()
+            )
             best_signal_selection = _select_best_signal_coin(
                 df_events=best_signal_scope_df,
+                df_forward_windows=best_signal_windows_df,
                 timeframe_filter=timeframe_filter,
             )
             symbol_filter = _normalize_symbol_filter(best_signal_selection.get("symbol"))
@@ -1891,8 +2500,7 @@ def render(ctx: dict) -> None:
             st,
             title="Best Signal Building",
             body_html=(
-                "Signal Archive could not find a trustworthy best-signal leader yet. "
-                "We need more resolved learned history before auto-selection becomes useful."
+                "No leader yet. The archive needs more completed signals with timing history."
             ),
             tone="neutral",
         )
@@ -1933,8 +2541,9 @@ def render(ctx: dict) -> None:
     best_signal_leaderboard_df = (
         _build_best_signal_leaderboard(
             df_events=leaderboard_source_df,
+            df_forward_windows=best_signal_windows_df if view_mode == "Best Signal" else None,
             timeframe_filter=timeframe_filter,
-            limit=5,
+            limit=_BEST_SIGNAL_LEADERBOARD_LIMIT,
         )
         if view_mode == "Best Signal"
         else pd.DataFrame()
@@ -1993,7 +2602,9 @@ def render(ctx: dict) -> None:
 
     if view_mode == "Best Signal" and not best_signal_leaderboard_df.empty:
         st.markdown("### Best Signal Leaderboard")
-        st.caption("Top archive leaders in the same scope. Select a coin to open its full archive read.")
+        st.caption(
+            "Top 10 coins with enough history. Select a row to open the full coin read."
+        )
         leaderboard_state = st.dataframe(
             best_signal_leaderboard_df,
             hide_index=True,
@@ -2013,6 +2624,7 @@ def render(ctx: dict) -> None:
             st.session_state["signal_review_pending_view_mode"] = "Coin"
             st.session_state["signal_review_pending_symbol"] = selected_leaderboard_coin
             if selected_best_tf:
+                st.session_state["signal_review_pending_timeframe"] = selected_best_tf.lower()
                 st.session_state["signal_review_pending_notice"] = (
                     f"Opened {selected_leaderboard_coin} from Best Signal Leaderboard. Best TF: {selected_best_tf}."
                 )
@@ -2029,7 +2641,7 @@ def render(ctx: dict) -> None:
             st.info(str(tracker_notice))
 
     if df_events.empty:
-        st.info("No tracked signals match this coin scope yet. Try another timeframe, switch modes, or let Market log more signals first.")
+        st.info("No signals match this coin/timeframe yet. Try All or let Market log more history.")
         _render_tracker_backup_restore(
             st=st,
             db_path=db_path,
@@ -2061,6 +2673,7 @@ def render(ctx: dict) -> None:
     df_hold_archive_events = (
         fetch_signal_events_df(
             limit=int(analysis_limit),
+            status="RESOLVED",
             source="Market",
             timeframe=None if timeframe_filter == "All" else timeframe_filter,
             symbol=symbol_filter,
@@ -2102,7 +2715,7 @@ def render(ctx: dict) -> None:
             fetch_signal_forward_windows_df=fetch_signal_forward_windows_df,
             symbol_filter=symbol_filter,
             timeframe_filter=timeframe_filter,
-            status_filter=status_filter,
+            status_filter="Resolved",
             current_market_version=current_market_version,
             analysis_limit=int(analysis_limit),
             db_path=db_path,
@@ -2155,7 +2768,7 @@ def render(ctx: dict) -> None:
                 fetch_signal_forward_windows_df=fetch_signal_forward_windows_df,
                 symbol_filter=symbol_filter,
                 timeframe_filter=timeframe_filter,
-                status_filter=status_filter,
+                status_filter="Resolved",
                 current_market_version=current_market_version,
                 analysis_limit=int(analysis_limit),
                 db_path=db_path,
@@ -2198,22 +2811,21 @@ def render(ctx: dict) -> None:
     tone_dir = POSITIVE if resolved_metrics_available and float(snapshot["avg_dir_return"]) >= 0.0 else (NEGATIVE if resolved_metrics_available else TEXT_MUTED)
     tone_mae = NEGATIVE if resolved_metrics_available else TEXT_MUTED
     resolved_metrics_note = (
-        "Current view, resolved signals finishing in their intended direction"
+        "Completed signals that moved in the expected direction"
         if resolved_metrics_available
-        else "No resolved signals in the current view yet"
+        else "Appears after signals complete"
     )
     avg_dir_note = (
-        "Current view directional move after the signal horizon"
+        "Average move after the timing window"
         if resolved_metrics_available
-        else "Directional return appears after signals in this view resolve"
+        else "Appears after signals complete"
     )
     avg_mae_note = (
-        "Average adverse excursion in the current view"
+        "Average worst move against the signal"
         if resolved_metrics_available
-        else "Adverse excursion appears after signals in this view resolve"
+        else "Appears after signals complete"
     )
     st.markdown("### Overview")
-    st.caption("Quick archive + execution read.")
     st.caption(_follow_through_horizon_note(timeframe_filter))
     render_kpi_grid(
         st,
@@ -2225,20 +2837,20 @@ def render(ctx: dict) -> None:
                 "subtext": resolved_metrics_note,
             },
             {
-                "label": "Avg Dir Return",
+                "label": "Avg Move",
                 "value": avg_dir_value,
                 "value_color": tone_dir,
                 "subtext": avg_dir_note,
             },
             {
-                "label": "Signals in View",
+                "label": "Signals",
                 "value": int(snapshot["total"]),
-                "subtext": "Latest archive window for this scope",
+                "subtext": "Signals loaded here",
             },
             {
-                "label": "Resolved in View",
+                "label": "Completed",
                 "value": int(snapshot["resolved"]),
-                "subtext": f"Open in view: {int(snapshot['open'])}",
+                "subtext": f"Open: {int(snapshot['open'])}",
                 "badge_text": _refresh_scope_badge(
                     symbol_filter=symbol_filter,
                     timeframe_filter=timeframe_filter,
@@ -2254,19 +2866,19 @@ def render(ctx: dict) -> None:
         st,
         items=[
             {
-                "label": "Taken Setups",
+                "label": "Taken",
                 "value": taken_count,
                 "value_color": POSITIVE if taken_count > 0 else TEXT_MUTED,
-                "subtext": "Tracked signals you marked as Taken inside this view",
+                "subtext": "Setups marked Taken",
             },
             {
-                "label": "Closed Journaled Trades",
+                "label": "Closed Trades",
                 "value": actual_closed,
                 "value_color": POSITIVE if actual_closed > 0 else TEXT_MUTED,
-                "subtext": "Taken trades in this view with a recorded exit",
+                "subtext": "Taken trades with exits",
             },
             {
-                "label": "Avg MAE",
+                "label": "Avg Drawdown",
                 "value": avg_mae_value,
                 "value_color": tone_mae,
                 "subtext": avg_mae_note,
@@ -2275,7 +2887,7 @@ def render(ctx: dict) -> None:
                 "label": "Live Alerts",
                 "value": active_alerts_count,
                 "value_color": WARNING if active_alerts_count else TEXT_MUTED,
-                "subtext": "Live market alerts active now, outside this view",
+                "subtext": "Active now, outside this archive view",
             },
         ],
         columns=4,
@@ -2283,26 +2895,66 @@ def render(ctx: dict) -> None:
     execution_vs_system_note, execution_vs_system_tone = _execution_vs_system_note(execution_snapshot)
     render_insight_card(
         st,
-        title="Execution vs System",
+        title="Execution Check",
         body_html=execution_vs_system_note,
         tone=execution_vs_system_tone,
     )
-    st.markdown("### Timeframe Intelligence")
-    st.caption("Latest coin archive by timeframe. Hold reads stay direction-specific.")
+    st.markdown("### Timeframe Read")
+    st.caption("Hold columns show efficient timing. Expected Path below shows the historical price route.")
     if autofilled_hold_now > 0:
         st.caption(
-            f"{symbol_filter}: filled {autofilled_hold_now} hold-history row(s) in the background. {missing_hold_backfill} still pending."
+            f"{symbol_filter}: filled {autofilled_hold_now} timing row(s). {missing_hold_backfill} still pending."
         )
     elif missing_hold_backfill > 0:
         st.caption(
-            f"{symbol_filter}: hold history is still filling in the background. {missing_hold_backfill} resolved row(s) still pending."
+            f"{symbol_filter}: timing history is still filling. {missing_hold_backfill} pending."
         )
     else:
-        st.caption(f"Hold history is up to date for {symbol_filter}.")
+        st.caption(f"Timing history is up to date for {symbol_filter}.")
     if timeframe_intelligence_df.empty:
-        st.caption("Timeframe intelligence is still building for this coin.")
+        st.caption("Timeframe read is still building.")
     else:
         st.dataframe(timeframe_intelligence_df, hide_index=True, width="stretch")
+    expected_path_projection = _build_expected_path_projection(
+        df_events=df_hold_archive_events,
+        df_forward_windows=df_hold_archive_windows,
+        symbol_filter=symbol_filter,
+        timeframe_filter=timeframe_filter,
+    )
+    if bool(expected_path_projection.get("available")):
+        live_ref_price, live_ref_label = _fetch_expected_path_reference_price(
+            fetch_ohlcv,
+            str(expected_path_projection.get("symbol") or symbol_filter),
+            str(expected_path_projection.get("timeframe") or timeframe_filter),
+        )
+        if live_ref_price is not None:
+            expected_path_projection = _with_expected_path_reference_price(
+                expected_path_projection,
+                live_ref_price,
+                live_ref_label,
+            )
+        render_insight_card(
+            st,
+            title="Expected Path",
+            body_html=_expected_path_body_html(expected_path_projection),
+            tone=(
+                "positive"
+                if float(expected_path_projection.get("follow_through_pct") or 0.0) >= 55.0
+                else "neutral"
+            ),
+        )
+    else:
+        render_insight_card(
+            st,
+            title="Expected Path Building",
+            body_html=_expected_path_building_body_html(
+                symbol_filter=symbol_filter,
+                timeframe_filter=timeframe_filter,
+                df_events=df_hold_archive_events,
+                df_forward_windows=df_hold_archive_windows,
+            ),
+            tone="neutral",
+        )
 
     if "session_bucket" in df_events.columns:
         df_events["Session"] = df_events["session_bucket"].replace("", "Unknown").fillna("Unknown")
@@ -2344,8 +2996,8 @@ def render(ctx: dict) -> None:
                 "body_html": (
                     f"<b>{str(strongest_timeframe['timeframe']).upper()}</b> is the cleanest current pocket for <b>{symbol_filter}</b> "
                     f"({float(strongest_timeframe['FollowThroughPct']):.1f}% follow-through, "
-                    f"<b>{float(strongest_timeframe['AvgDirReturnPct']):+.2f}%</b> avg directional return across "
-                    f"{int(strongest_timeframe['Resolved'])} resolved signals)."
+                    f"<b>{float(strongest_timeframe['AvgDirReturnPct']):+.2f}%</b> avg move across "
+                    f"{int(strongest_timeframe['Resolved'])} completed signals)."
                 ),
                 "tone": "positive" if float(strongest_timeframe["AvgDirReturnPct"]) >= 0.0 else "neutral",
             }
@@ -2356,8 +3008,8 @@ def render(ctx: dict) -> None:
                 "body_html": (
                     f"<b>{str(weakest_timeframe['timeframe']).upper()}</b> is currently the weakest pocket for <b>{symbol_filter}</b> "
                     f"({float(weakest_timeframe['FollowThroughPct']):.1f}% follow-through, "
-                    f"<b>{float(weakest_timeframe['AvgDirReturnPct']):+.2f}%</b> avg directional return across "
-                    f"{int(weakest_timeframe['Resolved'])} resolved signals)."
+                    f"<b>{float(weakest_timeframe['AvgDirReturnPct']):+.2f}%</b> avg move across "
+                    f"{int(weakest_timeframe['Resolved'])} completed signals)."
                 ),
                 "tone": "warning" if float(weakest_timeframe["FollowThroughPct"]) < 45.0 or float(weakest_timeframe["AvgDirReturnPct"]) < 0.0 else "neutral",
             }
@@ -2368,8 +3020,8 @@ def render(ctx: dict) -> None:
             _archive_building_card(
                 "Timeframe Spread",
                 (
-                    f"Only <b>{str(only_timeframe['timeframe']).upper()}</b> has enough resolved history for <b>{symbol_filter}</b> so far "
-                    f"({int(only_timeframe['Resolved'])} resolved signals). We need more timeframe variety before ranking strongest vs weakest."
+                    f"Only <b>{str(only_timeframe['timeframe']).upper()}</b> has enough history for <b>{symbol_filter}</b> so far "
+                    f"({int(only_timeframe['Resolved'])} completed signals). We need more timeframe variety before ranking strongest vs weakest."
                 ),
             )
         )
@@ -2377,7 +3029,7 @@ def render(ctx: dict) -> None:
         works_cards.append(
             _archive_building_card(
                 "Timeframe Spread",
-                "Timeframe history is still building for this coin. We need more resolved signals before ranking the cleanest pockets.",
+                "Timeframe history is still building for this coin. We need more completed signals before ranking the cleanest pockets.",
             )
         )
 
@@ -2422,10 +3074,10 @@ def render(ctx: dict) -> None:
             {
                 "title": "Best Session",
                 "body_html": (
-                    f"Execution archive is still building. On the signal side, <b>{best_follow_row['Session']}</b> "
+                    f"Trade journal is still building. On the signal side, <b>{best_follow_row['Session']}</b> "
                     f"is currently the cleanest session for <b>{symbol_filter}</b> "
                     f"({float(best_follow_row['FollowThroughPct']):.1f}% follow-through across "
-                    f"{int(best_follow_row['Resolved'])} resolved signals)."
+                    f"{int(best_follow_row['Resolved'])} completed signals)."
                 ),
                 "tone": "neutral",
             }
@@ -2435,11 +3087,11 @@ def render(ctx: dict) -> None:
     fail_cards = _prepare_section_cards(fail_cards, max_actionable=3)
 
     st.markdown("### What Works")
-    st.caption("Best pockets for this coin right now.")
+    st.caption("Strongest reads for this coin.")
     _render_insight_card_grid(st, works_cards, columns=3)
 
     st.markdown("### What Needs Care")
-    st.caption("Where this coin gets weaker right now.")
+    st.caption("Areas to treat carefully.")
     _render_insight_card_grid(st, fail_cards, columns=3)
 
     _render_execution_review_section(
@@ -2458,17 +3110,17 @@ def render(ctx: dict) -> None:
     detail_toggle_cols = st.columns(2, gap="medium")
     with detail_toggle_cols[0]:
         show_deep_dives = st.toggle(
-            "Show Deep Dives",
+            "Show Details",
             value=False,
             key="signal_review_show_deep_dives",
-            help="Turn this on when you want cohort tables and context breakdowns.",
+            help="Show breakdowns by setup, session, context, and timing.",
         )
     with detail_toggle_cols[1]:
         show_data_tables = st.toggle(
-            "Show Data Tables",
+            "Show Raw Tables",
             value=False,
             key="signal_review_show_data_tables",
-            help="Turn this on when you want source rows, recent alerts, and archive learning tables.",
+            help="Show source rows and archive support tables.",
         )
 
     need_advanced_detail = bool(show_deep_dives or show_data_tables)
@@ -2633,7 +3285,7 @@ def render(ctx: dict) -> None:
         )
     if "actual_trade_status" in advanced_df_events.columns:
         advanced_df_events["Actual Trade Status"] = (
-            advanced_df_events["actual_trade_status"].replace("", "Unjournaled").fillna("Unjournaled")
+            advanced_df_events["actual_trade_status"].replace("", "Not Journaled").fillna("Not Journaled")
         )
     if "actual_exit_reason" in advanced_df_events.columns:
         advanced_df_events["Actual Exit Reason"] = (
@@ -2644,9 +3296,9 @@ def render(ctx: dict) -> None:
     advanced_df_events = _annotate_actual_exit_quality(advanced_df_events)
 
     if show_deep_dives:
-        st.markdown("### Deep Dives")
-        st.caption("Optional cohort detail.")
-        with st.expander("Core Reads", expanded=False):
+        st.markdown("### Details")
+        st.caption("Optional breakdowns.")
+        with st.expander("Core", expanded=False):
             _render_compact_cohort_tables(
                 st,
                 df_events=advanced_df_events,
@@ -2674,7 +3326,7 @@ def render(ctx: dict) -> None:
                 ],
             )
 
-        with st.expander("Execution & Journal", expanded=False):
+        with st.expander("Execution", expanded=False):
             _render_compact_cohort_tables(
                 st,
                 df_events=advanced_df_events,
@@ -2692,7 +3344,7 @@ def render(ctx: dict) -> None:
         if hold_guidance_enabled:
             with st.expander("Timing Detail", expanded=False):
                 st.caption(
-                    "These stay coin-specific. They use resolved signals in the current archive window and sparse forward checkpoints to show where timing gets cleaner or weaker."
+                    "Coin-specific timing reads from completed signals."
                 )
                 _render_hold_window_cohort_tables(
                     st,
@@ -2783,9 +3435,9 @@ def render(ctx: dict) -> None:
             "confidence": "Confidence",
             "ai_confidence": "AI Confidence",
             "plan_outcome": "Plan Outcome",
-            "directional_return_pct": "Dir Return %",
-            "favorable_excursion_pct": "MFE %",
-            "adverse_excursion_pct": "MAE %",
+            "directional_return_pct": "Move %",
+            "favorable_excursion_pct": "Best Move %",
+            "adverse_excursion_pct": "Drawdown %",
             "status": "Status",
             "adaptive_edge_score": "Archive Score",
             "actionable_frame_score": "Hunt Score",
@@ -2801,10 +3453,10 @@ def render(ctx: dict) -> None:
             "actual_pnl_pct": "Actual PnL %",
         }
         recent_df = recent_df.rename(columns=rename_map)
-        st.markdown("### Data Tables")
-        st.caption("Source rows and support tables.")
+        st.markdown("### Raw Tables")
+        st.caption("Source rows for auditing.")
         st.markdown("#### Recent Signals")
-        st.caption(f"Showing latest {min(int(recent_table_limit), int(len(df_events)))} row(s) from this archive scope.")
+        st.caption(f"Showing latest {min(int(recent_table_limit), int(len(df_events)))} rows in this scope.")
         st.dataframe(recent_df.round(2), hide_index=True, width="stretch")
 
         df_alerts = fetch_market_alerts_df(limit=100, source="Market", db_path=db_path)
