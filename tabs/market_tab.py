@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from ui.ctx import get_ctx
 
@@ -21,6 +22,18 @@ from core.ai_spot_bias import (
     ai_spot_bias_status,
     build_ai_spot_bias_snapshot,
 )
+from core.archive_decision import (
+    apply_archive_confidence_guardrail,
+    apply_archive_invalidation_guardrail,
+    archive_decision_observability,
+    archive_decision_score_adjustment,
+    archive_decision_feedback_for_signal,
+    build_archive_decision_feedback_map,
+    build_archive_decision_feedback_model,
+    build_archive_signal_decision_snapshot,
+    calibrate_archive_decision_scores,
+)
+from core.archive_intelligence import archive_policy_for_signal, build_archive_policy_map
 from core.archive_policy import ARCHIVE_LEARNING_WINDOW_ROWS
 from core.confidence import (
     ai_confidence_bucket,
@@ -130,6 +143,7 @@ _AUTO_TIMEFRAME_LEARNING_TIMEFRAMES = ("5m", "15m", "1h", "4h", "1d")
 _AUTO_TIMEFRAME_LEARNING_SCAN_FOCUS = "Auto Timeframe Sweep"
 _AUTO_TIMEFRAME_LEARNING_GLOBAL_COOLDOWN_SECONDS = 45
 _AUTO_TIMEFRAME_LEARNING_FETCH_N = 80
+_AUTO_TIMEFRAME_LEARNING_MAX_TIMEFRAMES_PER_PASS = 2
 _AUTO_TIMEFRAME_LEARNING_MIN_INTERVAL_SECONDS = {
     "5m": 8 * 60,
     "15m": 15 * 60,
@@ -143,6 +157,34 @@ _AUTO_TIMEFRAME_LEARNING_SYMBOL_LIMITS = {
     "1h": 8,
     "4h": 8,
     "1d": 6,
+}
+_AUTO_TIMEFRAME_LEARNING_OPEN_SYMBOL_LIMITS = {
+    "5m": 8,
+    "15m": 10,
+    "1h": 8,
+    "4h": 8,
+    "1d": 6,
+}
+_AUTO_TIMEFRAME_LEARNING_CANDLE_LIMITS = {
+    "5m": 360,
+    "15m": 320,
+    "1h": 300,
+    "4h": 220,
+    "1d": 180,
+}
+_AUTO_TIMEFRAME_LEARNING_BACKFILL_PAIR_LIMITS = {
+    "5m": 2,
+    "15m": 3,
+    "1h": 3,
+    "4h": 2,
+    "1d": 2,
+}
+_AUTO_TIMEFRAME_LEARNING_USABLE_TARGETS = {
+    "5m": 24,
+    "15m": 32,
+    "1h": 48,
+    "4h": 24,
+    "1d": 16,
 }
 _SETUP_CONFIRM_PRIORITY = {
     "ENTER_TREND_AI": 6,
@@ -276,10 +318,33 @@ def _expectancy_bias_score(
     return max(30.0, min(70.0, score))
 
 
+def _coverage_adjusted_archive_scores(
+    *,
+    base_archive_score: float | None,
+    base_expectancy_score: float | None,
+    policy_delta: float | None,
+    policy_coverage: float | None,
+) -> tuple[float, float]:
+    coverage = max(0.0, min(1.0, _sortable_float(policy_coverage)))
+    base_weight = 0.35 + (0.65 * coverage)
+    archive_score = (_sortable_float(base_archive_score) * base_weight) + _sortable_float(policy_delta)
+    expectancy_score = max(
+        30.0,
+        min(
+            70.0,
+            50.0
+            + ((_sortable_float(base_expectancy_score) - 50.0) * base_weight)
+            + (_sortable_float(policy_delta) * 1.5),
+        ),
+    )
+    return archive_score, expectancy_score
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _market_archive_bundle(
     *,
     _fetch_signal_events_df,
+    _fetch_signal_forward_windows_df,
     db_path: str,
     decision_version_target: str,
 ) -> dict[str, object]:
@@ -304,6 +369,21 @@ def _market_archive_bundle(
         .str.strip()
     )
     adaptive_current_mask = adaptive_version_series.eq(decision_version_target)
+    adaptive_signal_keys = (
+        adaptive_history_df["signal_key"].fillna("").astype(str).str.strip().drop_duplicates().tolist()
+        if isinstance(adaptive_history_df, pd.DataFrame)
+        and not adaptive_history_df.empty
+        and "signal_key" in adaptive_history_df.columns
+        else []
+    )
+    adaptive_forward_windows_df = (
+        _fetch_signal_forward_windows_df(
+            signal_keys=adaptive_signal_keys,
+            db_path=db_path,
+        )
+        if callable(_fetch_signal_forward_windows_df) and adaptive_signal_keys
+        else pd.DataFrame()
+    )
     adaptive_has_plan = pd.to_numeric(
         adaptive_history_raw_df.get("has_plan", pd.Series(index=adaptive_history_raw_df.index, dtype=float)),
         errors="coerce",
@@ -321,6 +401,7 @@ def _market_archive_bundle(
     return {
         "raw_df": adaptive_history_raw_df,
         "df": adaptive_history_df,
+        "forward_windows_df": adaptive_forward_windows_df,
         "decision_mode": str(adaptive_history_df.attrs.get("decision_version_mode") or "mixed_fallback"),
         "decision_target": str(adaptive_history_df.attrs.get("decision_version_target") or decision_version_target),
         "decision_rows": adaptive_decision_rows,
@@ -335,6 +416,9 @@ def _market_archive_bundle(
         "risk_sizing_calibration_model": build_risk_sizing_calibration_model(adaptive_history_df),
         "trade_gate_calibration_model": build_trade_gate_calibration_model(adaptive_history_df),
         "scalp_calibration_model": build_scalp_calibration_model(adaptive_history_df),
+        "archive_policy_map": build_archive_policy_map(adaptive_history_df),
+        "archive_decision_feedback_model": build_archive_decision_feedback_model(adaptive_history_df),
+        "archive_decision_feedback_map": build_archive_decision_feedback_map(adaptive_history_df),
     }
 
 
@@ -771,6 +855,15 @@ def _market_signal_log_events(
                 "archive_guardrail_label": str(row.get("__archive_guardrail_label") or ""),
                 "archive_guardrail_penalty": row.get("__archive_guardrail_penalty"),
                 "archive_guardrail_note": str(row.get("__archive_guardrail_note") or ""),
+                "archive_policy_delta": row.get("__archive_policy_delta"),
+                "archive_policy_completed": row.get("__archive_policy_completed"),
+                "archive_policy_quality": str(row.get("__archive_policy_quality") or ""),
+                "archive_policy_coverage": row.get("__archive_policy_coverage"),
+                "archive_decision_delta": row.get("__archive_decision_delta"),
+                "archive_expectancy_delta": row.get("__archive_expectancy_delta"),
+                "archive_total_delta": row.get("__archive_total_delta"),
+                "archive_total_expectancy_delta": row.get("__archive_total_expectancy_delta"),
+                "archive_decision_scope": str(row.get("__archive_decision_scope") or ""),
                 "price": row.get("__price_val"),
                 "delta_pct": row.get("__delta_pct"),
                 "entry_price": row.get("__entry_val"),
@@ -1819,15 +1912,51 @@ def _auto_learning_state(raw_state: object) -> dict[str, object]:
     }
 
 
-def _auto_learning_timeframe_stats(df_events: pd.DataFrame | None) -> dict[str, dict[str, object]]:
+def _auto_learning_timeframe_stats(
+    df_events: pd.DataFrame | None,
+    df_forward_windows: pd.DataFrame | None = None,
+) -> dict[str, dict[str, object]]:
     stats: dict[str, dict[str, object]] = {
-        tf: {"rows": 0, "last_event": None}
+        tf: {
+            "rows": 0,
+            "resolved_rows": 0,
+            "usable_rows": 0,
+            "window_rows": 0,
+            "target_rows": int(_AUTO_TIMEFRAME_LEARNING_USABLE_TARGETS.get(tf, 24)),
+            "coverage_ratio": 0.0,
+            "checkpoint_coverage_ratio": 0.0,
+            "needs_checkpoint_backfill": True,
+            "last_event": None,
+        }
         for tf in _AUTO_TIMEFRAME_LEARNING_TIMEFRAMES
     }
     if df_events is None or df_events.empty or "timeframe" not in df_events.columns:
         return stats
     d = df_events.copy()
     d["__tf"] = d["timeframe"].fillna("").astype(str).str.strip().str.lower()
+    d["__status"] = (
+        d["status"].fillna("").astype(str).str.strip().str.upper()
+        if "status" in d.columns
+        else "RESOLVED"
+    )
+    if "directional_return_pct" in d.columns:
+        d["__has_outcome"] = pd.to_numeric(d["directional_return_pct"], errors="coerce").notna()
+    else:
+        d["__has_outcome"] = True
+    window_keys: set[str] = set()
+    window_scope_known = (
+        isinstance(df_forward_windows, pd.DataFrame)
+        and "signal_key" in df_forward_windows.columns
+        and "signal_key" in d.columns
+    )
+    if window_scope_known:
+        if "signal_key" in df_forward_windows.columns:
+            window_keys = set(df_forward_windows["signal_key"].fillna("").astype(str).str.strip())
+            window_keys.discard("")
+        d["__signal_key"] = d["signal_key"].fillna("").astype(str).str.strip()
+        d["__has_window"] = d["__signal_key"].isin(window_keys)
+    else:
+        d["__has_window"] = False
     event_col = "event_time" if "event_time" in d.columns else ("updated_at" if "updated_at" in d.columns else "")
     if event_col:
         d["__event_ts"] = pd.to_datetime(d[event_col], utc=True, errors="coerce")
@@ -1838,8 +1967,23 @@ def _auto_learning_timeframe_stats(df_events: pd.DataFrame | None) -> dict[str, 
         if group.empty:
             continue
         last_event = group["__event_ts"].dropna().max()
+        resolved_group = group[group["__status"].eq("RESOLVED")]
+        resolved_with_outcome = resolved_group[resolved_group["__has_outcome"]]
+        windowed_group = resolved_group[resolved_group["__has_window"]]
+        usable_rows = int(len(windowed_group)) if window_scope_known else int(len(resolved_with_outcome))
+        resolved_count = int(len(resolved_group))
+        target_rows = int(_AUTO_TIMEFRAME_LEARNING_USABLE_TARGETS.get(tf, 24))
+        checkpoint_ratio = float(len(windowed_group) / resolved_count) if resolved_count > 0 else 0.0
+        coverage_ratio = min(1.0, float(usable_rows) / float(max(1, target_rows)))
         stats[tf] = {
             "rows": int(len(group)),
+            "resolved_rows": resolved_count,
+            "usable_rows": int(usable_rows),
+            "window_rows": int(len(windowed_group)),
+            "target_rows": target_rows,
+            "coverage_ratio": coverage_ratio,
+            "checkpoint_coverage_ratio": checkpoint_ratio,
+            "needs_checkpoint_backfill": bool(window_scope_known and resolved_count > int(len(windowed_group))),
             "last_event": None if pd.isna(last_event) else pd.Timestamp(last_event),
         }
     return stats
@@ -1849,18 +1993,39 @@ def _select_auto_learning_timeframe(
     df_events: pd.DataFrame | None,
     state: dict[str, object] | None,
     *,
+    df_forward_windows: pd.DataFrame | None = None,
     now: object | None = None,
     current_timeframe: str | None = None,
 ) -> str | None:
+    selected = _select_auto_learning_timeframes(
+        df_events,
+        state,
+        df_forward_windows=df_forward_windows,
+        now=now,
+        current_timeframe=current_timeframe,
+        max_count=1,
+    )
+    return selected[0] if selected else None
+
+
+def _select_auto_learning_timeframes(
+    df_events: pd.DataFrame | None,
+    state: dict[str, object] | None,
+    *,
+    df_forward_windows: pd.DataFrame | None = None,
+    now: object | None = None,
+    current_timeframe: str | None = None,
+    max_count: int = _AUTO_TIMEFRAME_LEARNING_MAX_TIMEFRAMES_PER_PASS,
+) -> list[str]:
     state = _auto_learning_state(state)
     now_ts = _auto_learning_ts(now) or pd.Timestamp.now(tz="UTC")
     last_global = _auto_learning_ts(state.get("last_attempt_at"))
     if last_global is not None:
         global_age = (now_ts - last_global).total_seconds()
         if global_age < _AUTO_TIMEFRAME_LEARNING_GLOBAL_COOLDOWN_SECONDS:
-            return None
+            return []
 
-    stats = _auto_learning_timeframe_stats(df_events)
+    stats = _auto_learning_timeframe_stats(df_events, df_forward_windows)
     attempts = state.get("last_attempt_by_timeframe")
     attempts = attempts if isinstance(attempts, dict) else {}
     current_tf = str(current_timeframe or "").strip().lower()
@@ -1873,19 +2038,25 @@ def _select_auto_learning_timeframe(
             continue
         frame_stats = stats.get(tf, {})
         row_count = int(frame_stats.get("rows") or 0)
+        usable_rows = int(frame_stats.get("usable_rows") or 0)
+        resolved_rows = int(frame_stats.get("resolved_rows") or 0)
+        target_rows = int(_AUTO_TIMEFRAME_LEARNING_USABLE_TARGETS.get(tf, 24))
         last_event = frame_stats.get("last_event")
         last_event_ts = last_event if isinstance(last_event, pd.Timestamp) else _auto_learning_ts(last_event)
         event_age = float("inf") if last_event_ts is None else max(0.0, (now_ts - last_event_ts).total_seconds())
-        missing_bonus = 10_000.0 if row_count <= 0 else 0.0
+        coverage_gap = max(0, target_rows - usable_rows)
+        missing_bonus = 10_000.0 if usable_rows <= 0 else 0.0
+        coverage_bonus = float(coverage_gap) * 180.0
         stale_bonus = min(2_000.0, event_age / max(interval, 1.0) * 120.0)
-        scarcity_bonus = min(800.0, 800.0 / max(1.0, float(row_count)))
-        current_penalty = 25.0 if tf == current_tf else 0.0
-        priority = missing_bonus + stale_bonus + scarcity_bonus - current_penalty
+        scarcity_bonus = min(800.0, 800.0 / max(1.0, float(usable_rows or resolved_rows or row_count)))
+        current_penalty = 1_600.0 if tf == current_tf else 0.0
+        priority = missing_bonus + coverage_bonus + stale_bonus + scarcity_bonus - current_penalty
         ranked.append((priority, -idx, tf))
     if not ranked:
-        return None
+        return []
     ranked.sort(reverse=True)
-    return ranked[0][2]
+    safe_count = max(1, int(max_count or 1))
+    return [str(item[2]) for item in ranked[:safe_count]]
 
 
 def _mark_auto_learning_attempt(
@@ -1895,6 +2066,7 @@ def _mark_auto_learning_attempt(
     now: object | None = None,
     written: int = 0,
     resolved: int = 0,
+    backfilled: int = 0,
     errors: int = 0,
 ) -> dict[str, object]:
     next_state = _auto_learning_state(state)
@@ -1908,6 +2080,7 @@ def _mark_auto_learning_attempt(
         results[tf] = {
             "written": int(written),
             "resolved": int(resolved),
+            "backfilled": int(backfilled),
             "errors": int(errors),
             "updated_at": now_iso,
         }
@@ -1915,6 +2088,130 @@ def _mark_auto_learning_attempt(
     next_state["last_attempt_by_timeframe"] = attempts
     next_state["last_result_by_timeframe"] = results
     return next_state
+
+
+def _auto_learning_candle_limit(timeframe: str) -> int:
+    return int(_AUTO_TIMEFRAME_LEARNING_CANDLE_LIMITS.get(str(timeframe or "").strip().lower(), 260))
+
+
+def _auto_learning_symbol_limit(
+    timeframe: str,
+    df_events: pd.DataFrame | None = None,
+    df_forward_windows: pd.DataFrame | None = None,
+) -> int:
+    tf = str(timeframe or "").strip().lower()
+    base = int(_AUTO_TIMEFRAME_LEARNING_SYMBOL_LIMITS.get(tf, 8))
+    stats = _auto_learning_timeframe_stats(df_events, df_forward_windows).get(tf, {})
+    usable_rows = int(stats.get("usable_rows") or 0)
+    target_rows = int(_AUTO_TIMEFRAME_LEARNING_USABLE_TARGETS.get(tf, 24))
+    if usable_rows <= 0:
+        return min(base + 4, 12)
+    if usable_rows < max(1, target_rows // 2):
+        return min(base + 3, 12)
+    if usable_rows < target_rows:
+        return min(base + 2, 10)
+    return base
+
+
+def _auto_learning_backfill_pair_limit(
+    timeframe: str,
+    df_events: pd.DataFrame | None = None,
+    df_forward_windows: pd.DataFrame | None = None,
+) -> int:
+    tf = str(timeframe or "").strip().lower()
+    base = int(_AUTO_TIMEFRAME_LEARNING_BACKFILL_PAIR_LIMITS.get(tf, 2))
+    stats = _auto_learning_timeframe_stats(df_events, df_forward_windows).get(tf, {})
+    usable_rows = int(stats.get("usable_rows") or 0)
+    target_rows = int(_AUTO_TIMEFRAME_LEARNING_USABLE_TARGETS.get(tf, 24))
+    if usable_rows <= 0:
+        return min(base + 3, 6)
+    if usable_rows < max(1, target_rows // 2):
+        return min(base + 2, 5)
+    if usable_rows < target_rows:
+        return min(base + 1, 4)
+    return base
+
+
+def _auto_learning_open_symbol_candidates(
+    df_events: pd.DataFrame | None,
+    *,
+    timeframe: str,
+    exclude_stables: bool,
+    limit: int,
+) -> list[str]:
+    if df_events is None or df_events.empty:
+        return []
+    required = {"symbol", "timeframe", "status"}
+    if not required.issubset(df_events.columns):
+        return []
+    d = df_events.copy()
+    d["__tf"] = d["timeframe"].fillna("").astype(str).str.strip().str.lower()
+    d["__status"] = d["status"].fillna("").astype(str).str.strip().str.upper()
+    d["__base"] = d["symbol"].fillna("").astype(str).map(_canonical_pair_base)
+    d = d[
+        d["__tf"].eq(str(timeframe or "").strip().lower())
+        & d["__status"].eq("OPEN")
+        & d["__base"].ne("")
+    ].copy()
+    if d.empty:
+        return []
+    if bool(exclude_stables):
+        d = d[~d["__base"].map(is_stable_base_symbol)].copy()
+    if d.empty:
+        return []
+    if "event_time" in d.columns:
+        d["__event_ts"] = pd.to_datetime(d["event_time"], utc=True, errors="coerce")
+        d = d.sort_values("__event_ts", ascending=False)
+    bases: list[str] = []
+    seen: set[str] = set()
+    for base in d["__base"].tolist():
+        base_text = str(base or "").strip().upper()
+        if not base_text or base_text in seen:
+            continue
+        seen.add(base_text)
+        bases.append(f"{base_text}/USDT")
+        if len(bases) >= int(max(1, limit)):
+            break
+    return bases
+
+
+def _auto_learning_symbol_candidates(
+    *,
+    df_events: pd.DataFrame | None,
+    candidate_pairs: Sequence[str],
+    timeframe: str,
+    exclude_stables: bool,
+    open_limit: int,
+    total_limit: int,
+) -> list[str]:
+    symbols: list[str] = []
+    seen: set[str] = set()
+
+    def add_symbol(value: object) -> None:
+        base = _canonical_pair_base(str(value or ""))
+        if not base or base in seen:
+            return
+        if bool(exclude_stables) and is_stable_base_symbol(base):
+            return
+        seen.add(base)
+        text = str(value or "").strip().upper()
+        symbols.append(text if "/" in text else f"{base}/USDT")
+
+    for symbol in _auto_learning_open_symbol_candidates(
+        df_events,
+        timeframe=timeframe,
+        exclude_stables=exclude_stables,
+        limit=open_limit,
+    ):
+        add_symbol(symbol)
+
+    safe_total = max(int(total_limit or 1), int(open_limit or 1), 1)
+    for pair in list(candidate_pairs or []):
+        if len(symbols) >= safe_total:
+            break
+        add_symbol(pair)
+
+    return symbols[:safe_total]
 
 
 def _auto_timeframe_learning_event_from_frame(
@@ -2066,12 +2363,21 @@ def _run_auto_timeframe_learning_sweep(
     fetch_signal_events_df,
     log_signal_events,
     resolve_open_signal_events_for_frame,
+    backfill_signal_forward_windows_via_fetch=None,
+    fetch_signal_forward_windows_df=None,
     db_path: str,
     debug,
 ) -> dict[str, object]:
     state = _auto_learning_state(session_state.get(_AUTO_TIMEFRAME_LEARNING_STATE_KEY))
     if bool(state.get("running")):
         return {"ran": False, "reason": "already_running"}
+    now_ts = pd.Timestamp.now(tz="UTC")
+    last_global = _auto_learning_ts(state.get("last_attempt_at"))
+    if last_global is not None:
+        global_age = (now_ts - last_global).total_seconds()
+        if global_age < _AUTO_TIMEFRAME_LEARNING_GLOBAL_COOLDOWN_SECONDS:
+            session_state[_AUTO_TIMEFRAME_LEARNING_STATE_KEY] = state
+            return {"ran": False, "reason": "not_due"}
     try:
         df_recent = fetch_signal_events_df(
             limit=ARCHIVE_LEARNING_WINDOW_ROWS,
@@ -2084,123 +2390,196 @@ def _run_auto_timeframe_learning_sweep(
             debug(f"Auto timeframe learning scope unavailable: {e.__class__.__name__}: {str(e).strip()}")
         return {"ran": False, "reason": "scope_unavailable"}
 
-    now_ts = pd.Timestamp.now(tz="UTC")
-    timeframe = _select_auto_learning_timeframe(
+    df_forward_windows = pd.DataFrame()
+    if callable(fetch_signal_forward_windows_df) and isinstance(df_recent, pd.DataFrame) and "signal_key" in df_recent.columns:
+        signal_keys = [
+            str(value).strip()
+            for value in df_recent["signal_key"].dropna().tolist()
+            if str(value).strip()
+        ]
+        if signal_keys:
+            df_forward_windows = pd.DataFrame(columns=["signal_key"])
+            try:
+                fetched_forward_windows = fetch_signal_forward_windows_df(
+                    signal_keys=list(dict.fromkeys(signal_keys)),
+                    limit=ARCHIVE_LEARNING_WINDOW_ROWS,
+                    db_path=db_path,
+                )
+                if isinstance(fetched_forward_windows, pd.DataFrame):
+                    df_forward_windows = fetched_forward_windows.copy()
+                    if "signal_key" not in df_forward_windows.columns:
+                        df_forward_windows["signal_key"] = pd.Series(dtype=object)
+            except Exception as e:
+                df_forward_windows = pd.DataFrame()
+                if callable(debug):
+                    debug(f"Auto timeframe learning checkpoint scope unavailable: {e.__class__.__name__}: {str(e).strip()}")
+
+    timeframes = _select_auto_learning_timeframes(
         df_recent,
         state,
+        df_forward_windows=df_forward_windows,
         now=now_ts,
         current_timeframe=current_timeframe,
     )
-    if not timeframe:
+    if not timeframes:
         session_state[_AUTO_TIMEFRAME_LEARNING_STATE_KEY] = state
         return {"ran": False, "reason": "not_due"}
 
     state["running"] = True
-    state = _mark_auto_learning_attempt(state, timeframe=timeframe, now=now_ts)
     session_state[_AUTO_TIMEFRAME_LEARNING_STATE_KEY] = state
-    written = 0
-    resolved = 0
-    errors = 0
+    total_written = 0
+    total_resolved = 0
+    total_backfilled = 0
+    total_errors = 0
+    per_timeframe: list[dict[str, object]] = []
     try:
         try:
             candidate_pairs, _market_rows = get_top_volume_usdt_symbols(_AUTO_TIMEFRAME_LEARNING_FETCH_N)
+            universe_errors = 0
         except Exception as e:
-            errors += 1
+            universe_errors = 1
             if callable(debug):
-                debug(f"Auto timeframe learning universe failed ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
+                debug(f"Auto timeframe learning universe failed: {e.__class__.__name__}: {str(e).strip()}")
             candidate_pairs = []
-        symbols: list[str] = []
-        seen: set[str] = set()
-        for pair in list(candidate_pairs or []):
-            base = _canonical_pair_base(str(pair or ""))
-            if not base or base in seen:
-                continue
-            if bool(exclude_stables) and is_stable_base_symbol(base):
-                continue
-            seen.add(base)
-            symbols.append(str(pair or f"{base}/USDT"))
-            if len(symbols) >= int(_AUTO_TIMEFRAME_LEARNING_SYMBOL_LIMITS.get(timeframe, 8)):
-                break
 
-        events: list[dict[str, object]] = []
-        fetch_lock = Lock()
-        for symbol in symbols:
-            try:
-                with fetch_lock:
-                    df = fetch_ohlcv(symbol, timeframe, limit=260)
-            except Exception as e:
-                errors += 1
-                if callable(debug):
-                    debug(f"Auto timeframe learning OHLCV failed for {symbol} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
-                continue
-            df_eval = _prepare_closed_frame(df, min_rows=60)
-            if df_eval is None:
-                continue
-            base = _canonical_pair_base(symbol)
-            try:
-                resolved += int(
-                    resolve_open_signal_events_for_frame(
-                        symbol=base,
-                        timeframe=timeframe,
-                        df_ohlcv=df_eval,
-                        source="Market",
-                        db_path=db_path,
+        for timeframe in timeframes:
+            state = _mark_auto_learning_attempt(state, timeframe=timeframe, now=now_ts)
+            state["running"] = True
+            session_state[_AUTO_TIMEFRAME_LEARNING_STATE_KEY] = state
+            written = 0
+            resolved = 0
+            backfilled = 0
+            errors = int(universe_errors)
+            candle_limit = _auto_learning_candle_limit(timeframe)
+            symbols = _auto_learning_symbol_candidates(
+                df_events=df_recent,
+                candidate_pairs=list(candidate_pairs or []),
+                timeframe=timeframe,
+                exclude_stables=bool(exclude_stables),
+                open_limit=int(_AUTO_TIMEFRAME_LEARNING_OPEN_SYMBOL_LIMITS.get(timeframe, 6)),
+                total_limit=_auto_learning_symbol_limit(timeframe, df_recent, df_forward_windows),
+            )
+
+            events: list[dict[str, object]] = []
+            fetch_lock = Lock()
+            for symbol in symbols:
+                try:
+                    with fetch_lock:
+                        df = fetch_ohlcv(symbol, timeframe, limit=candle_limit)
+                except Exception as e:
+                    errors += 1
+                    if callable(debug):
+                        debug(f"Auto timeframe learning OHLCV failed for {symbol} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
+                    continue
+                df_eval = _prepare_closed_frame(df, min_rows=60)
+                if df_eval is None:
+                    continue
+                base = _canonical_pair_base(symbol)
+                try:
+                    resolved += int(
+                        resolve_open_signal_events_for_frame(
+                            symbol=base,
+                            timeframe=timeframe,
+                            df_ohlcv=df_eval,
+                            source="Market",
+                            db_path=db_path,
+                        )
                     )
-                )
-                resolved += int(
-                    resolve_open_signal_events_for_frame(
-                        symbol=base,
-                        timeframe=timeframe,
-                        df_ohlcv=df_eval,
-                        source="Scalp",
-                        db_path=db_path,
+                    resolved += int(
+                        resolve_open_signal_events_for_frame(
+                            symbol=base,
+                            timeframe=timeframe,
+                            df_ohlcv=df_eval,
+                            source="Scalp",
+                            db_path=db_path,
+                        )
                     )
-                )
-            except Exception as e:
-                errors += 1
-                if callable(debug):
-                    debug(f"Auto timeframe learning resolve failed for {base} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
+                except Exception as e:
+                    errors += 1
+                    if callable(debug):
+                        debug(f"Auto timeframe learning resolve failed for {base} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
+                try:
+                    event = _auto_timeframe_learning_event_from_frame(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        df_eval=df_eval,
+                        analyse=analyse,
+                        ml_ensemble_predict=ml_ensemble_predict,
+                        signal_plain=signal_plain,
+                        direction_key=direction_key,
+                    )
+                except Exception as e:
+                    errors += 1
+                    if callable(debug):
+                        debug(f"Auto timeframe learning event failed for {base} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
+                    event = None
+                if event:
+                    events.append(event)
+            if events:
+                written = int(log_signal_events(events, db_path=db_path))
+            if callable(backfill_signal_forward_windows_via_fetch):
+                try:
+                    backfilled = int(
+                        backfill_signal_forward_windows_via_fetch(
+                            fetch_ohlcv=fetch_ohlcv,
+                            source="Market",
+                            db_path=db_path,
+                            limit_pairs=_auto_learning_backfill_pair_limit(timeframe, df_recent, df_forward_windows),
+                            rows_per_pair=40,
+                            candle_limit=candle_limit,
+                            timeframe=timeframe,
+                            decision_version=current_decision_version("Market"),
+                        )
+                    )
+                except Exception as e:
+                    errors += 1
+                    if callable(debug):
+                        debug(f"Auto timeframe learning window backfill failed ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
+            state = _mark_auto_learning_attempt(
+                state,
+                timeframe=timeframe,
+                now=now_ts,
+                written=written,
+                resolved=resolved,
+                backfilled=backfilled,
+                errors=errors,
+            )
+            state["running"] = True
+            session_state[_AUTO_TIMEFRAME_LEARNING_STATE_KEY] = state
+            total_written += int(written)
+            total_resolved += int(resolved)
+            total_backfilled += int(backfilled)
+            total_errors += int(errors)
+            per_timeframe.append(
+                {
+                    "timeframe": timeframe,
+                    "written": int(written),
+                    "resolved": int(resolved),
+                    "backfilled": int(backfilled),
+                    "errors": int(errors),
+                    "symbols": len(symbols),
+                }
+            )
             try:
-                event = _auto_timeframe_learning_event_from_frame(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    df_eval=df_eval,
-                    analyse=analyse,
-                    ml_ensemble_predict=ml_ensemble_predict,
-                    signal_plain=signal_plain,
-                    direction_key=direction_key,
-                )
-            except Exception as e:
-                errors += 1
                 if callable(debug):
-                    debug(f"Auto timeframe learning event failed for {base} ({timeframe}): {e.__class__.__name__}: {str(e).strip()}")
-                event = None
-            if event:
-                events.append(event)
-        if events:
-            written = int(log_signal_events(events, db_path=db_path))
+                    debug(
+                        f"Auto timeframe learning sweep {timeframe}: "
+                        f"written={written}, resolved={resolved}, backfilled={backfilled}, errors={errors}."
+                    )
+            except Exception:
+                pass
     finally:
-        state = _mark_auto_learning_attempt(
-            state,
-            timeframe=timeframe,
-            now=now_ts,
-            written=written,
-            resolved=resolved,
-            errors=errors,
-        )
         state["running"] = False
         session_state[_AUTO_TIMEFRAME_LEARNING_STATE_KEY] = state
-    if callable(debug):
-        debug(
-            f"Auto timeframe learning sweep {timeframe}: "
-            f"written={written}, resolved={resolved}, errors={errors}."
-        )
     return {
         "ran": True,
-        "timeframe": timeframe,
-        "written": written,
-        "resolved": resolved,
-        "errors": errors,
+        "timeframe": timeframes[0] if timeframes else "",
+        "timeframes": timeframes,
+        "written": total_written,
+        "resolved": total_resolved,
+        "backfilled": total_backfilled,
+        "errors": total_errors,
+        "results": per_timeframe,
     }
 
 
@@ -4107,6 +4486,7 @@ def render(ctx: dict) -> None:
     get_signal_tracker_db_path = get_ctx(ctx, "get_signal_tracker_db_path")
     init_signal_tracker_db = get_ctx(ctx, "init_signal_tracker_db")
     fetch_signal_events_df = get_ctx(ctx, "fetch_signal_events_df")
+    fetch_signal_forward_windows_df = get_ctx(ctx, "fetch_signal_forward_windows_df")
     fetch_breakout_radar_snapshots_df = get_ctx(ctx, "fetch_breakout_radar_snapshots_df")
     fetch_scanner_trace_events_df = get_ctx(ctx, "fetch_scanner_trace_events_df")
     build_scanner_trace_summary = get_ctx(ctx, "build_scanner_trace_summary")
@@ -4117,6 +4497,7 @@ def render(ctx: dict) -> None:
     log_breakout_radar_snapshots = get_ctx(ctx, "log_breakout_radar_snapshots")
     log_scanner_trace_events = get_ctx(ctx, "log_scanner_trace_events")
     resolve_open_signal_events_for_frame = get_ctx(ctx, "resolve_open_signal_events_for_frame")
+    backfill_signal_forward_windows_via_fetch = get_ctx(ctx, "backfill_signal_forward_windows_via_fetch")
     _debug = get_ctx(ctx, "_debug")
     signal_tracker_db_path = init_signal_tracker_db(get_signal_tracker_db_path())
     major_fallback_symbols = [
@@ -6730,11 +7111,13 @@ def render(ctx: dict) -> None:
 
     archive_bundle = _market_archive_bundle(
         _fetch_signal_events_df=fetch_signal_events_df,
+        _fetch_signal_forward_windows_df=fetch_signal_forward_windows_df,
         db_path=signal_tracker_db_path,
         decision_version_target=market_decision_version,
     )
     adaptive_history_raw_df = archive_bundle["raw_df"]
     adaptive_history_df = archive_bundle["df"]
+    adaptive_forward_windows_df = archive_bundle["forward_windows_df"]
     breakout_archive_feedback_map = _build_breakout_archive_feedback_map(
         adaptive_history_df,
         timeframe=str(timeframe),
@@ -6771,6 +7154,9 @@ def render(ctx: dict) -> None:
     risk_sizing_calibration_model = archive_bundle["risk_sizing_calibration_model"]
     trade_gate_calibration_model = archive_bundle["trade_gate_calibration_model"]
     scalp_calibration_model = archive_bundle["scalp_calibration_model"]
+    archive_policy_map = archive_bundle["archive_policy_map"]
+    archive_decision_feedback_model = archive_bundle["archive_decision_feedback_model"]
+    archive_decision_feedback_map = archive_bundle["archive_decision_feedback_map"]
 
     # Fetch top coins
     if should_scan:
@@ -8253,6 +8639,7 @@ def render(ctx: dict) -> None:
             visible_rows=list(results or []),
             produced_rows=list(live_produced_rows or []),
         )
+        archive_signal_decision_cache: dict[tuple[str, str, str, str], object] = {}
         for row in archive_log_rows:
             direction_raw = str(row.get("Direction") or "")
             ai_ensemble = str(row.get("AI Ensemble") or "").strip()
@@ -8445,12 +8832,114 @@ def render(ctx: dict) -> None:
                     "Direction": direction_raw,
                 },
             )
-            row["__actionable_archive_score"] = float(getattr(actionable_archive_snapshot, "delta", 0.0) or 0.0)
-            row["__expectancy_bias_score"] = _expectancy_bias_score(
+            archive_policy_snapshot = archive_policy_for_signal(
+                archive_policy_map,
+                symbol=str(row.get("Coin") or ""),
+                timeframe=str(row.get("__timeframe") or timeframe or ""),
+                setup_confirm=str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                direction=direction_raw,
+            )
+            archive_signal_decision_key = (
+                str(row.get("Coin") or "").strip().upper(),
+                str(row.get("__timeframe") or timeframe or "").strip().lower(),
+                str(row.get("__action_raw", row.get("Setup Confirm", "")) or "").strip().upper(),
+                str(direction_raw or "").strip().upper(),
+            )
+            archive_signal_decision = archive_signal_decision_cache.get(archive_signal_decision_key)
+            if archive_signal_decision is None:
+                try:
+                    archive_signal_decision = build_archive_signal_decision_snapshot(
+                        df_events=adaptive_history_df,
+                        df_forward_windows=adaptive_forward_windows_df,
+                        symbol=str(row.get("Coin") or ""),
+                        timeframe=str(row.get("__timeframe") or timeframe or ""),
+                        setup_confirm=str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                        direction=direction_raw,
+                    )
+                except Exception as e:
+                    if callable(_debug):
+                        _debug(
+                            "Archive decision snapshot unavailable for "
+                            f"{str(row.get('Coin') or '').strip()} "
+                            f"({e.__class__.__name__}: {str(e).strip()})"
+                        )
+                    archive_signal_decision = SimpleNamespace(
+                        available=False,
+                        scope_label="",
+                        hold_window={},
+                        expected_path={},
+                    )
+                archive_signal_decision_cache[archive_signal_decision_key] = archive_signal_decision
+            archive_decision_delta, archive_expectancy_delta = archive_decision_score_adjustment(
+                archive_signal_decision
+            )
+            archive_policy_delta = float(getattr(archive_policy_snapshot, "policy_delta", 0.0) or 0.0)
+            archive_policy_coverage = float(getattr(archive_policy_snapshot, "coverage_factor", 0.0) or 0.0)
+            base_actionable_archive_score = float(getattr(actionable_archive_snapshot, "delta", 0.0) or 0.0)
+            base_expectancy_bias_score = _expectancy_bias_score(
                 archive_delta=getattr(actionable_archive_snapshot, "delta", 0.0),
                 bucket_resolved=getattr(actionable_archive_snapshot, "bucket_resolved", 0.0),
                 matched_factors=getattr(actionable_archive_snapshot, "matched_factors", 0),
             )
+            archive_score_before_decision, expectancy_score_before_decision = _coverage_adjusted_archive_scores(
+                base_archive_score=base_actionable_archive_score,
+                base_expectancy_score=base_expectancy_bias_score,
+                policy_delta=archive_policy_delta,
+                policy_coverage=archive_policy_coverage,
+            )
+            archive_total_delta = max(
+                -20.0,
+                min(20.0, _sortable_float(archive_score_before_decision) + archive_decision_delta),
+            )
+            archive_total_expectancy_delta = max(
+                30.0,
+                min(70.0, _sortable_float(expectancy_score_before_decision) + archive_expectancy_delta),
+            )
+            archive_decision_feedback = archive_decision_feedback_for_signal(
+                archive_decision_feedback_map,
+                archive_decision_feedback_model,
+                symbol=str(row.get("Coin") or ""),
+                timeframe=str(row.get("__timeframe") or timeframe or ""),
+                setup_confirm=str(row.get("__action_raw", row.get("Setup Confirm", "")) or ""),
+                direction=direction_raw,
+                playbook_key=str(getattr(market_regime_snapshot, "playbook_key", "") or ""),
+                trade_gate_key=str(getattr(market_trade_gate_snapshot, "gate_key", "") or ""),
+            )
+            archive_total_delta, archive_total_expectancy_edge = calibrate_archive_decision_scores(
+                archive_total_delta,
+                archive_total_expectancy_delta - 50.0,
+                archive_decision_feedback,
+            )
+            archive_total_delta, archive_total_expectancy_edge = apply_archive_invalidation_guardrail(
+                archive_total_delta,
+                archive_total_expectancy_edge,
+                archive_signal_decision,
+            )
+            archive_total_delta, archive_total_expectancy_edge = apply_archive_confidence_guardrail(
+                archive_total_delta,
+                archive_total_expectancy_edge,
+                archive_signal_decision,
+            )
+            archive_observability = archive_decision_observability(
+                archive_signal_decision,
+                archive_decision_feedback,
+            )
+            archive_total_expectancy_delta = max(30.0, min(70.0, 50.0 + archive_total_expectancy_edge))
+            row["__archive_policy_delta"] = archive_policy_delta
+            row["__archive_policy_completed"] = int(getattr(archive_policy_snapshot, "completed", 0) or 0)
+            row["__archive_policy_quality"] = str(getattr(archive_policy_snapshot, "quality_label", "") or "")
+            row["__archive_policy_coverage"] = archive_policy_coverage
+            row["__archive_decision_delta"] = archive_decision_delta
+            row["__archive_expectancy_delta"] = archive_expectancy_delta
+            row["__archive_total_delta"] = archive_total_delta
+            row["__archive_total_expectancy_delta"] = archive_total_expectancy_delta
+            row["__archive_decision_scope"] = str(getattr(archive_signal_decision, "scope_label", "") or "")
+            row["__archive_confidence_factor"] = archive_observability["archive_confidence_factor"]
+            row["__archive_confidence_tier"] = archive_observability["archive_confidence_tier"]
+            row["__archive_invalidation_risk"] = archive_observability["archive_invalidation_risk"]
+            row["__archive_feedback_multiplier"] = archive_observability["archive_feedback_multiplier"]
+            row["__actionable_archive_score"] = archive_total_delta
+            row["__expectancy_bias_score"] = archive_total_expectancy_delta
             row["__execution_friction_score"] = _execution_friction_score(
                 mcap_val=row.get("__mcap_val"),
                 volatility_label=str(row.get("Volatility") or ""),
@@ -9253,6 +9742,8 @@ def render(ctx: dict) -> None:
         fetch_signal_events_df=fetch_signal_events_df,
         log_signal_events=log_signal_events,
         resolve_open_signal_events_for_frame=resolve_open_signal_events_for_frame,
+        backfill_signal_forward_windows_via_fetch=backfill_signal_forward_windows_via_fetch,
+        fetch_signal_forward_windows_df=fetch_signal_forward_windows_df,
         db_path=signal_tracker_db_path,
         debug=_debug,
     )

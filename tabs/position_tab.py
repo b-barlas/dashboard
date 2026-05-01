@@ -7,6 +7,11 @@ import pandas as pd
 import plotly.graph_objs as go
 import ta
 from core.archive_policy import ARCHIVE_LEARNING_WINDOW_ROWS, ARCHIVE_RECENT_CONTEXT_ROWS
+from core.archive_decision import (
+    archive_symbol_key as _archive_symbol_key,
+    build_archive_signal_decision_snapshot,
+    select_archive_signal_scope_events,
+)
 from core.adaptive_weighting import (
     build_ai_confidence_calibration_model,
     build_ai_confidence_calibration_snapshot,
@@ -52,66 +57,21 @@ from ui.signal_formatters import (
 from ui.snapshot_cache import live_or_snapshot
 
 
-def _archive_symbol_key(value: object) -> str:
-    text = str(value or "").strip().upper()
-    if not text:
-        return ""
-    for separator in ("/", "-", "_", " "):
-        if separator in text:
-            text = text.split(separator, 1)[0].strip()
-            break
-    for quote_suffix in ("USDT", "USDC", "FDUSD", "BUSD", "USD"):
-        if text.endswith(quote_suffix) and len(text) > len(quote_suffix) + 1:
-            candidate = text[: -len(quote_suffix)].strip()
-            if candidate.isalpha():
-                text = candidate
-                break
-    return text
-
-
 def _position_hold_archive_slice(
     df_events: pd.DataFrame,
     *,
     symbol: str,
     timeframe: str,
     direction: str,
+    setup_confirm: str = "",
 ) -> tuple[pd.DataFrame, str]:
-    if df_events is None or df_events.empty:
-        return pd.DataFrame(), "No archive sample"
-    d = df_events.copy()
-    if "status" in d.columns:
-        d = d[d["status"].fillna("").astype(str).str.upper() == "RESOLVED"].copy()
-    if d.empty:
-        return pd.DataFrame(), "No resolved archive sample"
-
-    symbol_key = _archive_symbol_key(symbol)
-    timeframe_key = str(timeframe or "").strip().lower()
-    direction_key = "UPSIDE" if str(direction or "").strip().upper() == "LONG" else "DOWNSIDE"
-
-    def _match(frame: pd.DataFrame, *, require_symbol: bool, require_timeframe: bool, require_direction: bool) -> pd.DataFrame:
-        out = frame.copy()
-        if require_symbol and "symbol" in out.columns:
-            normalized_symbol = out["symbol"].map(_archive_symbol_key).fillna("").astype(str).str.upper()
-            out = out[normalized_symbol.eq(symbol_key)].copy()
-        if require_timeframe and "timeframe" in out.columns:
-            out = out[out["timeframe"].fillna("").astype(str).str.lower() == timeframe_key]
-        if require_direction and "direction" in out.columns:
-            out = out[out["direction"].fillna("").astype(str).str.upper() == direction_key]
-        return out.copy()
-
-    candidates = [
-        (_match(d, require_symbol=True, require_timeframe=True, require_direction=True), f"{symbol_key} {str(timeframe).upper()} {direction_key.title()}"),
-        (_match(d, require_symbol=True, require_timeframe=False, require_direction=True), f"{symbol_key} {direction_key.title()}"),
-        (_match(d, require_symbol=False, require_timeframe=True, require_direction=True), f"{str(timeframe).upper()} {direction_key.title()} market"),
-        (_match(d, require_symbol=False, require_timeframe=False, require_direction=True), f"broader {direction_key.title()} archive"),
-    ]
-    for frame, label in candidates:
-        if len(frame) >= 8:
-            return frame, label
-    for frame, label in candidates:
-        if not frame.empty:
-            return frame, label
-    return pd.DataFrame(), "No matching archive sample"
+    return select_archive_signal_scope_events(
+        df_events,
+        symbol=symbol,
+        timeframe=timeframe,
+        direction=direction,
+        setup_confirm=setup_confirm,
+    )
 
 
 def _position_hold_window_note(snapshot: dict[str, object], *, scope_label: str) -> tuple[str, str]:
@@ -119,7 +79,7 @@ def _position_hold_window_note(snapshot: dict[str, object], *, scope_label: str)
     resolved_signals = int(snapshot.get("resolved_signals") or 0)
     if resolved_signals <= 0:
         return (
-            "No matching resolved archive sample yet, so historical hold guidance is still building.",
+            f"No resolved archive pocket yet for <b>{scope}</b>. Historical hold guidance is still building.",
             "neutral",
         )
     if not bool(snapshot.get("available")):
@@ -856,31 +816,19 @@ def render(ctx: dict) -> None:
                     trade_gate=str(recent_market_context.get("Trade Gate") or ""),
                     catalyst_window=str(recent_market_context.get("Catalyst Window") or ""),
                 )
-                hold_window_events_df, hold_window_scope_label = _position_hold_archive_slice(
-                    adaptive_history_df,
+                archive_signal_decision = build_archive_signal_decision_snapshot(
+                    df_events=adaptive_history_df,
+                    df_forward_windows=adaptive_forward_windows_df,
                     symbol=archive_symbol,
                     timeframe=tf,
                     direction=direction,
+                    setup_confirm=action_raw,
+                    build_hold_window_intelligence_fn=build_hold_window_intelligence,
                 )
-                hold_window_keys = (
-                    hold_window_events_df["signal_key"].fillna("").astype(str).tolist()
-                    if not hold_window_events_df.empty and "signal_key" in hold_window_events_df.columns
-                    else []
-                )
-                hold_window_forward_df = (
-                    adaptive_forward_windows_df[
-                        adaptive_forward_windows_df["signal_key"].fillna("").astype(str).isin(hold_window_keys)
-                    ].copy()
-                    if hold_window_keys and not adaptive_forward_windows_df.empty and "signal_key" in adaptive_forward_windows_df.columns
-                    else pd.DataFrame()
-                )
-                hold_window_snapshot = build_hold_window_intelligence(
-                    hold_window_events_df,
-                    hold_window_forward_df,
-                )
+                hold_window_snapshot = archive_signal_decision.hold_window
                 hold_window_note, hold_window_tone = _position_hold_window_note(
                     hold_window_snapshot,
-                    scope_label=hold_window_scope_label,
+                    scope_label=archive_signal_decision.scope_label,
                 )
                 exit_quality = build_actual_exit_quality_profile(
                     adaptive_history_df,

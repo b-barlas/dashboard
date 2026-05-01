@@ -144,9 +144,25 @@ def _list_tracker_mirror_paths(resolved: Path, *, mirror_dir: str | None = None)
     )
 
 
+def _list_tracker_backup_paths(resolved: Path) -> list[Path]:
+    suffix = resolved.suffix or ".sqlite3"
+    pattern = f"{resolved.stem}.backup-*{suffix}"
+    return sorted(
+        [path for path in resolved.parent.glob(pattern) if path.is_file()],
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+
+
 def latest_signal_tracker_mirror_path(db_path: str | None = None, *, mirror_dir: str | None = None) -> str:
     resolved = Path(resolve_signal_tracker_db_path(db_path))
     latest = next(iter(_list_tracker_mirror_paths(resolved, mirror_dir=mirror_dir)), None)
+    return str(latest or "")
+
+
+def latest_signal_tracker_backup_path(db_path: str | None = None) -> str:
+    resolved = Path(resolve_signal_tracker_db_path(db_path))
+    latest = next(iter(_list_tracker_backup_paths(resolved)), None)
     return str(latest or "")
 
 
@@ -347,6 +363,28 @@ def _tracker_quarantine_path(resolved: Path) -> Path:
     return resolved.with_name(f"{resolved.stem}.invalid-{stamp}{suffix}")
 
 
+def _tracker_sidecar_paths(resolved: Path) -> tuple[Path, Path]:
+    return (
+        resolved.with_name(f"{resolved.name}-wal"),
+        resolved.with_name(f"{resolved.name}-shm"),
+    )
+
+
+def _move_invalid_tracker_db_aside(resolved: Path) -> str:
+    if not resolved.exists():
+        return ""
+    quarantine_path = _tracker_quarantine_path(resolved)
+    resolved.rename(quarantine_path)
+    for sidecar in _tracker_sidecar_paths(resolved):
+        if not sidecar.exists():
+            continue
+        try:
+            sidecar.rename(quarantine_path.with_name(f"{quarantine_path.name}-{sidecar.name.rsplit('-', 1)[-1]}"))
+        except Exception:
+            continue
+    return str(quarantine_path)
+
+
 def _tracker_mirror_path(resolved: Path, mirror_dir: Path) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     suffix = resolved.suffix or ".sqlite3"
@@ -431,14 +469,23 @@ def recover_signal_tracker_db_from_latest_mirror(
     if primary_valid:
         return None
     latest_path = latest_signal_tracker_mirror_path(str(resolved), mirror_dir=mirror_dir)
+    if latest_path and not _tracker_file_is_valid(Path(latest_path)):
+        latest_path = ""
     if not latest_path:
-        return None
+        latest_path = latest_signal_tracker_backup_path(str(resolved))
+        if latest_path and not _tracker_file_is_valid(Path(latest_path)):
+            latest_path = ""
     if not bool(_env_bool(_ENV_AUTO_RESTORE_KEYS, True) if auto_restore is None else auto_restore):
         return None
+    if not latest_path:
+        backup_path = _move_invalid_tracker_db_aside(resolved) if resolved.exists() and not primary_valid else ""
+        if not backup_path:
+            return None
+        return TrackerRestoreResult(path=str(resolved), backup_path=backup_path, restored_size=0)
 
     backup_path = ""
     if resolved.exists() and not primary_valid:
-        backup_path = quarantine_signal_tracker_db(str(resolved))
+        backup_path = _move_invalid_tracker_db_aside(resolved)
     restore_result = restore_signal_tracker_db_bytes(
         Path(latest_path).read_bytes(),
         db_path=str(resolved),
@@ -455,6 +502,10 @@ def recover_signal_tracker_db_from_latest_mirror(
 
 def _validate_tracker_db_file(path: Path) -> None:
     with sqlite3.connect(str(path)) as conn:
+        check_row = conn.execute("PRAGMA quick_check").fetchone()
+        check_value = str(check_row[0] if check_row else "").strip().lower()
+        if check_value != "ok":
+            raise ValueError(f"Tracker integrity check failed: {check_value or 'unknown'}")
         names = {
             str(row[0])
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -481,8 +532,7 @@ def restore_signal_tracker_db_bytes(
     if backup_existing and resolved.exists():
         backup_path = backup_signal_tracker_db(str(resolved))
 
-    wal_path = resolved.with_name(f"{resolved.name}-wal")
-    shm_path = resolved.with_name(f"{resolved.name}-shm")
+    wal_path, shm_path = _tracker_sidecar_paths(resolved)
     temp_restore = resolved.with_name(f"{resolved.stem}.restore_tmp{resolved.suffix or '.sqlite3'}")
     temp_restore.write_bytes(payload)
     try:
@@ -508,8 +558,13 @@ def restore_signal_tracker_db_bytes(
 
 def connect_signal_tracker_db(db_path: str | None = None) -> sqlite3.Connection:
     path = resolve_signal_tracker_db_path(db_path)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30.0)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=30000;")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+    except sqlite3.OperationalError as exc:
+        if "locked" not in str(exc).lower():
+            raise
     return conn

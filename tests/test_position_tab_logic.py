@@ -68,6 +68,70 @@ class PositionTabLogicTests(unittest.TestCase):
         self.assertEqual(len(out), 11)
         self.assertEqual(label, "broader Upside archive")
 
+    def test_position_hold_archive_slice_uses_current_setup_pocket_strictly(self) -> None:
+        df = pd.DataFrame(
+            [
+                {
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "direction": "UPSIDE",
+                    "status": "RESOLVED",
+                    "setup_confirm": "WATCH",
+                    "signal_key": f"watch-{i}",
+                }
+                for i in range(3)
+            ]
+            + [
+                {
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "direction": "UPSIDE",
+                    "status": "RESOLVED",
+                    "setup_confirm": "ENTER_TREND_AI",
+                    "signal_key": f"enter-{i}",
+                }
+                for i in range(10)
+            ]
+        )
+
+        out, label = _position_hold_archive_slice(
+            df,
+            symbol="BTC",
+            timeframe="1h",
+            direction="LONG",
+            setup_confirm="WATCH",
+        )
+
+        self.assertEqual(len(out), 3)
+        self.assertEqual(label, "BTC 1H WATCH ↑")
+        self.assertEqual(set(out["setup_confirm"]), {"WATCH"})
+
+    def test_position_hold_archive_slice_does_not_borrow_other_setup_when_current_setup_missing(self) -> None:
+        df = pd.DataFrame(
+            [
+                {
+                    "symbol": "BTC",
+                    "timeframe": "1h",
+                    "direction": "UPSIDE",
+                    "status": "RESOLVED",
+                    "setup_confirm": "ENTER_TREND_AI",
+                    "signal_key": f"enter-{i}",
+                }
+                for i in range(10)
+            ]
+        )
+
+        out, label = _position_hold_archive_slice(
+            df,
+            symbol="BTC",
+            timeframe="1h",
+            direction="LONG",
+            setup_confirm="WATCH",
+        )
+
+        self.assertTrue(out.empty)
+        self.assertEqual(label, "No BTC 1H WATCH ↑ archive pocket yet")
+
     def test_position_hold_window_note_describes_available_snapshot(self) -> None:
         note, tone = _position_hold_window_note(
             {

@@ -6,23 +6,20 @@ import pandas as pd
 
 from tabs.signal_review_tab import (
     _BEST_SIGNAL_LEADERBOARD_LIMIT,
-    _annotate_actual_exit_quality,
-    _annotate_actual_hold_style,
-    _archive_building_card,
     _best_signal_summary,
     _build_best_signal_leaderboard,
     _build_coin_hold_guidance_rows,
     _build_coin_timeframe_intelligence_bundle,
-    _build_execution_signal_cards,
     _build_expected_path_projection,
-    _build_execution_review_cards,
-    _build_hold_signal_cards,
     _display_trade_direction,
-    _execution_vs_system_note,
     _format_review_metric,
     _expected_path_building_body_html,
     _expected_path_body_html,
+    _expected_path_kpi_items,
     _fetch_expected_path_reference_price,
+    _filter_events_by_setup,
+    _filter_events_to_setup_direction,
+    _filter_events_to_setup_pocket,
     _follow_through_horizon_note,
     _hold_guidance_cell,
     _load_coin_timeframe_frames,
@@ -30,82 +27,17 @@ from tabs.signal_review_tab import (
     _refresh_scope_badge,
     _learning_readiness_summary,
     _ordered_timeframe_scope,
-    _prepare_section_cards,
     _prefer_known_summary_rows,
-    _qualified_summary_rows,
     _selected_best_signal_coin,
     _selected_dataframe_row_index,
     _select_best_signal_coin,
+    _select_setup_pocket,
+    _setup_filter_value,
+    _setup_pocket_label,
 )
 
 
 class SignalReviewLogicTests(unittest.TestCase):
-    def test_annotate_actual_hold_style_buckets_closed_trades(self) -> None:
-        df = pd.DataFrame(
-            [
-                {
-                    "actual_trade_status": "CLOSED",
-                    "actual_entry_at": "2026-04-04T08:00:00Z",
-                    "actual_exit_at": "2026-04-04T11:00:00Z",
-                },
-                {
-                    "actual_trade_status": "CLOSED",
-                    "actual_entry_at": "2026-04-04T08:00:00Z",
-                    "actual_exit_at": "2026-04-05T08:30:00Z",
-                },
-                {
-                    "actual_trade_status": "OPEN",
-                    "actual_entry_at": "2026-04-04T08:00:00Z",
-                    "actual_exit_at": "",
-                },
-            ]
-        )
-        out = _annotate_actual_hold_style(df)
-        self.assertEqual(list(out["Hold Style"]), ["Quick Follow-Through", "Needs Room", "Open / Not Closed"])
-        self.assertIn("Actual Hold Hours", out.columns)
-
-    def test_annotate_actual_exit_quality_buckets_trade_exits(self) -> None:
-        df = pd.DataFrame(
-            [
-                {
-                    "actual_trade_status": "CLOSED",
-                    "actual_exit_reason": "Target",
-                    "actual_pnl_pct": 3.2,
-                },
-                {
-                    "actual_trade_status": "CLOSED",
-                    "actual_exit_reason": "Manual Exit",
-                    "actual_pnl_pct": 1.1,
-                },
-                {
-                    "actual_trade_status": "CLOSED",
-                    "actual_exit_reason": "Stop",
-                    "actual_pnl_pct": -2.0,
-                },
-                {
-                    "actual_trade_status": "CLOSED",
-                    "actual_exit_reason": "Time Exit",
-                    "actual_pnl_pct": -0.9,
-                },
-                {
-                    "actual_trade_status": "OPEN",
-                    "actual_exit_reason": "",
-                    "actual_pnl_pct": None,
-                },
-            ]
-        )
-        out = _annotate_actual_exit_quality(df)
-        self.assertEqual(
-            list(out["Exit Quality"]),
-            [
-                "Target Winner",
-                "Manual Winner Exit",
-                "Protected Loss Exit",
-                "Late Manual Loss",
-                "Open / Not Closed",
-            ],
-        )
-
     def test_learning_readiness_summary_is_compact(self) -> None:
         body, tone = _learning_readiness_summary(
             mode="current_only",
@@ -154,6 +86,68 @@ class SignalReviewLogicTests(unittest.TestCase):
         self.assertEqual(len(frames), 1)
         self.assertEqual(list(frames[0]["events"]["signal_key"]), ["resolved-1"])
         self.assertEqual(list(frames[0]["windows"]["signal_key"]), ["resolved-1"])
+
+    def test_load_coin_timeframe_frames_reuses_selected_pocket_scope_for_all_tf(self) -> None:
+        base_events = pd.DataFrame(
+            [
+                {
+                    "signal_key": "watch-up-1",
+                    "timeframe": "1h",
+                    "direction": "UPSIDE",
+                    "setup_confirm": "WATCH",
+                    "status": "RESOLVED",
+                },
+                {
+                    "signal_key": "watch-up-2",
+                    "timeframe": "1h",
+                    "direction": "UPSIDE",
+                    "setup_confirm": "WATCH",
+                    "status": "RESOLVED",
+                },
+                {
+                    "signal_key": "watch-down-1",
+                    "timeframe": "1h",
+                    "direction": "DOWNSIDE",
+                    "setup_confirm": "WATCH",
+                    "status": "RESOLVED",
+                },
+                {
+                    "signal_key": "enter-up-1",
+                    "timeframe": "5m",
+                    "direction": "UPSIDE",
+                    "setup_confirm": "ENTER_TREND_AI",
+                    "status": "RESOLVED",
+                },
+            ]
+        )
+        pocket = {
+            "available": True,
+            "setup_class": "WATCH",
+            "direction": "UPSIDE",
+        }
+        selected_scope = _filter_events_to_setup_direction(base_events, pocket)
+
+        def fake_fetch_events(**_kwargs):
+            raise AssertionError("All timeframe read should reuse the selected setup scope")
+
+        def fake_fetch_windows(**kwargs):
+            return pd.DataFrame({"signal_key": list(kwargs["signal_keys"]), "bars_ahead": [1] * len(kwargs["signal_keys"])})
+
+        frames = _load_coin_timeframe_frames(
+            fetch_signal_events_df=fake_fetch_events,
+            fetch_signal_forward_windows_df=fake_fetch_windows,
+            symbol_filter="TRX",
+            timeframe_filter="All",
+            status_filter="Resolved",
+            current_market_version="test",
+            analysis_limit=100,
+            db_path=":memory:",
+            base_events=selected_scope,
+        )
+
+        frame_map = {str(frame["timeframe"]): frame["events"] for frame in frames}
+        self.assertEqual(list(frame_map["1h"]["signal_key"]), ["watch-up-1", "watch-up-2"])
+        self.assertEqual(frame_map["5m"].to_dict("records"), [])
 
     def test_select_best_signal_coin_balances_across_timeframes(self) -> None:
         df = pd.DataFrame(
@@ -335,11 +329,45 @@ class SignalReviewLogicTests(unittest.TestCase):
             min_timeframes=2,
             min_total_resolved=8,
         )
-        self.assertEqual(list(board.columns), ["Coin", "Mode", "Follow-Through", "Resolved", "Best TF", "Avg Move"])
+        self.assertEqual(list(board.columns), ["Coin", "Mode", "Best Setup", "Follow-Through", "Resolved", "Best TF", "Avg Move"])
         self.assertEqual(str(board.iloc[0]["Coin"]), "AAA")
         self.assertEqual(str(board.iloc[0]["Mode"]), "Best Signal")
         self.assertEqual(str(board.iloc[1]["Coin"]), "BBB")
         self.assertEqual(str(board.iloc[1]["Mode"]), "Best Read")
+
+    def test_build_best_signal_leaderboard_shows_best_setup_direction(self) -> None:
+        rows = []
+        for idx in range(12):
+            rows.append(
+                {
+                    "symbol": "TRX",
+                    "timeframe": "1h",
+                    "status": "RESOLVED",
+                    "direction": "UPSIDE",
+                    "setup_confirm": "WATCH",
+                    "directional_return_pct": 0.6,
+                }
+            )
+        for idx in range(12):
+            rows.append(
+                {
+                    "symbol": "ENJ",
+                    "timeframe": "1h",
+                    "status": "RESOLVED",
+                    "direction": "DOWNSIDE",
+                    "setup_confirm": "ENTER_TREND_AI",
+                    "directional_return_pct": 0.8,
+                }
+            )
+
+        board = _build_best_signal_leaderboard(
+            df_events=pd.DataFrame(rows),
+            timeframe_filter="1h",
+            min_resolved=8,
+        )
+
+        self.assertEqual(str(board.iloc[0]["Best Setup"]), "ENTER ↓ T+AI")
+        self.assertEqual(str(board.iloc[1]["Best Setup"]), "WATCH ↑")
 
     def test_build_best_signal_leaderboard_defaults_to_top_10(self) -> None:
         rows = []
@@ -503,6 +531,157 @@ class SignalReviewLogicTests(unittest.TestCase):
         self.assertEqual(_hold_guidance_cell({"available": False, "resolved_signals": 0}), "—")
         self.assertEqual(_hold_guidance_cell({"available": False, "resolved_signals": 0}, direction_label="Downside"), "—")
 
+    def test_setup_pocket_auto_best_prefers_actionable_history_over_skip(self) -> None:
+        rows = []
+        for idx in range(8):
+            rows.append(
+                {
+                    "signal_key": f"watch-{idx}",
+                    "symbol": "TRX",
+                    "timeframe": "1h",
+                    "direction": "Upside",
+                    "setup_confirm": "WATCH",
+                    "status": "RESOLVED",
+                    "directional_return_pct": 0.85,
+                    "adverse_excursion_pct": 0.10,
+                }
+            )
+        for idx in range(8):
+            rows.append(
+                {
+                    "signal_key": f"skip-{idx}",
+                    "symbol": "TRX",
+                    "timeframe": "1h",
+                    "direction": "Upside",
+                    "setup_confirm": "SKIP",
+                    "status": "RESOLVED",
+                    "directional_return_pct": 2.00,
+                    "adverse_excursion_pct": 0.05,
+                }
+            )
+
+        pocket = _select_setup_pocket(pd.DataFrame(rows), setup_filter_value="AUTO_BEST")
+
+        self.assertTrue(pocket["available"])
+        self.assertEqual(pocket["setup_class"], "WATCH")
+        self.assertEqual(pocket["setup_label"], "WATCH")
+        self.assertEqual(pocket["timeframe"], "1h")
+        self.assertEqual(pocket["direction"], "UPSIDE")
+        self.assertEqual(_setup_pocket_label(pocket), "WATCH ↑ • 1H")
+
+    def test_setup_pocket_specific_filter_restricts_best_read(self) -> None:
+        rows = []
+        for idx in range(8):
+            rows.append(
+                {
+                    "signal_key": f"watch-{idx}",
+                    "symbol": "ETH",
+                    "timeframe": "1h",
+                    "direction": "Upside",
+                    "setup_confirm": "WATCH",
+                    "status": "RESOLVED",
+                    "directional_return_pct": 1.20,
+                    "adverse_excursion_pct": 0.10,
+                }
+            )
+        for idx in range(10):
+            rows.append(
+                {
+                    "signal_key": f"enter-{idx}",
+                    "symbol": "ETH",
+                    "timeframe": "15m",
+                    "direction": "Downside",
+                    "setup_confirm": "ENTER_TREND_AI",
+                    "status": "RESOLVED",
+                    "directional_return_pct": 0.25,
+                    "adverse_excursion_pct": 0.20,
+                }
+            )
+
+        pocket = _select_setup_pocket(pd.DataFrame(rows), setup_filter_value=_setup_filter_value("ENTER T+AI"))
+
+        self.assertTrue(pocket["available"])
+        self.assertEqual(pocket["setup_class"], "ENTER_TREND_AI")
+        self.assertEqual(pocket["timeframe"], "15m")
+        self.assertEqual(pocket["direction"], "DOWNSIDE")
+        self.assertEqual(pocket["completed"], 10)
+
+    def test_setup_pocket_filter_keeps_open_rows_for_same_pocket_metrics(self) -> None:
+        rows = []
+        for idx in range(8):
+            rows.append(
+                {
+                    "signal_key": f"probe-{idx}",
+                    "symbol": "SOL",
+                    "timeframe": "4h",
+                    "direction": "Upside",
+                    "setup_confirm": "PROBE",
+                    "status": "RESOLVED",
+                    "directional_return_pct": 0.55,
+                    "adverse_excursion_pct": 0.15,
+                }
+            )
+        rows.append(
+            {
+                "signal_key": "probe-open",
+                "symbol": "SOL",
+                "timeframe": "4h",
+                "direction": "Upside",
+                "setup_confirm": "PROBE",
+                "status": "OPEN",
+                "directional_return_pct": None,
+                "adverse_excursion_pct": None,
+            }
+        )
+        rows.append(
+            {
+                "signal_key": "watch-other",
+                "symbol": "SOL",
+                "timeframe": "4h",
+                "direction": "Upside",
+                "setup_confirm": "WATCH",
+                "status": "OPEN",
+                "directional_return_pct": None,
+                "adverse_excursion_pct": None,
+            }
+        )
+        df = pd.DataFrame(rows)
+
+        pocket = _select_setup_pocket(df, setup_filter_value="AUTO_BEST")
+        filtered = _filter_events_to_setup_pocket(df, pocket)
+
+        self.assertTrue(pocket["available"])
+        self.assertEqual(pocket["setup_label"], "EARLY")
+        self.assertEqual(len(filtered), 9)
+        self.assertEqual(set(filtered["signal_key"]), {f"probe-{idx}" for idx in range(8)} | {"probe-open"})
+
+    def test_filter_events_by_setup_maps_user_friendly_setup_labels(self) -> None:
+        df = pd.DataFrame(
+            [
+                {"setup_confirm": "PROBE", "symbol": "BTC"},
+                {"setup_confirm": "WATCH", "symbol": "ETH"},
+            ]
+        )
+
+        filtered = _filter_events_by_setup(df, _setup_filter_value("EARLY"))
+
+        self.assertEqual(filtered["symbol"].tolist(), ["BTC"])
+        self.assertEqual(filtered["__setup_label"].tolist(), ["EARLY"])
+
+    def test_filter_events_by_setup_auto_best_excludes_skip_and_unknown(self) -> None:
+        df = pd.DataFrame(
+            [
+                {"setup_confirm": "SKIP", "symbol": "SKIPPER"},
+                {"setup_confirm": "legacy value", "symbol": "OLD"},
+                {"setup_confirm": "WATCH", "symbol": "WATCHER"},
+            ]
+        )
+
+        filtered = _filter_events_by_setup(df, "AUTO_BEST")
+
+        self.assertEqual(filtered["symbol"].tolist(), ["WATCHER"])
+        self.assertEqual(filtered["__setup_class"].tolist(), ["WATCH"])
+
     def test_expected_path_projection_builds_plain_scenario(self) -> None:
         events = []
         windows = []
@@ -557,6 +736,9 @@ class SignalReviewLogicTests(unittest.TestCase):
         self.assertEqual(snapshot["best_bar"], 8)
         self.assertEqual(snapshot["fade_after_bar"], 12)
         self.assertEqual(snapshot["read_quality"], "Thin")
+        self.assertEqual(snapshot["archive_check_sample"], 10)
+        self.assertAlmostEqual(snapshot["zone_hit_rate_pct"], 60.0, places=4)
+        self.assertAlmostEqual(snapshot["clean_path_rate_pct"], 60.0, places=4)
         body = _expected_path_body_html(snapshot)
         self.assertIn("Reference price", body)
         self.assertIn("Expected zone", body)
@@ -564,9 +746,11 @@ class SignalReviewLogicTests(unittest.TestCase):
         self.assertIn("next 8 candles on 1H", body)
         self.assertIn("Move from that price", body)
         self.assertIn("usual upside window", body)
-        self.assertIn("Normal shakeout", body)
+        self.assertIn("Normal pullback", body)
         self.assertIn("can still be normal", body)
         self.assertIn("Path weakens after", body)
+        self.assertIn("Archive check", body)
+        self.assertIn("60% reached this zone", body)
         self.assertIn("Price path", body)
         self.assertIn("$", body)
 
@@ -631,6 +815,81 @@ class SignalReviewLogicTests(unittest.TestCase):
         self.assertIn("next 4 candles on 1H", body)
         self.assertIn("Path weakens after: <b>8 bars</b>", body)
         self.assertIn("Hold window above is the efficiency read", body)
+
+    def test_expected_path_archive_check_uses_favorable_excursion_when_available(self) -> None:
+        events = []
+        windows = []
+        for idx in range(8):
+            key = f"zone-{idx}"
+            events.append(
+                {
+                    "signal_key": key,
+                    "symbol": "SOL",
+                    "timeframe": "1h",
+                    "direction": "Upside",
+                    "status": "RESOLVED",
+                    "price": 100.0,
+                    "event_time": f"2026-04-28T0{idx}:00:00Z",
+                }
+            )
+            windows.append(
+                {
+                    "signal_key": key,
+                    "bars_ahead": 4,
+                    "directional_return_pct": 0.5,
+                    "favorable_excursion_pct": 0.7 if idx < 6 else 0.2,
+                    "adverse_excursion_pct": 0.2,
+                }
+            )
+
+        snapshot = _build_expected_path_projection(
+            df_events=pd.DataFrame(events),
+            df_forward_windows=pd.DataFrame(windows),
+            symbol_filter="SOL",
+            timeframe_filter="1h",
+            min_samples=8,
+            now="2026-04-28T12:00:00Z",
+        )
+
+        self.assertTrue(snapshot["available"])
+        self.assertEqual(snapshot["archive_check_sample"], 8)
+        self.assertAlmostEqual(snapshot["zone_hit_rate_pct"], 75.0, places=4)
+        body = _expected_path_body_html(snapshot)
+        self.assertIn("75% reached this zone", body)
+
+    def test_expected_path_kpi_items_explain_caution_without_extra_card(self) -> None:
+        snapshot = {
+            "available": True,
+            "symbol": "TRX",
+            "timeframe": "1h",
+            "direction": "UPSIDE",
+            "sample": 18,
+            "read_quality": "Good",
+            "best_bar": 8,
+            "fade_after_bar": 0,
+            "best_zone_low_pct": 0.2,
+            "best_zone_high_pct": 0.6,
+            "normal_pullback_pct": 0.25,
+            "caution_pullback_pct": 0.6,
+            "reference_price": 0.32,
+            "reference_price_label": "latest close",
+            "price_zone_label": "$0.320640 - $0.321920",
+            "pullback_price_label": "$0.319200",
+            "caution_price_label": "$0.318080",
+            "archive_check_sample": 18,
+            "zone_hit_rate_pct": 72.0,
+            "clean_path_rate_pct": 61.0,
+            "path_conflict": True,
+        }
+
+        items = _expected_path_kpi_items(snapshot)
+        shakeout = next(item for item in items if item["label"] == "Normal Shakeout")
+        history = next(item for item in items if item["label"] == "History Depth")
+
+        self.assertIn("caution below $0.318080", shakeout["subtext"])
+        self.assertEqual(history["badge_text"], "72% reached zone")
+        self.assertIn("61% clean route", history["subtext"])
+        self.assertIn("alternate read is close", history["subtext"])
 
     def test_expected_path_reference_price_tries_usdt_pair_for_base_symbol(self) -> None:
         calls: list[str] = []
@@ -881,127 +1140,6 @@ class SignalReviewLogicTests(unittest.TestCase):
         )
         self.assertEqual(_missing_hold_backfill_count(df_events, df_forward_windows), 1)
 
-    def test_execution_vs_system_note_says_archive_building_when_no_taken_trades(self) -> None:
-        note, tone = _execution_vs_system_note(
-            {
-                "taken": 0.0,
-                "taken_resolved": 0.0,
-                "actual_closed": 0.0,
-                "taken_follow_through_rate": 0.0,
-                "actual_win_rate": 0.0,
-                "execution_gap_pct": 0.0,
-                "skipped_winners": 0.0,
-            }
-        )
-        self.assertIn("Execution journal is empty", note)
-        self.assertEqual(tone, "neutral")
-
-    def test_build_execution_review_cards_flags_thin_overlay_and_journal(self) -> None:
-        cards = _build_execution_review_cards(
-            {
-                "total": 12.0,
-                "overlay_marked": 3.0,
-                "overlay_coverage_pct": 25.0,
-                "taken": 1.0,
-                "taken_resolved": 0.0,
-                "actual_closed": 0.0,
-                "journal_coverage_pct": 0.0,
-                "execution_gap_pct": 0.0,
-                "skipped_winners": 0.0,
-                "skipped_resolved": 0.0,
-                "skipped_winner_rate": 0.0,
-            }
-        )
-        self.assertEqual(cards[0]["title"], "Manual Marking")
-        self.assertIn("25.0% coverage", cards[0]["body_html"])
-        self.assertEqual(cards[1]["title"], "Still Building")
-        self.assertIn("Trade Journal", cards[1]["body_html"])
-        self.assertIn("Execution Quality", cards[1]["body_html"])
-
-    def test_build_execution_review_cards_reads_positive_execution_edge_when_archive_is_mature(self) -> None:
-        cards = _build_execution_review_cards(
-            {
-                "total": 20.0,
-                "overlay_marked": 18.0,
-                "overlay_coverage_pct": 90.0,
-                "taken": 8.0,
-                "taken_resolved": 6.0,
-                "actual_closed": 6.0,
-                "journal_coverage_pct": 75.0,
-                "execution_gap_pct": 0.82,
-                "skipped_winners": 2.0,
-                "skipped_resolved": 5.0,
-                "skipped_winner_rate": 40.0,
-            }
-        )
-        self.assertEqual(cards[0]["title"], "Manual Marking")
-        self.assertEqual(cards[1]["title"], "Trade Journal")
-        self.assertEqual(cards[2]["title"], "Execution Quality")
-        self.assertIn("+0.82%", cards[2]["body_html"])
-        self.assertIn("Skipped setups that worked", cards[2]["body_html"])
-        self.assertEqual(cards[2]["tone"], "positive")
-
-    def test_build_execution_signal_cards_surface_execution_drag_and_missed_winners(self) -> None:
-        works_cards, fail_cards = _build_execution_signal_cards(
-            {
-                "taken": 8.0,
-                "taken_resolved": 6.0,
-                "actual_closed": 4.0,
-                "journal_coverage_pct": 50.0,
-                "execution_gap_pct": -0.9,
-                "skipped_winners": 3.0,
-                "skipped_resolved": 5.0,
-                "skipped_winner_rate": 60.0,
-                "actual_win_rate": 50.0,
-            }
-        )
-        self.assertEqual(works_cards, [])
-        self.assertEqual(fail_cards[0]["title"], "Thin Journal")
-        self.assertEqual(fail_cards[1]["title"], "Execution Drag")
-        self.assertEqual(fail_cards[2]["title"], "Missed Winners")
-
-    def test_build_hold_signal_cards_surface_best_and_weakest_profiles(self) -> None:
-        hold_guidance_rows = [
-            {
-                "Timeframe": "5M",
-                "Upside Snapshot": {
-                    "available": True,
-                    "best_label": "around 2 bars",
-                    "best_style": "Explosive",
-                    "sample": 12,
-                    "follow_through_pct": 66.0,
-                    "avg_dir_return_pct": 1.4,
-                    "edge_score": 1.1,
-                },
-                "Downside Snapshot": {
-                    "available": True,
-                    "best_label": "around 6 bars",
-                    "best_style": "Needs Room",
-                    "sample": 9,
-                    "follow_through_pct": 38.0,
-                    "avg_dir_return_pct": -0.5,
-                    "edge_score": -0.7,
-                },
-            }
-        ]
-        works_cards, fail_cards = _build_hold_signal_cards(hold_guidance_rows, symbol_filter="btc")
-        self.assertEqual(works_cards[0]["title"], "Best Hold Window")
-        self.assertIn("BTC 5M Upside", works_cards[0]["body_html"])
-        self.assertEqual(fail_cards[0]["title"], "Weakest Hold Window")
-        self.assertIn("BTC 5M Downside", fail_cards[0]["body_html"])
-        self.assertEqual(fail_cards[0]["tone"], "warning")
-
-    def test_qualified_summary_rows_filters_on_minimum_count(self) -> None:
-        df = pd.DataFrame(
-            [
-                {"Bucket": "A", "Resolved": 12},
-                {"Bucket": "B", "Resolved": 7},
-                {"Bucket": "C", "Resolved": 8},
-            ]
-        )
-        out = _qualified_summary_rows(df, count_field="Resolved", min_count=8)
-        self.assertEqual(list(out["Bucket"]), ["A", "C"])
-
     def test_prefer_known_summary_rows_drops_unknown_when_known_exists(self) -> None:
         df = pd.DataFrame(
             [
@@ -1012,22 +1150,6 @@ class SignalReviewLogicTests(unittest.TestCase):
         )
         out = _prefer_known_summary_rows(df, label_field="Session")
         self.assertEqual(list(out["Session"]), ["US (16-00 UTC)", "Asia (00-08 UTC)"])
-
-    def test_prepare_section_cards_condenses_building_cards_into_archive_status(self) -> None:
-        cards = [
-            {
-                "title": "Best Session",
-                "body_html": "Session looks healthy.",
-                "tone": "positive",
-            },
-            _archive_building_card("Hold Profile Archive", "Still building."),
-            _archive_building_card("Primary Alert Archive", "Still building."),
-        ]
-        out = _prepare_section_cards(cards, max_actionable=3)
-        self.assertEqual(out[0]["title"], "Best Session")
-        self.assertEqual(out[1]["title"], "Still Building")
-        self.assertIn("Hold Profile Archive", out[1]["body_html"])
-        self.assertIn("Primary Alert Archive", out[1]["body_html"])
 
     def test_display_trade_direction_uses_upside_downside_labels(self) -> None:
         self.assertEqual(_display_trade_direction("LONG"), "Upside")

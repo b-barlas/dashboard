@@ -276,6 +276,32 @@ def _connect(db_path: str | None = None):
     return connect_signal_tracker_db(db_path)
 
 
+def _looks_like_tracker_corruption(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "database disk image is malformed",
+            "file is not a database",
+            "not a database",
+            "malformed",
+            "integrity check failed",
+        )
+    )
+
+
+def _read_tracker_sql_query(path: str, query: str, params: Sequence[object] | None = None) -> pd.DataFrame:
+    try:
+        with _connect(path) as conn:
+            return pd.read_sql_query(query, conn, params=list(params or []))
+    except (sqlite3.DatabaseError, pd.errors.DatabaseError) as exc:
+        if not _looks_like_tracker_corruption(exc):
+            raise
+        recover_signal_tracker_db_from_latest_mirror(path)
+        with _connect(path) as conn:
+            return pd.read_sql_query(query, conn, params=list(params or []))
+
+
 def _ensure_signal_tracker_columns(conn: sqlite3.Connection) -> None:
     existing = {
         str(row["name"])
@@ -318,6 +344,15 @@ def _ensure_signal_tracker_columns(conn: sqlite3.Connection) -> None:
         "archive_guardrail_label": "TEXT",
         "archive_guardrail_penalty": "REAL",
         "archive_guardrail_note": "TEXT",
+        "archive_policy_delta": "REAL",
+        "archive_policy_completed": "INTEGER",
+        "archive_policy_quality": "TEXT",
+        "archive_policy_coverage": "REAL",
+        "archive_decision_delta": "REAL",
+        "archive_expectancy_delta": "REAL",
+        "archive_total_delta": "REAL",
+        "archive_total_expectancy_delta": "REAL",
+        "archive_decision_scope": "TEXT",
         "trade_decision": "TEXT",
         "trade_note": "TEXT",
         "trade_marked_at": "TEXT",
@@ -404,6 +439,15 @@ def init_signal_tracker_db(db_path: str | None = None) -> str:
                 archive_guardrail_label TEXT,
                 archive_guardrail_penalty REAL,
                 archive_guardrail_note TEXT,
+                archive_policy_delta REAL,
+                archive_policy_completed INTEGER,
+                archive_policy_quality TEXT,
+                archive_policy_coverage REAL,
+                archive_decision_delta REAL,
+                archive_expectancy_delta REAL,
+                archive_total_delta REAL,
+                archive_total_expectancy_delta REAL,
+                archive_decision_scope TEXT,
                 trade_decision TEXT,
                 trade_note TEXT,
                 trade_marked_at TEXT,
@@ -1093,6 +1137,15 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                 "archive_guardrail_label": str(event.get("archive_guardrail_label") or "").strip(),
                 "archive_guardrail_penalty": _float_or_none(event.get("archive_guardrail_penalty")),
                 "archive_guardrail_note": str(event.get("archive_guardrail_note") or "").strip(),
+                "archive_policy_delta": _float_or_none(event.get("archive_policy_delta")),
+                "archive_policy_completed": _int_or_none(event.get("archive_policy_completed")),
+                "archive_policy_quality": str(event.get("archive_policy_quality") or "").strip(),
+                "archive_policy_coverage": _float_or_none(event.get("archive_policy_coverage")),
+                "archive_decision_delta": _float_or_none(event.get("archive_decision_delta")),
+                "archive_expectancy_delta": _float_or_none(event.get("archive_expectancy_delta")),
+                "archive_total_delta": _float_or_none(event.get("archive_total_delta")),
+                "archive_total_expectancy_delta": _float_or_none(event.get("archive_total_expectancy_delta")),
+                "archive_decision_scope": str(event.get("archive_decision_scope") or "").strip(),
                 "price": _float_or_none(event.get("price")),
                 "delta_pct": _float_or_none(event.get("delta_pct")),
                 "entry_price": _float_or_none(event.get("entry_price")),
@@ -1125,6 +1178,8 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                     adaptive_edge_label, adaptive_edge_score,
                     actionable_frame_score, actionable_setup_score, actionable_context_score, actionable_tactical_score,
                     archive_guardrail_label, archive_guardrail_penalty, archive_guardrail_note,
+                    archive_policy_delta, archive_policy_completed, archive_policy_quality, archive_policy_coverage,
+                    archive_decision_delta, archive_expectancy_delta, archive_total_delta, archive_total_expectancy_delta, archive_decision_scope,
                     price, delta_pct, entry_price, stop_loss, target_price,
                     rr_ratio, has_plan, created_at, updated_at
                 ) VALUES (
@@ -1143,6 +1198,8 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                     :adaptive_edge_label, :adaptive_edge_score,
                     :actionable_frame_score, :actionable_setup_score, :actionable_context_score, :actionable_tactical_score,
                     :archive_guardrail_label, :archive_guardrail_penalty, :archive_guardrail_note,
+                    :archive_policy_delta, :archive_policy_completed, :archive_policy_quality, :archive_policy_coverage,
+                    :archive_decision_delta, :archive_expectancy_delta, :archive_total_delta, :archive_total_expectancy_delta, :archive_decision_scope,
                     :price, :delta_pct, :entry_price, :stop_loss, :target_price,
                     :rr_ratio, :has_plan, :created_at, :updated_at
                 )
@@ -1202,6 +1259,15 @@ def log_signal_events(events: Sequence[Mapping[str, object]], db_path: str | Non
                     archive_guardrail_label=excluded.archive_guardrail_label,
                     archive_guardrail_penalty=excluded.archive_guardrail_penalty,
                     archive_guardrail_note=excluded.archive_guardrail_note,
+                    archive_policy_delta=excluded.archive_policy_delta,
+                    archive_policy_completed=excluded.archive_policy_completed,
+                    archive_policy_quality=excluded.archive_policy_quality,
+                    archive_policy_coverage=excluded.archive_policy_coverage,
+                    archive_decision_delta=excluded.archive_decision_delta,
+                    archive_expectancy_delta=excluded.archive_expectancy_delta,
+                    archive_total_delta=excluded.archive_total_delta,
+                    archive_total_expectancy_delta=excluded.archive_total_expectancy_delta,
+                    archive_decision_scope=excluded.archive_decision_scope,
                     price=excluded.price,
                     delta_pct=excluded.delta_pct,
                     entry_price=excluded.entry_price,
@@ -1756,8 +1822,7 @@ def fetch_signal_events_df(
             params.append(version_text)
     query += " ORDER BY event_time DESC LIMIT ?"
     params.append(int(limit))
-    with _connect(path) as conn:
-        return pd.read_sql_query(query, conn, params=params)
+    return _read_tracker_sql_query(path, query, params)
 
 
 def fetch_signal_forward_windows_df(
@@ -1771,15 +1836,14 @@ def fetch_signal_forward_windows_df(
     if cleaned_keys:
         chunks: list[pd.DataFrame] = []
         chunk_size = 800
-        with _connect(path) as conn:
-            for start in range(0, len(cleaned_keys), chunk_size):
-                key_chunk = cleaned_keys[start : start + chunk_size]
-                placeholders = ",".join("?" for _ in key_chunk)
-                query = (
-                    "SELECT * FROM signal_forward_windows WHERE signal_key IN "
-                    f"({placeholders}) ORDER BY signal_key DESC, bars_ahead ASC"
-                )
-                chunks.append(pd.read_sql_query(query, conn, params=key_chunk))
+        for start in range(0, len(cleaned_keys), chunk_size):
+            key_chunk = cleaned_keys[start : start + chunk_size]
+            placeholders = ",".join("?" for _ in key_chunk)
+            query = (
+                "SELECT * FROM signal_forward_windows WHERE signal_key IN "
+                f"({placeholders}) ORDER BY signal_key DESC, bars_ahead ASC"
+            )
+            chunks.append(_read_tracker_sql_query(path, query, key_chunk))
         if not chunks:
             return pd.DataFrame()
         out = pd.concat(chunks, ignore_index=True)
@@ -1798,8 +1862,7 @@ def fetch_signal_forward_windows_df(
     if limit is not None:
         query += " LIMIT ?"
         params.append(int(limit))
-    with _connect(path) as conn:
-        return pd.read_sql_query(query, conn, params=params)
+    return _read_tracker_sql_query(path, query, params)
 
 
 def prefer_current_decision_version_slice(

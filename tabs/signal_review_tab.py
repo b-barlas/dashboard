@@ -5,6 +5,19 @@ import html
 import time
 
 import pandas as pd
+from core.archive_decision import build_archive_decision_snapshot
+from core.archive_intelligence import (
+    archive_direction_key,
+    archive_setup_class_key,
+    archive_setup_class_label,
+    build_archive_intelligence_snapshot,
+    filter_archive_events_by_setup,
+)
+from core.archive_expected_path import (
+    build_archive_expected_path_projection,
+    projection_float,
+    with_expected_path_reference_price,
+)
 from core.archive_policy import ARCHIVE_LEARNING_WINDOW_ROWS
 from core.decision_version import current_decision_version
 from core.session_utils import session_bucket_for_timestamp
@@ -20,7 +33,16 @@ _BEST_SIGNAL_MIN_TIMEFRAMES = 2
 _BEST_SIGNAL_MIN_TOTAL_RESOLVED = 24
 _BEST_SIGNAL_LEADERBOARD_LIMIT = 10
 _MIN_SIGNAL_ARCHIVE_ROWS = _BEST_SIGNAL_MIN_RESOLVED
-_MIN_EXECUTION_ARCHIVE_ROWS = 3
+_MIN_SETUP_POCKET_ROWS = 8
+
+_SETUP_FILTER_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("Auto Best", "AUTO_BEST"),
+    ("ENTER T+AI", "ENTER_TREND_AI"),
+    ("ENTER Trend", "ENTER_TREND_LED"),
+    ("ENTER AI", "ENTER_AI_LED"),
+    ("EARLY", "PROBE"),
+    ("WATCH", "WATCH"),
+)
 
 _FOLLOW_THROUGH_HORIZONS: dict[str, int] = {
     "5m": 12,
@@ -63,71 +85,6 @@ def _display_trade_direction(value: object) -> str:
     if side in {"SHORT", "DOWNSIDE", "SELL"}:
         return "Downside"
     return ""
-
-
-def _annotate_actual_hold_style(df_events: pd.DataFrame) -> pd.DataFrame:
-    if df_events is None or df_events.empty:
-        return pd.DataFrame()
-    d = df_events.copy()
-    if "actual_trade_status" not in d.columns:
-        return d
-    d["actual_trade_status"] = d["actual_trade_status"].fillna("").astype(str).str.upper()
-    d["actual_entry_at"] = pd.to_datetime(d.get("actual_entry_at"), utc=True, errors="coerce")
-    d["actual_exit_at"] = pd.to_datetime(d.get("actual_exit_at"), utc=True, errors="coerce")
-    d["Actual Hold Hours"] = (
-        (d["actual_exit_at"] - d["actual_entry_at"]).dt.total_seconds() / 3600.0
-    )
-    d["Actual Hold Hours"] = pd.to_numeric(d["Actual Hold Hours"], errors="coerce")
-
-    def _style_for_row(row: pd.Series) -> str:
-        status = str(row.get("actual_trade_status") or "").strip().upper()
-        hold_hours = row.get("Actual Hold Hours")
-        if status != "CLOSED":
-            return "Open / Not Closed"
-        if pd.isna(hold_hours):
-            return "Unknown Hold"
-        if float(hold_hours) <= 6.0:
-            return "Quick Follow-Through"
-        if float(hold_hours) >= 18.0:
-            return "Needs Room"
-        return "Standard Hold"
-
-    d["Hold Style"] = d.apply(_style_for_row, axis=1)
-    return d
-
-
-def _annotate_actual_exit_quality(df_events: pd.DataFrame) -> pd.DataFrame:
-    if df_events is None or df_events.empty:
-        return pd.DataFrame()
-    d = df_events.copy()
-    if "actual_trade_status" not in d.columns:
-        return d
-    d["actual_trade_status"] = d["actual_trade_status"].fillna("").astype(str).str.upper()
-    d["actual_pnl_pct"] = pd.to_numeric(d.get("actual_pnl_pct"), errors="coerce")
-    d["actual_exit_reason"] = d.get("actual_exit_reason", pd.Series(dtype=object)).fillna("").astype(str).str.strip().str.upper()
-
-    def _quality_for_row(row: pd.Series) -> str:
-        status = str(row.get("actual_trade_status") or "").strip().upper()
-        if status != "CLOSED":
-            return "Open / Not Closed"
-        pnl = row.get("actual_pnl_pct")
-        if pd.isna(pnl):
-            return "Unknown Exit"
-        reason = str(row.get("actual_exit_reason") or "").strip().upper()
-        if float(pnl) > 0.0:
-            if reason == "TARGET":
-                return "Target Winner"
-            if reason in {"MANUAL EXIT", "TIME EXIT"}:
-                return "Manual Winner Exit"
-            return "Winner Other Exit"
-        if reason in {"STOP", "INVALIDATION"}:
-            return "Protected Loss Exit"
-        if reason in {"MANUAL EXIT", "TIME EXIT"}:
-            return "Late Manual Loss"
-        return "Loss Other Exit"
-
-    d["Exit Quality"] = d.apply(_quality_for_row, axis=1)
-    return d
 
 
 def _normalize_symbol_filter(value: object) -> str:
@@ -178,17 +135,128 @@ def _coin_view_summary(
     return (
         f"<b>{' • '.join(scope_parts)}</b><br>"
         f"{int(rows_loaded)} signals loaded from the latest {int(analysis_limit)}<br>"
-        "Shows timing, expected path, and execution quality for this coin"
+        "Shows timing, expected path, and the strongest historical setup pocket"
     )
 
 
 def _archive_direction_key(value: object) -> str:
-    side = str(value or "").strip().upper()
-    if side in {"UPSIDE", "LONG", "BUY", "BULLISH", "STRONG BUY"}:
-        return "UPSIDE"
-    if side in {"DOWNSIDE", "SHORT", "SELL", "BEARISH", "STRONG SELL"}:
-        return "DOWNSIDE"
-    return ""
+    return archive_direction_key(value)
+
+
+def _setup_filter_value(label: str) -> str:
+    option_map = {display: value for display, value in _SETUP_FILTER_OPTIONS}
+    return option_map.get(str(label or "").strip(), "AUTO_BEST")
+
+
+def _setup_class_key(value: object) -> str:
+    return archive_setup_class_key(value)
+
+
+def _setup_class_label(value: object) -> str:
+    return archive_setup_class_label(value)
+
+
+def _setup_display_label(value: object, direction: object) -> str:
+    key = _setup_class_key(value)
+    if key == "UNKNOWN":
+        return _setup_class_label(value)
+    return setup_confirm_display(key, audience="trader", direction=str(direction or ""))
+
+
+def _annotate_setup_class(df_events: pd.DataFrame) -> pd.DataFrame:
+    if df_events is None or df_events.empty:
+        return pd.DataFrame()
+    out = df_events.copy()
+    setup_series = out.get("setup_confirm", pd.Series(index=out.index, dtype=object))
+    out["__setup_class"] = setup_series.fillna("").astype(str).map(_setup_class_key)
+    out["__setup_label"] = out["__setup_class"].map(_setup_class_label)
+    return out
+
+
+def _filter_events_by_setup(df_events: pd.DataFrame, setup_filter_value: str) -> pd.DataFrame:
+    return filter_archive_events_by_setup(df_events, setup_filter_value)
+
+
+def _select_setup_pocket(
+    df_events: pd.DataFrame,
+    *,
+    setup_filter_value: str,
+    min_completed: int = _MIN_SETUP_POCKET_ROWS,
+) -> dict[str, object]:
+    if df_events is None or df_events.empty:
+        return _setup_pocket_from_snapshot(None)
+    snapshot = build_archive_intelligence_snapshot(
+        df_events,
+        setup_filter_value=setup_filter_value,
+        min_completed=min_completed,
+    )
+    return _setup_pocket_from_snapshot(snapshot)
+
+
+def _setup_pocket_from_snapshot(snapshot: object | None) -> dict[str, object]:
+    empty = {
+        "available": False,
+        "setup_class": "",
+        "setup_label": "Building",
+        "setup_display": "Building",
+        "timeframe": "",
+        "direction": "",
+        "signals": 0,
+        "completed": 0,
+        "follow_through_pct": 0.0,
+        "avg_dir_return_pct": 0.0,
+        "avg_adverse_excursion_pct": 0.0,
+        "score": 0.0,
+    }
+    if snapshot is None or not bool(getattr(snapshot, "available", False)):
+        return empty
+    return {
+        "available": True,
+        "setup_class": str(snapshot.setup_class).strip().upper(),
+        "setup_label": str(snapshot.setup_label).strip() or "Other",
+        "setup_display": _setup_display_label(snapshot.setup_class, snapshot.direction),
+        "timeframe": str(snapshot.timeframe).strip().lower(),
+        "direction": str(snapshot.direction).strip().upper(),
+        "signals": int(snapshot.signals or 0),
+        "completed": int(snapshot.completed or 0),
+        "follow_through_pct": float(snapshot.follow_through_pct or 0.0),
+        "avg_dir_return_pct": float(snapshot.avg_dir_return_pct or 0.0),
+        "avg_adverse_excursion_pct": float(snapshot.avg_adverse_excursion_pct or 0.0),
+        "score": float(snapshot.score or 0.0),
+    }
+
+
+def _filter_events_to_setup_pocket(df_events: pd.DataFrame, pocket: Mapping[str, object]) -> pd.DataFrame:
+    if df_events is None or df_events.empty or not bool(pocket.get("available")):
+        return pd.DataFrame()
+    d = _annotate_setup_class(df_events)
+    d["timeframe"] = d["timeframe"].fillna("").astype(str).str.strip().str.lower()
+    d["__direction_key"] = d["direction"].map(_archive_direction_key)
+    return d[
+        d["timeframe"].eq(str(pocket.get("timeframe") or "").strip().lower())
+        & d["__setup_class"].eq(str(pocket.get("setup_class") or "").strip().upper())
+        & d["__direction_key"].eq(str(pocket.get("direction") or "").strip().upper())
+    ].copy()
+
+
+def _filter_events_to_setup_direction(df_events: pd.DataFrame, pocket: Mapping[str, object]) -> pd.DataFrame:
+    if df_events is None or df_events.empty or not bool(pocket.get("available")):
+        return pd.DataFrame()
+    d = _annotate_setup_class(df_events)
+    d["__direction_key"] = d["direction"].map(_archive_direction_key)
+    return d[
+        d["__setup_class"].eq(str(pocket.get("setup_class") or "").strip().upper())
+        & d["__direction_key"].eq(str(pocket.get("direction") or "").strip().upper())
+    ].copy()
+
+
+def _setup_pocket_label(pocket: Mapping[str, object]) -> str:
+    if not bool(pocket.get("available")):
+        return "Building"
+    setup = str(pocket.get("setup_display") or pocket.get("setup_label") or "Setup").strip()
+    timeframe = str(pocket.get("timeframe") or "").strip().upper()
+    parts = [part for part in (setup, timeframe) if part]
+    return " • ".join(parts)
 
 
 def _filter_directional_signal_rows(df_events: pd.DataFrame) -> pd.DataFrame:
@@ -229,14 +297,17 @@ def _merge_path_sample_counts(
     event_scope = event_scope[event_scope["signal_key"].isin(window_keys)].copy()
     if event_scope.empty:
         return out, True
+    group_cols = ["symbol", "timeframe", "__direction_key"]
+    if "__setup_class" in out.columns and "__setup_class" in event_scope.columns:
+        group_cols.append("__setup_class")
     path_counts = (
-        event_scope.groupby(["symbol", "timeframe", "__direction_key"], dropna=False)["signal_key"]
+        event_scope.groupby(group_cols, dropna=False)["signal_key"]
         .nunique()
         .reset_index(name="PathSamples")
     )
     out = out.drop(columns=["PathSamples"], errors="ignore").merge(
         path_counts,
-        on=["symbol", "timeframe", "__direction_key"],
+        on=group_cols,
         how="left",
     )
     out["PathSamples"] = pd.to_numeric(out["PathSamples"], errors="coerce").fillna(0).astype(int)
@@ -455,11 +526,12 @@ def _build_best_signal_leaderboard(
     d = d[d["symbol"].ne("") & d["timeframe"].ne("")].copy()
     if d.empty:
         return pd.DataFrame()
+    d = _annotate_setup_class(d)
     if "signal_key" in d.columns:
         d["signal_key"] = d["signal_key"].fillna("").astype(str).str.strip()
     d["directional_return_pct"] = pd.to_numeric(d.get("directional_return_pct"), errors="coerce")
     grouped = (
-        d.groupby(["symbol", "timeframe", "__direction_key"], dropna=False)
+        d.groupby(["symbol", "timeframe", "__setup_class", "__setup_label", "__direction_key"], dropna=False)
         .agg(
             Resolved=("symbol", "count"),
             FollowThroughPct=(
@@ -506,10 +578,14 @@ def _build_best_signal_leaderboard(
         ).head(int(limit)).copy()
         board["Mode"] = "Best Signal"
         board["Best TF"] = board["timeframe"].astype(str).str.upper()
+        board["Best Setup"] = board.apply(
+            lambda row: _setup_display_label(row.get("__setup_class"), row.get("__direction_key")),
+            axis=1,
+        )
         board["Follow-Through"] = board["FollowThroughPct"].map(lambda value: f"{float(value):.1f}%")
         board["Avg Move"] = board["AvgDirReturnPct"].map(lambda value: f"{float(value):+.2f}%")
         board = board.rename(columns={"symbol": "Coin"})
-        return board[["Coin", "Mode", "Follow-Through", "Resolved", "Best TF", "Avg Move"]].reset_index(drop=True)
+        return board[["Coin", "Mode", "Best Setup", "Follow-Through", "Resolved", "Best TF", "Avg Move"]].reset_index(drop=True)
 
     symbol_scores = (
         qualified.groupby("symbol", dropna=False)
@@ -539,8 +615,29 @@ def _build_best_signal_leaderboard(
             ascending=[False, False, False, False, False],
         )
         .groupby("symbol", dropna=False)
-        .head(1)[["symbol", "timeframe"]]
-        .rename(columns={"timeframe": "best_timeframe"})
+        .head(1)[
+            [
+                "symbol",
+                "timeframe",
+                "__setup_class",
+                "__direction_key",
+                "FollowThroughPct",
+                "AvgDirReturnPct",
+                "Resolved",
+                "PathSamples",
+            ]
+        ]
+        .rename(
+            columns={
+                "timeframe": "best_timeframe",
+                "__setup_class": "best_setup_class",
+                "__direction_key": "best_direction",
+                "FollowThroughPct": "BestFollowThroughPct",
+                "AvgDirReturnPct": "BestAvgDirReturnPct",
+                "Resolved": "BestResolved",
+                "PathSamples": "BestPathSamples",
+            }
+        )
     )
     board = symbol_scores.merge(best_timeframes, on="symbol", how="left")
     board["Mode"] = board.apply(
@@ -557,10 +654,15 @@ def _build_best_signal_leaderboard(
         ascending=[False, False, False, False, False, False],
     ).head(int(limit)).copy()
     board["Best TF"] = board["best_timeframe"].fillna("").astype(str).str.upper()
-    board["Follow-Through"] = board["AvgFollowThroughPct"].map(lambda value: f"{float(value):.1f}%")
-    board["Avg Move"] = board["AvgDirReturnPct"].map(lambda value: f"{float(value):+.2f}%")
+    board["Best Setup"] = board.apply(
+        lambda row: _setup_display_label(row.get("best_setup_class"), row.get("best_direction")),
+        axis=1,
+    )
+    board["Follow-Through"] = board["BestFollowThroughPct"].map(lambda value: f"{float(value):.1f}%")
+    board["Avg Move"] = board["BestAvgDirReturnPct"].map(lambda value: f"{float(value):+.2f}%")
+    board["Resolved"] = pd.to_numeric(board["BestResolved"], errors="coerce").fillna(0).astype(int)
     board = board.rename(columns={"symbol": "Coin"})
-    return board[["Coin", "Mode", "Follow-Through", "Resolved", "Best TF", "Avg Move"]].reset_index(drop=True)
+    return board[["Coin", "Mode", "Best Setup", "Follow-Through", "Resolved", "Best TF", "Avg Move"]].reset_index(drop=True)
 
 
 def _selected_dataframe_row_index(selection_state: object) -> int | None:
@@ -656,13 +758,7 @@ def _hold_guidance_cell(snapshot: Mapping[str, object], *, direction_label: str 
 
 
 def _projection_float(value: object, default: float = 0.0) -> float:
-    try:
-        out = float(value)
-    except Exception:
-        return float(default)
-    if pd.isna(out):
-        return float(default)
-    return float(out)
+    return projection_float(value, default)
 
 
 def _format_projection_price(value: object) -> str:
@@ -699,16 +795,23 @@ def _format_directional_projection_range(low_pct: object, high_pct: object, dire
     return f"+{low:.2f}% to +{high:.2f}%"
 
 
-def _projection_direction_key(value: object) -> str:
-    return _archive_direction_key(value)
-
-
-def _expected_path_read_quality(sample: int) -> str:
-    if int(sample) >= 32:
-        return "Strong"
-    if int(sample) >= 16:
-        return "Good"
-    return "Thin"
+def _expected_path_archive_check_html(snapshot: Mapping[str, object]) -> str:
+    sample = int(snapshot.get("archive_check_sample") or 0)
+    zone_hit = snapshot.get("zone_hit_rate_pct")
+    clean_path = snapshot.get("clean_path_rate_pct")
+    if sample <= 0 or zone_hit is None or clean_path is None:
+        return ""
+    try:
+        zone_hit_pct = float(zone_hit)
+        clean_path_pct = float(clean_path)
+    except Exception:
+        return ""
+    if pd.isna(zone_hit_pct) or pd.isna(clean_path_pct):
+        return ""
+    return (
+        f"Archive check: <b>{zone_hit_pct:.0f}% reached this zone</b>; "
+        f"{clean_path_pct:.0f}% stayed within normal pullback<br>"
+    )
 
 
 def _with_expected_path_reference_price(
@@ -716,35 +819,17 @@ def _with_expected_path_reference_price(
     reference_price: object,
     reference_label: str = "latest close",
 ) -> dict[str, object]:
-    out = dict(snapshot)
-    ref_price = _projection_float(reference_price, 0.0)
-    if ref_price <= 0:
-        return out
-
-    direction_key = str(out.get("direction") or "").strip().upper()
-    lower_return = abs(_projection_float(out.get("best_zone_low_pct"), 0.0))
-    upper_return = abs(_projection_float(out.get("best_zone_high_pct"), 0.0))
-    lower_return, upper_return = sorted([lower_return, upper_return])
-    normal_pullback = max(0.0, abs(_projection_float(out.get("normal_pullback_pct"), 0.0)))
-
-    if direction_key == "DOWNSIDE":
-        p1 = ref_price * (1.0 - lower_return / 100.0)
-        p2 = ref_price * (1.0 - upper_return / 100.0)
-        pullback_price = ref_price * (1.0 + normal_pullback / 100.0)
-    else:
-        p1 = ref_price * (1.0 + lower_return / 100.0)
-        p2 = ref_price * (1.0 + upper_return / 100.0)
-        pullback_price = ref_price * (1.0 - normal_pullback / 100.0)
-
-    price_low, price_high = sorted([p1, p2])
-    out.update(
-        {
-            "reference_price": ref_price,
-            "reference_price_label": str(reference_label or "latest close").strip() or "latest close",
-            "price_zone_label": f"{_format_projection_price(price_low)} - {_format_projection_price(price_high)}",
-            "pullback_price_label": _format_projection_price(pullback_price),
-        }
-    )
+    out = with_expected_path_reference_price(snapshot, reference_price, reference_label)
+    price_low = _projection_float(out.get("price_zone_low"), 0.0)
+    price_high = _projection_float(out.get("price_zone_high"), 0.0)
+    pullback_price = _projection_float(out.get("pullback_price"), 0.0)
+    caution_price = _projection_float(out.get("caution_price"), 0.0)
+    if price_low > 0 and price_high > 0:
+        out["price_zone_label"] = f"{_format_projection_price(price_low)} - {_format_projection_price(price_high)}"
+    if pullback_price > 0:
+        out["pullback_price_label"] = _format_projection_price(pullback_price)
+    if caution_price > 0:
+        out["caution_price_label"] = _format_projection_price(caution_price)
     return out
 
 
@@ -777,14 +862,6 @@ def _fetch_expected_path_reference_price(fetch_ohlcv, symbol: str, timeframe: st
     return None, ""
 
 
-def _format_archive_reference_label(ts: object, *, stale: bool) -> str:
-    prefix = "last archived price" if stale else "latest archived price"
-    parsed = pd.to_datetime(ts, utc=True, errors="coerce")
-    if pd.isna(parsed):
-        return prefix
-    return f"{prefix}, {pd.Timestamp(parsed).strftime('%b %d')}"
-
-
 def _expected_path_timing_label(snapshot: Mapping[str, object]) -> str:
     bars = int(snapshot.get("best_bar") or 0)
     timeframe = str(snapshot.get("timeframe") or "").strip().upper()
@@ -792,183 +869,6 @@ def _expected_path_timing_label(snapshot: Mapping[str, object]) -> str:
         return ""
     candle_label = "candle" if bars == 1 else "candles"
     return f"next {bars} {candle_label} on {timeframe}"
-
-
-def _expected_path_reference_price(
-    df_events: pd.DataFrame,
-    *,
-    timeframe: str,
-    direction: str,
-    now: object | None = None,
-    max_age_hours: int = 48,
-) -> tuple[float | None, str]:
-    if df_events is None or df_events.empty or "price" not in df_events.columns:
-        return None, ""
-    d = df_events.copy()
-    if "timeframe" in d.columns:
-        d = d[d["timeframe"].fillna("").astype(str).str.strip().str.lower().eq(str(timeframe).lower())].copy()
-    if "direction" in d.columns:
-        d["__direction"] = d["direction"].map(_projection_direction_key)
-        d = d[d["__direction"].eq(str(direction).upper())].copy()
-    d["__price"] = pd.to_numeric(d.get("price"), errors="coerce")
-    d = d[d["__price"].notna() & (d["__price"] > 0)].copy()
-    if d.empty:
-        return None, ""
-    if "event_time" in d.columns:
-        d["__event_ts"] = pd.to_datetime(d["event_time"], utc=True, errors="coerce")
-        d = d.sort_values("__event_ts", ascending=False)
-        latest = d.iloc[0]
-        ts = latest.get("__event_ts")
-        if pd.notna(ts):
-            now_ts = pd.to_datetime(now, utc=True, errors="coerce") if now is not None else pd.Timestamp.now(tz="UTC")
-            if pd.notna(now_ts):
-                age_hours = max(0.0, float((pd.Timestamp(now_ts) - pd.Timestamp(ts)).total_seconds()) / 3600.0)
-                return (
-                    float(latest["__price"]),
-                    _format_archive_reference_label(ts, stale=age_hours > float(max_age_hours)),
-                )
-    latest_price = float(d.iloc[0]["__price"])
-    return latest_price, "latest archived price"
-
-
-def _expected_path_snapshot_for_group(
-    *,
-    events_df: pd.DataFrame,
-    windows_df: pd.DataFrame,
-    symbol_filter: str,
-    timeframe: str,
-    direction: str,
-    min_samples: int,
-    now: object | None = None,
-) -> dict[str, object]:
-    empty = {
-        "available": False,
-        "symbol": str(symbol_filter or "").strip().upper(),
-        "timeframe": str(timeframe or "").strip().lower(),
-        "direction": str(direction or "").strip().upper(),
-        "sample": 0,
-    }
-    if events_df is None or events_df.empty or windows_df is None or windows_df.empty:
-        return empty
-    required_event_cols = {"signal_key", "timeframe", "direction"}
-    required_window_cols = {"signal_key", "bars_ahead", "directional_return_pct", "adverse_excursion_pct"}
-    if not required_event_cols.issubset(events_df.columns) or not required_window_cols.issubset(windows_df.columns):
-        return empty
-
-    e = events_df.copy()
-    e["signal_key"] = e["signal_key"].fillna("").astype(str).str.strip()
-    e["timeframe"] = e["timeframe"].fillna("").astype(str).str.strip().str.lower()
-    e["__direction"] = e["direction"].map(_projection_direction_key)
-    status = e.get("status", pd.Series(index=e.index, dtype=object)).fillna("").astype(str).str.upper()
-    e = e[
-        e["signal_key"].ne("")
-        & e["timeframe"].eq(str(timeframe).strip().lower())
-        & e["__direction"].eq(str(direction).strip().upper())
-        & status.eq("RESOLVED")
-    ].copy()
-    if e.empty:
-        return empty
-
-    w = windows_df.copy()
-    w["signal_key"] = w["signal_key"].fillna("").astype(str).str.strip()
-    w["bars_ahead"] = pd.to_numeric(w["bars_ahead"], errors="coerce")
-    w["directional_return_pct"] = pd.to_numeric(w["directional_return_pct"], errors="coerce")
-    w["adverse_excursion_pct"] = pd.to_numeric(w["adverse_excursion_pct"], errors="coerce")
-    w = w[
-        w["signal_key"].ne("")
-        & w["bars_ahead"].notna()
-        & w["directional_return_pct"].notna()
-        & w["adverse_excursion_pct"].notna()
-    ].copy()
-    if w.empty:
-        return empty
-
-    merged = w.merge(e[["signal_key", "timeframe", "__direction", "price", "event_time"] if {"price", "event_time"}.issubset(e.columns) else ["signal_key", "timeframe", "__direction"]], on="signal_key", how="inner")
-    if merged.empty:
-        return empty
-    sample = int(merged["signal_key"].nunique())
-    if sample < int(min_samples):
-        out = dict(empty)
-        out.update({"sample": sample, "read_quality": "Building"})
-        return out
-
-    by_bar_rows: list[dict[str, object]] = []
-    for bar, group in merged.groupby("bars_ahead", dropna=True):
-        bar_sample = int(group["signal_key"].nunique())
-        if bar_sample < max(3, min(int(min_samples), 8)):
-            continue
-        returns = pd.to_numeric(group["directional_return_pct"], errors="coerce").dropna()
-        adverse = pd.to_numeric(group["adverse_excursion_pct"], errors="coerce").dropna()
-        if returns.empty:
-            continue
-        median_return = float(returns.median())
-        if median_return <= 0.0:
-            continue
-        adverse_median = float(adverse.median()) if not adverse.empty else 0.0
-        follow_through = float((returns > 0.0).mean() * 100.0)
-        path_score = median_return - (0.30 * adverse_median) + ((follow_through - 50.0) / 100.0)
-        by_bar_rows.append(
-            {
-                "bars_ahead": int(bar),
-                "sample": bar_sample,
-                "median_return": median_return,
-                "lower_return": float(returns.quantile(0.40)),
-                "upper_return": float(returns.quantile(0.75)),
-                "normal_pullback": max(0.0, float(adverse.quantile(0.65)) if not adverse.empty else 0.0),
-                "follow_through": follow_through,
-                "path_score": path_score,
-            }
-        )
-    if not by_bar_rows:
-        out = dict(empty)
-        out.update({"sample": sample, "read_quality": _expected_path_read_quality(sample)})
-        return out
-
-    by_bar_rows.sort(key=lambda row: (float(row["path_score"]), float(row["median_return"]), int(row["sample"])), reverse=True)
-    best = by_bar_rows[0]
-    best_bar = int(best["bars_ahead"])
-    best_median = float(best["median_return"])
-    fade_after_bar = 0
-    for row in sorted([r for r in by_bar_rows if int(r["bars_ahead"]) > best_bar], key=lambda r: int(r["bars_ahead"])):
-        if float(row["median_return"]) <= max(0.05, best_median * 0.65) or float(row["follow_through"]) < 50.0:
-            fade_after_bar = int(row["bars_ahead"])
-            break
-
-    ref_price, ref_label = _expected_path_reference_price(
-        merged,
-        timeframe=str(timeframe).strip().lower(),
-        direction=str(direction).strip().upper(),
-        now=now,
-    )
-    lower_return = float(min(best["lower_return"], best["upper_return"]))
-    upper_return = float(max(best["lower_return"], best["upper_return"]))
-    normal_pullback = float(best["normal_pullback"])
-
-    score = (
-        float(best["path_score"])
-        + min(1.5, sample / 24.0)
-        + (0.25 if _expected_path_read_quality(sample) == "Strong" else 0.0)
-    )
-    snapshot = {
-        "available": True,
-        "symbol": str(symbol_filter or "").strip().upper(),
-        "timeframe": str(timeframe or "").strip().lower(),
-        "direction": str(direction or "").strip().upper(),
-        "sample": sample,
-        "read_quality": _expected_path_read_quality(sample),
-        "best_bar": best_bar,
-        "fade_after_bar": fade_after_bar,
-        "best_zone_low_pct": lower_return,
-        "best_zone_high_pct": upper_return,
-        "normal_pullback_pct": normal_pullback,
-        "follow_through_pct": float(best["follow_through"]),
-        "score": float(score),
-        "reference_price": ref_price,
-        "reference_price_label": ref_label,
-        "price_zone_label": "",
-        "pullback_price_label": "",
-    }
-    return _with_expected_path_reference_price(snapshot, ref_price, ref_label)
 
 
 def _build_expected_path_projection(
@@ -980,45 +880,22 @@ def _build_expected_path_projection(
     min_samples: int = 8,
     now: object | None = None,
 ) -> dict[str, object]:
-    empty = {"available": False, "symbol": str(symbol_filter or "").strip().upper(), "sample": 0}
-    if df_events is None or df_events.empty or df_forward_windows is None or df_forward_windows.empty:
-        return empty
-    if "timeframe" not in df_events.columns or "direction" not in df_events.columns:
-        return empty
-    timeframe_text = str(timeframe_filter or "").strip().lower()
-    available_timeframes = set(df_events["timeframe"].fillna("").astype(str).str.strip().str.lower().tolist())
-    available_timeframes.discard("")
-    timeframes = _ordered_timeframe_scope(
+    snapshot = build_archive_expected_path_projection(
+        df_events=df_events,
+        df_forward_windows=df_forward_windows,
+        symbol_filter=symbol_filter,
         timeframe_filter=timeframe_filter,
-        available_timeframes=available_timeframes,
+        timeframe_order=_HOLD_GUIDANCE_TIMEFRAME_ORDER,
+        min_samples=min_samples,
+        now=now,
     )
-    if timeframe_text and timeframe_text != "all":
-        timeframes = [timeframe_text]
-    snapshots: list[dict[str, object]] = []
-    for timeframe in timeframes:
-        for direction in ("UPSIDE", "DOWNSIDE"):
-            snap = _expected_path_snapshot_for_group(
-                events_df=df_events,
-                windows_df=df_forward_windows,
-                symbol_filter=symbol_filter,
-                timeframe=timeframe,
-                direction=direction,
-                min_samples=min_samples,
-                now=now,
-            )
-            if bool(snap.get("available")):
-                snapshots.append(snap)
-    if not snapshots:
-        return empty
-    snapshots.sort(
-        key=lambda snap: (
-            float(snap.get("score") or 0.0),
-            float(snap.get("follow_through_pct") or 0.0),
-            int(snap.get("sample") or 0),
-        ),
-        reverse=True,
-    )
-    return snapshots[0]
+    if bool(snapshot.get("available")) and _projection_float(snapshot.get("reference_price"), 0.0) > 0:
+        return _with_expected_path_reference_price(
+            snapshot,
+            snapshot.get("reference_price"),
+            str(snapshot.get("reference_price_label") or "latest archived price"),
+        )
+    return snapshot
 
 
 def _expected_path_body_html(snapshot: Mapping[str, object]) -> str:
@@ -1053,6 +930,7 @@ def _expected_path_body_html(snapshot: Mapping[str, object]) -> str:
     reference_label = html.escape(str(snapshot.get("reference_price_label") or "latest close"))
     timing_label = html.escape(_expected_path_timing_label(snapshot))
     timing_html = f"Timing: <b>{timing_label}</b><br>" if timing_label else ""
+    archive_check_html = _expected_path_archive_check_html(snapshot)
     if price_zone and reference_price > 0:
         return (
             f"<b>{symbol} {timeframe} {direction_escaped}</b><br>"
@@ -1062,9 +940,10 @@ def _expected_path_body_html(snapshot: Mapping[str, object]) -> str:
             f"{timing_html.replace('Timing:', 'Best path window:', 1)}"
             f"Move from that price: <b>{html.escape(move_pct)}</b> "
             f"<span style='opacity:0.70;'>({html.escape(move_hint)})</span><br>"
-            f"Normal shakeout: <b>{html.escape(pullback_price or pullback)}</b> "
+            f"Normal pullback: <b>{html.escape(pullback_price or pullback)}</b> "
             f"<span style='opacity:0.70;'>({html.escape(pullback_pct_label)}, can still be normal)</span><br>"
             f"Path weakens after: <b>{html.escape(fade_text)}</b><br>"
+            f"{archive_check_html}"
             f"History depth: <b>{quality}</b> ({sample} similar signals)<br>"
             "<span style='opacity:0.72;'>Price path from similar past signals, not a price target. Hold window above is the efficiency read.</span>"
         )
@@ -1073,12 +952,131 @@ def _expected_path_body_html(snapshot: Mapping[str, object]) -> str:
         f"Expected move: <b>{html.escape(move_pct)}</b> "
         f"<span style='opacity:0.70;'>({html.escape(move_hint)})</span><br>"
         f"{timing_html.replace('Timing:', 'Best path window:', 1)}"
-        f"Normal shakeout: <b>{pullback}</b> "
+        f"Normal pullback: <b>{pullback}</b> "
         "<span style='opacity:0.70;'>(can still be normal)</span><br>"
         f"Path weakens after: <b>{html.escape(fade_text)}</b><br>"
+        f"{archive_check_html}"
         f"History depth: <b>{quality}</b> ({sample} similar signals)<br>"
         "<span style='opacity:0.72;'>Price path from similar past signals, not a price target. Hold window above is the efficiency read.</span>"
     )
+
+
+def _expected_path_scope_label(snapshot: Mapping[str, object]) -> str:
+    symbol = str(snapshot.get("symbol") or "").strip().upper() or "Coin"
+    timeframe = str(snapshot.get("timeframe") or "").strip().upper()
+    direction_key = str(snapshot.get("direction") or "").strip().upper()
+    direction = "Upside" if direction_key == "UPSIDE" else ("Downside" if direction_key == "DOWNSIDE" else "Direction")
+    parts = [symbol]
+    if timeframe:
+        parts.append(timeframe)
+    parts.append(direction)
+    return " ".join(parts)
+
+
+def _expected_path_kpi_items(snapshot: Mapping[str, object]) -> list[dict[str, object]]:
+    if not bool(snapshot.get("available")):
+        return []
+
+    direction_key = str(snapshot.get("direction") or "").strip().upper()
+    move_pct = _format_directional_projection_range(
+        snapshot.get("best_zone_low_pct"),
+        snapshot.get("best_zone_high_pct"),
+        direction_key,
+    )
+    price_zone = str(snapshot.get("price_zone_label") or "").strip()
+    reference_price = _projection_float(snapshot.get("reference_price"), 0.0)
+    reference_label = str(snapshot.get("reference_price_label") or "latest close").strip() or "latest close"
+    zone_value = price_zone if price_zone and reference_price > 0 else move_pct
+    zone_subtext = (
+        f"From {_format_projection_price(reference_price)} {reference_label}; move {move_pct}"
+        if price_zone and reference_price > 0
+        else "Usual move window from similar signals"
+    )
+
+    bars = int(snapshot.get("best_bar") or 0)
+    timeframe = str(snapshot.get("timeframe") or "").strip().upper()
+    timing_value = f"Next {bars}" if bars > 0 else "Building"
+    candle_label = "candle" if bars == 1 else "candles"
+    timing_subtext = f"{candle_label} on {timeframe}" if bars > 0 and timeframe else "Waiting for timing history"
+
+    pullback_pct = max(0.0, abs(_projection_float(snapshot.get("normal_pullback_pct"), 0.0)))
+    if direction_key == "DOWNSIDE":
+        pullback_pct_label = f"+{pullback_pct:.2f}% against setup"
+        caution_side = "above"
+    else:
+        pullback_pct_label = f"-{pullback_pct:.2f}%"
+        caution_side = "below"
+    pullback_price = str(snapshot.get("pullback_price_label") or "").strip()
+    caution_price = str(snapshot.get("caution_price_label") or "").strip()
+    caution_pct = max(0.0, abs(_projection_float(snapshot.get("caution_pullback_pct"), pullback_pct)))
+    caution_subtext = f"{pullback_pct_label} can still be normal"
+    if caution_price:
+        caution_subtext = f"Normal up to {pullback_pct_label}; caution {caution_side} {caution_price}"
+    elif caution_pct > pullback_pct:
+        caution_subtext = f"Normal up to {pullback_pct_label}; caution past {caution_pct:.2f}%"
+
+    fade_after = int(snapshot.get("fade_after_bar") or 0)
+    fade_value = _format_bar_count(fade_after) if fade_after > 0 else "Not clear"
+    fade_subtext = "Archive edge usually weakens here" if fade_after > 0 else "No clean fade point yet"
+
+    quality = str(snapshot.get("read_quality") or "Thin")
+    sample = int(snapshot.get("sample") or 0)
+    archive_sample = int(snapshot.get("archive_check_sample") or 0)
+    zone_hit = snapshot.get("zone_hit_rate_pct")
+    clean_path = snapshot.get("clean_path_rate_pct")
+    badge_text = ""
+    if archive_sample > 0 and zone_hit is not None:
+        try:
+            zone_hit_pct = float(zone_hit)
+            if not pd.isna(zone_hit_pct):
+                badge_text = f"{zone_hit_pct:.0f}% reached zone"
+        except Exception:
+            badge_text = ""
+    history_subtext = f"{sample} similar signals"
+    if clean_path is not None:
+        try:
+            clean_path_pct = float(clean_path)
+            if not pd.isna(clean_path_pct):
+                history_subtext = f"{history_subtext}; {clean_path_pct:.0f}% clean route"
+        except Exception:
+            pass
+    if bool(snapshot.get("path_conflict")):
+        history_subtext = f"{history_subtext}; alternate read is close"
+
+    quality_tone = "positive" if quality == "Strong" else ("warning" if quality == "Good" else "neutral")
+    quality_color = "#00FF88" if quality == "Strong" else ("#FFD166" if quality == "Good" else "#8AA0B8")
+
+    return [
+        {
+            "label": "Expected Zone",
+            "value": zone_value,
+            "value_color": "#00FF88" if direction_key == "UPSIDE" else "#FF3366" if direction_key == "DOWNSIDE" else "#F7FBFF",
+            "subtext": zone_subtext,
+        },
+        {
+            "label": "Timing",
+            "value": timing_value,
+            "subtext": timing_subtext,
+        },
+        {
+            "label": "Normal Shakeout",
+            "value": pullback_price or pullback_pct_label,
+            "subtext": caution_subtext,
+        },
+        {
+            "label": "Fades After",
+            "value": fade_value,
+            "subtext": fade_subtext,
+        },
+        {
+            "label": "History Depth",
+            "value": quality,
+            "value_color": quality_color,
+            "subtext": history_subtext,
+            "badge_text": badge_text,
+            "badge_tone": quality_tone,
+        },
+    ]
 
 
 def _expected_path_building_body_html(
@@ -1360,8 +1358,9 @@ def _load_coin_timeframe_frames(
         available_timeframes=available_timeframes,
     )
     frames: list[dict[str, object]] = []
+    has_base_events = isinstance(base_events, pd.DataFrame) and not base_events.empty and "timeframe" in base_events.columns
     for timeframe_key in timeframe_scope:
-        if str(timeframe_filter or "").strip() != "All" and isinstance(base_events, pd.DataFrame):
+        if has_base_events:
             tf_events = base_events.copy()
             if not tf_events.empty and "timeframe" in tf_events.columns:
                 tf_events = tf_events[
@@ -1420,19 +1419,6 @@ def _format_review_metric(
     return f"{number:+.{decimals}f}" if signed else f"{number:.{decimals}f}"
 
 
-def _qualified_summary_rows(
-    summary_df: pd.DataFrame,
-    *,
-    count_field: str,
-    min_count: int,
-) -> pd.DataFrame:
-    if summary_df is None or summary_df.empty or count_field not in summary_df.columns:
-        return pd.DataFrame()
-    d = summary_df.copy()
-    d[count_field] = pd.to_numeric(d[count_field], errors="coerce").fillna(0.0)
-    return d[d[count_field] >= float(min_count)].copy()
-
-
 def _prefer_known_summary_rows(summary_df: pd.DataFrame, *, label_field: str) -> pd.DataFrame:
     if summary_df is None or summary_df.empty or label_field not in summary_df.columns:
         return pd.DataFrame()
@@ -1442,385 +1428,6 @@ def _prefer_known_summary_rows(summary_df: pd.DataFrame, *, label_field: str) ->
     if bool(known_mask.any()):
         return d.loc[known_mask].copy()
     return pd.DataFrame()
-
-
-def _archive_building_card(title: str, body_html: str) -> dict[str, str]:
-    return {
-        "title": title,
-        "body_html": body_html,
-        "tone": "neutral",
-        "kind": "building",
-    }
-
-
-def _prepare_section_cards(
-    cards: list[dict[str, str]],
-    *,
-    max_actionable: int = 3,
-) -> list[dict[str, str]]:
-    visible_cards = [card for card in list(cards or []) if card]
-    if not visible_cards:
-        return []
-    actionable = [card for card in visible_cards if str(card.get("kind") or "").strip().lower() != "building"]
-    building = [card for card in visible_cards if str(card.get("kind") or "").strip().lower() == "building"]
-    prepared = actionable[: max(1, int(max_actionable))]
-    if building:
-        titles = [str(card.get("title") or "").strip() for card in building if str(card.get("title") or "").strip()]
-        preview = ", ".join(titles[:3])
-        extra = "" if len(titles) <= 3 else f" +{len(titles) - 3} more"
-        prepared.append(
-            {
-                "title": "Still Building",
-                "body_html": (
-                    f"Still building: <b>{preview}</b>{extra}. More completed signals or closed trades needed."
-                ),
-                "tone": "neutral",
-            }
-        )
-    return prepared if prepared else visible_cards[:1]
-
-
-def _execution_vs_system_note(execution_snapshot: dict[str, float]) -> tuple[str, str]:
-    taken = float(execution_snapshot.get("taken", 0.0) or 0.0)
-    taken_resolved = float(execution_snapshot.get("taken_resolved", 0.0) or 0.0)
-    actual_closed = float(execution_snapshot.get("actual_closed", 0.0) or 0.0)
-    if taken <= 0.0 and actual_closed <= 0.0:
-        return (
-            "Execution journal is empty. Mark taken trades to compare your execution with the system.",
-            "neutral",
-        )
-    if taken_resolved < _MIN_EXECUTION_ARCHIVE_ROWS or actual_closed < _MIN_EXECUTION_ARCHIVE_ROWS:
-        return (
-            "Execution sample is still thin. Use this as a rough read for now.",
-            "neutral",
-        )
-    return (
-        (
-            f"Taken setups had <b>{execution_snapshot['taken_follow_through_rate']:.1f}%</b> signal follow-through, "
-            f"while closed real trades finished with <b>{execution_snapshot['actual_win_rate']:.1f}%</b> win rate. "
-            f"Execution gap is <b>{execution_snapshot['execution_gap_pct']:+.2f}%</b>. "
-            f"Skipped winners: <b>{int(execution_snapshot['skipped_winners'])}</b>."
-        ),
-        "positive" if float(execution_snapshot.get("execution_gap_pct", 0.0) or 0.0) >= 0.0 else "warning",
-    )
-
-
-def _build_execution_review_cards(execution_snapshot: dict[str, float]) -> list[dict[str, str]]:
-    total = int(execution_snapshot.get("total", 0.0) or 0.0)
-    overlay_marked = int(execution_snapshot.get("overlay_marked", 0.0) or 0.0)
-    overlay_coverage_pct = float(execution_snapshot.get("overlay_coverage_pct", 0.0) or 0.0)
-    taken = int(execution_snapshot.get("taken", 0.0) or 0.0)
-    taken_resolved = int(execution_snapshot.get("taken_resolved", 0.0) or 0.0)
-    actual_closed = int(execution_snapshot.get("actual_closed", 0.0) or 0.0)
-    journal_coverage_pct = float(execution_snapshot.get("journal_coverage_pct", 0.0) or 0.0)
-    execution_gap_pct = float(execution_snapshot.get("execution_gap_pct", 0.0) or 0.0)
-    skipped_winners = int(execution_snapshot.get("skipped_winners", 0.0) or 0.0)
-    skipped_resolved = int(execution_snapshot.get("skipped_resolved", 0.0) or 0.0)
-    skipped_winner_rate = float(execution_snapshot.get("skipped_winner_rate", 0.0) or 0.0)
-
-    cards: list[dict[str, str]] = []
-
-    if total <= 0:
-        return [
-            _archive_building_card(
-                "Manual Marking",
-                "No signals are in this view yet, so execution review is still waiting for history.",
-            )
-        ]
-
-    if overlay_marked <= 0:
-        cards.append(
-            _archive_building_card(
-                "Manual Marking",
-                "No setups are tagged yet. Mark them as <b>Taken</b>, <b>Skipped</b>, or <b>Observed</b> before reading execution quality.",
-            )
-        )
-    elif overlay_coverage_pct < 50.0:
-        cards.append(
-            {
-                "title": "Manual Marking",
-                "body_html": (
-                    f"Only <b>{overlay_marked}/{total}</b> setups in this view are tagged "
-                    f"(<b>{overlay_coverage_pct:.1f}% coverage</b>). "
-                    "Tag more setups first so the execution read becomes reliable."
-                ),
-                "tone": "warning",
-            }
-        )
-    else:
-        cards.append(
-            {
-                "title": "Manual Marking",
-                "body_html": (
-                    f"Manual marking is healthy in this view with <b>{overlay_marked}/{total}</b> setups marked "
-                    f"(<b>{overlay_coverage_pct:.1f}% coverage</b>)."
-                ),
-                "tone": "positive",
-            }
-        )
-
-    if taken <= 0:
-        cards.append(
-            _archive_building_card(
-                "Trade Journal",
-                "No setups are marked as <b>Taken</b> yet. Add taken trades before reading real execution quality.",
-            )
-        )
-    elif actual_closed < _MIN_EXECUTION_ARCHIVE_ROWS:
-        cards.append(
-            _archive_building_card(
-                "Trade Journal",
-                (
-                    f"<b>{taken}</b> taken setup(s) are marked, but only <b>{actual_closed}</b> closed trade(s) have an exit. "
-                    "Add real exits before reading PnL or win rate."
-                ),
-            )
-        )
-    elif journal_coverage_pct < 60.0:
-        cards.append(
-            {
-                "title": "Trade Journal",
-                "body_html": (
-                    f"Closed-trade journaling is improving, but only <b>{journal_coverage_pct:.1f}% of taken setups</b> in this view have a recorded exit. "
-                    "A few more exits will make this read stronger."
-                ),
-                "tone": "warning",
-            }
-        )
-    else:
-        cards.append(
-            {
-                "title": "Trade Journal",
-                "body_html": (
-                    f"Closed-trade journaling is usable here: <b>{actual_closed}</b> closed trade(s) across <b>{taken}</b> taken setup(s) "
-                    f"(<b>{journal_coverage_pct:.1f}% coverage</b>)."
-                ),
-                "tone": "positive",
-            }
-        )
-
-    if taken_resolved < _MIN_EXECUTION_ARCHIVE_ROWS or actual_closed < _MIN_EXECUTION_ARCHIVE_ROWS:
-        cards.append(
-            _archive_building_card(
-                "Execution Quality",
-                "Execution quality is still building. Add more completed taken setups and closed trades before comparing your results with the signal.",
-            )
-        )
-    else:
-        if execution_gap_pct >= 0.5:
-            tone = "positive"
-            edge_read = (
-                f"Your closed trades are running <b>{execution_gap_pct:+.2f}% ahead</b> of the matching signal move."
-            )
-        elif execution_gap_pct <= -0.5:
-            tone = "warning"
-            edge_read = (
-                f"Your closed trades are trailing the matching signal move by <b>{execution_gap_pct:+.2f}%</b>."
-            )
-        else:
-            tone = "neutral"
-            edge_read = (
-                f"Your closed trades are broadly aligned with the matching signal move at <b>{execution_gap_pct:+.2f}%</b>."
-            )
-        skipped_read = (
-            f" Skipped setups that worked: <b>{skipped_winners}</b> out of <b>{skipped_resolved}</b> "
-            f"(<b>{skipped_winner_rate:.1f}%</b>)."
-            if skipped_resolved > 0
-            else ""
-        )
-        cards.append(
-            {
-                "title": "Execution Quality",
-                "body_html": edge_read + skipped_read,
-                "tone": tone,
-            }
-        )
-
-    return _prepare_section_cards(cards, max_actionable=3)
-
-
-def _build_execution_signal_cards(execution_snapshot: Mapping[str, object]) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    works_cards: list[dict[str, str]] = []
-    fail_cards: list[dict[str, str]] = []
-
-    taken = int(execution_snapshot.get("taken", 0.0) or 0.0)
-    taken_resolved = int(execution_snapshot.get("taken_resolved", 0.0) or 0.0)
-    actual_closed = int(execution_snapshot.get("actual_closed", 0.0) or 0.0)
-    journal_coverage_pct = float(execution_snapshot.get("journal_coverage_pct", 0.0) or 0.0)
-    execution_gap_pct = float(execution_snapshot.get("execution_gap_pct", 0.0) or 0.0)
-    skipped_winners = int(execution_snapshot.get("skipped_winners", 0.0) or 0.0)
-    skipped_resolved = int(execution_snapshot.get("skipped_resolved", 0.0) or 0.0)
-    skipped_winner_rate = float(execution_snapshot.get("skipped_winner_rate", 0.0) or 0.0)
-    actual_win_rate = float(execution_snapshot.get("actual_win_rate", 0.0) or 0.0)
-
-    if taken >= _MIN_EXECUTION_ARCHIVE_ROWS:
-        if journal_coverage_pct >= 60.0 and actual_closed >= _MIN_EXECUTION_ARCHIVE_ROWS:
-            works_cards.append(
-                {
-                    "title": "Journal Complete",
-                    "body_html": (
-                        f"Trade journal is usable here: <b>{actual_closed}</b> closed trade(s) across "
-                        f"<b>{taken}</b> taken setups (<b>{journal_coverage_pct:.1f}% coverage</b>)."
-                    ),
-                    "tone": "positive",
-                }
-            )
-        elif journal_coverage_pct > 0.0:
-            fail_cards.append(
-                {
-                    "title": "Thin Journal",
-                    "body_html": (
-                        f"Only <b>{journal_coverage_pct:.1f}%</b> of taken setups have a recorded exit "
-                        f"(<b>{actual_closed}</b> closed trade(s) across <b>{taken}</b> taken setups). "
-                        "Add more exits before reading real execution quality."
-                    ),
-                    "tone": "warning",
-                }
-            )
-
-    if taken_resolved >= _MIN_EXECUTION_ARCHIVE_ROWS and actual_closed >= _MIN_EXECUTION_ARCHIVE_ROWS:
-        if execution_gap_pct >= 0.5:
-            works_cards.append(
-                {
-                    "title": "Execution Quality",
-                    "body_html": (
-                        f"Taken trades are running <b>{execution_gap_pct:+.2f}%</b> ahead of the matching signal move, "
-                        f"with <b>{actual_win_rate:.1f}%</b> realized win rate across closed trades."
-                    ),
-                    "tone": "positive",
-                }
-            )
-        elif execution_gap_pct <= -0.5:
-            fail_cards.append(
-                {
-                    "title": "Execution Drag",
-                    "body_html": (
-                        f"Taken trades are trailing the matching signal move by <b>{execution_gap_pct:+.2f}%</b>. "
-                        "The signal worked better than the real trade result."
-                    ),
-                    "tone": "warning",
-                }
-            )
-
-    if skipped_resolved >= _MIN_EXECUTION_ARCHIVE_ROWS and skipped_winner_rate >= 40.0:
-        fail_cards.append(
-            {
-                "title": "Missed Winners",
-                "body_html": (
-                    f"<b>{skipped_winners}</b> of <b>{skipped_resolved}</b> skipped setups ended up working "
-                    f"(<b>{skipped_winner_rate:.1f}%</b>). "
-                    "Your selection filter may be too strict in this pocket."
-                ),
-                "tone": "warning",
-            }
-        )
-
-    return works_cards, fail_cards
-
-
-def _build_hold_signal_cards(
-    hold_guidance_rows: list[Mapping[str, object]],
-    *,
-    symbol_filter: str,
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    records: list[dict[str, object]] = []
-    for row in list(hold_guidance_rows or []):
-        timeframe_label = str(row.get("Timeframe") or "").strip().upper()
-        for direction_label in ("Upside", "Downside"):
-            snapshot = row.get(f"{direction_label} Snapshot", {})
-            if not isinstance(snapshot, Mapping):
-                continue
-            records.append(
-                {
-                    "timeframe": timeframe_label or "UNKNOWN",
-                    "direction": direction_label,
-                    "available": bool(snapshot.get("available")),
-                    "best_label": str(snapshot.get("best_label") or "").strip(),
-                    "best_style": str(snapshot.get("best_style") or "").strip() or "Standard Hold",
-                    "sample": int(snapshot.get("sample") or 0),
-                    "resolved_signals": int(snapshot.get("resolved_signals") or 0),
-                    "follow_through_pct": float(snapshot.get("follow_through_pct") or 0.0),
-                    "avg_dir_return_pct": float(snapshot.get("avg_dir_return_pct") or 0.0),
-                    "edge_score": float(snapshot.get("edge_score") or 0.0),
-                }
-            )
-
-    available_records = [record for record in records if bool(record.get("available"))]
-    if not available_records:
-        return [], []
-
-    symbol_label = str(symbol_filter or "").strip().upper() or "Coin"
-    works_cards: list[dict[str, str]] = []
-    fail_cards: list[dict[str, str]] = []
-
-    best_record = sorted(
-        available_records,
-        key=lambda record: (
-            float(record.get("edge_score", 0.0) or 0.0),
-            float(record.get("avg_dir_return_pct", 0.0) or 0.0),
-            float(record.get("follow_through_pct", 0.0) or 0.0),
-            int(record.get("sample", 0) or 0),
-        ),
-        reverse=True,
-    )[0]
-    works_cards.append(
-        {
-            "title": "Best Hold Window",
-            "body_html": (
-                f"<b>{symbol_label} {best_record['timeframe']} {best_record['direction']}</b> has the cleanest hold profile so far "
-                f"({best_record['best_label']}, {best_record['best_style']}, "
-                f"<b>{best_record['follow_through_pct']:.1f}%</b> follow-through, "
-                f"<b>{best_record['avg_dir_return_pct']:+.2f}%</b> avg move across "
-                    f"<b>{int(best_record['sample'])}</b> similar signals)."
-            ),
-            "tone": "positive" if float(best_record["avg_dir_return_pct"]) > 0.0 else "neutral",
-        }
-    )
-
-    weakest_record = sorted(
-        available_records,
-        key=lambda record: (
-            float(record.get("edge_score", 0.0) or 0.0),
-            float(record.get("avg_dir_return_pct", 0.0) or 0.0),
-            float(record.get("follow_through_pct", 0.0) or 0.0),
-            int(record.get("sample", 0) or 0),
-        ),
-    )[0]
-    if (
-        len(available_records) >= 2
-        or float(weakest_record.get("avg_dir_return_pct", 0.0) or 0.0) < 0.0
-        or float(weakest_record.get("follow_through_pct", 0.0) or 0.0) < 45.0
-    ):
-        fail_cards.append(
-            {
-                "title": "Weakest Hold Window",
-                "body_html": (
-                    f"<b>{symbol_label} {weakest_record['timeframe']} {weakest_record['direction']}</b> is the weakest current hold profile "
-                    f"({weakest_record['best_label']}, {weakest_record['best_style']}, "
-                    f"<b>{weakest_record['follow_through_pct']:.1f}%</b> follow-through, "
-                    f"<b>{weakest_record['avg_dir_return_pct']:+.2f}%</b> avg move across "
-                    f"<b>{int(weakest_record['sample'])}</b> similar signals)."
-                ),
-                "tone": "warning" if float(weakest_record["avg_dir_return_pct"]) < 0.0 or float(weakest_record["follow_through_pct"]) < 45.0 else "neutral",
-            }
-        )
-
-    return works_cards, fail_cards
-
-
-def _render_insight_card_grid(st, cards: list[dict[str, str]], *, columns: int = 3) -> None:
-    visible_cards = [card for card in cards if card]
-    if not visible_cards:
-        return
-    cols = st.columns(columns, gap="medium")
-    for idx, card in enumerate(visible_cards):
-        with cols[idx % columns]:
-            render_insight_card(
-                st,
-                title=str(card.get("title") or ""),
-                body_html=str(card.get("body_html") or ""),
-                tone=str(card.get("tone") or "neutral"),
-            )
 
 
 def _render_compact_cohort_tables(
@@ -1889,318 +1496,6 @@ def _render_hold_window_cohort_tables(
         with cols[idx % 2]:
             st.markdown(f"##### {title}")
             st.dataframe(summary_df.round(2), hide_index=True, width="stretch")
-
-
-def _render_execution_review_section(
-    *,
-    st,
-    df_events: pd.DataFrame,
-    execution_snapshot: dict[str, float],
-    db_path: str,
-    save_signal_trade_overlay,
-    save_signal_trade_journal,
-    positive_color: str,
-    warning_color: str,
-    negative_color: str,
-    muted_color: str,
-) -> None:
-    st.markdown("### Execution Review")
-    st.caption("Mark what you did and compare it with the system signal.")
-    review_cards = _build_execution_review_cards(execution_snapshot)
-    _render_insight_card_grid(st, review_cards, columns=3)
-    trade_overlay_count = int(execution_snapshot.get("overlay_marked", 0.0) or 0.0)
-    total_signals = int(execution_snapshot.get("total", float(len(df_events))) or 0.0)
-    taken_count = int(execution_snapshot.get("taken", 0.0) or 0.0)
-    closed_trade_count = int(execution_snapshot.get("actual_closed", 0.0) or 0.0)
-    overlay_coverage_pct = float(execution_snapshot.get("overlay_coverage_pct", 0.0) or 0.0)
-    journal_coverage_pct = float(execution_snapshot.get("journal_coverage_pct", 0.0) or 0.0)
-    execution_gap_pct = float(execution_snapshot.get("execution_gap_pct", 0.0) or 0.0)
-    skipped_winners = int(execution_snapshot.get("skipped_winners", 0.0) or 0.0)
-    skipped_resolved = int(execution_snapshot.get("skipped_resolved", 0.0) or 0.0)
-    skipped_winner_rate = float(execution_snapshot.get("skipped_winner_rate", 0.0) or 0.0)
-    avg_actual_pnl = float(execution_snapshot.get("avg_actual_pnl", 0.0) or 0.0)
-    st.markdown(
-        (
-            f"<div class='market-note-box' style='border:1px solid rgba(0,212,255,0.26); border-left:4px solid {positive_color};"
-            " background:rgba(0,212,255,0.04); margin:0.35rem 0 1rem 0;'>"
-            f"<b style='color:{positive_color};'>Workflow:</b> "
-            "Tag the setup first. If you took it, add the real entry and exit."
-            "</div>"
-        ),
-        unsafe_allow_html=True,
-    )
-    review_cols = st.columns([1.2, 1.0], gap="medium")
-    render_kpi_grid(
-        st,
-        items=[
-            {
-                "label": "Tagged Setups",
-                "value": f"{trade_overlay_count}/{total_signals}",
-                "value_color": positive_color if trade_overlay_count > 0 else muted_color,
-                "subtext": f"{overlay_coverage_pct:.1f}% of this view is tagged",
-            },
-            {
-                "label": "Journal Complete",
-                "value": f"{closed_trade_count}/{taken_count}",
-                "value_color": positive_color if closed_trade_count > 0 else muted_color,
-                "subtext": (
-                    f"{journal_coverage_pct:.1f}% of taken setups have an exit"
-                    if taken_count > 0
-                    else "No taken setups in this view yet"
-                ),
-            },
-            {
-                "label": "Real vs Signal",
-                "value": _format_review_metric(
-                    execution_gap_pct,
-                    available=closed_trade_count > 0,
-                    pct=True,
-                    signed=True,
-                    decimals=2,
-                ),
-                "value_color": (
-                    positive_color
-                    if closed_trade_count > 0 and execution_gap_pct >= 0.0
-                    else (negative_color if closed_trade_count > 0 else muted_color)
-                ),
-                "subtext": (
-                    "Closed trade result vs matching signal move"
-                    if closed_trade_count > 0
-                    else "Appears after closed trades"
-                ),
-            },
-            {
-                "label": "Skipped Winners",
-                "value": skipped_winners,
-                "value_color": warning_color if skipped_winners > 0 else muted_color,
-                "subtext": (
-                    f"{skipped_winner_rate:.1f}% of skipped setups worked"
-                    if skipped_resolved > 0
-                    else "Appears after skipped setups resolve"
-                ),
-            },
-        ],
-        columns=4,
-    )
-    render_kpi_grid(
-        st,
-        items=[
-            {
-                "label": "Avg Realized PnL",
-                "value": _format_review_metric(
-                    avg_actual_pnl,
-                    available=closed_trade_count > 0,
-                    pct=True,
-                    signed=True,
-                    decimals=2,
-                ),
-                "value_color": (
-                    positive_color
-                    if closed_trade_count > 0 and avg_actual_pnl >= 0.0
-                    else (negative_color if closed_trade_count > 0 else muted_color)
-                ),
-                "subtext": (
-                    "Average result across closed trades"
-                    if closed_trade_count > 0
-                    else "Appears after closed trades"
-                ),
-            },
-            {
-                "label": "Taken Completed",
-                "value": int(execution_snapshot.get("taken_resolved", 0.0) or 0.0),
-                "value_color": positive_color if int(execution_snapshot.get("taken_resolved", 0.0) or 0.0) > 0 else muted_color,
-                "subtext": "Taken setups that reached the timing window",
-            },
-            {
-                "label": "Taken Follow-Through",
-                "value": _format_review_metric(
-                    float(execution_snapshot.get("taken_follow_through_rate", 0.0) or 0.0),
-                    available=int(execution_snapshot.get("taken_resolved", 0.0) or 0.0) > 0,
-                    pct=True,
-                    decimals=1,
-                ),
-                "value_color": (
-                    positive_color
-                    if int(execution_snapshot.get("taken_resolved", 0.0) or 0.0) > 0
-                    and float(execution_snapshot.get("taken_follow_through_rate", 0.0) or 0.0) >= 55.0
-                    else (warning_color if int(execution_snapshot.get("taken_resolved", 0.0) or 0.0) > 0 else muted_color)
-                ),
-                "subtext": (
-                    "Follow-through rate across completed taken setups"
-                    if int(execution_snapshot.get("taken_resolved", 0.0) or 0.0) > 0
-                    else "Appears after taken setups complete"
-                ),
-            },
-            {
-                "label": "Closed Trade Win Rate",
-                "value": _format_review_metric(
-                    float(execution_snapshot.get("actual_win_rate", 0.0) or 0.0),
-                    available=closed_trade_count > 0,
-                    pct=True,
-                    decimals=1,
-                ),
-                "value_color": (
-                    positive_color
-                    if closed_trade_count > 0 and float(execution_snapshot.get("actual_win_rate", 0.0) or 0.0) >= 55.0
-                    else (warning_color if closed_trade_count > 0 else muted_color)
-                ),
-                "subtext": (
-                    "Win rate across closed trades"
-                    if closed_trade_count > 0
-                    else "Appears after closed trades"
-                ),
-            },
-        ],
-        columns=4,
-    )
-    signal_options: dict[str, str] = {}
-    for _, row in df_events.iterrows():
-        signal_key = str(row.get("signal_key") or "").strip()
-        if not signal_key:
-            continue
-        event_time = pd.to_datetime(row.get("event_time"), errors="coerce")
-        ts_label = event_time.strftime("%Y-%m-%d %H:%M") if pd.notna(event_time) else "Unknown time"
-        setup_label = setup_confirm_display(
-            str(row.get("setup_confirm") or ""),
-            action_reason=str(row.get("action_reason") or ""),
-            direction=str(row.get("direction") or ""),
-        )
-        label = (
-            f"{ts_label} • {str(row.get('symbol') or '')} • "
-            f"{str(row.get('timeframe') or '')} • {setup_label}"
-        )
-        signal_options[label] = signal_key
-
-    with review_cols[0]:
-        if signal_options:
-            with st.expander("Mark or Journal a Setup", expanded=False):
-                selected_label = st.selectbox(
-                    "Tracked setup",
-                    list(signal_options.keys()),
-                    index=0,
-                    key="signal_review_trade_overlay_pick",
-                    help="Use this to mark whether you actually took a tracked setup, skipped it, or just observed it.",
-                )
-                selected_key = signal_options[selected_label]
-                selected_row = df_events[df_events["signal_key"].astype(str) == selected_key].iloc[0]
-                current_decision = str(selected_row.get("trade_decision") or "").strip()
-                current_note = str(selected_row.get("trade_note") or "").strip()
-                current_side = str(selected_row.get("actual_trade_side") or "").strip().upper()
-                current_entry_price = selected_row.get("actual_entry_price")
-                current_entry_at = str(selected_row.get("actual_entry_at") or "").strip()
-                current_exit_price = selected_row.get("actual_exit_price")
-                current_exit_at = str(selected_row.get("actual_exit_at") or "").strip()
-                current_exit_reason = str(selected_row.get("actual_exit_reason") or "").strip()
-                current_trade_status = str(selected_row.get("actual_trade_status") or "").strip().upper()
-                decision_options = ["Taken", "Skipped", "Observed", "Clear"]
-                default_idx = decision_options.index(current_decision) if current_decision in decision_options else 0
-                with st.form("signal_trade_overlay_form", clear_on_submit=False):
-                    chosen_decision = st.selectbox(
-                        "Your action",
-                        decision_options,
-                        index=default_idx,
-                        key="signal_trade_overlay_decision",
-                    )
-                    trade_note = st.text_input(
-                        "Note",
-                        value=current_note,
-                        key="signal_trade_overlay_note",
-                        placeholder="Optional execution note",
-                    )
-                    submitted = st.form_submit_button("Save tag", use_container_width=False)
-                if submitted:
-                    decision_value = "" if chosen_decision == "Clear" else chosen_decision
-                    saved = save_signal_trade_overlay(
-                        selected_key,
-                        trade_decision=decision_value,
-                        trade_note=trade_note,
-                        db_path=db_path,
-                    )
-                    if saved:
-                        st.success("Setup tag saved.")
-                        st.rerun()
-                    else:
-                        st.error("Setup tag could not be saved for that signal.")
-
-                has_journal = any(
-                    [
-                        current_side,
-                        current_entry_at,
-                        current_exit_at,
-                        pd.notna(current_entry_price),
-                        pd.notna(current_exit_price),
-                        current_exit_reason,
-                    ]
-                )
-                if current_decision == "Taken" or has_journal:
-                    signal_direction = str(selected_row.get("direction") or "").strip().upper()
-                    suggested_side = "Upside" if signal_direction == "UPSIDE" else "Downside"
-                    side_options = ["Upside", "Downside"]
-                    default_side = _display_trade_direction(current_side) or suggested_side
-                    default_side_idx = side_options.index(default_side)
-                    exit_reason_options = ["Open", "Target", "Stop", "Manual Exit", "Time Exit", "Invalidation", "Clear"]
-                    mapped_exit_reason = current_exit_reason if current_exit_reason in exit_reason_options else ("Open" if current_trade_status != "CLOSED" else "Manual Exit")
-                    with st.form("signal_trade_journal_form", clear_on_submit=False):
-                        st.markdown("#### Real Trade Journal")
-                        st.caption("Use this only for trades you really took. It keeps system signal quality separate from your actual execution.")
-                        chosen_side = st.selectbox(
-                            "Trade direction",
-                            side_options,
-                            index=default_side_idx,
-                            key="signal_trade_journal_side",
-                        )
-                        entry_price_text = st.text_input(
-                            "Entry price",
-                            value="" if pd.isna(current_entry_price) else f"{float(current_entry_price):.8f}".rstrip("0").rstrip("."),
-                            key="signal_trade_journal_entry_price",
-                            placeholder="Example: 102.45",
-                        )
-                        entry_time_text = st.text_input(
-                            "Entry time (UTC)",
-                            value=current_entry_at,
-                            key="signal_trade_journal_entry_at",
-                            placeholder="2026-04-04T12:00:00Z",
-                        )
-                        exit_price_text = st.text_input(
-                            "Exit price",
-                            value="" if pd.isna(current_exit_price) else f"{float(current_exit_price):.8f}".rstrip("0").rstrip("."),
-                            key="signal_trade_journal_exit_price",
-                            placeholder="Leave blank if still open",
-                        )
-                        exit_time_text = st.text_input(
-                            "Exit time (UTC)",
-                            value=current_exit_at,
-                            key="signal_trade_journal_exit_at",
-                            placeholder="Leave blank if still open",
-                        )
-                        chosen_exit_reason = st.selectbox(
-                            "Exit reason",
-                            exit_reason_options,
-                            index=exit_reason_options.index(mapped_exit_reason),
-                            key="signal_trade_journal_exit_reason",
-                        )
-                        journal_submitted = st.form_submit_button("Save journal", use_container_width=False)
-                    if journal_submitted:
-                        if chosen_exit_reason == "Clear":
-                            journal_saved = save_signal_trade_journal(selected_key, db_path=db_path)
-                        else:
-                            journal_saved = save_signal_trade_journal(
-                                selected_key,
-                                actual_trade_side=chosen_side,
-                                actual_entry_price=entry_price_text,
-                                actual_entry_at=entry_time_text,
-                                actual_exit_price="" if chosen_exit_reason == "Open" else exit_price_text,
-                                actual_exit_at="" if chosen_exit_reason == "Open" else exit_time_text,
-                                actual_exit_reason="" if chosen_exit_reason == "Open" else chosen_exit_reason,
-                                db_path=db_path,
-                            )
-                        if journal_saved:
-                            st.success("Actual trade journal saved.")
-                            st.rerun()
-                        else:
-                            st.error("Trade journal could not be saved. Entry price and trade direction are required.")
-        else:
-            st.caption("No tracked signals are available in this view yet for journaling.")
 
 
 def _render_tracker_backup_restore(
@@ -2333,15 +1628,11 @@ def render(ctx: dict) -> None:
     get_signal_tracker_db_path = get_ctx(ctx, "get_signal_tracker_db_path")
     init_signal_tracker_db = get_ctx(ctx, "init_signal_tracker_db")
     fetch_market_alerts_df = get_ctx(ctx, "fetch_market_alerts_df")
-    count_market_alerts = get_ctx(ctx, "count_market_alerts")
     resolve_open_signal_events_via_fetch = get_ctx(ctx, "resolve_open_signal_events_via_fetch")
     backfill_signal_forward_windows_via_fetch = get_ctx(ctx, "backfill_signal_forward_windows_via_fetch")
     fetch_signal_events_df = get_ctx(ctx, "fetch_signal_events_df")
     fetch_signal_forward_windows_df = get_ctx(ctx, "fetch_signal_forward_windows_df")
-    save_signal_trade_overlay = get_ctx(ctx, "save_signal_trade_overlay")
-    save_signal_trade_journal = get_ctx(ctx, "save_signal_trade_journal")
     build_signal_review_snapshot = get_ctx(ctx, "build_signal_review_snapshot")
-    build_execution_overlay_snapshot = get_ctx(ctx, "build_execution_overlay_snapshot")
     build_signal_cohort_summary = get_ctx(ctx, "build_signal_cohort_summary")
     build_hold_window_intelligence = get_ctx(ctx, "build_hold_window_intelligence")
     build_hold_window_cohort_summary = get_ctx(ctx, "build_hold_window_cohort_summary")
@@ -2360,7 +1651,7 @@ def render(ctx: dict) -> None:
         st,
         title="Signal Archive",
         intro_html=(
-            "Review logged market signals, expected path, and your execution quality. "
+            "Review logged market signals, their strongest historical setup pockets, and expected path. "
             "This is an archive read, not a live entry screen."
         ),
     )
@@ -2413,6 +1704,20 @@ def render(ctx: dict) -> None:
             else "All gives the broadest read. A specific timeframe narrows the coin view."
         ),
     )
+    setup_filter_options = [label for label, _ in _SETUP_FILTER_OPTIONS]
+    if str(st.session_state.get("signal_review_setup_type") or "") not in setup_filter_options:
+        st.session_state["signal_review_setup_type"] = "Auto Best"
+    setup_filter_label = st.selectbox(
+        "Setup Type",
+        setup_filter_options,
+        index=0,
+        key="signal_review_setup_type",
+        help=(
+            "Auto Best finds the strongest actionable setup pocket in this scope. "
+            "Pick a specific setup type only when you want to narrow the archive read."
+        ),
+    )
+    setup_filter_value = _setup_filter_value(setup_filter_label)
     status_filter = "Resolved" if view_mode == "Best Signal" else "All"
 
     current_market_version = current_decision_version("Market")
@@ -2426,7 +1731,7 @@ def render(ctx: dict) -> None:
             st,
             title="Enter a Coin",
             body_html=(
-                "Type a <b>coin</b> above. Signal Archive will load its timing, expected path, and execution read."
+                "Type a <b>coin</b> above. Signal Archive will load its strongest learned setup pocket, timing, and expected path."
             ),
             tone="neutral",
         )
@@ -2463,6 +1768,8 @@ def render(ctx: dict) -> None:
                 decision_version=current_market_version,
                 db_path=db_path,
             )
+            if setup_filter_value != "ALL":
+                best_signal_scope_df = _filter_events_by_setup(best_signal_scope_df, setup_filter_value)
             best_signal_scope_keys = (
                 best_signal_scope_df["signal_key"].fillna("").astype(str).str.strip().drop_duplicates().tolist()
                 if not best_signal_scope_df.empty and "signal_key" in best_signal_scope_df.columns
@@ -2525,7 +1832,6 @@ def render(ctx: dict) -> None:
         decision_version=current_market_version,
         db_path=db_path,
     )
-    active_alerts_count = int(count_market_alerts(active_only=True, source="Market", db_path=db_path))
     adaptive_archive_df = fetch_signal_events_df(
         limit=analysis_limit,
         status="RESOLVED",
@@ -2535,6 +1841,9 @@ def render(ctx: dict) -> None:
         decision_version=current_market_version,
         db_path=db_path,
     )
+    if setup_filter_value != "ALL":
+        df_events = _filter_events_by_setup(df_events, setup_filter_value)
+        adaptive_archive_df = _filter_events_by_setup(adaptive_archive_df, setup_filter_value)
     adaptive_rows = int(len(adaptive_archive_df))
     adaptive_total_rows = int(len(adaptive_archive_df))
     leaderboard_source_df = best_signal_scope_df if view_mode == "Best Signal" else adaptive_archive_df
@@ -2601,9 +1910,11 @@ def render(ctx: dict) -> None:
             )
 
     if view_mode == "Best Signal" and not best_signal_leaderboard_df.empty:
+        qualified_count = int(len(best_signal_leaderboard_df))
         st.markdown("### Best Signal Leaderboard")
         st.caption(
-            "Top 10 coins with enough history. Select a row to open the full coin read."
+            f"Showing {qualified_count} coin(s), up to {_BEST_SIGNAL_LEADERBOARD_LIMIT}. "
+            "Select a row to open the full coin read."
         )
         leaderboard_state = st.dataframe(
             best_signal_leaderboard_df,
@@ -2641,7 +1952,8 @@ def render(ctx: dict) -> None:
             st.info(str(tracker_notice))
 
     if df_events.empty:
-        st.info("No signals match this coin/timeframe yet. Try All or let Market log more history.")
+        empty_scope = "actionable setup" if setup_filter_value == "AUTO_BEST" else "selected setup"
+        st.info(f"No {empty_scope} signals match this coin/timeframe yet. Let Market log more history.")
         _render_tracker_backup_restore(
             st=st,
             db_path=db_path,
@@ -2654,23 +1966,8 @@ def render(ctx: dict) -> None:
         )
         return
 
-    snapshot = build_signal_review_snapshot(df_events)
-    execution_snapshot = build_execution_overlay_snapshot(df_events)
-    signal_keys = (
-        df_events["signal_key"].fillna("").astype(str).str.strip().tolist()
-        if "signal_key" in df_events.columns
-        else []
-    )
     hold_guidance_enabled = bool(symbol_filter)
-    df_forward_windows = (
-        fetch_signal_forward_windows_df(
-            signal_keys=signal_keys,
-            db_path=db_path,
-        )
-        if hold_guidance_enabled and signal_keys
-        else pd.DataFrame()
-    )
-    df_hold_archive_events = (
+    df_hold_archive_events_raw = (
         fetch_signal_events_df(
             limit=int(analysis_limit),
             status="RESOLVED",
@@ -2683,33 +1980,50 @@ def render(ctx: dict) -> None:
         if hold_guidance_enabled
         else pd.DataFrame()
     )
-    hold_archive_signal_keys = []
-    df_hold_archive_windows = pd.DataFrame()
+    if not df_hold_archive_events_raw.empty:
+        if setup_filter_value != "ALL":
+            df_hold_archive_events_raw = _filter_events_by_setup(df_hold_archive_events_raw, setup_filter_value)
+    hold_archive_signal_keys = (
+        df_hold_archive_events_raw["signal_key"].fillna("").astype(str).str.strip().tolist()
+        if not df_hold_archive_events_raw.empty and "signal_key" in df_hold_archive_events_raw.columns
+        else []
+    )
+    df_hold_archive_windows_raw = (
+        fetch_signal_forward_windows_df(
+            signal_keys=hold_archive_signal_keys,
+            db_path=db_path,
+        )
+        if hold_guidance_enabled and hold_archive_signal_keys
+        else pd.DataFrame()
+    )
+    archive_decision = build_archive_decision_snapshot(
+        df_events=df_events,
+        df_resolved_events=df_hold_archive_events_raw,
+        df_forward_windows=df_hold_archive_windows_raw,
+        symbol_filter=symbol_filter,
+        timeframe_filter=timeframe_filter,
+        setup_filter_value=setup_filter_value,
+        min_completed=_MIN_SETUP_POCKET_ROWS,
+        build_hold_window_intelligence_fn=build_hold_window_intelligence,
+    )
+    setup_pocket = _setup_pocket_from_snapshot(archive_decision.setup)
+    metric_df_events = archive_decision.metric_events if not archive_decision.metric_events.empty else df_events.copy()
+    timeframe_read_events = (
+        archive_decision.direction_events if not archive_decision.direction_events.empty else metric_df_events.copy()
+    )
+    snapshot = build_signal_review_snapshot(metric_df_events)
+    df_forward_windows = archive_decision.metric_windows
+    df_hold_archive_events = archive_decision.hold_events
+    df_hold_archive_windows = archive_decision.hold_windows
     timeframe_frames: list[dict[str, object]] = []
-    timeframe_summary_df = pd.DataFrame()
-    hold_guidance_rows: list[dict[str, object]] = []
     timeframe_intelligence_df = pd.DataFrame()
-    missing_hold_backfill = 0
+    missing_hold_backfill = _missing_hold_backfill_count(df_hold_archive_events, df_hold_archive_windows)
     hold_autofill_scope_key = _hold_autofill_scope_key(
         symbol_filter=symbol_filter,
         timeframe_filter=timeframe_filter,
         decision_version=current_market_version,
     )
     if hold_guidance_enabled:
-        hold_archive_signal_keys = (
-            df_hold_archive_events["signal_key"].fillna("").astype(str).str.strip().tolist()
-            if "signal_key" in df_hold_archive_events.columns
-            else []
-        )
-        df_hold_archive_windows = (
-            fetch_signal_forward_windows_df(
-                signal_keys=hold_archive_signal_keys,
-                db_path=db_path,
-            )
-            if hold_archive_signal_keys
-            else pd.DataFrame()
-        )
-        missing_hold_backfill = _missing_hold_backfill_count(df_hold_archive_events, df_hold_archive_windows)
         timeframe_frames = _load_coin_timeframe_frames(
             fetch_signal_events_df=fetch_signal_events_df,
             fetch_signal_forward_windows_df=fetch_signal_forward_windows_df,
@@ -2719,9 +2033,9 @@ def render(ctx: dict) -> None:
             current_market_version=current_market_version,
             analysis_limit=int(analysis_limit),
             db_path=db_path,
-            base_events=df_events,
+            base_events=timeframe_read_events,
         )
-        timeframe_intelligence_df, timeframe_summary_df, hold_guidance_rows = _build_coin_timeframe_intelligence_bundle(
+        timeframe_intelligence_df, _, _ = _build_coin_timeframe_intelligence_bundle(
             timeframe_frames=timeframe_frames,
             build_signal_cohort_summary=build_signal_cohort_summary,
             build_hold_window_intelligence=build_hold_window_intelligence,
@@ -2747,15 +2061,7 @@ def render(ctx: dict) -> None:
             )
         )
         if autofilled_hold_now > 0:
-            df_forward_windows = (
-                fetch_signal_forward_windows_df(
-                    signal_keys=signal_keys,
-                    db_path=db_path,
-                )
-                if signal_keys
-                else pd.DataFrame()
-            )
-            df_hold_archive_windows = (
+            df_hold_archive_windows_raw = (
                 fetch_signal_forward_windows_df(
                     signal_keys=hold_archive_signal_keys,
                     db_path=db_path,
@@ -2763,6 +2069,25 @@ def render(ctx: dict) -> None:
                 if hold_archive_signal_keys
                 else pd.DataFrame()
             )
+            archive_decision = build_archive_decision_snapshot(
+                df_events=df_events,
+                df_resolved_events=df_hold_archive_events_raw,
+                df_forward_windows=df_hold_archive_windows_raw,
+                symbol_filter=symbol_filter,
+                timeframe_filter=timeframe_filter,
+                setup_filter_value=setup_filter_value,
+                min_completed=_MIN_SETUP_POCKET_ROWS,
+                build_hold_window_intelligence_fn=build_hold_window_intelligence,
+            )
+            setup_pocket = _setup_pocket_from_snapshot(archive_decision.setup)
+            metric_df_events = archive_decision.metric_events if not archive_decision.metric_events.empty else df_events.copy()
+            timeframe_read_events = (
+                archive_decision.direction_events if not archive_decision.direction_events.empty else metric_df_events.copy()
+            )
+            snapshot = build_signal_review_snapshot(metric_df_events)
+            df_forward_windows = archive_decision.metric_windows
+            df_hold_archive_events = archive_decision.hold_events
+            df_hold_archive_windows = archive_decision.hold_windows
             timeframe_frames = _load_coin_timeframe_frames(
                 fetch_signal_events_df=fetch_signal_events_df,
                 fetch_signal_forward_windows_df=fetch_signal_forward_windows_df,
@@ -2772,16 +2097,14 @@ def render(ctx: dict) -> None:
                 current_market_version=current_market_version,
                 analysis_limit=int(analysis_limit),
                 db_path=db_path,
-                base_events=df_events,
+                base_events=timeframe_read_events,
             )
-            timeframe_intelligence_df, timeframe_summary_df, hold_guidance_rows = _build_coin_timeframe_intelligence_bundle(
+            timeframe_intelligence_df, _, _ = _build_coin_timeframe_intelligence_bundle(
                 timeframe_frames=timeframe_frames,
                 build_signal_cohort_summary=build_signal_cohort_summary,
                 build_hold_window_intelligence=build_hold_window_intelligence,
             )
             missing_hold_backfill = _missing_hold_backfill_count(df_hold_archive_events, df_hold_archive_windows)
-    taken_count = int(snapshot["taken"])
-    actual_closed = int(snapshot["actual_closed"])
     resolved_count = int(snapshot["resolved"])
     resolved_metrics_available = resolved_count > 0
     follow_value = _format_review_metric(
@@ -2797,36 +2120,34 @@ def render(ctx: dict) -> None:
         pct=True,
         signed=True,
     )
-    avg_mae_value = _format_review_metric(
-        float(snapshot["avg_adverse_excursion"]),
-        available=resolved_metrics_available,
-        decimals=2,
-        pct=True,
-    )
     tone_follow = (
         POSITIVE
         if resolved_metrics_available and float(snapshot["follow_through_rate"]) >= 55.0
         else (WARNING if resolved_metrics_available and float(snapshot["follow_through_rate"]) >= 45.0 else TEXT_MUTED)
     )
     tone_dir = POSITIVE if resolved_metrics_available and float(snapshot["avg_dir_return"]) >= 0.0 else (NEGATIVE if resolved_metrics_available else TEXT_MUTED)
-    tone_mae = NEGATIVE if resolved_metrics_available else TEXT_MUTED
+    best_setup_label = _setup_pocket_label(setup_pocket)
+    best_setup_subtext = (
+        f"{int(setup_pocket.get('completed') or 0)} completed in selected pocket"
+        if bool(setup_pocket.get("available"))
+        else f"Needs at least {_MIN_SETUP_POCKET_ROWS} completed signals"
+    )
+    selected_scope_text = "selected pocket" if bool(setup_pocket.get("available")) else "current scope"
     resolved_metrics_note = (
-        "Completed signals that moved in the expected direction"
+        f"Signals in the {selected_scope_text} that moved in the expected direction"
         if resolved_metrics_available
-        else "Appears after signals complete"
+        else f"Appears after the {selected_scope_text} completes"
     )
     avg_dir_note = (
-        "Average move after the timing window"
+        f"Average move inside the {selected_scope_text}"
         if resolved_metrics_available
-        else "Appears after signals complete"
-    )
-    avg_mae_note = (
-        "Average worst move against the signal"
-        if resolved_metrics_available
-        else "Appears after signals complete"
+        else f"Appears after the {selected_scope_text} completes"
     )
     st.markdown("### Overview")
-    st.caption(_follow_through_horizon_note(timeframe_filter))
+    if bool(setup_pocket.get("available")):
+        st.caption(f"Best pocket: {best_setup_label}. {_follow_through_horizon_note(str(setup_pocket.get('timeframe') or timeframe_filter))}")
+    else:
+        st.caption(f"Best pocket is still building. {_follow_through_horizon_note(timeframe_filter)}")
     render_kpi_grid(
         st,
         items=[
@@ -2845,7 +2166,7 @@ def render(ctx: dict) -> None:
             {
                 "label": "Signals",
                 "value": int(snapshot["total"]),
-                "subtext": "Signals loaded here",
+                "subtext": f"Signals in the {selected_scope_text}",
             },
             {
                 "label": "Completed",
@@ -2859,45 +2180,14 @@ def render(ctx: dict) -> None:
                 "badge_color": POSITIVE if resolved_now > 0 else TEXT_MUTED,
                 "badge_tone": "positive" if resolved_now > 0 else "neutral",
             },
-        ],
-        columns=4,
-    )
-    render_kpi_grid(
-        st,
-        items=[
             {
-                "label": "Taken",
-                "value": taken_count,
-                "value_color": POSITIVE if taken_count > 0 else TEXT_MUTED,
-                "subtext": "Setups marked Taken",
-            },
-            {
-                "label": "Closed Trades",
-                "value": actual_closed,
-                "value_color": POSITIVE if actual_closed > 0 else TEXT_MUTED,
-                "subtext": "Taken trades with exits",
-            },
-            {
-                "label": "Avg Drawdown",
-                "value": avg_mae_value,
-                "value_color": tone_mae,
-                "subtext": avg_mae_note,
-            },
-            {
-                "label": "Live Alerts",
-                "value": active_alerts_count,
-                "value_color": WARNING if active_alerts_count else TEXT_MUTED,
-                "subtext": "Active now, outside this archive view",
+                "label": "Best Setup",
+                "value": str(setup_pocket.get("setup_display") or setup_pocket.get("setup_label") or "Building"),
+                "value_color": POSITIVE if bool(setup_pocket.get("available")) else TEXT_MUTED,
+                "subtext": best_setup_subtext,
             },
         ],
-        columns=4,
-    )
-    execution_vs_system_note, execution_vs_system_tone = _execution_vs_system_note(execution_snapshot)
-    render_insight_card(
-        st,
-        title="Execution Check",
-        body_html=execution_vs_system_note,
-        tone=execution_vs_system_tone,
+        columns=5,
     )
     st.markdown("### Timeframe Read")
     st.caption("Hold columns show efficient timing. Expected Path below shows the historical price route.")
@@ -2915,12 +2205,7 @@ def render(ctx: dict) -> None:
         st.caption("Timeframe read is still building.")
     else:
         st.dataframe(timeframe_intelligence_df, hide_index=True, width="stretch")
-    expected_path_projection = _build_expected_path_projection(
-        df_events=df_hold_archive_events,
-        df_forward_windows=df_hold_archive_windows,
-        symbol_filter=symbol_filter,
-        timeframe_filter=timeframe_filter,
-    )
+    expected_path_projection = dict(archive_decision.expected_path)
     if bool(expected_path_projection.get("available")):
         live_ref_price, live_ref_label = _fetch_expected_path_reference_price(
             fetch_ohlcv,
@@ -2933,15 +2218,15 @@ def render(ctx: dict) -> None:
                 live_ref_price,
                 live_ref_label,
             )
-        render_insight_card(
+        st.markdown("### Expected Path")
+        st.caption(
+            f"{_expected_path_scope_label(expected_path_projection)}. "
+            "Archive scenario from similar past signals, not a price target."
+        )
+        render_kpi_grid(
             st,
-            title="Expected Path",
-            body_html=_expected_path_body_html(expected_path_projection),
-            tone=(
-                "positive"
-                if float(expected_path_projection.get("follow_through_pct") or 0.0) >= 55.0
-                else "neutral"
-            ),
+            items=_expected_path_kpi_items(expected_path_projection),
+            columns=5,
         )
     else:
         render_insight_card(
@@ -2962,150 +2247,6 @@ def render(ctx: dict) -> None:
         df_events["Session"] = pd.to_datetime(df_events["event_time"], utc=True, errors="coerce").map(
             lambda ts: session_bucket_for_timestamp(ts) if pd.notna(ts) else "Unknown"
         )
-
-    session_summary_df = build_signal_cohort_summary(df_events, "Session") if "Session" in df_events.columns else pd.DataFrame()
-    works_cards: list[dict[str, str]] = []
-    fail_cards: list[dict[str, str]] = []
-
-    execution_work_cards, execution_fail_cards = _build_execution_signal_cards(execution_snapshot)
-    works_cards.extend(execution_work_cards)
-    fail_cards.extend(execution_fail_cards)
-    if hold_guidance_enabled:
-        hold_work_cards, hold_fail_cards = _build_hold_signal_cards(
-            hold_guidance_rows,
-            symbol_filter=symbol_filter,
-        )
-        works_cards.extend(hold_work_cards)
-        fail_cards.extend(hold_fail_cards)
-
-    qualified_timeframe_df = _qualified_summary_rows(
-        timeframe_summary_df,
-        count_field="Resolved",
-        min_count=_MIN_SIGNAL_ARCHIVE_ROWS,
-    )
-    if len(qualified_timeframe_df) >= 2:
-        strongest_timeframe = qualified_timeframe_df.sort_values(
-            ["FollowThroughPct", "AvgDirReturnPct", "Resolved"], ascending=[False, False, False]
-        ).iloc[0]
-        weakest_timeframe = qualified_timeframe_df.sort_values(
-            ["FollowThroughPct", "AvgDirReturnPct", "Resolved"], ascending=[True, True, False]
-        ).iloc[0]
-        works_cards.append(
-            {
-                "title": "Best Timeframe",
-                "body_html": (
-                    f"<b>{str(strongest_timeframe['timeframe']).upper()}</b> is the cleanest current pocket for <b>{symbol_filter}</b> "
-                    f"({float(strongest_timeframe['FollowThroughPct']):.1f}% follow-through, "
-                    f"<b>{float(strongest_timeframe['AvgDirReturnPct']):+.2f}%</b> avg move across "
-                    f"{int(strongest_timeframe['Resolved'])} completed signals)."
-                ),
-                "tone": "positive" if float(strongest_timeframe["AvgDirReturnPct"]) >= 0.0 else "neutral",
-            }
-        )
-        fail_cards.append(
-            {
-                "title": "Weakest Timeframe",
-                "body_html": (
-                    f"<b>{str(weakest_timeframe['timeframe']).upper()}</b> is currently the weakest pocket for <b>{symbol_filter}</b> "
-                    f"({float(weakest_timeframe['FollowThroughPct']):.1f}% follow-through, "
-                    f"<b>{float(weakest_timeframe['AvgDirReturnPct']):+.2f}%</b> avg move across "
-                    f"{int(weakest_timeframe['Resolved'])} completed signals)."
-                ),
-                "tone": "warning" if float(weakest_timeframe["FollowThroughPct"]) < 45.0 or float(weakest_timeframe["AvgDirReturnPct"]) < 0.0 else "neutral",
-            }
-        )
-    elif len(qualified_timeframe_df) == 1:
-        only_timeframe = qualified_timeframe_df.iloc[0]
-        works_cards.append(
-            _archive_building_card(
-                "Timeframe Spread",
-                (
-                    f"Only <b>{str(only_timeframe['timeframe']).upper()}</b> has enough history for <b>{symbol_filter}</b> so far "
-                    f"({int(only_timeframe['Resolved'])} completed signals). We need more timeframe variety before ranking strongest vs weakest."
-                ),
-            )
-        )
-    else:
-        works_cards.append(
-            _archive_building_card(
-                "Timeframe Spread",
-                "Timeframe history is still building for this coin. We need more completed signals before ranking the cleanest pockets.",
-            )
-        )
-
-    qualified_session_execution_df = _qualified_summary_rows(
-        session_summary_df,
-        count_field="ClosedTradeCount",
-        min_count=_MIN_EXECUTION_ARCHIVE_ROWS,
-    )
-    qualified_session_signal_df = _qualified_summary_rows(
-        session_summary_df,
-        count_field="Resolved",
-        min_count=_MIN_SIGNAL_ARCHIVE_ROWS,
-    )
-    qualified_known_session_execution_df = _prefer_known_summary_rows(
-        qualified_session_execution_df,
-        label_field="Session",
-    )
-    qualified_known_session_signal_df = _prefer_known_summary_rows(
-        qualified_session_signal_df,
-        label_field="Session",
-    )
-    if not qualified_known_session_execution_df.empty:
-        best_execution_row = qualified_known_session_execution_df.sort_values(
-            ["ActualWinRatePct", "ClosedTradeCount", "Signals"], ascending=[False, False, False]
-        ).iloc[0]
-        works_cards.append(
-            {
-                "title": "Best Session",
-                "body_html": (
-                    f"<b>{best_execution_row['Session']}</b> is converting best in real execution for <b>{symbol_filter}</b> "
-                    f"({float(best_execution_row['ActualWinRatePct']):.1f}% across "
-                    f"{int(best_execution_row['ClosedTradeCount'])} closed trades)."
-                ),
-                "tone": "positive" if float(best_execution_row["ActualWinRatePct"]) >= 55.0 else "neutral",
-            }
-        )
-    elif not qualified_known_session_signal_df.empty:
-        best_follow_row = qualified_known_session_signal_df.sort_values(
-            ["FollowThroughPct", "Resolved", "Signals"], ascending=[False, False, False]
-        ).iloc[0]
-        works_cards.append(
-            {
-                "title": "Best Session",
-                "body_html": (
-                    f"Trade journal is still building. On the signal side, <b>{best_follow_row['Session']}</b> "
-                    f"is currently the cleanest session for <b>{symbol_filter}</b> "
-                    f"({float(best_follow_row['FollowThroughPct']):.1f}% follow-through across "
-                    f"{int(best_follow_row['Resolved'])} completed signals)."
-                ),
-                "tone": "neutral",
-            }
-        )
-
-    works_cards = _prepare_section_cards(works_cards, max_actionable=3)
-    fail_cards = _prepare_section_cards(fail_cards, max_actionable=3)
-
-    st.markdown("### What Works")
-    st.caption("Strongest reads for this coin.")
-    _render_insight_card_grid(st, works_cards, columns=3)
-
-    st.markdown("### What Needs Care")
-    st.caption("Areas to treat carefully.")
-    _render_insight_card_grid(st, fail_cards, columns=3)
-
-    _render_execution_review_section(
-        st=st,
-        df_events=df_events,
-        execution_snapshot=execution_snapshot,
-        db_path=db_path,
-        save_signal_trade_overlay=save_signal_trade_overlay,
-        save_signal_trade_journal=save_signal_trade_journal,
-        positive_color=POSITIVE,
-        warning_color=WARNING,
-        negative_color=NEGATIVE,
-        muted_color=TEXT_MUTED,
-    )
 
     detail_toggle_cols = st.columns(2, gap="medium")
     with detail_toggle_cols[0]:
@@ -3271,7 +2412,7 @@ def render(ctx: dict) -> None:
             )
         )
     if "Market Stance" in advanced_df_events.columns:
-        advanced_df_events["Execution Readiness"] = advanced_df_events.apply(
+        advanced_df_events["Readiness"] = advanced_df_events.apply(
             lambda row: archived_execution_stance_label(
                 trade_gate=str(row.get("Market Stance") or ""),
                 adaptive_edge=str(row.get("Learned Edge") or ""),
@@ -3279,21 +2420,7 @@ def render(ctx: dict) -> None:
             ),
             axis=1,
         )
-    if "trade_decision" in advanced_df_events.columns:
-        advanced_df_events["Trade Decision"] = (
-            advanced_df_events["trade_decision"].replace("", "Unmarked").fillna("Unmarked")
-        )
-    if "actual_trade_status" in advanced_df_events.columns:
-        advanced_df_events["Actual Trade Status"] = (
-            advanced_df_events["actual_trade_status"].replace("", "Not Journaled").fillna("Not Journaled")
-        )
-    if "actual_exit_reason" in advanced_df_events.columns:
-        advanced_df_events["Actual Exit Reason"] = (
-            advanced_df_events["actual_exit_reason"].replace("", "Open / Unset").fillna("Open / Unset")
-        )
     advanced_df_events = annotate_alert_footprint(advanced_df_events)
-    advanced_df_events = _annotate_actual_hold_style(advanced_df_events)
-    advanced_df_events = _annotate_actual_exit_quality(advanced_df_events)
 
     if show_deep_dives:
         st.markdown("### Details")
@@ -3318,26 +2445,12 @@ def render(ctx: dict) -> None:
                 df_events=advanced_df_events,
                 build_signal_cohort_summary=build_signal_cohort_summary,
                 specs=[
+                    ("Readiness", "By Readiness", "Readiness"),
                     ("Primary Alert", "By Lead Alert"),
                     ("Catalyst State", "By Catalyst State"),
                     ("Catalyst Window", "By Catalyst Window"),
                     ("Flow Read", "By Tape Read", "Tape Read"),
                     ("Sector", "By Sector"),
-                ],
-            )
-
-        with st.expander("Execution", expanded=False):
-            _render_compact_cohort_tables(
-                st,
-                df_events=advanced_df_events,
-                build_signal_cohort_summary=build_signal_cohort_summary,
-                specs=[
-                    ("Execution Readiness", "By Tradeability", "Tradeability"),
-                    ("Trade Decision", "By Action Taken", "Action Taken"),
-                    ("Actual Trade Status", "By Journal Status", "Journal Status"),
-                    ("Hold Style", "By Hold Style"),
-                    ("Exit Quality", "By Exit Quality"),
-                    ("Actual Exit Reason", "By Exit Reason", "Exit Reason"),
                 ],
             )
 
@@ -3382,15 +2495,9 @@ def render(ctx: dict) -> None:
             "Flow Read",
             "Session",
             "Learned Edge",
-            "Execution Readiness",
+            "Readiness",
             "Market Regime",
             "Market Stance",
-            "Trade Decision",
-            "Actual Trade Status",
-            "Hold Style",
-            "Actual Hold Hours",
-            "Exit Quality",
-            "Actual Exit Reason",
             "Risk Tier",
             copy_text("review.label.no_trade_reason"),
             "Playbook",
@@ -3401,13 +2508,6 @@ def render(ctx: dict) -> None:
             "actionable_setup_score",
             "actionable_context_score",
             "actionable_tactical_score",
-            "trade_note",
-            "actual_trade_side",
-            "actual_entry_price",
-            "actual_entry_at",
-            "actual_exit_price",
-            "actual_exit_at",
-            "actual_pnl_pct",
             "confidence",
             "ai_confidence",
             "plan_outcome",
@@ -3417,8 +2517,6 @@ def render(ctx: dict) -> None:
             "status",
         ]
         recent_df = advanced_df_events[[c for c in recent_cols if c in advanced_df_events.columns]].copy().head(int(recent_table_limit))
-        if "actual_trade_side" in recent_df.columns:
-            recent_df["actual_trade_side"] = recent_df["actual_trade_side"].map(_display_trade_direction).replace("", "—")
         if "event_time" in recent_df.columns:
             recent_df["event_time"] = pd.to_datetime(recent_df["event_time"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
         rename_map = {
@@ -3430,7 +2528,6 @@ def render(ctx: dict) -> None:
             "Market Lead": "AI View",
             "Flow Read": "Tape Read",
             "Learned Edge": "Archive Read",
-            "Execution Readiness": "Tradeability",
             "direction": "Direction",
             "confidence": "Confidence",
             "ai_confidence": "AI Confidence",
@@ -3444,13 +2541,6 @@ def render(ctx: dict) -> None:
             "actionable_setup_score": "Setup Score",
             "actionable_context_score": "Context Score",
             "actionable_tactical_score": "Tactical Score",
-            "trade_note": "Trade Note",
-            "actual_trade_side": "Trade Direction",
-            "actual_entry_price": "Actual Entry",
-            "actual_entry_at": "Entry Time",
-            "actual_exit_price": "Actual Exit",
-            "actual_exit_at": "Exit Time",
-            "actual_pnl_pct": "Actual PnL %",
         }
         recent_df = recent_df.rename(columns=rename_map)
         st.markdown("### Raw Tables")

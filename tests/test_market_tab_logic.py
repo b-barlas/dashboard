@@ -33,8 +33,12 @@ from tabs.market_tab import (
     _alert_archive_label,
     _actionable_market_result_priority_key,
     _auto_timeframe_learning_event_from_frame,
+    _auto_learning_backfill_pair_limit,
     _auto_learning_state,
+    _auto_learning_symbol_candidates,
+    _auto_learning_timeframe_stats,
     _mark_auto_learning_attempt,
+    _select_auto_learning_timeframes,
     _select_auto_learning_timeframe,
     _build_breakout_freshness_snapshot,
     _compress_market_alerts_for_display,
@@ -53,6 +57,7 @@ from tabs.market_tab import (
     _coingecko_coin_id_fallback_reason,
     _confidence_badge,
     _coingecko_coin_id_unavailable_message,
+    _coverage_adjusted_archive_scores,
     _custom_watchlist_fallback_coin_id,
     _custom_watchlist_enrichment_coverage,
     _custom_watchlist_missing_status,
@@ -78,6 +83,7 @@ from tabs.market_tab import (
     _merge_market_cap_maps,
     _market_lead_breadth_component,
     _market_lead_snapshot,
+    _market_signal_log_events,
     _scalp_signal_log_events,
     _market_result_priority_key,
     _market_result_priority_key_for_mode,
@@ -143,6 +149,155 @@ class MarketTabLogicTests(unittest.TestCase):
         )
 
         self.assertIsNone(selected)
+
+    def test_auto_learning_selector_can_return_balanced_batch(self):
+        now = "2026-04-28T12:00:00Z"
+        df_events = pd.DataFrame(
+            [
+                {"timeframe": "5m", "event_time": "2026-04-28T11:50:00Z"},
+                {"timeframe": "15m", "event_time": "2026-04-28T08:00:00Z"},
+                {"timeframe": "1h", "event_time": "2026-04-28T11:30:00Z"},
+                {"timeframe": "1d", "event_time": "2026-04-27T00:00:00Z"},
+            ]
+        )
+
+        selected = _select_auto_learning_timeframes(
+            df_events,
+            _auto_learning_state({}),
+            now=now,
+            current_timeframe="1h",
+            max_count=2,
+        )
+
+        self.assertEqual(selected, ["4h", "15m"])
+
+    def test_auto_learning_stats_use_checkpoint_coverage_when_available(self):
+        df_events = pd.DataFrame(
+            [
+                {
+                    "signal_key": "a",
+                    "timeframe": "15m",
+                    "status": "RESOLVED",
+                    "directional_return_pct": 0.5,
+                    "event_time": "2026-04-28T10:00:00Z",
+                },
+                {
+                    "signal_key": "b",
+                    "timeframe": "15m",
+                    "status": "RESOLVED",
+                    "directional_return_pct": 0.2,
+                    "event_time": "2026-04-28T10:15:00Z",
+                },
+                {
+                    "signal_key": "c",
+                    "timeframe": "1h",
+                    "status": "RESOLVED",
+                    "directional_return_pct": 0.3,
+                    "event_time": "2026-04-28T10:00:00Z",
+                },
+            ]
+        )
+        windows = pd.DataFrame([{"signal_key": "a", "bars_ahead": 4}])
+
+        stats = _auto_learning_timeframe_stats(df_events, windows)
+
+        self.assertEqual(stats["15m"]["resolved_rows"], 2)
+        self.assertEqual(stats["15m"]["window_rows"], 1)
+        self.assertEqual(stats["15m"]["usable_rows"], 1)
+        self.assertEqual(stats["1h"]["usable_rows"], 0)
+
+    def test_auto_learning_stats_treat_empty_checkpoint_scope_as_not_usable(self):
+        df_events = pd.DataFrame(
+            [
+                {
+                    "signal_key": "a",
+                    "timeframe": "15m",
+                    "status": "RESOLVED",
+                    "directional_return_pct": 0.5,
+                    "event_time": "2026-04-28T10:00:00Z",
+                },
+                {
+                    "signal_key": "b",
+                    "timeframe": "15m",
+                    "status": "RESOLVED",
+                    "directional_return_pct": 0.2,
+                    "event_time": "2026-04-28T10:15:00Z",
+                },
+            ]
+        )
+
+        stats = _auto_learning_timeframe_stats(df_events, pd.DataFrame(columns=["signal_key"]))
+
+        self.assertEqual(stats["15m"]["resolved_rows"], 2)
+        self.assertEqual(stats["15m"]["window_rows"], 0)
+        self.assertEqual(stats["15m"]["usable_rows"], 0)
+        self.assertEqual(stats["15m"]["checkpoint_coverage_ratio"], 0.0)
+        self.assertTrue(stats["15m"]["needs_checkpoint_backfill"])
+
+    def test_auto_learning_selector_prioritizes_checkpoint_missing_timeframe(self):
+        events = []
+        windows = []
+        counts = {"5m": 24, "15m": 32, "1h": 60, "4h": 24, "1d": 16}
+        for timeframe, count in counts.items():
+            for idx in range(count):
+                signal_key = f"{timeframe}-{idx}"
+                events.append(
+                    {
+                        "signal_key": signal_key,
+                        "timeframe": timeframe,
+                        "status": "RESOLVED",
+                        "directional_return_pct": 0.2,
+                        "event_time": "2026-04-28T10:00:00Z",
+                    }
+                )
+                if timeframe != "1h":
+                    windows.append({"signal_key": signal_key, "bars_ahead": 4})
+
+        selected = _select_auto_learning_timeframe(
+            pd.DataFrame(events),
+            _auto_learning_state({}),
+            df_forward_windows=pd.DataFrame(windows),
+            now="2026-04-28T12:00:00Z",
+            current_timeframe="15m",
+        )
+
+        self.assertEqual(selected, "1h")
+
+    def test_auto_learning_backfill_expands_for_thin_checkpoint_history(self):
+        df_events = pd.DataFrame(
+            [
+                {
+                    "signal_key": "a",
+                    "timeframe": "4h",
+                    "status": "RESOLVED",
+                    "directional_return_pct": 0.5,
+                    "event_time": "2026-04-28T10:00:00Z",
+                }
+            ]
+        )
+
+        self.assertGreater(_auto_learning_backfill_pair_limit("4h", df_events, pd.DataFrame()), 2)
+
+    def test_auto_learning_symbol_candidates_prioritize_open_signals(self):
+        df_events = pd.DataFrame(
+            [
+                {"symbol": "OLD", "timeframe": "15m", "status": "OPEN", "event_time": "2026-04-28T08:00:00Z"},
+                {"symbol": "HOT", "timeframe": "15m", "status": "OPEN", "event_time": "2026-04-28T11:00:00Z"},
+                {"symbol": "USDT", "timeframe": "15m", "status": "OPEN", "event_time": "2026-04-28T11:15:00Z"},
+                {"symbol": "BTC", "timeframe": "1h", "status": "OPEN", "event_time": "2026-04-28T11:00:00Z"},
+            ]
+        )
+
+        symbols = _auto_learning_symbol_candidates(
+            df_events=df_events,
+            candidate_pairs=["BTC/USDT", "HOT/USDT", "SOL/USDT"],
+            timeframe="15m",
+            exclude_stables=True,
+            open_limit=2,
+            total_limit=4,
+        )
+
+        self.assertEqual(symbols, ["HOT/USDT", "OLD/USDT", "BTC/USDT", "SOL/USDT"])
 
     def test_auto_timeframe_learning_event_uses_closed_frame_signal(self):
         timestamps = pd.date_range("2026-04-28T00:00:00Z", periods=80, freq="h")
@@ -293,6 +448,68 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertEqual(events[0]["lead_label"], "Good R:R")
         self.assertEqual(events[0]["scan_focus"], "Breakout Radar")
         self.assertEqual(events[1]["action_reason"], "CONDITIONAL")
+
+    def test_market_signal_log_events_includes_archive_decision_calibration(self):
+        rows = [
+            {
+                "Coin": "TRX",
+                "__event_time": "2026-04-20T10:00:00Z",
+                "__timeframe": "1h",
+                "Direction": "Upside",
+                "Setup Confirm": "WATCH ↑",
+                "__action_raw": "WATCH_UP",
+                "__action_reason": "Watch setup",
+                "__confidence_val": 74.0,
+                "__ai_confidence_val": 71.0,
+                "__adaptive_edge_score": 62.0,
+                "__archive_policy_delta": 1.25,
+                "__archive_policy_completed": 36,
+                "__archive_policy_quality": "Good",
+                "__archive_policy_coverage": 0.72,
+                "__archive_decision_delta": 2.5,
+                "__archive_expectancy_delta": 0.7,
+                "__archive_total_delta": 4.25,
+                "__archive_total_expectancy_delta": 55.7,
+                "__archive_decision_scope": "WATCH_UP 1H Upside",
+                "__archive_confidence_factor": 0.68,
+                "__archive_confidence_tier": "Good",
+                "__archive_invalidation_risk": 0.12,
+                "__archive_feedback_multiplier": 0.94,
+                "__price_val": 0.32,
+                "AI Ensemble": "Upside (71%)",
+            }
+        ]
+
+        events = _market_signal_log_events(
+            rows=rows,
+            timeframe="1h",
+            scan_mode="Breakout Radar",
+            market_lead_snapshot=SimpleNamespace(label="Upside", score=68.0, upside_leads=4, downside_leads=1),
+            market_regime_snapshot=SimpleNamespace(label="Trend", playbook_key="trend", playbook="Trend"),
+            market_trade_gate_snapshot=SimpleNamespace(no_trade=False, gate_key="TRADEABLE", label="Tradeable", reason_code=""),
+            build_signal_risk_sizing=lambda **_k: SimpleNamespace(label="Standard", unit_fraction=1.0),
+            sector_rotation_snapshot=SimpleNamespace(label="Risk On"),
+            classify_symbol_sector=lambda _symbol: "L1",
+            market_catalyst_snapshot=SimpleNamespace(label="Clear", next_event="", blocking=False, category="", scope="", tag="", targeted_only=False),
+            market_flow_snapshot=SimpleNamespace(label="Balanced", state=""),
+            session_fit_snapshot=SimpleNamespace(score=60.0),
+            market_alerts=[],
+        )
+
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event["archive_decision_scope"], "WATCH_UP 1H Upside")
+        self.assertAlmostEqual(float(event["archive_decision_delta"]), 2.5)
+        self.assertAlmostEqual(float(event["archive_expectancy_delta"]), 0.7)
+        self.assertAlmostEqual(float(event["archive_total_delta"]), 4.25)
+        self.assertAlmostEqual(float(event["archive_total_expectancy_delta"]), 55.7)
+        self.assertAlmostEqual(float(event["archive_policy_delta"]), 1.25)
+        self.assertEqual(event["archive_policy_completed"], 36)
+        self.assertEqual(event["archive_policy_quality"], "Good")
+        self.assertAlmostEqual(float(event["archive_policy_coverage"]), 0.72)
+        self.assertNotIn("archive_confidence_factor", event)
+        self.assertNotIn("archive_invalidation_risk", event)
+        self.assertNotIn("archive_feedback_multiplier", event)
 
     def test_alert_lane_label_uses_trader_facing_terms(self):
         self.assertEqual(
@@ -1245,6 +1462,31 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertGreater(supportive, 50.0)
         self.assertLess(cautious, 50.0)
         self.assertGreater(supportive, thin)
+
+    def test_coverage_adjusted_archive_scores_dampen_thin_exact_history(self):
+        thin_archive, thin_expectancy = _coverage_adjusted_archive_scores(
+            base_archive_score=6.0,
+            base_expectancy_score=62.0,
+            policy_delta=0.0,
+            policy_coverage=0.0,
+        )
+        strong_archive, strong_expectancy = _coverage_adjusted_archive_scores(
+            base_archive_score=6.0,
+            base_expectancy_score=62.0,
+            policy_delta=0.0,
+            policy_coverage=1.0,
+        )
+        boosted_archive, boosted_expectancy = _coverage_adjusted_archive_scores(
+            base_archive_score=6.0,
+            base_expectancy_score=62.0,
+            policy_delta=3.0,
+            policy_coverage=1.0,
+        )
+
+        self.assertLess(thin_archive, strong_archive)
+        self.assertLess(thin_expectancy, strong_expectancy)
+        self.assertGreater(boosted_archive, strong_archive)
+        self.assertGreater(boosted_expectancy, strong_expectancy)
 
     def test_direction_fetch_symbol_keeps_canonical_requested_symbol_for_htf_context(self):
         self.assertEqual(_direction_fetch_symbol("BTC/USDT", "XBT/USD", "exchange"), "BTC/USDT")

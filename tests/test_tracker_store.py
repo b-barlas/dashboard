@@ -18,6 +18,7 @@ from core.tracker_store import (
     build_tracker_storage_snapshot,
     create_signal_tracker_mirror_snapshot,
     latest_signal_tracker_mirror_path,
+    latest_signal_tracker_backup_path,
     mirror_signal_tracker_db_if_due,
     quarantine_signal_tracker_db,
     read_signal_tracker_db_bytes,
@@ -98,6 +99,46 @@ class TrackerStoreTests(unittest.TestCase):
             self.assertTrue(Path(backup_path).exists())
             restored_bytes = read_signal_tracker_db_bytes(backup_path)
             self.assertTrue(restored_bytes.startswith(b"SQLite format 3\x00"))
+            self.assertEqual(latest_signal_tracker_backup_path(db_path), backup_path)
+
+    def test_log_signal_events_persists_archive_decision_calibration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "tracker.sqlite3")
+            init_signal_tracker_db(db_path)
+
+            log_signal_events(
+                [
+                    {
+                        "source": "Market",
+                        "symbol": "TRX",
+                        "timeframe": "1h",
+                        "event_time": "2026-04-05T10:00:00Z",
+                        "direction": "UPSIDE",
+                        "setup_confirm": "WATCH_UP",
+                        "archive_policy_delta": 1.25,
+                        "archive_policy_completed": 36,
+                        "archive_policy_quality": "Good",
+                        "archive_policy_coverage": 0.72,
+                        "archive_decision_delta": 2.5,
+                        "archive_expectancy_delta": 0.7,
+                        "archive_total_delta": 4.25,
+                        "archive_total_expectancy_delta": 55.7,
+                        "archive_decision_scope": "WATCH_UP 1H Upside",
+                    }
+                ],
+                db_path=db_path,
+            )
+
+            row = fetch_signal_events_df(limit=20, db_path=db_path).iloc[0]
+            self.assertAlmostEqual(float(row["archive_policy_delta"]), 1.25)
+            self.assertEqual(int(row["archive_policy_completed"]), 36)
+            self.assertEqual(row["archive_policy_quality"], "Good")
+            self.assertAlmostEqual(float(row["archive_policy_coverage"]), 0.72)
+            self.assertAlmostEqual(float(row["archive_decision_delta"]), 2.5)
+            self.assertAlmostEqual(float(row["archive_expectancy_delta"]), 0.7)
+            self.assertAlmostEqual(float(row["archive_total_delta"]), 4.25)
+            self.assertAlmostEqual(float(row["archive_total_expectancy_delta"]), 55.7)
+            self.assertEqual(row["archive_decision_scope"], "WATCH_UP 1H Upside")
 
     def test_restore_signal_tracker_db_bytes_replaces_current_db_and_keeps_backup(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -254,6 +295,44 @@ class TrackerStoreTests(unittest.TestCase):
             self.assertTrue(bool(result.backup_path))
             self.assertTrue(Path(result.backup_path).exists())
             self.assertEqual(fetch_signal_events_df(limit=20, db_path=db_path)["symbol"].tolist(), ["BTC"])
+
+    def test_recover_signal_tracker_db_from_latest_backup_when_mirror_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "tracker.sqlite3")
+            init_signal_tracker_db(db_path)
+            log_signal_events(
+                [
+                    {
+                        "source": "Market",
+                        "symbol": "BTC",
+                        "timeframe": "1h",
+                        "event_time": "2026-04-05T10:00:00Z",
+                        "direction": "UPSIDE",
+                    }
+                ],
+                db_path=db_path,
+            )
+            backup_path = backup_signal_tracker_db(db_path)
+            Path(db_path).write_bytes(b"corrupt-db")
+            Path(f"{db_path}-wal").unlink(missing_ok=True)
+            Path(f"{db_path}-shm").unlink(missing_ok=True)
+
+            result = recover_signal_tracker_db_from_latest_mirror(db_path, auto_restore=True)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(fetch_signal_events_df(limit=20, db_path=db_path)["symbol"].tolist(), ["BTC"])
+            self.assertEqual(latest_signal_tracker_backup_path(db_path), backup_path)
+
+    def test_init_signal_tracker_db_moves_invalid_primary_aside_without_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "tracker.sqlite3")
+            Path(db_path).write_bytes(b"corrupt-db")
+
+            init_signal_tracker_db(db_path)
+
+            self.assertEqual(fetch_signal_events_df(limit=20, db_path=db_path).to_dict("records"), [])
+            invalid_paths = list(Path(tmp).glob("tracker.invalid-*.sqlite3"))
+            self.assertEqual(len(invalid_paths), 1)
 
     def test_quarantine_signal_tracker_db_copies_invalid_primary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
