@@ -342,9 +342,11 @@ def apply_archive_confidence_guardrail(
 
     raw_archive = _archive_float(archive_delta)
     raw_expectancy = _archive_float(expectancy_delta)
-    confidence = max(0.0, min(1.0, _archive_float(getattr(snapshot, "confidence_factor", None), -1.0)))
-    if confidence < 0:
+    raw_confidence = _archive_float(getattr(snapshot, "confidence_factor", None), -1.0)
+    if raw_confidence < 0:
         confidence = archive_decision_confidence_factor(snapshot)
+    else:
+        confidence = max(0.0, min(1.0, raw_confidence))
     multiplier = 0.25 + (0.75 * confidence)
     return (
         max(-20.0, min(20.0, raw_archive * multiplier)),
@@ -358,12 +360,11 @@ def archive_decision_observability(
 ) -> dict[str, object]:
     """Return hidden audit fields explaining archive ranking impact."""
 
-    confidence_factor = max(
-        0.0,
-        min(1.0, _archive_float(getattr(snapshot, "confidence_factor", None), -1.0)),
-    )
-    if confidence_factor < 0:
+    raw_confidence = _archive_float(getattr(snapshot, "confidence_factor", None), -1.0)
+    if raw_confidence < 0:
         confidence_factor = archive_decision_confidence_factor(snapshot)
+    else:
+        confidence_factor = max(0.0, min(1.0, raw_confidence))
     confidence_tier = str(getattr(snapshot, "confidence_tier", "") or "").strip()
     if not confidence_tier:
         confidence_tier = archive_confidence_tier(confidence_factor)

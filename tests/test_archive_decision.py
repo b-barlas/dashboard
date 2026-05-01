@@ -314,6 +314,31 @@ class ArchiveDecisionTests(unittest.TestCase):
         self.assertLess(thin_expectancy, strong_expectancy)
         self.assertEqual((strong_delta, strong_expectancy), (8.0, 4.0))
 
+    def test_archive_confidence_guardrail_computes_missing_confidence_factor(self) -> None:
+        snapshot = SimpleNamespace(
+            setup=SimpleNamespace(completed=40, coverage_factor=1.0),
+            hold_window={"available": True, "sample": 40, "resolved_signals": 40},
+            expected_path={
+                "available": True,
+                "sample": 40,
+                "archive_check_sample": 40,
+                "read_quality": "Strong",
+                "path_conflict": False,
+                "zone_hit_rate_pct": 82.0,
+                "clean_path_rate_pct": 74.0,
+                "caution_break_rate_pct": 4.0,
+                "follow_through_pct": 68.0,
+            },
+        )
+
+        guarded_delta, guarded_expectancy = apply_archive_confidence_guardrail(8.0, 4.0, snapshot)
+        meta = archive_decision_observability(snapshot)
+
+        self.assertGreater(float(meta["archive_confidence_factor"]), 0.8)
+        self.assertEqual(meta["archive_confidence_tier"], "Strong")
+        self.assertGreater(guarded_delta, 7.0)
+        self.assertGreater(guarded_expectancy, 3.5)
+
     def test_archive_decision_observability_exposes_hidden_audit_fields(self) -> None:
         snapshot = SimpleNamespace(
             confidence_factor=0.67,
