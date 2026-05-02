@@ -119,6 +119,8 @@ def build_position_management_snapshot(
     volume_spike_label: str = "",
     hold_profile_label: str = "",
     hold_profile_note: str = "",
+    archive_hold_profile_label: str = "",
+    archive_hold_profile_note: str = "",
     exit_quality_label: str = "",
     exit_quality_note: str = "",
 ) -> PositionManagementSnapshot:
@@ -142,6 +144,11 @@ def build_position_management_snapshot(
     flow_value = str(flow_proxy or "").strip()
     hold_profile = str(hold_profile_label or "").strip()
     hold_profile_text = str(hold_profile_note or "").strip()
+    archive_hold_profile = str(archive_hold_profile_label or "").strip()
+    archive_hold_profile_text = str(archive_hold_profile_note or "").strip()
+    if (not hold_profile or hold_profile == "Archive Building") and archive_hold_profile:
+        hold_profile = archive_hold_profile
+        hold_profile_text = archive_hold_profile_text
     exit_quality = str(exit_quality_label or "").strip()
     exit_quality_text = str(exit_quality_note or "").strip()
 

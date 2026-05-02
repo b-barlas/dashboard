@@ -120,6 +120,25 @@ def _position_hold_window_note(snapshot: dict[str, object], *, scope_label: str)
     )
 
 
+def _position_archive_hold_profile(snapshot: dict[str, object], *, scope_label: str) -> dict[str, str]:
+    if not bool((snapshot or {}).get("available")):
+        return {"label": "", "note": ""}
+    best_style = str(snapshot.get("best_style") or "").strip()
+    if best_style not in {"Quick Follow-Through", "Standard Hold", "Needs Room"}:
+        return {"label": "", "note": ""}
+    best_bar = int(snapshot.get("best_bar") or 0)
+    fade_after_bar = int(snapshot.get("fade_after_bar") or 0)
+    sample = int(snapshot.get("sample") or 0)
+    scope = str(scope_label or "selected archive pocket").strip()
+    timing = f"best around {best_bar} bars" if best_bar > 0 else "best timing is still forming"
+    fade = f", fades after roughly {fade_after_bar} bars" if fade_after_bar > 0 else ""
+    sample_note = f" from {sample} checkpoint samples" if sample > 0 else ""
+    return {
+        "label": best_style,
+        "note": f"Signal Archive hold window for {scope}: {timing}{fade}{sample_note}.",
+    }
+
+
 def _spot_tf_note(snapshot) -> str:
     return (
         f"{str(snapshot.timeframe).upper()}: {_spot_bias_label(snapshot.direction)} | "
@@ -830,6 +849,10 @@ def render(ctx: dict) -> None:
                     hold_window_snapshot,
                     scope_label=archive_signal_decision.scope_label,
                 )
+                archive_hold_profile = _position_archive_hold_profile(
+                    hold_window_snapshot,
+                    scope_label=archive_signal_decision.scope_label,
+                )
                 exit_quality = build_actual_exit_quality_profile(
                     adaptive_history_df,
                     symbol=archive_symbol,
@@ -1075,6 +1098,8 @@ def render(ctx: dict) -> None:
                     volume_spike_label=str(volume_txt or ""),
                     hold_profile_label=str(hold_profile.get("label") or ""),
                     hold_profile_note=str(hold_profile.get("note") or ""),
+                    archive_hold_profile_label=str(archive_hold_profile.get("label") or ""),
+                    archive_hold_profile_note=str(archive_hold_profile.get("note") or ""),
                     exit_quality_label=str(exit_quality.get("label") or ""),
                     exit_quality_note=str(exit_quality.get("note") or ""),
                 )

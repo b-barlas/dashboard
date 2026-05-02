@@ -4,7 +4,7 @@ import unittest
 
 import pandas as pd
 
-from tabs.position_tab import _position_hold_archive_slice, _position_hold_window_note
+from tabs.position_tab import _position_archive_hold_profile, _position_hold_archive_slice, _position_hold_window_note
 
 
 class PositionTabLogicTests(unittest.TestCase):
@@ -151,6 +151,23 @@ class PositionTabLogicTests(unittest.TestCase):
         self.assertIn("fades after roughly <b>8</b> bars", note)
         self.assertIn("BTC 1H Upside", note)
         self.assertEqual(tone, "positive")
+
+    def test_position_archive_hold_profile_builds_management_fallback_note(self) -> None:
+        profile = _position_archive_hold_profile(
+            {
+                "available": True,
+                "best_bar": 4,
+                "best_style": "Quick Follow-Through",
+                "fade_after_bar": 8,
+                "sample": 10,
+            },
+            scope_label="BTC 1H WATCH ↑",
+        )
+
+        self.assertEqual(profile["label"], "Quick Follow-Through")
+        self.assertIn("BTC 1H WATCH ↑", profile["note"])
+        self.assertIn("best around 4 bars", profile["note"])
+        self.assertIn("fades after roughly 8 bars", profile["note"])
 
 
 if __name__ == "__main__":

@@ -161,6 +161,73 @@ class PositionManagementTests(unittest.TestCase):
         self.assertEqual(out.action_key, "REDUCE")
         self.assertIn("volume spike", out.note.lower())
 
+    def test_signal_archive_hold_window_fills_when_actual_trade_profile_is_building(self) -> None:
+        out = build_position_management_snapshot(
+            direction="LONG",
+            health_label="HOLD",
+            health_score=68.0,
+            health_notes=[],
+            levered_pnl_pct=1.0,
+            liq_distance_pct=14.0,
+            leverage=4.0,
+            invalidated=False,
+            invalidation_distance_pct=3.0,
+            spot_direction="UPSIDE",
+            tactical_direction="UPSIDE",
+            ai_direction="UPSIDE",
+            selected_confidence=66.0,
+            context_fit_label="Tradeable",
+            context_fit_aggression="Selective adds only",
+            adaptive_label="Historically Mixed",
+            execution_fit_label="Execution Mixed",
+            session_fit_label="Session Supportive",
+            archive_guardrail_label="",
+            catalyst_window="Far / Clear",
+            trade_gate="Tradeable",
+            playbook="Trend continuation",
+            flow_proxy="Balanced",
+            hold_profile_label="Archive Building",
+            hold_profile_note="Closed trade profile is still building.",
+            archive_hold_profile_label="Quick Follow-Through",
+            archive_hold_profile_note="Signal Archive hold window: best around 4 bars, fades after roughly 8 bars.",
+        )
+
+        self.assertIn("Signal Archive hold window", out.note)
+
+    def test_actual_trade_hold_profile_takes_priority_over_signal_archive_fallback(self) -> None:
+        out = build_position_management_snapshot(
+            direction="LONG",
+            health_label="HOLD",
+            health_score=68.0,
+            health_notes=[],
+            levered_pnl_pct=1.0,
+            liq_distance_pct=14.0,
+            leverage=4.0,
+            invalidated=False,
+            invalidation_distance_pct=3.0,
+            spot_direction="UPSIDE",
+            tactical_direction="UPSIDE",
+            ai_direction="UPSIDE",
+            selected_confidence=66.0,
+            context_fit_label="Tradeable",
+            context_fit_aggression="Selective adds only",
+            adaptive_label="Historically Mixed",
+            execution_fit_label="Execution Mixed",
+            session_fit_label="Session Supportive",
+            archive_guardrail_label="",
+            catalyst_window="Far / Clear",
+            trade_gate="Tradeable",
+            playbook="Trend continuation",
+            flow_proxy="Balanced",
+            hold_profile_label="Needs Room",
+            hold_profile_note="Actual closed trades say winners need room.",
+            archive_hold_profile_label="Quick Follow-Through",
+            archive_hold_profile_note="Signal Archive hold window should not override actual trade profile.",
+        )
+
+        self.assertIn("Actual closed trades say winners need room", out.note)
+        self.assertNotIn("Signal Archive hold window should not override", out.note)
+
 
 if __name__ == "__main__":
     unittest.main()
