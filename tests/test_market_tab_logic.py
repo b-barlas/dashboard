@@ -32,6 +32,7 @@ from tabs.market_tab import (
     _alert_lane_label,
     _alert_archive_label,
     _actionable_market_result_priority_key,
+    _ai_votes_from_row,
     _auto_timeframe_learning_event_from_frame,
     _auto_learning_backfill_pair_limit,
     _auto_learning_state,
@@ -688,6 +689,7 @@ class MarketTabLogicTests(unittest.TestCase):
             "__scalp_display_state",
             "__adaptive_edge_note",
             "__setup_calibration_note",
+            "__ai_votes",
             "__delta_note",
         ]
         hidden_cols = _market_hidden_meta_cols(df_columns, ["Coin", "Scalp Opportunity"])
@@ -695,6 +697,7 @@ class MarketTabLogicTests(unittest.TestCase):
             hidden_cols,
             [
                 "__adaptive_edge_note",
+                "__ai_votes",
                 "__delta_note",
                 "__scalp_display_state",
                 "__scalp_reason_short",
@@ -702,6 +705,11 @@ class MarketTabLogicTests(unittest.TestCase):
                 "__setup_calibration_note",
             ],
         )
+
+    def test_ai_votes_from_row_uses_visible_ensemble_when_meta_is_missing(self):
+        self.assertEqual(_ai_votes_from_row({}, "Upside (3/3)"), 3)
+        self.assertEqual(_ai_votes_from_row({"AI Ensemble": "Downside (2/3)"}, "Downside"), 2)
+        self.assertEqual(_ai_votes_from_row({"__ai_votes": 1, "AI Ensemble": "Upside (3/3)"}, "Upside"), 1)
 
     def test_pick_clearest_direction_prefers_advanced_alignment(self):
         df = pd.DataFrame(

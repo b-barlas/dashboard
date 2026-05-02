@@ -492,6 +492,7 @@ _MARKET_RENDER_META_COLS = [
     "__adaptive_edge_note",
     "__ai_confidence_note",
     "__ai_note",
+    "__ai_votes",
     "__catalyst_fit_note",
     "__confidence_note",
     "__delta_note",
@@ -642,6 +643,29 @@ def _confidence_value_from_badge(text: object) -> float | None:
         return float(match.group(1))
     except Exception:
         return None
+
+
+def _ai_votes_from_row(row: dict, display_text: object = "") -> int:
+    """Return the AI support dot count from hidden meta or visible text."""
+
+    candidates = [
+        (row or {}).get("__ai_votes"),
+        display_text,
+        (row or {}).get("AI Ensemble"),
+    ]
+    for candidate in candidates:
+        raw = str(candidate or "").strip()
+        if not raw:
+            continue
+        try:
+            if re.fullmatch(r"-?\d+(?:\.0+)?", raw):
+                return max(0, min(3, int(float(raw))))
+        except Exception:
+            pass
+        match = re.search(r"\((\d)\s*/\s*3\)", raw)
+        if match:
+            return max(0, min(3, int(match.group(1))))
+    return 0
 
 
 def _adaptive_execution_summary(model: dict[str, object]) -> str:
@@ -5814,11 +5838,7 @@ def render(ctx: dict) -> None:
 
     def _ai_ensemble_cell_title(row: dict, txt: str) -> str:
         verdict = str(txt or "").strip() or "Neutral"
-        votes = row.get("__ai_votes")
-        try:
-            votes_n = max(0, min(3, int(votes)))
-        except Exception:
-            votes_n = 0
+        votes_n = _ai_votes_from_row(row, txt)
         meaning = {
             "Upside": "The higher-timeframe AI stack leans up.",
             "Downside": "The higher-timeframe AI stack leans down.",
@@ -5834,11 +5854,7 @@ def render(ctx: dict) -> None:
     def _ai_confidence_cell_title(row: dict, txt: str) -> str:
         score = _confidence_value_from_badge(txt) or 0.0
         label = _extract_confidence_label(txt)
-        votes = row.get("__ai_votes")
-        try:
-            votes_n = max(0, min(3, int(votes)))
-        except Exception:
-            votes_n = 0
+        votes_n = _ai_votes_from_row(row, row.get("AI Ensemble", ""))
         agreement_hint = (
             "Model agreement is strong."
             if votes_n >= 3
@@ -6048,13 +6064,7 @@ def render(ctx: dict) -> None:
         if col == "AI Ensemble":
             t = _tone_for_col(col, txt)
             base_txt = re.sub(r"\s*\(\s*\d+\s*/\s*3\s*\)\s*$", "", txt).strip() or txt
-            votes = row.get("__ai_votes")
-            try:
-                votes_n = int(votes)
-            except Exception:
-                m = re.search(r"\((\d)\s*/\s*3\)", txt)
-                votes_n = int(m.group(1)) if m else 0
-            votes_n = max(0, min(3, votes_n))
+            votes_n = _ai_votes_from_row(row, txt)
             return _ensemble_metric(
                 base_txt,
                 tone=t,
