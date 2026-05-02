@@ -639,6 +639,46 @@ class MarketTabLogicTests(unittest.TestCase):
         ranked = sorted([weaker, stronger], key=_market_result_priority_key)
         self.assertEqual(ranked[0]["Coin"], "SOL")
 
+    def test_broad_market_priority_uses_archive_bias_without_overriding_setup_quality(self):
+        archive_supported = {
+            "Coin": "SOL",
+            "__action_raw": "WATCH",
+            "__risk_unit_fraction": 0.25,
+            "__execution_friction_score": 70.0,
+            "__expectancy_bias_score": 61.0,
+            "__confidence_val": 72.0,
+            "__adaptive_edge_score": 58.0,
+            "__actionable_archive_score": 5.5,
+            "__archive_guardrail_penalty": 0.0,
+            "__ai_confidence_val": 68.0,
+            "__mcap_val": 2_000_000_000,
+        }
+        archive_cautious = {
+            **archive_supported,
+            "Coin": "APT",
+            "__expectancy_bias_score": 42.0,
+            "__actionable_archive_score": -4.0,
+        }
+        stronger_setup = {
+            **archive_cautious,
+            "Coin": "BTC",
+            "__action_raw": "✅ ENTER (Trend+AI)",
+            "__expectancy_bias_score": 30.0,
+            "__actionable_archive_score": -8.0,
+        }
+
+        same_setup_order = sorted(
+            [archive_cautious, archive_supported],
+            key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_BROAD),
+        )
+        mixed_setup_order = sorted(
+            [archive_supported, stronger_setup],
+            key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_BROAD),
+        )
+
+        self.assertEqual(same_setup_order[0]["Coin"], "SOL")
+        self.assertEqual(mixed_setup_order[0]["Coin"], "BTC")
+
     def test_market_hidden_meta_cols_include_render_contract_fields(self):
         df_columns = [
             "Coin",
@@ -2782,6 +2822,44 @@ class MarketTabLogicTests(unittest.TestCase):
             key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_EMERGING),
         )
         self.assertEqual(ordered[0]["Coin"], "RAVE")
+
+    def test_trending_priority_uses_archive_bias_only_after_live_radar_quality(self):
+        archive_supported = {
+            "Coin": "RAVE",
+            "__emerging_rank_score": 74.0,
+            "__emerging_direction": "Upside",
+            "__actionable_frame_score": 68.0,
+            "__actionable_tactical_score": 62.0,
+            "__action_raw": "WATCH",
+            "__confidence_val": 78.0,
+            "__ai_confidence_val": 61.0,
+            "__execution_friction_score": 70.0,
+            "__expectancy_bias_score": 61.0,
+            "__archive_guardrail_penalty": 0.0,
+        }
+        archive_cautious = {
+            **archive_supported,
+            "Coin": "ENJ",
+            "__expectancy_bias_score": 42.0,
+        }
+        stronger_live_radar = {
+            **archive_cautious,
+            "Coin": "MOVR",
+            "__emerging_rank_score": 82.0,
+            "__expectancy_bias_score": 30.0,
+        }
+
+        same_quality_order = sorted(
+            [archive_cautious, archive_supported],
+            key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_TRENDING),
+        )
+        live_radar_order = sorted(
+            [archive_supported, stronger_live_radar],
+            key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_TRENDING),
+        )
+
+        self.assertEqual(same_quality_order[0]["Coin"], "RAVE")
+        self.assertEqual(live_radar_order[0]["Coin"], "MOVR")
 
     def test_next_scan_pool_target_grows_after_pool_is_exhausted(self):
         self.assertEqual(
