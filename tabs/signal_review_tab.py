@@ -332,7 +332,10 @@ def _select_best_signal_coin(
         "follow_through_pct": 0.0,
         "avg_dir_return_pct": 0.0,
         "resolved": 0,
+        "best_resolved": 0,
         "best_timeframe": "",
+        "best_setup_class": "",
+        "best_direction": "",
     }
     if df_events is None or df_events.empty:
         return empty
@@ -352,11 +355,12 @@ def _select_best_signal_coin(
     d = d[d["symbol"].ne("") & d["timeframe"].ne("")].copy()
     if d.empty:
         return empty
+    d = _annotate_setup_class(d)
     if "signal_key" in d.columns:
         d["signal_key"] = d["signal_key"].fillna("").astype(str).str.strip()
     d["directional_return_pct"] = pd.to_numeric(d.get("directional_return_pct"), errors="coerce")
     grouped = (
-        d.groupby(["symbol", "timeframe", "__direction_key"], dropna=False)
+        d.groupby(["symbol", "timeframe", "__setup_class", "__setup_label", "__direction_key"], dropna=False)
         .agg(
             Resolved=("symbol", "count"),
             FollowThroughPct=(
@@ -402,7 +406,10 @@ def _select_best_signal_coin(
             "follow_through_pct": float(best["FollowThroughPct"] or 0.0),
             "avg_dir_return_pct": float(best["AvgDirReturnPct"] or 0.0),
             "resolved": int(best["Resolved"] or 0),
+            "best_resolved": int(best["Resolved"] or 0),
             "best_timeframe": str(best["timeframe"]).strip().lower(),
+            "best_setup_class": str(best.get("__setup_class") or "").strip().upper(),
+            "best_direction": str(best.get("__direction_key") or "").strip().upper(),
         }
 
     symbol_scores = (
@@ -454,7 +461,10 @@ def _select_best_signal_coin(
         "follow_through_pct": float(best_symbol_row["AvgFollowThroughPct"] or 0.0),
         "avg_dir_return_pct": float(best_symbol_row["AvgDirReturnPct"] or 0.0),
         "resolved": int(best_symbol_row["Resolved"] or 0),
+        "best_resolved": int(best_timeframe_row.get("Resolved") or 0),
         "best_timeframe": str(best_timeframe_row["timeframe"]).strip().lower(),
+        "best_setup_class": str(best_timeframe_row.get("__setup_class") or "").strip().upper(),
+        "best_direction": str(best_timeframe_row.get("__direction_key") or "").strip().upper(),
     }
 
 
@@ -468,14 +478,14 @@ def _best_signal_summary(
     best_timeframe = str(selection.get("best_timeframe") or "").strip().lower()
     follow = float(selection.get("follow_through_pct") or 0.0)
     avg_dir = float(selection.get("avg_dir_return_pct") or 0.0)
-    resolved = int(selection.get("resolved") or 0)
+    best_resolved = int(selection.get("best_resolved") or selection.get("resolved") or 0)
     qualified_timeframes = int(selection.get("qualified_timeframes") or 0)
     mode = str(selection.get("mode") or "").strip()
     if str(timeframe_filter or "").strip() and str(timeframe_filter) != "All":
         return (
             f"<b>{symbol}</b><br>"
             f"Best leader with enough history for <b>{str(timeframe_filter).upper()}</b><br>"
-            f"{follow:.1f}% follow-through • {avg_dir:+.2f}% avg move • {resolved} completed"
+            f"{follow:.1f}% follow-through • {avg_dir:+.2f}% avg move • {best_resolved} completed"
         )
     if mode == "best_available":
         timeframe_note = (
@@ -486,13 +496,13 @@ def _best_signal_summary(
         return (
             f"<b>{symbol}</b><br>"
             "Best available read with enough history<br>"
-            f"{follow:.1f}% follow-through • {avg_dir:+.2f}% avg move • best TF {best_timeframe.upper() if best_timeframe else 'N/A'} • "
+            f"{follow:.1f}% follow-through • {avg_dir:+.2f}% avg move • {best_resolved} completed • best TF {best_timeframe.upper() if best_timeframe else 'N/A'} • "
             f"{timeframe_note} ready"
         )
     return (
         f"<b>{symbol}</b><br>"
         "Best leader with enough history<br>"
-        f"{follow:.1f}% follow-through • {avg_dir:+.2f}% avg move • best TF {best_timeframe.upper() if best_timeframe else 'N/A'} • "
+        f"{follow:.1f}% follow-through • {avg_dir:+.2f}% avg move • {best_resolved} completed • best TF {best_timeframe.upper() if best_timeframe else 'N/A'} • "
         f"{qualified_timeframes} timeframe pockets ready"
     )
 
@@ -721,6 +731,24 @@ def _learning_readiness_summary(*, mode: str, current_rows: int, total_rows: int
     return (
         f"<b>Learning building</b><br>{int(current_rows)} signals in this history window",
         "neutral",
+    )
+
+
+def _best_signal_learning_summary(selection: Mapping[str, object]) -> tuple[str, str]:
+    completed = int(selection.get("best_resolved") or selection.get("resolved") or 0)
+    if completed <= 0:
+        return (
+            "<b>Learning building</b><br>No completed signals in the selected best setup yet",
+            "neutral",
+        )
+    if completed < _MIN_SIGNAL_ARCHIVE_ROWS:
+        return (
+            f"<b>Learning building</b><br>{completed} completed in the selected best setup",
+            "warning",
+        )
+    return (
+        f"<b>Learning active</b><br>{completed} completed in the selected best setup",
+        "positive",
     )
 
 
@@ -1863,11 +1891,14 @@ def render(ctx: dict) -> None:
         adaptive_mode = "building"
     else:
         adaptive_mode = "empty"
-    learning_summary, learning_tone = _learning_readiness_summary(
-        mode=adaptive_mode,
-        current_rows=adaptive_rows,
-        total_rows=adaptive_total_rows,
-    )
+    if view_mode == "Best Signal" and bool(best_signal_selection.get("available")):
+        learning_summary, learning_tone = _best_signal_learning_summary(best_signal_selection)
+    else:
+        learning_summary, learning_tone = _learning_readiness_summary(
+            mode=adaptive_mode,
+            current_rows=adaptive_rows,
+            total_rows=adaptive_total_rows,
+        )
     archive_health_body, archive_health_tone = _archive_health_summary(storage_snapshot)
     show_archive_health = archive_health_tone not in {"neutral", "positive"}
 

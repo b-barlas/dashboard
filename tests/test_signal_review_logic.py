@@ -25,6 +25,7 @@ from tabs.signal_review_tab import (
     _load_coin_timeframe_frames,
     _missing_hold_backfill_count,
     _refresh_scope_badge,
+    _best_signal_learning_summary,
     _learning_readiness_summary,
     _ordered_timeframe_scope,
     _prefer_known_summary_rows,
@@ -47,6 +48,13 @@ class SignalReviewLogicTests(unittest.TestCase):
         self.assertIn("Learning active", body)
         self.assertIn("905 signals", body)
         self.assertIn("history window", body)
+        self.assertEqual(tone, "positive")
+
+    def test_best_signal_learning_summary_uses_selected_best_setup_count(self) -> None:
+        body, tone = _best_signal_learning_summary({"available": True, "resolved": 19, "best_resolved": 16})
+        self.assertIn("Learning active", body)
+        self.assertIn("16 completed", body)
+        self.assertNotIn("19", body)
         self.assertEqual(tone, "positive")
 
     def test_ordered_timeframe_scope_keeps_canonical_order_and_extras(self) -> None:
@@ -263,6 +271,61 @@ class SignalReviewLogicTests(unittest.TestCase):
 
         self.assertTrue(selection["available"])
         self.assertEqual(selection["symbol"], "TRX")
+
+    def test_select_best_signal_coin_uses_same_setup_pockets_as_leaderboard(self) -> None:
+        rows = []
+        for idx in range(6):
+            rows.append(
+                {
+                    "symbol": "PENGU",
+                    "timeframe": "5m",
+                    "status": "RESOLVED",
+                    "direction": "UPSIDE",
+                    "setup_confirm": "WATCH",
+                    "directional_return_pct": 1.0,
+                }
+            )
+            rows.append(
+                {
+                    "symbol": "PENGU",
+                    "timeframe": "5m",
+                    "status": "RESOLVED",
+                    "direction": "UPSIDE",
+                    "setup_confirm": "PROBE",
+                    "directional_return_pct": 1.0,
+                }
+            )
+        for idx in range(8):
+            rows.append(
+                {
+                    "symbol": "BNB",
+                    "timeframe": "5m",
+                    "status": "RESOLVED",
+                    "direction": "DOWNSIDE",
+                    "setup_confirm": "PROBE",
+                    "directional_return_pct": 0.8,
+                }
+            )
+
+        df = pd.DataFrame(rows)
+        selection = _select_best_signal_coin(
+            df_events=df,
+            timeframe_filter="All",
+            min_resolved=8,
+            min_timeframes=1,
+            min_total_resolved=8,
+        )
+        board = _build_best_signal_leaderboard(
+            df_events=df,
+            timeframe_filter="All",
+            min_resolved=8,
+            min_timeframes=1,
+            min_total_resolved=8,
+        )
+
+        self.assertEqual(selection["symbol"], "BNB")
+        self.assertEqual(list(board["Coin"]), ["BNB"])
+        self.assertNotIn("PENGU", set(board["Coin"]))
 
     def test_best_signal_summary_mentions_cross_timeframe_mode(self) -> None:
         summary = _best_signal_summary(
