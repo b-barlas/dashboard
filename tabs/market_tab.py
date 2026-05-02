@@ -1689,7 +1689,7 @@ def _pick_clearest_direction(df_results: pd.DataFrame) -> tuple[str, str]:
 
 def _pick_best_scalp_opportunity(df_results: pd.DataFrame) -> tuple[str, str]:
     if "Scalp Opportunity" not in df_results.columns or len(df_results) <= 0:
-        return "No scalp read", "Current table has no scalp timing data yet."
+        return "No timing read", "Current table has no short-term timing data yet."
 
     working = df_results.copy()
     working["__scalp_state"] = (
@@ -1704,7 +1704,7 @@ def _pick_best_scalp_opportunity(df_results: pd.DataFrame) -> tuple[str, str]:
     )
     working = working[working["Scalp Opportunity"].astype(str).isin(["Upside", "Downside"])]
     if working.empty:
-        return "No clean scalp", "No live or conditional scalp candidate in the current table."
+        return "No clean timing", "No live or conditional short-term candidate in this table."
 
     live_count = int(working["__scalp_state"].eq("LIVE").sum())
     conditional_count = int(working["__scalp_state"].eq("CONDITIONAL").sum())
@@ -1732,7 +1732,7 @@ def _pick_best_scalp_opportunity(df_results: pd.DataFrame) -> tuple[str, str]:
     working = working[working["__rr"] > 0]
     if working.empty:
         count_sub = f"Live: {live_count} • Conditional: {conditional_count}"
-        return "No valid R:R", count_sub
+        return "No clean R:R", count_sub
 
     scoped = working[working["__scalp_state"] == "LIVE"].copy()
     if scoped.empty:
@@ -4574,10 +4574,10 @@ def render(ctx: dict) -> None:
         title="Crypto Market Intelligence Hub",
         hero=True,
         intro_html=(
-            f"Your market overview dashboard. Shows live BTC/ETH prices, total market cap, "
-            f"{_tip('Fear & Greed Index', copy_text('market.hero.fear_greed_tip'))} "
-            f"and {_tip('BTC Dominance', 'Bitcoin’s share of the total crypto market. Rising dominance usually means money is hiding in BTC; falling dominance can support altcoins.')}. "
-            f"The Market tab scans Broad Market, Breakout Radar, Trending Coins, or your custom watchlist, then scores each symbol with closed-candle technical and AI context."
+            f"Live market context and ranked coin setups. Track BTC/ETH, total market cap, "
+            f"{_tip('Fear & Greed Index', copy_text('market.hero.fear_greed_tip'))}, "
+            f"and {_tip('BTC Dominance', 'Bitcoin’s share of the total crypto market. Rising dominance usually means money is hiding in BTC; falling dominance can support altcoins.')}, "
+            f"then scan Broad Market, Breakout Radar, Trending Coins, or a custom watchlist."
         ),
     )
 
@@ -4678,7 +4678,7 @@ def render(ctx: dict) -> None:
             f"<span class='market-header-sentiment-marker' style='left:{marker_left:.2f}%; background:{fg_color}; box-shadow:0 0 0 4px rgba(255,255,255,0.04), 0 0 16px {fg_color};'></span>"
             "</div>"
             "<div class='market-header-band-guides'><span>Fear</span><span>Neutral</span><span>Greed</span></div>"
-            "<div class='market-header-note'>Sentiment context, not a standalone trigger.</div>"
+            "<div class='market-header-note'>Sentiment backdrop.</div>"
             "</div>"
         )
 
@@ -4689,7 +4689,7 @@ def render(ctx: dict) -> None:
                 title="Bitcoin Price",
                 value_text=f"${btc_price:,.2f}" if btc_price is not None and btc_price > 0 else "N/A",
                 delta_pct=btc_change,
-                context_label="BTC is setting the market tone right now.",
+                context_label="Market tone.",
                 unavailable=not (btc_price is not None and btc_price > 0),
             ),
             unsafe_allow_html=True,
@@ -4701,7 +4701,7 @@ def render(ctx: dict) -> None:
                 title="Ethereum Price",
                 value_text=f"${eth_price:,.2f}" if eth_price is not None and eth_price > 0 else "N/A",
                 delta_pct=eth_change,
-                context_label="ETH participation sets alt tone.",
+                context_label="Alt participation.",
                 unavailable=not (eth_price is not None and eth_price > 0),
             ),
             unsafe_allow_html=True,
@@ -4713,7 +4713,7 @@ def render(ctx: dict) -> None:
                 title="Total Market Cap",
                 value_text=f"${total_mcap / 1e12:.2f}T" if mcap_feed_ok else "N/A",
                 delta_pct=delta_mcap if pd.notna(delta_mcap) else None,
-                context_label="Broad crypto balance sheet.",
+                context_label="Market breadth context.",
                 unavailable=not mcap_feed_ok,
             ),
             unsafe_allow_html=True,
@@ -5012,7 +5012,7 @@ def render(ctx: dict) -> None:
             ['5m', '15m', '1h', '4h', '1d'],
             index=2,
             key="market_timeframe",
-            help="Controls candle delta, tactical levels, scalp timing, and selected-timeframe setup checks.",
+            help="Sets the candle window for signals, levels, and timing.",
         )
     with controls[1]:
         direction_filter = st.selectbox(
@@ -5020,7 +5020,7 @@ def render(ctx: dict) -> None:
             ['Upside', 'Downside', 'Both'],
             index=2,
             format_func=lambda x: "All Directions" if x == "Both" else x,
-            help="Filter table candidates by intended direction. All Directions shows both upside and downside reads.",
+            help="Show upside, downside, or both.",
         )
     with controls[2]:
         current_scan_mode = str(st.session_state.get("market_scan_mode") or "").strip()
@@ -5038,7 +5038,7 @@ def render(ctx: dict) -> None:
             index=0,
             key="market_scan_mode",
             disabled=custom_mode_active,
-            help="Broad Market is the clean liquid-universe read. Breakout Radar hunts early acceleration. Trending Coins starts from attention, momentum, and volume anomaly candidates.",
+            help="Broad Market is the clean liquid read. Breakout Radar hunts earlier acceleration. Trending Coins starts from attention, momentum, and volume surges.",
         )
     with controls[3]:
         top_n_default = int(st.session_state.get("market_top_n", 10))
@@ -5049,7 +5049,7 @@ def render(ctx: dict) -> None:
             value=top_n_default,
             key="market_top_n",
             disabled=custom_mode_active,
-            help="How many ranked rows to show. Disabled in Custom Coins mode because the watchlist size controls the table.",
+            help="Rows shown. Custom Coins uses the watchlist size instead.",
         )
     with controls[4]:
         custom_coin_input = st.text_input(
@@ -5057,7 +5057,7 @@ def render(ctx: dict) -> None:
             value=st.session_state.get("market_custom_coin_input", ""),
             key="market_custom_coin_input",
             placeholder="BTC, ETH, SOL",
-            help="Optional watchlist mode. Enter up to 10 symbols separated by comma, then press Enter or Scan.",
+            help="Enter up to 10 symbols, then press Enter or Scan.",
             on_change=_apply_custom_coin_input,
         )
     with controls[5]:
@@ -5088,23 +5088,23 @@ def render(ctx: dict) -> None:
         st.markdown(
             f"<div class='market-note-box' style='border:1px solid rgba(0,212,255,0.34); border-left:4px solid {ACCENT}; "
             f"background:rgba(0,212,255,0.06); color:{TEXT_MUTED}; margin-top:0.25rem;'>"
-            f"<b style='color:{ACCENT};'>Watchlist Mode:</b> reading {len(custom_bases_applied)} coin(s): "
-            f"{preview}{more}. Top N is disabled while custom mode is active."
+            f"<b style='color:{ACCENT};'>Custom watchlist:</b> {len(custom_bases_applied)} coin(s): "
+            f"{preview}{more}. Top N is paused in this mode."
             f"</div>",
             unsafe_allow_html=True,
         )
     elif custom_coin_input.strip() and custom_bases_draft:
-        st.caption("Custom symbols are ready. Press Enter or Scan to apply watchlist mode.")
+        st.caption("Custom symbols are ready. Press Enter or Scan.")
     elif _normalize_scan_mode(scan_mode) == _SCAN_MODE_EMERGING:
-        st.caption("Breakout Radar uses the same table, reaches deeper into active-liquidity names, and looks for earlier acceleration. Expect more noise than Broad Market.")
+        st.caption("Breakout Radar uses the same table and hunts earlier acceleration. Noisier than Broad Market.")
     elif _normalize_scan_mode(scan_mode) == _SCAN_MODE_TRENDING:
-        st.caption("Trending Coins uses the same table, but starts from search trend, 24h momentum, and volume-anomaly candidates.")
+        st.caption("Trending Coins starts from attention, 24h momentum, and volume-surge candidates.")
 
     exclude_stables = st.toggle(
         "Exclude stablecoins",
         value=True,
         key="market_exclude_stables",
-        help="Hide stable/synthetic USD-pegged coins from the market universe.",
+        help="Hide stable and synthetic USD coins.",
     )
     CACHE_TTL_MINUTES = 15
     gate_min_rr, gate_min_adx, gate_min_confidence = scalp_gate_thresholds(timeframe)
