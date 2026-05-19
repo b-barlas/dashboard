@@ -7,6 +7,7 @@ import time
 import pandas as pd
 from core.archive_decision import build_archive_decision_snapshot
 from core.archive_intelligence import (
+    ACTIONABLE_SETUP_CLASSES,
     archive_direction_key,
     archive_setup_class_key,
     archive_setup_class_label,
@@ -21,6 +22,7 @@ from core.archive_expected_path import (
 from core.archive_policy import ARCHIVE_LEARNING_WINDOW_ROWS
 from core.decision_version import current_decision_version
 from core.session_utils import session_bucket_for_timestamp
+from core.symbols import is_excluded_trading_base_symbol
 from core.trading_copy import copy_text, playbook_display, playbook_key, trade_gate_display, trade_gate_key
 
 from ui.ctx import get_ctx
@@ -173,6 +175,18 @@ def _annotate_setup_class(df_events: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _filter_best_signal_actionable_setups(df_events: pd.DataFrame) -> pd.DataFrame:
+    if df_events is None or df_events.empty or "__setup_class" not in df_events.columns:
+        return pd.DataFrame() if df_events is None else df_events.copy()
+    d = df_events.copy()
+    if "setup_confirm" not in d.columns:
+        return d[d["__setup_class"].ne("SKIP")].copy()
+    setup_text = d["setup_confirm"].fillna("").astype(str).str.strip()
+    if not setup_text.ne("").any():
+        return d[d["__setup_class"].ne("SKIP")].copy()
+    return d[d["__setup_class"].isin(ACTIONABLE_SETUP_CLASSES)].copy()
+
+
 def _filter_events_by_setup(df_events: pd.DataFrame, setup_filter_value: str) -> pd.DataFrame:
     return filter_archive_events_by_setup(df_events, setup_filter_value)
 
@@ -268,6 +282,14 @@ def _filter_directional_signal_rows(df_events: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
+def _filter_best_signal_tradeable_symbols(df_events: pd.DataFrame) -> pd.DataFrame:
+    if df_events is None or df_events.empty or "symbol" not in df_events.columns:
+        return pd.DataFrame() if df_events is None else df_events.copy()
+    d = df_events.copy()
+    d["symbol"] = d["symbol"].fillna("").astype(str).str.strip().str.upper()
+    return d[d["symbol"].ne("") & ~d["symbol"].map(is_excluded_trading_base_symbol)].copy()
+
+
 def _merge_path_sample_counts(
     grouped: pd.DataFrame,
     df_events: pd.DataFrame,
@@ -353,9 +375,13 @@ def _select_best_signal_coin(
     d["symbol"] = d["symbol"].fillna("").astype(str).str.strip().str.upper()
     d["timeframe"] = d["timeframe"].fillna("").astype(str).str.strip().str.lower()
     d = d[d["symbol"].ne("") & d["timeframe"].ne("")].copy()
+    d = _filter_best_signal_tradeable_symbols(d)
     if d.empty:
         return empty
     d = _annotate_setup_class(d)
+    d = _filter_best_signal_actionable_setups(d)
+    if d.empty:
+        return empty
     if "signal_key" in d.columns:
         d["signal_key"] = d["signal_key"].fillna("").astype(str).str.strip()
     d["directional_return_pct"] = pd.to_numeric(d.get("directional_return_pct"), errors="coerce")
@@ -534,9 +560,13 @@ def _build_best_signal_leaderboard(
     d["symbol"] = d["symbol"].fillna("").astype(str).str.strip().str.upper()
     d["timeframe"] = d["timeframe"].fillna("").astype(str).str.strip().str.lower()
     d = d[d["symbol"].ne("") & d["timeframe"].ne("")].copy()
+    d = _filter_best_signal_tradeable_symbols(d)
     if d.empty:
         return pd.DataFrame()
     d = _annotate_setup_class(d)
+    d = _filter_best_signal_actionable_setups(d)
+    if d.empty:
+        return pd.DataFrame()
     if "signal_key" in d.columns:
         d["signal_key"] = d["signal_key"].fillna("").astype(str).str.strip()
     d["directional_return_pct"] = pd.to_numeric(d.get("directional_return_pct"), errors="coerce")
@@ -659,8 +689,31 @@ def _build_best_signal_leaderboard(
         ),
         axis=1,
     )
+    board["ModeRank"] = board["Mode"].map({"Best Signal": 1.0, "Best Read": 0.0}).fillna(0.0)
+    board["BestPocketScore"] = board.apply(
+        lambda row: _best_signal_quality_score(
+            follow_through_pct=float(row.get("BestFollowThroughPct") or 0.0),
+            avg_dir_return_pct=float(row.get("BestAvgDirReturnPct") or 0.0),
+            resolved=int(row.get("BestResolved") or 0),
+            resolved_baseline=min_resolved,
+            qualified_timeframes=min(
+                int(row.get("QualifiedTimeframes") or 0),
+                int(max(1, min_timeframes)),
+            ),
+            timeframe_baseline=min_timeframes,
+        ),
+        axis=1,
+    )
+    board["LeaderboardScore"] = board["BestPocketScore"] + (board["ModeRank"] * 4.0)
     board = board.sort_values(
-        ["QualityScore", "AvgFollowThroughPct", "AvgDirReturnPct", "QualifiedTimeframes", "PathSamples", "Resolved"],
+        [
+            "ModeRank",
+            "LeaderboardScore",
+            "BestFollowThroughPct",
+            "BestAvgDirReturnPct",
+            "BestPathSamples",
+            "BestResolved",
+        ],
         ascending=[False, False, False, False, False, False],
     ).head(int(limit)).copy()
     board["Best TF"] = board["best_timeframe"].fillna("").astype(str).str.upper()

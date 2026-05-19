@@ -432,6 +432,164 @@ class SignalReviewLogicTests(unittest.TestCase):
         self.assertEqual(str(board.iloc[0]["Best Setup"]), "ENTER ↓ T+AI")
         self.assertEqual(str(board.iloc[1]["Best Setup"]), "WATCH ↑")
 
+    def test_build_best_signal_leaderboard_sorts_by_displayed_best_pocket(self) -> None:
+        rows = []
+        for idx in range(12):
+            rows.append(
+                {
+                    "symbol": "PENGU",
+                    "timeframe": "5m",
+                    "status": "RESOLVED",
+                    "direction": "DOWNSIDE",
+                    "setup_confirm": "PROBE",
+                    "directional_return_pct": 0.9,
+                }
+            )
+        for idx in range(12):
+            rows.append(
+                {
+                    "symbol": "PENGU",
+                    "timeframe": "1h",
+                    "status": "RESOLVED",
+                    "direction": "UPSIDE",
+                    "setup_confirm": "WATCH",
+                    "directional_return_pct": 0.15,
+                }
+            )
+        for idx in range(37):
+            rows.append(
+                {
+                    "symbol": "DOGE",
+                    "timeframe": "1h",
+                    "status": "RESOLVED",
+                    "direction": "UPSIDE",
+                    "setup_confirm": "WATCH",
+                    "directional_return_pct": 0.55,
+                }
+            )
+
+        board = _build_best_signal_leaderboard(
+            df_events=pd.DataFrame(rows),
+            timeframe_filter="All",
+            min_resolved=12,
+            min_timeframes=2,
+            min_total_resolved=24,
+        )
+
+        self.assertEqual(str(board.iloc[0]["Coin"]), "PENGU")
+        self.assertEqual(str(board.iloc[0]["Mode"]), "Best Signal")
+        self.assertEqual(str(board.iloc[0]["Best Setup"]), "EARLY ↓")
+        self.assertEqual(str(board.iloc[0]["Best TF"]), "5M")
+
+    def test_build_best_signal_leaderboard_lists_best_signals_before_fallback_reads(self) -> None:
+        rows = []
+        for idx in range(12):
+            rows.append(
+                {
+                    "symbol": "TRX",
+                    "timeframe": "5m",
+                    "status": "RESOLVED",
+                    "direction": "UPSIDE",
+                    "setup_confirm": "WATCH",
+                    "directional_return_pct": 0.1,
+                }
+            )
+        for idx in range(12):
+            rows.append(
+                {
+                    "symbol": "TRX",
+                    "timeframe": "1h",
+                    "status": "RESOLVED",
+                    "direction": "UPSIDE",
+                    "setup_confirm": "WATCH",
+                    "directional_return_pct": 0.1,
+                }
+            )
+        for idx in range(36):
+            rows.append(
+                {
+                    "symbol": "DOGE",
+                    "timeframe": "1h",
+                    "status": "RESOLVED",
+                    "direction": "UPSIDE",
+                    "setup_confirm": "WATCH",
+                    "directional_return_pct": 1.0,
+                }
+            )
+
+        board = _build_best_signal_leaderboard(
+            df_events=pd.DataFrame(rows),
+            timeframe_filter="All",
+            min_resolved=12,
+            min_timeframes=2,
+            min_total_resolved=24,
+        )
+
+        self.assertEqual(str(board.iloc[0]["Coin"]), "TRX")
+        self.assertEqual(str(board.iloc[0]["Mode"]), "Best Signal")
+        self.assertEqual(str(board.iloc[1]["Coin"]), "DOGE")
+        self.assertEqual(str(board.iloc[1]["Mode"]), "Best Read")
+
+    def test_build_best_signal_leaderboard_excludes_asset_pegged_symbols(self) -> None:
+        rows = []
+        for symbol, move in (("XAUT", 2.0), ("PAXG", 1.8), ("TRX", 0.8)):
+            for idx in range(12):
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "timeframe": "1h",
+                        "status": "RESOLVED",
+                        "direction": "UPSIDE",
+                        "setup_confirm": "WATCH",
+                        "directional_return_pct": move,
+                    }
+                )
+
+        board = _build_best_signal_leaderboard(
+            df_events=pd.DataFrame(rows),
+            timeframe_filter="1h",
+            min_resolved=8,
+        )
+        selection = _select_best_signal_coin(
+            df_events=pd.DataFrame(rows),
+            timeframe_filter="1h",
+            min_resolved=8,
+        )
+
+        self.assertEqual(list(board["Coin"]), ["TRX"])
+        self.assertEqual(selection["symbol"], "TRX")
+
+    def test_build_best_signal_leaderboard_excludes_skip_pockets(self) -> None:
+        rows = []
+        for symbol, setup, move in (("CHZ", "SKIP", 2.4), ("DOGE", "WATCH", 0.7)):
+            for idx in range(12):
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "timeframe": "1h",
+                        "status": "RESOLVED",
+                        "direction": "UPSIDE",
+                        "setup_confirm": setup,
+                        "directional_return_pct": move,
+                    }
+                )
+
+        df = pd.DataFrame(rows)
+        board = _build_best_signal_leaderboard(
+            df_events=df,
+            timeframe_filter="1h",
+            min_resolved=8,
+        )
+        selection = _select_best_signal_coin(
+            df_events=df,
+            timeframe_filter="1h",
+            min_resolved=8,
+        )
+
+        self.assertEqual(list(board["Coin"]), ["DOGE"])
+        self.assertEqual(selection["symbol"], "DOGE")
+        self.assertNotIn("SKIP", set(board["Best Setup"]))
+
     def test_build_best_signal_leaderboard_defaults_to_top_10(self) -> None:
         rows = []
         for idx in range(12):

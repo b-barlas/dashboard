@@ -442,8 +442,8 @@ _COPY = {
         "neutral": "Early-setup heavy table: many candidates are close, but stronger confirmation is still scarce.",
     },
     "market.audit.watch_heavy": {
-        "trader": "WATCH-heavy table: selected-timeframe execution checks are filtering most names.",
-        "neutral": "Developing-setup heavy table: selected-timeframe execution checks are filtering most names.",
+        "trader": "WATCH-heavy table: active-timeframe execution checks are filtering most names.",
+        "neutral": "Developing-setup heavy table: active-timeframe execution checks are filtering most names.",
     },
     "market.audit.skip_neutral": {
         "trader": "SKIP-heavy table: most candidates are being rejected because the higher-timeframe Direction is still Neutral.",
@@ -488,18 +488,18 @@ _COPY = {
     "market.help.scanner_guide_html": {
         "trader": (
             "<b>Read order:</b> <b>Setup Confirm</b> -> <b>Direction + Confidence</b> -> <b>AI Ensemble + AI Confidence</b>.<br>"
-            "<b>Scan modes:</b> Broad Market = cleaner liquid universe, Breakout Radar = early acceleration hunt, Trending Coins = attention + momentum + volume anomaly candidates, Custom Coins = your watchlist. For Custom Coins, type symbols and press Enter or Scan.<br>"
+            "<b>Scanner:</b> Market Radar blends liquidity, breakout pressure, attention, volume anomalies, archive memory, and setup quality into one ranked table. Custom Coins scans only your watchlist; type symbols and press Enter or Scan.<br>"
             "<b>Setup Confirm:</b> ENTER = ready, EARLY = small-risk only, WATCH = monitor only, SKIP = leave it alone for now.<br>"
             "Price ($) shows the latest candle close.<br>"
-            "Δ (%) shows the change from previous closed candle to latest closed candle on selected timeframe.<br>"
+            "Δ (%) shows the change from previous closed candle to latest closed candle on the row's Best TF.<br>"
             "<b>Tip:</b> use column-header and cell hovers for detailed definitions. Advanced columns are optional."
         ),
         "neutral": (
             "<b>Read order:</b> <b>Setup Confirm</b> -> <b>Direction + Confidence</b> -> <b>AI Ensemble + AI Confidence</b>.<br>"
-            "<b>Scan modes:</b> Broad Market = cleaner liquid universe, Breakout Radar = early acceleration read, Trending Coins = attention + momentum + volume anomaly candidates, Custom Coins = your watchlist. For Custom Coins, type symbols and press Enter or Scan.<br>"
+            "<b>Scanner:</b> Market Radar blends liquidity, breakout pressure, attention, volume anomalies, archive memory, and setup quality into one ranked table. Custom Coins scans only your watchlist; type symbols and press Enter or Scan.<br>"
             "<b>Setup Confirm:</b> High-quality = strongest class, Early setup = interesting but not fully confirmed, Developing = monitor, Not aligned = pass.<br>"
             "Price ($) shows the latest candle close.<br>"
-            "Δ (%) shows the change from previous closed candle to latest closed candle on selected timeframe.<br>"
+            "Δ (%) shows the change from previous closed candle to latest closed candle on the row's Best TF.<br>"
             "<b>Tip:</b> use column-header and cell hovers for detailed definitions. Advanced columns are optional."
         ),
     },
@@ -706,7 +706,7 @@ _COPY = {
         "neutral": "Current market filter is capping size.",
     },
     "risk_sizing.note.probe_only": {
-        "trader": "Probe setup: starter size only until full confirmation appears.",
+        "trader": "Early setup: starter size only until full confirmation appears.",
         "neutral": "Early setup: keep size small until stronger confirmation appears.",
     },
     "risk_sizing.note.learned_support": {
@@ -1025,14 +1025,13 @@ Main table columns:
 - R:R, Entry/Stop/Target, Scalp Opportunity
 - Optional advanced indicator columns
 
-Market scan modes:
-- Broad Market: cleaner liquid-universe scan
-- Breakout Radar: broader early-acceleration scan using liquidity, momentum, volume, and archive feedback
-- Trending Coins: attention + momentum + volume-anomaly candidates shown in the same table
+Scanner flow:
+- Market Radar blends liquidity, breakout pressure, attention, volume anomalies, archive memory, and setup quality into one ranked table
 - Watchlist: enter up to 10 symbols in Custom Coins and press Enter or Scan; the table analyzes only that watchlist
 - Top N control is disabled while custom mode is active
 - Watchlist mode reads requested symbols directly and does not depend on the broad provider universe
-- Selected timeframe controls tactical candle context, levels, scalp timing checks, and Delta
+- Selected timeframe sets the starting context; Market Radar can promote a stronger Best TF per row
+- Levels, scalp timing checks, and Delta follow the row's active Best TF
 - Visible `Direction` + `Confidence` come from closed higher-timeframe anchor candles
 - Visible `AI Ensemble` comes from a separate closed AI bias engine using the same adaptive anchors
 - Visible `AI Confidence` scores the quality of that higher-timeframe AI verdict
@@ -1080,15 +1079,15 @@ How the 5 key columns are calculated:
 
 5. `Setup Confirm`
 - This is **not** the main direction
-- It answers: “Given the main spot direction, is the selected timeframe good enough right now?”
+- It answers: “Given the main spot direction, is this row's active timeframe good enough right now?”
 - First, spot `Direction + Confidence` must be valid
-- Then selected timeframe execution is checked from:
+- Then the row's active timeframe execution is checked from:
   - local structure quality
   - local trend quality
   - local regime quality
   - local location quality
   - local spot-style risk/reward from support / resistance / EMA21 / ATR
-- `TREND-led` = pure technical selected-timeframe confirmation
+- `TREND-led` = pure technical active-timeframe confirmation
 - `AI-led` = pure AI confirmation, but it still must pass the same execution safety checks
 - `TREND+AI` = both motors are independently strong and also elite together
 - `EARLY` = not fully confirmed yet, but clean enough for small-risk only
@@ -1115,14 +1114,13 @@ Main table columns:
 - R:R, Entry/Stop/Target, Scalp Opportunity
 - Optional advanced indicator columns
 
-Market scan modes:
-- Broad Market: cleaner liquid-universe scan
-- Breakout Radar: broader early-acceleration scan using liquidity, momentum, volume, and archive feedback
-- Trending Coins: attention + momentum + volume-anomaly candidates shown in the same table
+Scanner flow:
+- Market Radar blends liquidity, breakout pressure, attention, volume anomalies, archive memory, and setup quality into one ranked table
 - Watchlist: enter up to 10 symbols in Custom Coins and press Enter or Scan; the table analyzes only that watchlist
 - Top N control is disabled while custom mode is active
 - Watchlist mode reads requested symbols directly and does not depend on the broad provider universe
-- Selected timeframe controls tactical candle context, levels, scalp timing checks, and Delta
+- Selected timeframe sets the starting context; Market Radar can promote a stronger Best TF per row
+- Levels, scalp timing checks, and Delta follow the row's active Best TF
 - Visible `Direction` + `Confidence` come from closed higher-timeframe anchor candles
 - Visible `AI Ensemble` comes from a separate closed AI bias engine using the same adaptive anchors
 - Visible `AI Confidence` scores the quality of that higher-timeframe AI verdict
@@ -1150,9 +1148,9 @@ How the 5 key columns are calculated:
 
 5. `Setup Confirm`
 - This is **not** the main direction
-- It answers: “Given the main spot direction, does the selected timeframe look good enough right now?”
-- `TREND-led` = technical selected-timeframe confirmation
-- `AI-led` = AI selected-timeframe confirmation
+- It answers: “Given the main spot direction, does this row's active timeframe look good enough right now?”
+- `TREND-led` = technical timeframe confirmation
+- `AI-led` = AI timeframe confirmation
 - `TREND+AI` = both are strong together
 - `EARLY` = early setup
 - `WATCH` = developing setup

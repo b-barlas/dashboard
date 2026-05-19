@@ -68,6 +68,7 @@ _TAB_DEPS = [
             "_tip", "get_major_ohlcv_bundle", "ml_ensemble_predict", "get_top_volume_usdt_symbols",
             "fetch_top_gainers_losers", "fetch_trending_coins", "fetch_exchange_tickers_snapshot",
             "get_market_cap_rows_for_symbols",
+            "EXCHANGE", "_symbol_variants",
             "build_market_regime_snapshot",
             "build_market_trade_gate",
             "build_signal_risk_sizing", "market_default_risk_budget",

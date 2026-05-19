@@ -9,6 +9,7 @@ from core.ai_spot_bias import (
     ai_spot_bias_display_votes,
     analyze_timeframe_ai_bias,
     build_ai_spot_bias_snapshot,
+    build_ai_spot_bias_snapshot_from_prediction,
 )
 
 
@@ -406,6 +407,91 @@ class AISpotBiasContractTests(unittest.TestCase):
         )
         self.assertEqual(neutral_supported.direction, "NEUTRAL")
         self.assertEqual(ai_spot_bias_display_votes(neutral_supported), 2)
+
+    def test_build_ai_spot_bias_snapshot_reuses_same_custom_anchor_frame(self) -> None:
+        calls: list[int] = []
+
+        def _counting_predictor(frame):
+            calls.append(len(frame))
+            return (
+                0.72,
+                "LONG",
+                {
+                    "directional_agreement": 1.0,
+                    "consensus_agreement": 1.0,
+                },
+            )
+
+        shared_frame = _frame(rows=180)
+        out = build_ai_spot_bias_snapshot(
+            df_4h=None,
+            df_1d=None,
+            confirm_df=shared_frame,
+            lead_df=shared_frame,
+            confirm_timeframe="1h",
+            lead_timeframe="1h",
+            predictor=_counting_predictor,
+        )
+
+        self.assertEqual(out.direction, "UPSIDE")
+        self.assertEqual(calls, [180, 179, 178, 176])
+
+    def test_build_ai_spot_bias_snapshot_can_use_latest_only_trace(self) -> None:
+        calls: list[int] = []
+
+        def _counting_predictor(frame):
+            calls.append(len(frame))
+            return (
+                0.72,
+                "LONG",
+                {
+                    "directional_agreement": 1.0,
+                    "consensus_agreement": 1.0,
+                },
+            )
+
+        shared_frame = _frame(rows=180)
+        out = build_ai_spot_bias_snapshot(
+            df_4h=None,
+            df_1d=None,
+            confirm_df=shared_frame,
+            lead_df=shared_frame,
+            confirm_timeframe="1h",
+            lead_timeframe="1h",
+            predictor=_counting_predictor,
+            trace_offsets=(0,),
+        )
+
+        self.assertEqual(out.direction, "UPSIDE")
+        self.assertEqual(calls, [180])
+
+    def test_fast_ai_spot_bias_from_prediction_matches_latest_only_same_frame_read(self) -> None:
+        details = {
+            "directional_agreement": 1.0,
+            "consensus_agreement": 1.0,
+            "model_votes": ("LONG", "LONG", "LONG"),
+        }
+        regular = build_ai_spot_bias_snapshot(
+            df_4h=None,
+            df_1d=None,
+            confirm_df=_frame(rows=180),
+            lead_df=_frame(rows=180),
+            confirm_timeframe="1h",
+            lead_timeframe="1h",
+            predictor=_predictor((0.72, "LONG", details), (0.72, "LONG", details)),
+            trace_offsets=(0,),
+        )
+        fast = build_ai_spot_bias_snapshot_from_prediction(
+            probability_up=0.72,
+            raw_direction="LONG",
+            details=details,
+            timeframe="1h",
+        )
+
+        self.assertEqual(fast.direction, regular.direction)
+        self.assertEqual(fast.support_votes, regular.support_votes)
+        self.assertAlmostEqual(fast.score, regular.score)
+        self.assertAlmostEqual(fast.conviction_quality, regular.conviction_quality)
 
     def test_ai_spot_bias_display_votes_use_trace_level_model_support_not_just_latest_votes(self) -> None:
         out = build_ai_spot_bias_snapshot(

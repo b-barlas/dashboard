@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
+from threading import Lock
 
 import pandas as pd
 
@@ -8,6 +9,7 @@ from tabs.market_scan_helpers import (
     SCAN_MODE_ACTIONABLE,
     SCAN_MODE_BROAD,
     SCAN_MODE_EMERGING,
+    SCAN_MODE_RADAR,
     SCAN_MODE_TRENDING,
     _actionable_analysis_batch_size,
     _actionable_direction_include,
@@ -24,8 +26,12 @@ from tabs.market_scan_helpers import (
     _emerging_candidate_score,
     _initial_scan_batch_size,
     _initial_scan_symbols,
+    _market_radar_initial_batch_size,
+    _market_radar_scan_budget,
+    _market_radar_universe_quality_snapshot,
     _next_refill_candidate_batch,
     _next_scan_pool_target,
+    _normalize_scan_mode,
     _scan_candidate_pool_size,
 )
 from tabs.market_tab import (
@@ -41,6 +47,10 @@ from tabs.market_tab import (
     _mark_auto_learning_attempt,
     _select_auto_learning_timeframes,
     _select_auto_learning_timeframe,
+    _market_radar_deep_discovery_due,
+    _market_radar_deep_discovery_state,
+    _mark_market_radar_deep_discovery_attempt,
+    _select_market_radar_deep_discovery_timeframe,
     _build_breakout_freshness_snapshot,
     _compress_market_alerts_for_display,
     _rank_market_alerts_by_archive,
@@ -50,9 +60,12 @@ from tabs.market_tab import (
     _apply_market_custom_input_state,
     _build_custom_scan_universe,
     _build_breakout_radar_universe,
+    _build_market_radar_universe,
     _build_trending_scan_universe,
     _enrich_breakout_radar_freshness,
+    _radar_memory_candidate_snapshot_rows,
     _build_market_cap_map,
+    _merge_breakout_radar_market_rows,
     _canonical_pair_base,
     _coingecko_coin_id_fallback_available,
     _coingecko_coin_id_fallback_reason,
@@ -66,6 +79,10 @@ from tabs.market_tab import (
     _direction_fetch_symbol,
     _filter_scan_symbols,
     _fetch_market_scan_ohlcv,
+    _should_resolve_signal_frame,
+    _signal_frame_resolve_cache_key,
+    _trim_signal_frame_resolve_cache,
+    _cached_market_ml_predictor,
     _healthy_empty_seen_for_sig,
     _healthy_empty_registry,
     _last_good_registry,
@@ -74,6 +91,7 @@ from tabs.market_tab import (
     _parse_market_custom_bases,
     _consume_market_custom_clear,
     _market_scan_signature,
+    _market_scan_materially_degraded,
     _market_data_mode,
     _next_universe_fetch_n,
     _pair_provenance_label,
@@ -82,12 +100,22 @@ from tabs.market_tab import (
     _resolve_display_scan_state,
     _queue_market_custom_clear,
     _merge_market_cap_maps,
+    _market_radar_best_tf_candidates,
+    _market_radar_best_tf_probe_indices,
+    _market_radar_best_tf_probe_limit,
+    _market_scan_ohlcv_limit,
+    _scanner_trace_timeframes_for_mode,
+    _scanner_trace_unusable_backup_bases,
+    _scanner_trace_base_count,
     _market_lead_breadth_component,
     _market_lead_snapshot,
     _market_signal_log_events,
     _scalp_signal_log_events,
     _market_result_priority_key,
     _market_result_priority_key_for_mode,
+    _market_ranked_results_for_mode,
+    _market_scan_fallback_coin_id,
+    _market_radar_exchange_or_backup_scan_symbols,
     _market_hidden_meta_cols,
     _pick_best_scalp_opportunity,
     _scan_universe_notice,
@@ -102,10 +130,12 @@ from tabs.market_tab import (
     _should_use_major_fallback,
     _should_use_cached_scan,
     _fetch_ticker_delta_once,
+    _ticker_pct_change_24h,
     _execution_friction_score,
     _expectancy_bias_score,
     _extract_ai_verdict,
     _extract_confidence_label,
+    _exchange_available_scan_symbols,
     _setup_confirm_priority,
     _setup_status_summary,
     _share_line,
@@ -113,11 +143,49 @@ from tabs.market_tab import (
     _sync_market_cap_cells,
     _underfilled_universe_message,
 )
-from core.symbols import is_stable_base_symbol
+from core.symbols import is_excluded_trading_base_symbol, is_stable_base_symbol
 from threading import Lock
 
 
 class MarketTabLogicTests(unittest.TestCase):
+    def test_market_radar_deep_discovery_rotates_timeframes(self):
+        state = _market_radar_deep_discovery_state({})
+        self.assertEqual(_select_market_radar_deep_discovery_timeframe(state), "5m")
+
+        next_state = _mark_market_radar_deep_discovery_attempt(
+            state,
+            timeframe="5m",
+            now="2026-05-07T12:00:00Z",
+            written=7,
+            candidate_rows=9,
+            source_rows=40,
+        )
+
+        self.assertEqual(_select_market_radar_deep_discovery_timeframe(next_state), "15m")
+        self.assertEqual(next_state["last_result"]["written"], 7)
+
+    def test_market_radar_deep_discovery_due_respects_cooldown(self):
+        state = _mark_market_radar_deep_discovery_attempt(
+            {},
+            timeframe="1h",
+            now="2026-05-07T12:00:00Z",
+        )
+
+        self.assertFalse(
+            _market_radar_deep_discovery_due(
+                state,
+                now="2026-05-07T12:02:00Z",
+                cooldown_seconds=300,
+            )
+        )
+        self.assertTrue(
+            _market_radar_deep_discovery_due(
+                state,
+                now="2026-05-07T12:06:00Z",
+                cooldown_seconds=300,
+            )
+        )
+
     def test_auto_learning_selector_prioritizes_missing_timeframe(self):
         now = "2026-04-28T12:00:00Z"
         df_events = pd.DataFrame(
@@ -362,8 +430,8 @@ class MarketTabLogicTests(unittest.TestCase):
 
     def test_scanner_trace_events_classify_candidate_stages(self):
         produced = [
-            {"Coin": "BTC", "__confidence_val": 78.0, "Direction": "Upside"},
-            {"Coin": "ETH", "__confidence_val": 64.0, "Direction": "Downside"},
+            {"Coin": "BTC", "__timeframe": "5m", "__confidence_val": 78.0, "Direction": "Upside"},
+            {"Coin": "ETH", "__timeframe": "15m", "__confidence_val": 64.0, "Direction": "Downside"},
         ]
         visible = [produced[0]]
         events = _scanner_trace_events(
@@ -387,13 +455,25 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertEqual(by_symbol["XRP"]["stage"], "candidate")
         self.assertEqual(by_symbol["SOL"]["reason"], "no OHLCV data")
         self.assertEqual(by_symbol["BTC"]["shown_rank"], 1)
+        self.assertEqual(by_symbol["BTC"]["timeframe"], "5m")
+        self.assertEqual(by_symbol["ETH"]["timeframe"], "15m")
+        self.assertEqual(by_symbol["SOL"]["timeframe"], "1h")
+        self.assertIn("|5m|", str(by_symbol["BTC"]["scan_id"]))
+        self.assertIn("|15m|", str(by_symbol["ETH"]["scan_id"]))
         self.assertAlmostEqual(float(by_symbol["XRP"]["radar_source_score"]), 0.42)
+
+    def test_scanner_trace_base_count_dedupes_pair_variants(self):
+        self.assertEqual(
+            _scanner_trace_base_count({"DASH/USD", "DASH/USDT", "BTC/USDT", ""}),
+            2,
+        )
 
     def test_scalp_signal_log_events_emits_live_and_conditional_scalp_rows(self):
         rows = [
             {
                 "Coin": "BTC",
                 "__event_time": "2026-04-20T10:00:00Z",
+                "__timeframe": "5m",
                 "__scalp_direction_raw": "LONG",
                 "__scalp_display_state": "LIVE",
                 "__scalp_reason_short": "Good R:R",
@@ -409,6 +489,7 @@ class MarketTabLogicTests(unittest.TestCase):
             {
                 "Coin": "ETH",
                 "__event_time": "2026-04-20T10:00:00Z",
+                "__timeframe": "15m",
                 "__scalp_direction_raw": "SHORT",
                 "__scalp_display_state": "CONDITIONAL",
                 "__scalp_reason_short": "Gate soft veto",
@@ -444,10 +525,12 @@ class MarketTabLogicTests(unittest.TestCase):
         )
         self.assertEqual(len(events), 2)
         self.assertEqual(events[0]["source"], "Scalp")
+        self.assertEqual(events[0]["timeframe"], "5m")
         self.assertEqual(events[0]["direction"], "LONG")
         self.assertEqual(events[0]["action_reason"], "LIVE")
         self.assertEqual(events[0]["lead_label"], "Good R:R")
         self.assertEqual(events[0]["scan_focus"], "Breakout Radar")
+        self.assertEqual(events[1]["timeframe"], "15m")
         self.assertEqual(events[1]["action_reason"], "CONDITIONAL")
 
     def test_market_signal_log_events_includes_archive_decision_calibration(self):
@@ -455,7 +538,7 @@ class MarketTabLogicTests(unittest.TestCase):
             {
                 "Coin": "TRX",
                 "__event_time": "2026-04-20T10:00:00Z",
-                "__timeframe": "1h",
+                "__timeframe": "15m",
                 "Direction": "Upside",
                 "Setup Confirm": "WATCH ↑",
                 "__action_raw": "WATCH_UP",
@@ -471,7 +554,7 @@ class MarketTabLogicTests(unittest.TestCase):
                 "__archive_expectancy_delta": 0.7,
                 "__archive_total_delta": 4.25,
                 "__archive_total_expectancy_delta": 55.7,
-                "__archive_decision_scope": "WATCH_UP 1H Upside",
+                "__archive_decision_scope": "WATCH_UP 15M Upside",
                 "__archive_confidence_factor": 0.68,
                 "__archive_confidence_tier": "Good",
                 "__archive_invalidation_risk": 0.12,
@@ -499,7 +582,8 @@ class MarketTabLogicTests(unittest.TestCase):
 
         self.assertEqual(len(events), 1)
         event = events[0]
-        self.assertEqual(event["archive_decision_scope"], "WATCH_UP 1H Upside")
+        self.assertEqual(event["timeframe"], "15m")
+        self.assertEqual(event["archive_decision_scope"], "WATCH_UP 15M Upside")
         self.assertAlmostEqual(float(event["archive_decision_delta"]), 2.5)
         self.assertAlmostEqual(float(event["archive_expectancy_delta"]), 0.7)
         self.assertAlmostEqual(float(event["archive_total_delta"]), 4.25)
@@ -640,7 +724,7 @@ class MarketTabLogicTests(unittest.TestCase):
         ranked = sorted([weaker, stronger], key=_market_result_priority_key)
         self.assertEqual(ranked[0]["Coin"], "SOL")
 
-    def test_broad_market_priority_uses_archive_bias_without_overriding_setup_quality(self):
+    def test_legacy_broad_mode_uses_market_radar_priority(self):
         archive_supported = {
             "Coin": "SOL",
             "__action_raw": "WATCH",
@@ -677,8 +761,14 @@ class MarketTabLogicTests(unittest.TestCase):
             key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_BROAD),
         )
 
+        radar_order = sorted(
+            [archive_supported, stronger_setup],
+            key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_RADAR),
+        )
+
         self.assertEqual(same_setup_order[0]["Coin"], "SOL")
         self.assertEqual(mixed_setup_order[0]["Coin"], "BTC")
+        self.assertEqual(mixed_setup_order, radar_order)
 
     def test_market_hidden_meta_cols_include_render_contract_fields(self):
         df_columns = [
@@ -690,6 +780,7 @@ class MarketTabLogicTests(unittest.TestCase):
             "__adaptive_edge_note",
             "__setup_calibration_note",
             "__ai_votes",
+            "__best_timeframe_note",
             "__delta_note",
         ]
         hidden_cols = _market_hidden_meta_cols(df_columns, ["Coin", "Scalp Opportunity"])
@@ -698,6 +789,7 @@ class MarketTabLogicTests(unittest.TestCase):
             [
                 "__adaptive_edge_note",
                 "__ai_votes",
+                "__best_timeframe_note",
                 "__delta_note",
                 "__scalp_display_state",
                 "__scalp_reason_short",
@@ -705,6 +797,40 @@ class MarketTabLogicTests(unittest.TestCase):
                 "__setup_calibration_note",
             ],
         )
+
+    def test_market_radar_best_tf_candidates_keep_selected_first(self):
+        self.assertEqual(_market_radar_best_tf_candidates("1h"), ("1h", "5m", "15m"))
+        self.assertEqual(_market_radar_best_tf_candidates("4h"), ("4h", "5m", "15m", "1h"))
+
+    def test_market_radar_best_tf_probe_limit_runs_before_ranking_on_shortlist(self):
+        self.assertEqual(_market_radar_best_tf_probe_limit(10, 28), 8)
+        self.assertEqual(_market_radar_best_tf_probe_limit(50, 42), 8)
+        self.assertEqual(_market_radar_best_tf_probe_limit(3, 8), 3)
+
+    def test_market_radar_best_tf_probe_indices_spend_budget_on_best_base_scores(self):
+        self.assertEqual(
+            _market_radar_best_tf_probe_indices([12, 91, 30, 90, 4], 2),
+            {1, 3},
+        )
+        self.assertEqual(
+            _market_radar_best_tf_probe_indices([50, 50, 40], 2),
+            {0, 1},
+        )
+
+    def test_market_scan_ohlcv_limit_keeps_full_history_outside_market_radar(self):
+        self.assertEqual(_market_scan_ohlcv_limit(SCAN_MODE_BROAD, "1h"), 500)
+        self.assertEqual(_market_scan_ohlcv_limit(SCAN_MODE_ACTIONABLE, "5m"), 500)
+
+    def test_market_scan_ohlcv_limit_trims_market_radar_history_safely(self):
+        self.assertEqual(_market_scan_ohlcv_limit(SCAN_MODE_RADAR, "5m"), 280)
+        self.assertEqual(_market_scan_ohlcv_limit(SCAN_MODE_RADAR, "15m"), 280)
+        self.assertEqual(_market_scan_ohlcv_limit(SCAN_MODE_RADAR, "1H"), 260)
+        self.assertEqual(_market_scan_ohlcv_limit(SCAN_MODE_RADAR, "4h"), 220)
+        self.assertEqual(_market_scan_ohlcv_limit(SCAN_MODE_RADAR, "1d"), 180)
+
+    def test_scanner_trace_timeframes_for_market_radar_reads_best_tf_candidates(self):
+        self.assertEqual(_scanner_trace_timeframes_for_mode(SCAN_MODE_RADAR, "1H"), ("1h", "5m", "15m"))
+        self.assertEqual(_scanner_trace_timeframes_for_mode(SCAN_MODE_BROAD, "1H"), ("1h",))
 
     def test_ai_votes_from_row_uses_visible_ensemble_when_meta_is_missing(self):
         self.assertEqual(_ai_votes_from_row({}, "Upside (3/3)"), 3)
@@ -930,8 +1056,8 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertEqual(_extract_confidence_label("44% (Very Low)"), "Very Low")
 
     def test_share_line_formats_counts_in_requested_order(self):
-        line = _share_line({"Watch": 6, "Ready": 3, "Skip": 1}, ["Ready", "Watch", "Skip"])
-        self.assertEqual(line, "Ready: 3 (30%) • Watch: 6 (60%) • Skip: 1 (10%)")
+        line = _share_line({"WATCH": 6, "ENTER": 3, "SKIP": 1}, ["ENTER", "WATCH", "SKIP"])
+        self.assertEqual(line, "ENTER: 3 (30%) • WATCH: 6 (60%) • SKIP: 1 (10%)")
 
     def test_share_line_against_total_handles_sparse_counts(self):
         line = _share_line_against_total({"Emerging Upside": 2}, ["Emerging Upside", "Emerging Downside"], 10)
@@ -942,6 +1068,8 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertTrue(is_stable_base_symbol("usd1"))
         self.assertTrue(is_stable_base_symbol("USDG"))
         self.assertTrue(is_stable_base_symbol("usdg"))
+        self.assertFalse(is_stable_base_symbol("XAUT"))
+        self.assertTrue(is_excluded_trading_base_symbol("XAUT"))
 
     def test_queue_market_custom_clear_marks_pending_and_clears_applied_watchlist(self):
         state = {
@@ -976,7 +1104,7 @@ class MarketTabLogicTests(unittest.TestCase):
 
     def test_candidate_scan_symbols_excludes_usd1_when_stable_filter_enabled(self):
         out = _candidate_scan_symbols(
-            usdt_symbols=["BTC/USDT", "USD1/USDT", "USDG/USDT", "ETH/USDT"],
+            usdt_symbols=["BTC/USDT", "USD1/USDT", "USDG/USDT", "XAUT/USDT", "PAXG/USDT", "ETH/USDT"],
             market_rows=[],
             exclude_stables=True,
             custom_bases_applied=[],
@@ -1050,6 +1178,35 @@ class MarketTabLogicTests(unittest.TestCase):
             )
         )
 
+    def test_market_scan_fallback_coin_id_extends_backup_to_market_radar(self):
+        coin_id_map = {"OP": "optimism", "COS": "contentos"}
+        self.assertEqual(
+            _market_scan_fallback_coin_id(
+                "OP/USDT",
+                custom_mode_active=False,
+                scan_mode=SCAN_MODE_RADAR,
+                coin_id_map=coin_id_map,
+            ),
+            "optimism",
+        )
+        self.assertIsNone(
+            _market_scan_fallback_coin_id(
+                "OP/USDT",
+                custom_mode_active=False,
+                scan_mode=SCAN_MODE_BROAD,
+                coin_id_map=coin_id_map,
+            )
+        )
+        self.assertEqual(
+            _market_scan_fallback_coin_id(
+                "COS/USDT",
+                custom_mode_active=True,
+                scan_mode=SCAN_MODE_BROAD,
+                coin_id_map=coin_id_map,
+            ),
+            "contentos",
+        )
+
     def test_fetch_market_scan_ohlcv_prefers_exchange_before_coin_id_fallback(self):
         frame = pd.DataFrame({"close": [1.0]})
 
@@ -1070,21 +1227,154 @@ class MarketTabLogicTests(unittest.TestCase):
         )
         self.assertIs(out, frame)
 
+    def test_signal_frame_resolve_cache_keys_closed_candle_context(self):
+        key = _signal_frame_resolve_cache_key(
+            source="Market",
+            symbol="rave/usdt",
+            timeframe="1H",
+            latest_timestamp="2026-05-06 12:00:00+00:00",
+        )
+        self.assertIn("Market|RAVE|1h|2026-05-06", key)
+
+    def test_should_resolve_signal_frame_skips_repeated_closed_candle(self):
+        cache: dict = {}
+        lock = Lock()
+        kwargs = {
+            "source": "Market",
+            "symbol": "RAVE",
+            "timeframe": "1h",
+            "latest_timestamp": "2026-05-06T12:00:00Z",
+        }
+        self.assertTrue(_should_resolve_signal_frame(cache, lock, **kwargs))
+        self.assertFalse(_should_resolve_signal_frame(cache, lock, **kwargs))
+        self.assertTrue(
+            _should_resolve_signal_frame(
+                cache,
+                lock,
+                source="Market",
+                symbol="RAVE",
+                timeframe="1h",
+                latest_timestamp="2026-05-06T13:00:00Z",
+            )
+        )
+
+    def test_trim_signal_frame_resolve_cache_keeps_latest_entries(self):
+        cache = {"old": 1.0, "new": 3.0, "mid": 2.0}
+        self.assertEqual(
+            list(_trim_signal_frame_resolve_cache(cache, limit=2).keys()),
+            ["new", "mid"],
+        )
+
+    def test_cached_market_ml_predictor_reuses_same_closed_frame_slice(self):
+        calls: list[int] = []
+
+        def _predictor(frame: pd.DataFrame):
+            calls.append(len(frame))
+            return 0.61, "LONG", {"agreement": 1.0}
+
+        frame = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-01-01", periods=4, freq="h"),
+                "close": [1.0, 1.1, 1.2, 1.3],
+            }
+        )
+        cached = _cached_market_ml_predictor(_predictor)
+
+        self.assertEqual(cached(frame)[1], "LONG")
+        self.assertEqual(cached(frame.copy())[1], "LONG")
+        self.assertEqual(cached(frame.iloc[:-1].copy())[1], "LONG")
+        self.assertEqual(cached(frame.iloc[:-1].copy())[1], "LONG")
+        self.assertEqual(calls, [4, 3])
+
+    def test_exchange_available_scan_symbols_filters_provider_only_pairs(self):
+        out = _exchange_available_scan_symbols(
+            ["BTC/USDT", "XAUT/USDT", "MOVR/USDT", "ETH/USDT"],
+            markets={"BTC/USDT": {}, "XAUT/USDT": {}, "ETH/USD": {}},
+            symbol_variants=lambda symbol: [symbol, symbol.replace("/USDT", "/USD")],
+        )
+
+        self.assertEqual(out, ["BTC/USDT", "ETH/USD"])
+
+    def test_exchange_available_scan_symbols_keeps_all_when_markets_unknown(self):
+        out = _exchange_available_scan_symbols(
+            ["BTC/USDT", "MOVR/USDT"],
+            markets={},
+            symbol_variants=lambda symbol: [],
+        )
+
+        self.assertEqual(out, ["BTC/USDT", "MOVR/USDT"])
+
+    def test_market_radar_exchange_or_backup_keeps_provider_coin_id_candidates(self):
+        out = _market_radar_exchange_or_backup_scan_symbols(
+            ["BTC/USDT", "XAUT/USDT", "MOVR/USDT", "PAXG/USDT", "RAVE/USDT", "ETH/USDT"],
+            markets={"BTC/USDT": {}, "XAUT/USDT": {}, "ETH/USD": {}},
+            symbol_variants=lambda symbol: [symbol, symbol.replace("/USDT", "/USD")],
+            coin_id_map={"MOVR": "moonriver", "PAXG": "pax-gold", "RAVE": "rave"},
+            backup_limit=1,
+        )
+
+        self.assertEqual(out, ["BTC/USDT", "MOVR/USDT", "ETH/USD"])
+
+    def test_market_radar_exchange_or_backup_skips_recent_empty_backup(self):
+        out = _market_radar_exchange_or_backup_scan_symbols(
+            ["BTC/USDT", "LAB/USDT", "MOVR/USDT"],
+            markets={"BTC/USDT": {}},
+            symbol_variants=lambda symbol: [symbol],
+            coin_id_map={"LAB": "label-foundation", "MOVR": "moonriver"},
+            blocked_backup_bases={"LAB"},
+            backup_limit=2,
+        )
+
+        self.assertEqual(out, ["BTC/USDT", "MOVR/USDT"])
+
+    def test_scanner_trace_unusable_backup_bases_reads_recent_empty_backup_skips(self):
+        trace_rows = pd.DataFrame(
+            [
+                {
+                    "symbol": "LAB",
+                    "stage": "skipped",
+                    "reason": "no exchange OHLCV data; CoinGecko backup returned empty",
+                    "observed_at": "2026-05-07T10:00:00Z",
+                },
+                {
+                    "symbol": "OLD",
+                    "stage": "skipped",
+                    "reason": "no exchange OHLCV data; CoinGecko backup returned empty",
+                    "observed_at": "2026-05-06T10:00:00Z",
+                },
+                {
+                    "symbol": "RAVE",
+                    "stage": "ranked_out",
+                    "reason": "",
+                    "observed_at": "2026-05-07T10:00:00Z",
+                },
+            ]
+        )
+
+        self.assertEqual(
+            _scanner_trace_unusable_backup_bases(
+                trace_rows,
+                max_age_hours=6,
+                now="2026-05-07T12:00:00Z",
+            ),
+            {"LAB"},
+        )
+
     def test_build_custom_scan_universe_builds_usdt_pairs_from_custom_bases(self):
         rows = [{"symbol": "COS", "market_cap": 100, "id": "contentos"}]
 
         def _market_rows_fetch(symbols, vs_currency="usd"):
-            self.assertEqual(tuple(symbols), ("COS", "USD1"))
+            self.assertEqual(tuple(symbols), ("COS", "USD1", "XAUT"))
             self.assertEqual(vs_currency, "usd")
             return rows
 
         unique_market_data, mcap_map, usdt_symbols, candidate_symbol_pool = _build_custom_scan_universe(
-            custom_bases_applied=["COS", "USD1"],
+            custom_bases_applied=["COS", "USD1", "XAUT"],
             get_market_cap_rows_for_symbols=_market_rows_fetch,
             exclude_stables=True,
             scan_pool_n=10,
         )
-        self.assertEqual(usdt_symbols, ["COS/USDT", "USD1/USDT"])
+        self.assertEqual(usdt_symbols, ["COS/USDT", "USD1/USDT", "XAUT/USDT"])
         self.assertEqual(candidate_symbol_pool, ["COS/USDT"])
         self.assertEqual(len(unique_market_data), 1)
         self.assertEqual(mcap_map["COS"], 100)
@@ -1589,7 +1879,7 @@ class MarketTabLogicTests(unittest.TestCase):
             scan_mode="Broad Market",
         )
         self.assertEqual(first, second)
-        self.assertEqual(first, ("1h", "Both", 0, True, ("DOGE",), "Broad Market"))
+        self.assertEqual(first, ("1h", "Both", 0, True, ("DOGE",), "Market Radar"))
 
     def test_market_scan_signature_is_order_and_alias_insensitive_in_custom_mode(self):
         first = _market_scan_signature(
@@ -1609,7 +1899,7 @@ class MarketTabLogicTests(unittest.TestCase):
             scan_mode="Broad Market",
         )
         self.assertEqual(first, second)
-        self.assertEqual(first, ("1h", "Both", 0, True, ("BTC", "ETH"), "Broad Market"))
+        self.assertEqual(first, ("1h", "Both", 0, True, ("BTC", "ETH"), "Market Radar"))
 
     def test_market_scan_signature_tracks_scan_mode_outside_custom_mode(self):
         broad = _market_scan_signature(
@@ -1640,6 +1930,31 @@ class MarketTabLogicTests(unittest.TestCase):
         )
         self.assertNotEqual(broad, trending)
         self.assertEqual(trending, ("1h", "Both", 10, True, (), "Trending Coins"))
+
+    def test_unknown_scan_mode_falls_back_to_market_radar(self):
+        self.assertEqual(_normalize_scan_mode(""), SCAN_MODE_RADAR)
+        self.assertEqual(_normalize_scan_mode("legacy mystery mode"), SCAN_MODE_RADAR)
+        self.assertEqual(
+            _market_scan_signature(
+                timeframe="1h",
+                direction_filter="Both",
+                top_n=10,
+                exclude_stables=True,
+                custom_bases_applied=[],
+                scan_mode="legacy mystery mode",
+            ),
+            ("1h", "Both", 10, True, (), "Market Radar"),
+        )
+
+    def test_helper_defaults_use_market_radar_budget(self):
+        self.assertEqual(
+            _scan_candidate_pool_size(10, custom_mode_active=False),
+            _scan_candidate_pool_size(10, custom_mode_active=False, scan_mode=SCAN_MODE_RADAR),
+        )
+        self.assertEqual(
+            _initial_scan_batch_size(10, scan_pool_n=50, custom_mode_active=False),
+            _initial_scan_batch_size(10, scan_pool_n=50, custom_mode_active=False, scan_mode=SCAN_MODE_RADAR),
+        )
 
     def test_normalize_custom_bases_dedupes_aliases(self):
         out = _normalize_custom_bases(["BTC", "XBT", "eth/usdt", "ETH"])
@@ -1781,6 +2096,46 @@ class MarketTabLogicTests(unittest.TestCase):
                 )
             )
 
+    def test_market_scan_material_degradation_ignores_small_single_symbol_gap(self):
+        self.assertFalse(
+            _market_scan_materially_degraded(
+                skipped_count=1,
+                attempted_count=24,
+                produced_count=23,
+                requested_n=10,
+                fetched_frame_count=23,
+            )
+        )
+
+    def test_market_scan_material_degradation_flags_underfilled_or_broad_gaps(self):
+        self.assertTrue(
+            _market_scan_materially_degraded(
+                skipped_count=1,
+                attempted_count=10,
+                produced_count=9,
+                requested_n=10,
+                fetched_frame_count=9,
+            )
+        )
+        self.assertTrue(
+            _market_scan_materially_degraded(
+                skipped_count=3,
+                attempted_count=24,
+                produced_count=21,
+                requested_n=10,
+                fetched_frame_count=21,
+            )
+        )
+        self.assertTrue(
+            _market_scan_materially_degraded(
+                skipped_count=0,
+                attempted_count=10,
+                produced_count=0,
+                requested_n=10,
+                fetched_frame_count=0,
+            )
+        )
+
     def test_cache_fallback_is_blocked_after_newer_healthy_empty_scan_for_same_signature(self):
         with patch("tabs.market_tab.pd.Timestamp.now", return_value=pd.Timestamp("2026-03-07 10:10:00", tz="UTC")):
             self.assertFalse(
@@ -1871,11 +2226,11 @@ class MarketTabLogicTests(unittest.TestCase):
 
     def test_scan_candidate_pool_size_adds_non_custom_headroom(self):
         self.assertEqual(
-            _scan_candidate_pool_size(50, custom_mode_active=False),
+            _scan_candidate_pool_size(50, custom_mode_active=False, scan_mode=SCAN_MODE_BROAD),
             75,
         )
         self.assertEqual(
-            _scan_candidate_pool_size(10, custom_mode_active=False),
+            _scan_candidate_pool_size(10, custom_mode_active=False, scan_mode=SCAN_MODE_BROAD),
             20,
         )
         self.assertEqual(
@@ -1887,13 +2242,27 @@ class MarketTabLogicTests(unittest.TestCase):
             45,
         )
         self.assertEqual(
+            _scan_candidate_pool_size(10, custom_mode_active=False, scan_mode=SCAN_MODE_RADAR),
+            50,
+        )
+        self.assertEqual(
             _scan_candidate_pool_size(10, custom_mode_active=False, scan_mode=SCAN_MODE_EMERGING),
-            55,
+            90,
         )
         self.assertEqual(
             _scan_candidate_pool_size(10, custom_mode_active=False, scan_mode=SCAN_MODE_TRENDING),
             55,
         )
+
+    def test_market_radar_scan_budget_caps_interactive_ohlcv_work(self):
+        self.assertEqual(_market_radar_scan_budget(10), 24)
+        self.assertEqual(_market_radar_scan_budget(20), 40)
+        self.assertEqual(_market_radar_scan_budget(40), 48)
+
+    def test_market_radar_initial_batch_size_expands_breadth_without_full_budget(self):
+        self.assertEqual(_market_radar_initial_batch_size(10), 18)
+        self.assertEqual(_market_radar_initial_batch_size(20), 32)
+        self.assertEqual(_market_radar_initial_batch_size(40), 48)
 
     def test_initial_scan_batch_size_expands_for_actionable_focus(self):
         self.assertEqual(
@@ -1919,9 +2288,18 @@ class MarketTabLogicTests(unittest.TestCase):
                 10,
                 scan_pool_n=55,
                 custom_mode_active=False,
+                scan_mode=SCAN_MODE_RADAR,
+            ),
+            18,
+        )
+        self.assertEqual(
+            _initial_scan_batch_size(
+                10,
+                scan_pool_n=55,
+                custom_mode_active=False,
                 scan_mode=SCAN_MODE_EMERGING,
             ),
-            30,
+            34,
         )
         self.assertEqual(
             _initial_scan_batch_size(
@@ -1945,6 +2323,115 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertEqual(len(out), 20)
         self.assertEqual(out[:10], [f"COIN{i}/USDT" for i in range(1, 11)])
         self.assertTrue(any(symbol not in [f"COIN{i}/USDT" for i in range(11, 21)] for symbol in out[10:]))
+
+    def test_initial_scan_symbols_market_radar_uses_controlled_breadth(self):
+        candidate_pool = [f"COIN{i}/USDT" for i in range(1, 81)]
+        out = _initial_scan_symbols(
+            candidate_pool=candidate_pool,
+            requested_n=10,
+            scan_pool_n=80,
+            custom_mode_active=False,
+            scan_mode=SCAN_MODE_RADAR,
+            timeframe="1h",
+        )
+        self.assertEqual(len(out), 18)
+        self.assertEqual(out[:10], [f"COIN{i}/USDT" for i in range(1, 11)])
+        self.assertTrue(any(symbol not in [f"COIN{i}/USDT" for i in range(11, 19)] for symbol in out[10:]))
+
+    def test_initial_scan_symbols_market_radar_protects_multiple_discovery_lanes(self):
+        candidate_pool = [f"COIN{i}/USDT" for i in range(1, 46)]
+        candidate_pool[18] = "VVV/USDT"
+        candidate_pool[19] = "B3/USDT"
+        candidate_pool[29] = "VIRTUAL/USDT"
+        candidate_pool[32] = "SAFE/USDT"
+
+        out = _initial_scan_symbols(
+            candidate_pool=candidate_pool,
+            market_rows=[
+                {"symbol": "vvv", "_radar_source_score": 0.82, "_radar_source_kind": "gainers_losers"},
+                {"symbol": "safe", "_radar_source_score": 0.76, "_radar_source_kind": "gainers_losers"},
+                {"symbol": "b3", "_radar_source_score": 0.69, "_radar_source_kind": "gainers_losers"},
+                {"symbol": "virtual", "_radar_source_score": 0.41, "_radar_source_kind": "exchange_breakout"},
+            ],
+            requested_n=10,
+            scan_pool_n=45,
+            custom_mode_active=False,
+            scan_mode=SCAN_MODE_RADAR,
+            timeframe="1h",
+        )
+
+        self.assertEqual(len(out), 18)
+        self.assertIn("B3/USDT", out)
+        self.assertIn("VIRTUAL/USDT", out)
+
+    def test_market_radar_universe_quality_snapshot_scores_broad_discovery_pool(self):
+        snapshot = _market_radar_universe_quality_snapshot(
+            candidate_symbols=[
+                "BTC/USDT",
+                "ETH/USDT",
+                "RAVE/USDT",
+                "MOVR/USDT",
+                "EDGE/USDT",
+                "APE/USDT",
+                "TRX/USDT",
+                "VVV/USDT",
+                "B3/USDT",
+                "VIRTUAL/USDT",
+                "SAFE/USDT",
+                "DOGE/USDT",
+                "ZETA/USDT",
+                "NEAR/USDT",
+                "CHZ/USDT",
+                "TIA/USDT",
+                "QNT/USDT",
+                "PI/USDT",
+                "ONDO/USDT",
+                "LINK/USDT",
+            ],
+            market_rows=[
+                {"symbol": "btc"},
+                {"symbol": "eth"},
+                {"symbol": "rave", "_radar_source_kind": "gainers_losers"},
+                {"symbol": "movr", "_radar_source_kind": "trending"},
+                {"symbol": "edge", "_radar_source_kind": "exchange_breakout"},
+                {"symbol": "ape", "_radar_source_kind": "volume_anomaly"},
+                {"symbol": "trx", "_radar_trace_boost_score": 0.4},
+                {"symbol": "vvv", "_radar_memory_score": 0.3},
+                {"symbol": "b3", "_radar_archive_edge_score": 0.2},
+            ],
+            exchange_ready_symbols=[
+                "BTC/USDT",
+                "ETH/USDT",
+                "RAVE/USDT",
+                "MOVR/USDT",
+                "EDGE/USDT",
+                "APE/USDT",
+                "TRX/USDT",
+                "VVV/USDT",
+                "B3/USDT",
+                "VIRTUAL/USDT",
+                "SAFE/USDT",
+                "DOGE/USDT",
+            ],
+            requested_n=10,
+        )
+
+        self.assertIn(snapshot["tier"], {"healthy", "strong"})
+        self.assertGreaterEqual(snapshot["discovery_lane_count"], 5)
+        self.assertEqual(snapshot["candidate_count"], 20)
+        self.assertEqual(snapshot["exchange_ready_count"], 12)
+
+    def test_market_radar_universe_quality_snapshot_flags_thin_liquidity_only_pool(self):
+        snapshot = _market_radar_universe_quality_snapshot(
+            candidate_symbols=["BTC/USDT", "ETH/USDT", "BNB/USDT"],
+            market_rows=[{"symbol": "btc"}, {"symbol": "eth"}, {"symbol": "bnb"}],
+            exchange_ready_symbols=["BTC/USDT", "ETH/USDT", "BNB/USDT"],
+            requested_n=10,
+        )
+
+        self.assertEqual(snapshot["tier"], "thin")
+        self.assertEqual(snapshot["discovery_lane_count"], 0)
+        self.assertEqual(snapshot["candidate_count"], 3)
 
     def test_initial_scan_symbols_breakout_radar_protects_deep_high_signal_candidates(self):
         candidate_pool = [f"COIN{i}/USDT" for i in range(1, 81)]
@@ -1974,7 +2461,7 @@ class MarketTabLogicTests(unittest.TestCase):
             timeframe="1h",
         )
         self.assertIn("COIN79/USDT", promoted)
-        self.assertEqual(len(promoted), 30)
+        self.assertEqual(len(promoted), 34)
 
     def test_initial_scan_symbols_breakout_radar_protects_memory_acceleration_candidates(self):
         candidate_pool = [f"COIN{i}/USDT" for i in range(1, 81)]
@@ -2010,9 +2497,17 @@ class MarketTabLogicTests(unittest.TestCase):
             _actionable_analysis_batch_size(
                 10,
                 fetched_n=60,
+                scan_mode=SCAN_MODE_RADAR,
+            ),
+            24,
+        )
+        self.assertEqual(
+            _actionable_analysis_batch_size(
+                10,
+                fetched_n=60,
                 scan_mode=SCAN_MODE_EMERGING,
             ),
-            40,
+            32,
         )
 
     def test_next_refill_candidate_batch_uses_remaining_pool_after_attrition(self):
@@ -2025,6 +2520,55 @@ class MarketTabLogicTests(unittest.TestCase):
             used_major_fallback=False,
         )
         self.assertEqual(out, ["SOL/USDT", "XRP/USDT"])
+
+    def test_next_refill_candidate_batch_respects_market_radar_budget(self):
+        pool = [f"COIN{i}/USDT" for i in range(1, 80)]
+        out = _next_refill_candidate_batch(
+            candidate_pool=pool,
+            attempted_symbols=set(pool[:24]),
+            requested_n=10,
+            produced_n=3,
+            custom_mode_active=False,
+            used_major_fallback=False,
+            scan_mode=SCAN_MODE_RADAR,
+        )
+        self.assertEqual(out, [])
+
+        refill = _next_refill_candidate_batch(
+            candidate_pool=pool,
+            attempted_symbols=set(pool[:18]),
+            requested_n=10,
+            produced_n=7,
+            custom_mode_active=False,
+            used_major_fallback=False,
+            scan_mode=SCAN_MODE_RADAR,
+        )
+        self.assertEqual(refill, pool[18:24])
+
+    def test_next_refill_candidate_batch_market_radar_quality_refills_after_top_n_is_full(self):
+        pool = [f"COIN{i}/USDT" for i in range(1, 80)]
+        without_quality_refill = _next_refill_candidate_batch(
+            candidate_pool=pool,
+            attempted_symbols=set(pool[:18]),
+            requested_n=10,
+            produced_n=10,
+            custom_mode_active=False,
+            used_major_fallback=False,
+            scan_mode=SCAN_MODE_RADAR,
+        )
+        self.assertEqual(without_quality_refill, [])
+
+        quality_refill = _next_refill_candidate_batch(
+            candidate_pool=pool,
+            attempted_symbols=set(pool[:18]),
+            requested_n=10,
+            produced_n=10,
+            custom_mode_active=False,
+            used_major_fallback=False,
+            scan_mode=SCAN_MODE_RADAR,
+            quality_refill=True,
+        )
+        self.assertEqual(quality_refill, pool[18:24])
 
     def test_candidate_scan_symbols_actionable_focus_prefers_active_liquid_candidates(self):
         out = _candidate_scan_symbols(
@@ -2098,6 +2642,29 @@ class MarketTabLogicTests(unittest.TestCase):
             timeframe="1h",
             direction_filter="Upside",
             scan_mode=SCAN_MODE_EMERGING,
+        )
+        self.assertEqual(out[0], "RAVE/USDT")
+
+    def test_candidate_scan_symbols_market_radar_balances_quality_and_discovery(self):
+        out = _candidate_scan_symbols(
+            usdt_symbols=["BTC/USDT", "RAVE/USDT", "XRP/USDT"],
+            market_rows=[
+                {"symbol": "btc", "market_cap": 2_000_000_000_000, "price_change_percentage_24h": 0.5, "total_volume": 2_000_000_000},
+                {
+                    "symbol": "rave",
+                    "market_cap": 120_000_000,
+                    "price_change_percentage_24h": 4.8,
+                    "_quote_volume_24h": 8_000_000,
+                    "_radar_source_score": 0.74,
+                    "_radar_freshness_score": 0.68,
+                },
+                {"symbol": "xrp", "market_cap": 120_000_000_000, "price_change_percentage_24h": 1.0, "total_volume": 500_000_000},
+            ],
+            exclude_stables=False,
+            custom_bases_applied=[],
+            timeframe="1h",
+            direction_filter="Upside",
+            scan_mode=SCAN_MODE_RADAR,
         )
         self.assertEqual(out[0], "RAVE/USDT")
 
@@ -2357,6 +2924,125 @@ class MarketTabLogicTests(unittest.TestCase):
         )
         self.assertEqual(out[0], "ALPHA/USDT")
 
+    def test_scanner_trace_feedback_promotes_repeated_unscanned_candidate(self):
+        trace_rows = pd.DataFrame(
+            [
+                {
+                    "symbol": "ALPHA",
+                    "stage": "candidate",
+                    "observed_at": "2026-04-20T10:00:00Z",
+                    "radar_source_score": 0.57,
+                    "candidate_rank": 34,
+                    "delta_pct": 4.8,
+                },
+                {
+                    "symbol": "ALPHA",
+                    "stage": "candidate",
+                    "observed_at": "2026-04-20T10:30:00Z",
+                    "radar_source_score": 0.61,
+                    "candidate_rank": 27,
+                    "delta_pct": 5.4,
+                },
+                {
+                    "symbol": "BETA",
+                    "stage": "candidate",
+                    "observed_at": "2026-04-20T10:30:00Z",
+                    "radar_source_score": 0.18,
+                    "candidate_rank": 44,
+                    "delta_pct": 0.4,
+                },
+            ]
+        )
+        feedback = _build_scanner_trace_feedback_map(
+            trace_rows,
+            now="2026-04-20T11:00:00Z",
+        )
+        self.assertIn("ALPHA", feedback)
+        self.assertNotIn("BETA", feedback)
+        self.assertGreaterEqual(float(feedback["ALPHA"]["radar_trace_boost_score"]), 0.40)
+
+    def test_scanner_trace_feedback_keeps_recent_shown_leader_alive(self):
+        trace_rows = pd.DataFrame(
+            [
+                {
+                    "symbol": "VIRTUAL",
+                    "stage": "shown",
+                    "observed_at": "2026-04-20T10:45:00Z",
+                    "confidence": 82.0,
+                    "ai_confidence": 81.0,
+                    "emerging_rank_score": 67.0,
+                    "actionable_frame_score": 66.0,
+                    "actionable_tactical_score": 58.0,
+                    "radar_source_score": 0.14,
+                    "candidate_rank": 16,
+                },
+            ]
+        )
+        feedback = _build_scanner_trace_feedback_map(
+            trace_rows,
+            now="2026-04-20T11:00:00Z",
+        )
+        self.assertIn("VIRTUAL", feedback)
+        self.assertGreaterEqual(float(feedback["VIRTUAL"]["radar_trace_boost_score"]), 0.30)
+
+    def test_scanner_trace_feedback_damps_recent_shown_leader_with_negative_archive_edge(self):
+        trace_rows = pd.DataFrame(
+            [
+                {
+                    "symbol": "VIRTUAL",
+                    "stage": "shown",
+                    "observed_at": "2026-04-20T10:45:00Z",
+                    "confidence": 82.0,
+                    "ai_confidence": 81.0,
+                    "emerging_rank_score": 67.0,
+                    "actionable_frame_score": 66.0,
+                    "actionable_tactical_score": 58.0,
+                    "radar_source_score": 0.14,
+                    "candidate_rank": 16,
+                },
+            ]
+        )
+        baseline = _build_scanner_trace_feedback_map(
+            trace_rows,
+            now="2026-04-20T11:00:00Z",
+        )
+        damped = _build_scanner_trace_feedback_map(
+            trace_rows,
+            now="2026-04-20T11:00:00Z",
+            archive_feedback_map={
+                "VIRTUAL": {
+                    "radar_archive_edge_score": -0.80,
+                    "radar_archive_resolved": 12.0,
+                }
+            },
+        )
+        self.assertIn("VIRTUAL", baseline)
+        self.assertIn("VIRTUAL", damped)
+        self.assertLess(
+            float(damped["VIRTUAL"]["radar_trace_boost_score"]),
+            float(baseline["VIRTUAL"]["radar_trace_boost_score"]) * 0.55,
+        )
+        self.assertAlmostEqual(float(damped["VIRTUAL"]["radar_trace_archive_edge_score"]), -0.80)
+
+    def test_scanner_trace_feedback_ignores_stale_unscanned_candidate(self):
+        trace_rows = pd.DataFrame(
+            [
+                {
+                    "symbol": "ALPHA",
+                    "stage": "candidate",
+                    "observed_at": "2026-04-18T10:00:00Z",
+                    "radar_source_score": 0.86,
+                    "candidate_rank": 6,
+                    "delta_pct": 7.2,
+                },
+            ]
+        )
+        feedback = _build_scanner_trace_feedback_map(
+            trace_rows,
+            now="2026-04-20T11:00:00Z",
+        )
+        self.assertNotIn("ALPHA", feedback)
+
     def test_emerging_candidate_score_demotes_negative_archive_edge(self):
         base_kwargs = {
             "timeframe": "1h",
@@ -2464,6 +3150,360 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertGreater(float(zeta_row.get("_radar_source_score") or 0.0), 0.0)
         self.assertEqual(mcap_map.get("ZETA"), 220_000_000)
 
+    def test_ticker_pct_change_uses_open_fallback_when_percentage_missing(self):
+        self.assertAlmostEqual(
+            _ticker_pct_change_24h({"last": 108.0, "open": 100.0}),
+            8.0,
+        )
+
+    def test_build_market_radar_universe_combines_liquidity_breakout_and_trending(self):
+        base_ts = pd.date_range("2026-01-01", periods=90, freq="h", tz="UTC")
+        flat_frame = pd.DataFrame(
+            {
+                "timestamp": base_ts,
+                "open": [100.0] * 90,
+                "high": [100.0] * 90,
+                "low": [100.0] * 90,
+                "close": [100.0] * 90,
+                "volume": [1_000.0] * 90,
+            }
+        )
+        provider_calls = {"momentum": 0, "trending": 0, "exchange": 0, "mcap": 0}
+
+        def _momentum_provider(limit=20):
+            provider_calls["momentum"] += 1
+            return (
+                [{"symbol": "RAVE", "market_cap": 140_000_000, "price_change_percentage_24h": 6.2}],
+                [],
+            )
+
+        def _trending_provider():
+            provider_calls["trending"] += 1
+            return [{"symbol": "MOVR"}]
+
+        def _exchange_provider():
+            provider_calls["exchange"] += 1
+            return {
+                "ZETA/USDT": {"percentage": 7.1, "quoteVolume": 3_000_000},
+            }
+
+        def _market_cap_provider(symbols, vs_currency="usd"):
+            provider_calls["mcap"] += 1
+            return [
+                {"symbol": "rave", "market_cap": 140_000_000, "id": "rave"},
+                {"symbol": "movr", "market_cap": 180_000_000, "id": "movr"},
+            ]
+
+        pairs, rows, mcap_map = _build_market_radar_universe(
+            base_pairs=["BTC/USDT"],
+            base_market_rows=[
+                {"symbol": "btc", "market_cap": 2_000_000_000_000, "id": "bitcoin"},
+            ],
+            fetch_top_gainers_losers=_momentum_provider,
+            fetch_trending_coins=_trending_provider,
+            fetch_exchange_tickers_snapshot=_exchange_provider,
+            get_top_volume_usdt_symbols=lambda top_n=30: (["BTC/USDT"], []),
+            get_market_cap_rows_for_symbols=_market_cap_provider,
+            fetch_ohlcv=lambda *_args, **_kwargs: flat_frame,
+            direction_filter="Upside",
+            scan_timeframe="1h",
+            provider_fetch_n=120,
+            targeted_lookup_limit=8,
+        )
+        self.assertIn("BTC/USDT", pairs)
+        self.assertIn("RAVE/USDT", pairs)
+        self.assertIn("MOVR/USDT", pairs)
+        self.assertNotIn("ZETA/USDT", pairs)
+        self.assertIn("RAVE", mcap_map)
+        self.assertFalse(any(str(row.get("symbol")).lower() == "zeta" for row in rows))
+        self.assertEqual(provider_calls, {"momentum": 1, "trending": 1, "exchange": 0, "mcap": 1})
+
+    def test_build_market_radar_universe_can_include_exchange_breakouts_for_deep_discovery(self):
+        pairs, rows, _mcap_map = _build_market_radar_universe(
+            base_pairs=["BTC/USDT"],
+            base_market_rows=[
+                {"symbol": "btc", "market_cap": 2_000_000_000_000, "id": "bitcoin"},
+            ],
+            fetch_top_gainers_losers=lambda limit=20: ([], []),
+            fetch_trending_coins=lambda: [],
+            fetch_exchange_tickers_snapshot=lambda: {
+                "ZETA/USDT": {"percentage": 7.1, "quoteVolume": 3_000_000},
+            },
+            get_top_volume_usdt_symbols=lambda top_n=30: (["BTC/USDT"], []),
+            get_market_cap_rows_for_symbols=lambda symbols, vs_currency="usd": [],
+            fetch_ohlcv=lambda *_args, **_kwargs: None,
+            direction_filter="Upside",
+            scan_timeframe="1h",
+            provider_fetch_n=120,
+            targeted_lookup_limit=0,
+            include_exchange_breakouts=True,
+        )
+
+        self.assertIn("ZETA/USDT", pairs)
+        self.assertTrue(any(str(row.get("symbol")).lower() == "zeta" for row in rows))
+
+    def test_build_market_radar_universe_can_seed_live_volume_anomaly_source(self):
+        base_ts = pd.date_range("2026-01-01", periods=90, freq="h", tz="UTC")
+        fetch_calls = {"ohlcv": 0, "volume_universe": 0}
+
+        def _frame(_symbol: str, *_args, **_kwargs) -> pd.DataFrame:
+            fetch_calls["ohlcv"] += 1
+            closes = [100.0 + i * 0.03 for i in range(90)]
+            volumes = [1_000.0 + ((i % 5) * 20.0) for i in range(88)] + [12_000.0, 850.0]
+            return pd.DataFrame(
+                {
+                    "timestamp": base_ts,
+                    "open": closes,
+                    "high": closes,
+                    "low": closes,
+                    "close": closes,
+                    "volume": volumes,
+                }
+            )
+
+        pairs, rows, _mcap_map = _build_market_radar_universe(
+            base_pairs=["BTC/USDT"],
+            base_market_rows=[
+                {"symbol": "btc", "market_cap": 2_000_000_000_000, "id": "bitcoin"},
+            ],
+            fetch_top_gainers_losers=lambda limit=20: ([], []),
+            fetch_trending_coins=lambda: [],
+            fetch_exchange_tickers_snapshot=lambda: {},
+            get_top_volume_usdt_symbols=lambda top_n=30: (
+                fetch_calls.__setitem__("volume_universe", fetch_calls["volume_universe"] + 1)
+                or ["APE/USDT"],
+                [],
+            ),
+            get_market_cap_rows_for_symbols=lambda symbols, vs_currency="usd": [
+                {"symbol": "ape", "market_cap": 650_000_000, "id": "apecoin"},
+            ],
+            fetch_ohlcv=_frame,
+            direction_filter="Upside",
+            scan_timeframe="1h",
+            provider_fetch_n=90,
+            volume_anomaly_cache={},
+            volume_anomaly_symbol_limit=4,
+            volume_anomaly_fetch_missing=True,
+            targeted_lookup_limit=8,
+        )
+
+        self.assertIn("APE/USDT", pairs)
+        ape_row = next(row for row in rows if str(row.get("symbol")).lower() == "ape")
+        self.assertEqual(ape_row.get("_radar_source_kind"), "volume_anomaly")
+        self.assertGreater(float(ape_row.get("_radar_source_score") or 0.0), 0.0)
+        self.assertEqual(fetch_calls, {"ohlcv": 1, "volume_universe": 1})
+
+    def test_build_market_radar_universe_can_seed_trace_feedback_candidates(self):
+        pairs, rows, mcap_map = _build_market_radar_universe(
+            base_pairs=["BTC/USDT"],
+            base_market_rows=[
+                {"symbol": "btc", "market_cap": 2_000_000_000_000, "id": "bitcoin"},
+            ],
+            fetch_top_gainers_losers=lambda limit=20: ([], []),
+            fetch_trending_coins=lambda: [],
+            fetch_exchange_tickers_snapshot=lambda: {},
+            get_top_volume_usdt_symbols=lambda top_n=30: (["BTC/USDT"], []),
+            get_market_cap_rows_for_symbols=lambda symbols, vs_currency="usd": [
+                {"symbol": "rave", "market_cap": 140_000_000, "id": "rave"}
+            ],
+            fetch_ohlcv=lambda *_args, **_kwargs: None,
+            direction_filter="Both",
+            scan_timeframe="1h",
+            provider_fetch_n=90,
+            volume_anomaly_cache={},
+            volume_anomaly_symbol_limit=0,
+            volume_anomaly_fetch_missing=False,
+            targeted_lookup_limit=0,
+            trace_feedback_seed_limit=1,
+            scanner_trace_feedback_map={
+                "RAVE": {
+                    "radar_trace_boost_score": 0.52,
+                    "radar_trace_interest_score": 0.90,
+                    "radar_trace_age_hours": 1.0,
+                }
+            },
+        )
+
+        self.assertIn("RAVE/USDT", pairs)
+        rave_row = next(row for row in rows if str(row.get("symbol")).lower() == "rave")
+        self.assertEqual(rave_row.get("_radar_source_kind"), "trace_feedback")
+        self.assertAlmostEqual(float(rave_row.get("_radar_trace_boost_score") or 0.0), 0.52)
+        self.assertEqual(mcap_map.get("RAVE"), 0)
+
+    def test_radar_memory_candidate_snapshot_rows_keep_only_pressure_candidates(self):
+        rows = _radar_memory_candidate_snapshot_rows(
+            [
+                {
+                    "symbol": "btc",
+                    "market_cap": 2_000_000_000_000,
+                    "price_change_percentage_24h": 0.1,
+                    "total_volume": 2_000_000_000,
+                },
+                {
+                    "symbol": "rave",
+                    "_radar_source_kind": "gainers_losers",
+                    "_radar_source_score": 0.74,
+                    "_radar_freshness_score": 0.61,
+                    "price_change_percentage_24h": 4.8,
+                    "_quote_volume_24h": 8_000_000,
+                },
+                {
+                    "symbol": "zeta",
+                    "_radar_freshness_score": 0.42,
+                    "price_change_percentage_24h": 0.4,
+                    "_quote_volume_24h": 3_000_000,
+                },
+                {
+                    "symbol": "usdc",
+                    "_radar_source_score": 0.90,
+                    "price_change_percentage_24h": 2.0,
+                },
+            ],
+            limit=10,
+        )
+        symbols = [str(row.get("symbol")).upper() for row in rows]
+        self.assertEqual(symbols, ["RAVE", "ZETA"])
+        self.assertEqual(float(rows[0].get("_quote_volume_24h") or 0.0), 8_000_000)
+
+    def test_radar_memory_candidate_snapshot_rows_accept_display_coin_rows(self):
+        rows = _radar_memory_candidate_snapshot_rows(
+            [
+                {
+                    "Coin": "DOGE",
+                    "_radar_source_kind": "exchange_breakout",
+                    "_radar_source_score": 0.75,
+                    "price_change_percentage_24h": -4.0,
+                    "_quote_volume_24h": 1_500_000_000,
+                }
+            ],
+            limit=10,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(str(rows[0].get("symbol")).upper(), "DOGE")
+        self.assertEqual(rows[0].get("_radar_source_kind"), "exchange_breakout")
+
+    def test_radar_memory_candidate_snapshot_rows_dedupe_by_strongest_base(self):
+        rows = _radar_memory_candidate_snapshot_rows(
+            [
+                {
+                    "symbol": "rave",
+                    "_radar_source_score": 0.32,
+                    "price_change_percentage_24h": 1.5,
+                },
+                {
+                    "symbol": "RAVE",
+                    "_radar_source_score": 0.78,
+                    "price_change_percentage_24h": 4.0,
+                },
+                {
+                    "symbol": "movr",
+                    "_radar_source_score": 0.62,
+                    "price_change_percentage_24h": 3.0,
+                },
+            ],
+            limit=1,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(str(rows[0].get("symbol")).upper(), "RAVE")
+        self.assertAlmostEqual(float(rows[0].get("_radar_source_score") or 0.0), 0.78)
+
+    def test_radar_memory_candidate_snapshot_rows_do_not_self_refresh_stale_memory(self):
+        rows = _radar_memory_candidate_snapshot_rows(
+            [
+                {
+                    "symbol": "rave",
+                    "_radar_memory_score": 0.95,
+                    "price_change_percentage_24h": 0.2,
+                    "_quote_volume_24h": 8_000_000,
+                },
+                {
+                    "symbol": "movr",
+                    "_radar_memory_score": 0.20,
+                    "price_change_percentage_24h": 2.2,
+                    "_quote_volume_24h": 4_000_000,
+                },
+            ],
+            limit=10,
+        )
+        self.assertEqual([str(row.get("symbol")).upper() for row in rows], ["MOVR"])
+
+    def test_merge_breakout_radar_rows_keeps_strongest_source_label(self):
+        rows = _merge_breakout_radar_market_rows(
+            [
+                {
+                    "symbol": "zeta",
+                    "_radar_source_score": 0.22,
+                    "_radar_source_kind": "trending",
+                    "total_volume": 200_000,
+                }
+            ],
+            [
+                {
+                    "symbol": "ZETA",
+                    "_radar_source_score": 0.83,
+                    "_radar_source_kind": "exchange_breakout",
+                    "_quote_volume_24h": 3_000_000,
+                    "_radar_trace_boost_score": 0.44,
+                }
+            ],
+        )
+        zeta_row = next(row for row in rows if str(row.get("symbol")).lower() == "zeta")
+        self.assertEqual(zeta_row.get("_radar_source_kind"), "exchange_breakout")
+        self.assertAlmostEqual(float(zeta_row.get("_radar_source_score") or 0.0), 0.83)
+        self.assertAlmostEqual(float(zeta_row.get("_radar_trace_boost_score") or 0.0), 0.44)
+        self.assertAlmostEqual(float(zeta_row.get("_quote_volume_24h") or 0.0), 3_000_000)
+
+    def test_merge_breakout_radar_rows_accepts_display_coin_rows(self):
+        rows = _merge_breakout_radar_market_rows(
+            [
+                {
+                    "Coin": "DOGE",
+                    "_radar_source_score": 0.75,
+                    "_radar_source_kind": "exchange_breakout",
+                    "_quote_volume_24h": 1_500_000_000,
+                }
+            ]
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(str(rows[0].get("symbol")).upper(), "DOGE")
+        self.assertEqual(rows[0].get("_radar_source_kind"), "exchange_breakout")
+
+    def test_candidate_scan_symbols_market_radar_protects_low_cap_breakout_from_quiet_majors(self):
+        major_rows = [
+            {
+                "symbol": f"major{i}",
+                "market_cap": 50_000_000_000 + i,
+                "price_change_percentage_24h": 0.15,
+                "total_volume": 1_000_000_000 + i,
+            }
+            for i in range(35)
+        ]
+        pairs = [f"MAJOR{i}/USDT" for i in range(35)] + ["ZETA/USDT"]
+        rows = [
+            *major_rows,
+            {
+                "symbol": "zeta",
+                "market_cap": 95_000_000,
+                "price_change_percentage_24h": 5.2,
+                "_quote_volume_24h": 4_000_000,
+                "_radar_source_score": 0.84,
+                "_radar_freshness_score": 0.76,
+                "_radar_memory_score": 0.38,
+            },
+        ]
+        out = _candidate_scan_symbols(
+            usdt_symbols=pairs,
+            market_rows=rows,
+            exclude_stables=False,
+            custom_bases_applied=[],
+            timeframe="1h",
+            direction_filter="Upside",
+            scan_mode=SCAN_MODE_RADAR,
+        )
+        self.assertLess(out.index("ZETA/USDT"), 5)
+
     def test_build_trending_scan_universe_combines_trends_movers_and_volume_anomalies(self):
         base_ts = pd.date_range("2026-01-01", periods=90, freq="h", tz="UTC")
 
@@ -2554,6 +3594,37 @@ class MarketTabLogicTests(unittest.TestCase):
         self.assertIn("APE/USDT", first_pairs)
         self.assertEqual(second_pairs, first_pairs)
         self.assertEqual(fetch_calls["count"], 1)
+
+    def test_build_trending_scan_universe_can_use_cached_only_volume_probe(self):
+        fetch_calls = {"count": 0}
+        universe_calls = {"count": 0}
+
+        def _frame(_symbol: str, *_args, **_kwargs) -> pd.DataFrame:
+            fetch_calls["count"] += 1
+            return pd.DataFrame()
+
+        pairs, rows, _mcap = _build_trending_scan_universe(
+            base_market_rows=[],
+            fetch_trending_coins=lambda: [],
+            fetch_top_gainers_losers=lambda limit=20: ([], []),
+            get_top_volume_usdt_symbols=lambda top_n=30: (
+                universe_calls.__setitem__("count", universe_calls["count"] + 1) or ["APE/USDT"],
+                [],
+            ),
+            get_market_cap_rows_for_symbols=lambda symbols, vs_currency="usd": [],
+            fetch_ohlcv=_frame,
+            direction_filter="Upside",
+            scan_timeframe="1h",
+            provider_fetch_n=30,
+            volume_anomaly_cache={},
+            volume_anomaly_symbol_limit=4,
+            volume_anomaly_fetch_missing=False,
+        )
+
+        self.assertEqual(fetch_calls["count"], 0)
+        self.assertEqual(universe_calls["count"], 0)
+        self.assertNotIn("APE/USDT", pairs)
+        self.assertFalse(any(str(row.get("_radar_source_kind")) == "volume_anomaly" for row in rows))
 
     def test_build_breakout_radar_universe_keeps_recent_memory_candidates_alive(self):
         requested_symbols: list[tuple[str, ...]] = []
@@ -2661,6 +3732,92 @@ class MarketTabLogicTests(unittest.TestCase):
             float(zeta_row.get("_radar_freshness_score") or 0.0),
             float(btc_row.get("_radar_freshness_score") or 0.0),
         )
+
+    def test_enrich_breakout_radar_freshness_shares_prescan_frame_cache(self):
+        calls: list[tuple[str, str, int]] = []
+
+        def _fake_fetch(symbol, timeframe, limit=0):
+            calls.append((str(symbol), str(timeframe), int(limit or 0)))
+            close = [100.0 + (idx * 0.18) for idx in range(100)]
+            return pd.DataFrame(
+                {
+                    "open": close,
+                    "high": [v * 1.003 for v in close],
+                    "low": [v * 0.997 for v in close],
+                    "close": close,
+                    "volume": [1_000] * len(close),
+                }
+            )
+
+        frame_cache: dict[tuple[str, str], pd.DataFrame | None] = {}
+        rows = _enrich_breakout_radar_freshness(
+            base_pairs=["ZETA/USDT"],
+            market_rows=[
+                {"symbol": "zeta", "_radar_source_score": 0.81, "_quote_volume_24h": 8_000_000, "price_change_percentage_24h": 5.4},
+            ],
+            fetch_ohlcv=_fake_fetch,
+            scan_timeframe="1h",
+            direction_filter="Upside",
+            max_candidates=8,
+            freshness_cache={},
+            frame_cache=frame_cache,
+        )
+        zeta_row = next(row for row in rows if str(row.get("symbol")).lower() == "zeta")
+        self.assertGreater(float(zeta_row.get("_radar_freshness_score") or 0.0), 0.0)
+        self.assertEqual(calls, [("ZETA/USDT", "15m", 96)])
+        self.assertIn(("ZETA", "15m"), frame_cache)
+        self.assertGreaterEqual(len(frame_cache[("ZETA", "15m")]), 56)
+
+        def _unexpected_fetch(_symbol, _timeframe, limit=0):
+            raise AssertionError("freshness should reuse the shared prescan frame")
+
+        rows_from_cache = _enrich_breakout_radar_freshness(
+            base_pairs=["ZETA/USDT"],
+            market_rows=[
+                {"symbol": "zeta", "_radar_source_score": 0.81, "_quote_volume_24h": 8_000_000, "price_change_percentage_24h": 5.4},
+            ],
+            fetch_ohlcv=_unexpected_fetch,
+            scan_timeframe="1h",
+            direction_filter="Upside",
+            max_candidates=8,
+            freshness_cache={},
+            frame_cache=frame_cache,
+        )
+        cached_row = next(row for row in rows_from_cache if str(row.get("symbol")).lower() == "zeta")
+        self.assertEqual(
+            float(cached_row.get("_radar_freshness_score") or 0.0),
+            float(zeta_row.get("_radar_freshness_score") or 0.0),
+        )
+
+    def test_enrich_breakout_radar_freshness_honors_candidate_limit(self):
+        calls: list[str] = []
+
+        def _fake_fetch(symbol, timeframe, limit=0):
+            calls.append(str(symbol))
+            close = [100.0 + idx * 0.2 for idx in range(90)]
+            return pd.DataFrame(
+                {
+                    "open": close,
+                    "high": [value * 1.003 for value in close],
+                    "low": [value * 0.997 for value in close],
+                    "close": close,
+                    "volume": [1_000] * len(close),
+                }
+            )
+
+        _enrich_breakout_radar_freshness(
+            base_pairs=["AAA/USDT", "BBB/USDT", "CCC/USDT"],
+            market_rows=[
+                {"symbol": "aaa", "_radar_source_score": 0.9, "_quote_volume_24h": 9_000_000},
+                {"symbol": "bbb", "_radar_source_score": 0.8, "_quote_volume_24h": 8_000_000},
+                {"symbol": "ccc", "_radar_source_score": 0.7, "_quote_volume_24h": 7_000_000},
+            ],
+            fetch_ohlcv=_fake_fetch,
+            scan_timeframe="1h",
+            direction_filter="Upside",
+            max_candidates=2,
+        )
+        self.assertEqual(calls, ["AAA/USDT", "BBB/USDT"])
 
     def test_enrich_breakout_radar_freshness_respects_direction_filter(self):
         close = [100, 100.2, 100.4, 100.5, 100.6, 100.7, 100.9, 101.0, 101.1, 101.3, 101.4, 101.5,
@@ -2798,7 +3955,7 @@ class MarketTabLogicTests(unittest.TestCase):
         )
         self.assertGreater(rave_early, enj_late_chase)
 
-    def test_emerging_market_result_priority_keeps_tradeable_setup_classes_above_skip(self):
+    def test_legacy_emerging_mode_uses_market_radar_priority(self):
         stronger = {
             "Coin": "RAVE",
             "__emerging_rank_score": 62.0,
@@ -2829,7 +3986,238 @@ class MarketTabLogicTests(unittest.TestCase):
             [weaker, stronger],
             key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_EMERGING),
         )
+        radar_order = sorted(
+            [weaker, stronger],
+            key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_RADAR),
+        )
+
         self.assertEqual(ordered[0]["Coin"], "RAVE")
+        self.assertEqual(ordered, radar_order)
+
+    def test_market_radar_priority_keeps_clean_setup_above_noisy_discovery(self):
+        clean_setup = {
+            "Coin": "RAVE",
+            "__emerging_rank_score": 62.0,
+            "__emerging_direction": "Upside",
+            "__actionable_frame_score": 58.0,
+            "__actionable_tactical_score": 48.0,
+            "__actionable_setup_score": 54.0,
+            "__action_raw": "WATCH",
+            "__confidence_val": 82.0,
+            "__ai_confidence_val": 72.0,
+            "__execution_friction_score": 78.0,
+            "__expectancy_bias_score": 58.0,
+            "__archive_guardrail_penalty": 0.0,
+        }
+        noisy_discovery = {
+            "Coin": "BTC",
+            "__emerging_rank_score": 86.0,
+            "__emerging_direction": "Upside",
+            "__actionable_frame_score": 84.0,
+            "__actionable_tactical_score": 76.0,
+            "__actionable_setup_score": 74.0,
+            "__action_raw": "SKIP",
+            "__confidence_val": 67.0,
+            "__ai_confidence_val": 55.0,
+            "__execution_friction_score": 43.0,
+            "__expectancy_bias_score": 50.0,
+            "__archive_guardrail_penalty": 0.0,
+        }
+        ordered = sorted(
+            [noisy_discovery, clean_setup],
+            key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_RADAR),
+        )
+        self.assertEqual(ordered[0]["Coin"], "RAVE")
+
+    def test_market_radar_priority_keeps_early_above_high_confidence_watch(self):
+        high_quality_watch = {
+            "Coin": "RAVE",
+            "__emerging_rank_score": 96.0,
+            "__emerging_direction": "Upside",
+            "__actionable_frame_score": 92.0,
+            "__actionable_tactical_score": 88.0,
+            "__actionable_setup_score": 84.0,
+            "__actionable_context_score": 82.0,
+            "__action_raw": "WATCH",
+            "__confidence_val": 92.0,
+            "__ai_confidence_val": 90.0,
+            "__execution_friction_score": 88.0,
+            "__expectancy_bias_score": 72.0,
+            "__archive_guardrail_penalty": 0.0,
+        }
+        early_setup = {
+            "Coin": "ZETA",
+            "__emerging_rank_score": 58.0,
+            "__emerging_direction": "Upside",
+            "__actionable_frame_score": 56.0,
+            "__actionable_tactical_score": 54.0,
+            "__actionable_setup_score": 58.0,
+            "__actionable_context_score": 55.0,
+            "__action_raw": "EARLY",
+            "__confidence_val": 76.0,
+            "__ai_confidence_val": 68.0,
+            "__execution_friction_score": 72.0,
+            "__expectancy_bias_score": 60.0,
+            "__archive_guardrail_penalty": 0.0,
+        }
+        ordered = sorted(
+            [high_quality_watch, early_setup],
+            key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_RADAR),
+        )
+        self.assertEqual(ordered[0]["Coin"], "ZETA")
+
+    def test_market_radar_priority_keeps_setup_stage_before_opportunity_score(self):
+        staged_enter = {
+            "Coin": "SLOW",
+            "__emerging_rank_score": 30.0,
+            "__emerging_direction": "Neutral",
+            "__actionable_frame_score": 42.0,
+            "__actionable_tactical_score": 41.0,
+            "__actionable_setup_score": 43.0,
+            "__actionable_context_score": 40.0,
+            "__action_raw": "ENTER_TREND_LED",
+            "__confidence_val": 55.0,
+            "__ai_confidence_val": 45.0,
+            "__execution_friction_score": 44.0,
+            "__expectancy_bias_score": 45.0,
+            "__archive_guardrail_penalty": 3.0,
+        }
+        strong_watch = {
+            "Coin": "FAST",
+            "__emerging_rank_score": 88.0,
+            "__emerging_direction": "Upside",
+            "__spot_direction_raw": "Upside",
+            "__ai_direction_raw": "Upside",
+            "__actionable_frame_score": 82.0,
+            "__actionable_tactical_score": 78.0,
+            "__actionable_setup_score": 74.0,
+            "__actionable_context_score": 72.0,
+            "__action_raw": "WATCH",
+            "__confidence_val": 84.0,
+            "__ai_confidence_val": 80.0,
+            "__execution_friction_score": 76.0,
+            "__expectancy_bias_score": 62.0,
+            "__archive_guardrail_penalty": 0.0,
+        }
+        ordered = sorted(
+            [staged_enter, strong_watch],
+            key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_RADAR),
+        )
+        self.assertEqual(ordered[0]["Coin"], "SLOW")
+
+    def test_market_radar_priority_uses_guardrail_inside_same_setup_class(self):
+        clean_watch = {
+            "Coin": "RAVE",
+            "__emerging_rank_score": 65.0,
+            "__emerging_direction": "Upside",
+            "__actionable_frame_score": 58.0,
+            "__actionable_tactical_score": 58.0,
+            "__actionable_setup_score": 57.0,
+            "__actionable_context_score": 61.0,
+            "__action_raw": "WATCH",
+            "__risk_unit_fraction": 0.20,
+            "__adaptive_edge_score": 58.0,
+            "__actionable_archive_score": 1.4,
+            "__confidence_val": 72.0,
+            "__ai_confidence_val": 64.0,
+            "__execution_friction_score": 70.0,
+            "__expectancy_bias_score": 56.0,
+            "__archive_guardrail_penalty": 0.0,
+        }
+        noisy_watch = {
+            **clean_watch,
+            "Coin": "ENJ",
+            "__actionable_frame_score": 72.0,
+            "__actionable_tactical_score": 74.0,
+            "__actionable_setup_score": 70.0,
+            "__actionable_context_score": 43.0,
+            "__risk_unit_fraction": 0.05,
+            "__adaptive_edge_score": 42.0,
+            "__actionable_archive_score": -4.0,
+            "__archive_guardrail_penalty": 7.0,
+        }
+        ordered = sorted(
+            [noisy_watch, clean_watch],
+            key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_RADAR),
+        )
+        self.assertEqual(ordered[0]["Coin"], "RAVE")
+
+    def test_market_radar_priority_penalizes_high_confidence_ai_direction_conflict(self):
+        aligned_watch = {
+            "Coin": "RAVE",
+            "__emerging_rank_score": 62.0,
+            "__emerging_direction": "Upside",
+            "__spot_direction_raw": "Upside",
+            "__ai_direction_raw": "Upside",
+            "__actionable_frame_score": 58.0,
+            "__actionable_tactical_score": 48.0,
+            "__actionable_setup_score": 54.0,
+            "__actionable_context_score": 50.0,
+            "__action_raw": "WATCH",
+            "__confidence_val": 76.0,
+            "__ai_confidence_val": 72.0,
+            "__execution_friction_score": 78.0,
+            "__expectancy_bias_score": 58.0,
+            "__archive_guardrail_penalty": 0.0,
+        }
+        conflicted_watch = {
+            **aligned_watch,
+            "Coin": "WLFI",
+            "__emerging_rank_score": 68.0,
+            "__spot_direction_raw": "Upside",
+            "__ai_direction_raw": "Downside",
+            "__confidence_val": 82.0,
+            "__ai_confidence_val": 96.0,
+        }
+        ordered = sorted(
+            [conflicted_watch, aligned_watch],
+            key=lambda row: _market_result_priority_key_for_mode(row, SCAN_MODE_RADAR),
+        )
+        self.assertEqual(ordered[0]["Coin"], "RAVE")
+
+    def test_market_radar_rerank_can_promote_produced_row_after_learning_fields(self):
+        initially_visible = {
+            "Coin": "DOGE",
+            "__emerging_rank_score": 68.0,
+            "__emerging_direction": "Upside",
+            "__actionable_frame_score": 70.0,
+            "__actionable_tactical_score": 72.0,
+            "__actionable_setup_score": 71.0,
+            "__actionable_context_score": 42.0,
+            "__action_raw": "WATCH",
+            "__risk_unit_fraction": 0.04,
+            "__adaptive_edge_score": 43.0,
+            "__actionable_archive_score": -3.2,
+            "__confidence_val": 74.0,
+            "__ai_confidence_val": 60.0,
+            "__execution_friction_score": 48.0,
+            "__expectancy_bias_score": 43.0,
+            "__archive_guardrail_penalty": 6.0,
+        }
+        produced_after_learning = {
+            "Coin": "RAVE",
+            "__emerging_rank_score": 66.0,
+            "__emerging_direction": "Upside",
+            "__actionable_frame_score": 62.0,
+            "__actionable_tactical_score": 64.0,
+            "__actionable_setup_score": 63.0,
+            "__actionable_context_score": 74.0,
+            "__action_raw": "WATCH",
+            "__risk_unit_fraction": 0.25,
+            "__adaptive_edge_score": 68.0,
+            "__actionable_archive_score": 4.6,
+            "__confidence_val": 72.0,
+            "__ai_confidence_val": 62.0,
+            "__execution_friction_score": 70.0,
+            "__expectancy_bias_score": 59.0,
+            "__archive_guardrail_penalty": 0.0,
+        }
+        ranked = _market_ranked_results_for_mode(
+            [initially_visible, produced_after_learning],
+            SCAN_MODE_RADAR,
+            limit_n=1,
+        )
+        self.assertEqual(ranked[0]["Coin"], "RAVE")
 
     def test_trending_priority_uses_archive_bias_only_after_live_radar_quality(self):
         archive_supported = {
@@ -2877,6 +4265,7 @@ class MarketTabLogicTests(unittest.TestCase):
                 produced_n=20,
                 custom_mode_active=False,
                 used_major_fallback=False,
+                scan_mode=SCAN_MODE_BROAD,
             ),
             112,
         )
@@ -2887,6 +4276,7 @@ class MarketTabLogicTests(unittest.TestCase):
                 produced_n=20,
                 custom_mode_active=False,
                 used_major_fallback=False,
+                scan_mode=SCAN_MODE_BROAD,
             ),
             250,
         )

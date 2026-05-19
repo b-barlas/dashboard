@@ -23,9 +23,11 @@ class MarketCoinColumnContractTests(unittest.TestCase):
         self.assertIn("tuple(custom_bases_applied)", self.text)
         self.assertIn("if exclude_stables:", self.text)
         self.assertIn(
-            "candidates = [s for s in candidates if \"/\" in s and not _is_stable_base(s.split(\"/\")[0].upper())]",
+            "candidates = [s for s in candidates if \"/\" in s and not _is_excluded_trading_base(s.split(\"/\")[0].upper())]",
             self.text,
         )
+        self.assertIn("exclude_stables = True", self.text)
+        self.assertNotIn("market_exclude_stables", self.text)
 
     def test_sorting_has_deterministic_tie_breakers(self):
         self.assertIn('def _market_result_priority_key(row: dict)', self.text)

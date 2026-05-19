@@ -58,6 +58,14 @@ class MarketTablePriceDeltaContractTests(unittest.TestCase):
             self.text,
             msg="Delta fallback must use ticker percentage only when candle delta is unavailable.",
         )
+        fallback_start = self.text.index("if price_change is None:")
+        fallback_end = self.text.index("indicators_started = time.perf_counter()", fallback_start)
+        fallback_block = self.text[fallback_start:fallback_end]
+        self.assertNotIn(
+            "price_change = None",
+            fallback_block,
+            msg="Ticker fallback result must not be overwritten before rendering Delta.",
+        )
 
     def test_ui_copy_matches_price_delta_semantics(self):
         self.assertIn(
@@ -66,15 +74,15 @@ class MarketTablePriceDeltaContractTests(unittest.TestCase):
             msg="Price caption must state latest candle close.",
         )
         self.assertIn(
-            "change from previous closed candle to latest closed candle on selected timeframe",
+            "change from previous closed candle to latest closed candle on the row's Best TF",
             copy_text("market.help.scanner_guide_html"),
-            msg="Column guide must explain selected-timeframe closed-candle delta semantics.",
+            msg="Column guide must explain row Best-TF closed-candle delta semantics.",
         )
 
     def test_market_scanner_copy_names_current_scan_modes(self):
         guide = copy_text("market.help.scanner_guide_html")
-        self.assertIn("Breakout Radar", guide)
-        self.assertIn("Trending Coins", guide)
+        self.assertIn("Market Radar", guide)
+        self.assertIn("one ranked table", guide)
         self.assertIn("Custom Coins", guide)
         self.assertIn("press Enter or Scan", guide)
         self.assertNotIn("Run Scan", guide)

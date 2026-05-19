@@ -286,10 +286,12 @@ def _build_recent_trace(
     *,
     timeframe: str,
     predictor,
+    trace_offsets: tuple[int, ...] | None = None,
 ) -> list[TraceSample]:
     trace: list[TraceSample] = []
     total_len = len(safe)
-    for offset in _trace_offsets(timeframe):
+    offsets = tuple(trace_offsets) if trace_offsets is not None else _trace_offsets(timeframe)
+    for offset in offsets:
         end_idx = total_len - int(offset)
         if end_idx < MIN_AI_ROWS:
             continue
@@ -388,19 +390,14 @@ def _stability_quality(trace: list[TraceSample], dominant_dir: str) -> float:
     return 25.0
 
 
-def analyze_timeframe_ai_bias(
-    df: pd.DataFrame | None,
+def _timeframe_ai_bias_from_trace(
+    trace: list[TraceSample],
     *,
     timeframe: str,
-    predictor=ml_ensemble_predict,
+    empty_note: str = "AI model could not produce enough recent closed-bar context.",
 ) -> TimeframeAIBiasSnapshot:
-    safe = _safe_frame(df)
-    if safe is None:
-        return _empty_tf_snapshot(timeframe)
-
-    trace = _build_recent_trace(safe, timeframe=timeframe, predictor=predictor)
     if not trace:
-        return _empty_tf_snapshot(timeframe, note="AI model could not produce enough recent closed-bar context.")
+        return _empty_tf_snapshot(timeframe, note=empty_note)
     latest = trace[0]
     trace_model_votes = _trace_model_votes(trace)
     status = str(latest.get("status") or "").strip().lower()
@@ -497,6 +494,30 @@ def analyze_timeframe_ai_bias(
     )
 
 
+def analyze_timeframe_ai_bias(
+    df: pd.DataFrame | None,
+    *,
+    timeframe: str,
+    predictor=ml_ensemble_predict,
+    trace_offsets: tuple[int, ...] | None = None,
+) -> TimeframeAIBiasSnapshot:
+    safe = _safe_frame(df)
+    if safe is None:
+        return _empty_tf_snapshot(timeframe)
+
+    trace = _build_recent_trace(
+        safe,
+        timeframe=timeframe,
+        predictor=predictor,
+        trace_offsets=trace_offsets,
+    )
+    return _timeframe_ai_bias_from_trace(
+        trace,
+        timeframe=timeframe,
+        empty_note="AI model could not produce enough recent closed-bar context.",
+    )
+
+
 def _htf_support_votes(
     final_direction: str,
     lead: TimeframeAIBiasSnapshot,
@@ -513,25 +534,13 @@ def _htf_support_votes(
     return max(0, min(3, support))
 
 
-def build_ai_spot_bias_snapshot(
+def _build_ai_spot_bias_from_timeframes(
     *,
-    df_4h: pd.DataFrame | None,
-    df_1d: pd.DataFrame | None,
-    predictor=ml_ensemble_predict,
-    lead_df: pd.DataFrame | None = None,
-    confirm_df: pd.DataFrame | None = None,
-    lead_timeframe: str = "1d",
-    confirm_timeframe: str = "4h",
+    lead: TimeframeAIBiasSnapshot,
+    confirm: TimeframeAIBiasSnapshot,
+    lead_timeframe: str,
+    confirm_timeframe: str,
 ) -> AISpotBiasSnapshot:
-    if lead_df is None and confirm_df is None:
-        lead_df = df_1d
-        confirm_df = df_4h
-        lead_timeframe = "1d"
-        confirm_timeframe = "4h"
-
-    confirm = analyze_timeframe_ai_bias(confirm_df, timeframe=confirm_timeframe, predictor=predictor)
-    lead = analyze_timeframe_ai_bias(lead_df, timeframe=lead_timeframe, predictor=predictor)
-
     degraded_data = bool(confirm.degraded or lead.degraded)
     timeframe_alignment, timeframe_conflict = _timeframe_alignment(lead, confirm)
     score = float(np.clip(0.60 * lead.score + 0.40 * confirm.score, -100.0, 100.0))
@@ -576,6 +585,66 @@ def build_ai_spot_bias_snapshot(
         support_votes=support_votes,
         lead_timeframe=lead_timeframe,
         confirm_timeframe=confirm_timeframe,
+    )
+
+
+def build_ai_spot_bias_snapshot(
+    *,
+    df_4h: pd.DataFrame | None,
+    df_1d: pd.DataFrame | None,
+    predictor=ml_ensemble_predict,
+    lead_df: pd.DataFrame | None = None,
+    confirm_df: pd.DataFrame | None = None,
+    lead_timeframe: str = "1d",
+    confirm_timeframe: str = "4h",
+    trace_offsets: tuple[int, ...] | None = None,
+) -> AISpotBiasSnapshot:
+    if lead_df is None and confirm_df is None:
+        lead_df = df_1d
+        confirm_df = df_4h
+        lead_timeframe = "1d"
+        confirm_timeframe = "4h"
+
+    same_anchor_frame = lead_df is confirm_df and str(lead_timeframe).lower() == str(confirm_timeframe).lower()
+    confirm = analyze_timeframe_ai_bias(
+        confirm_df,
+        timeframe=confirm_timeframe,
+        predictor=predictor,
+        trace_offsets=trace_offsets,
+    )
+    lead = confirm if same_anchor_frame else analyze_timeframe_ai_bias(
+        lead_df,
+        timeframe=lead_timeframe,
+        predictor=predictor,
+        trace_offsets=trace_offsets,
+    )
+
+    return _build_ai_spot_bias_from_timeframes(
+        lead=lead,
+        confirm=confirm,
+        lead_timeframe=lead_timeframe,
+        confirm_timeframe=confirm_timeframe,
+    )
+
+
+def build_ai_spot_bias_snapshot_from_prediction(
+    *,
+    probability_up: float,
+    raw_direction: str,
+    details: dict | None,
+    timeframe: str,
+) -> AISpotBiasSnapshot:
+    """Fast path for callers that already computed the latest AI prediction."""
+
+    safe_details = details if isinstance(details, dict) else {}
+    sample = _trace_sample(float(probability_up), str(raw_direction or ""), safe_details)
+    sample["status"] = str(safe_details.get("status") or "").strip().lower()
+    tf_snapshot = _timeframe_ai_bias_from_trace([sample], timeframe=timeframe)
+    return _build_ai_spot_bias_from_timeframes(
+        lead=tf_snapshot,
+        confirm=tf_snapshot,
+        lead_timeframe=timeframe,
+        confirm_timeframe=timeframe,
     )
 
 

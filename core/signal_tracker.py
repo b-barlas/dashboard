@@ -1844,6 +1844,7 @@ def fetch_signal_forward_windows_df(
                 f"({placeholders}) ORDER BY signal_key DESC, bars_ahead ASC"
             )
             chunks.append(_read_tracker_sql_query(path, query, key_chunk))
+        chunks = [chunk for chunk in chunks if chunk is not None and not chunk.empty]
         if not chunks:
             return pd.DataFrame()
         out = pd.concat(chunks, ignore_index=True)

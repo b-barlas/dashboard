@@ -27,6 +27,15 @@ STABLE_BASE_SYMBOLS: frozenset[str] = frozenset(
     }
 )
 
+ASSET_PEGGED_BASE_SYMBOLS: frozenset[str] = frozenset(
+    {
+        "XAUT",
+        "PAXG",
+        "XAU",
+        "XAG",
+    }
+)
+
 
 BASE_ALIASES: dict[str, tuple[str, ...]] = {
     "BTC": ("BTC", "XBT"),
@@ -51,6 +60,17 @@ def is_stable_base_symbol(symbol: str) -> bool:
     if not s:
         return False
     return s in STABLE_BASE_SYMBOLS
+
+
+def is_asset_pegged_base_symbol(symbol: str) -> bool:
+    s = str(symbol or "").strip().upper()
+    if not s:
+        return False
+    return s in ASSET_PEGGED_BASE_SYMBOLS
+
+
+def is_excluded_trading_base_symbol(symbol: str) -> bool:
+    return is_stable_base_symbol(symbol) or is_asset_pegged_base_symbol(symbol)
 
 
 def base_symbol_candidates(symbol: str) -> tuple[str, ...]:

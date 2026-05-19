@@ -4,17 +4,43 @@ import math
 
 import pandas as pd
 
-from core.symbols import canonical_base_symbol, is_stable_base_symbol
+from core.symbols import canonical_base_symbol, is_excluded_trading_base_symbol
 
+SCAN_MODE_RADAR = "Market Radar"
 SCAN_MODE_BROAD = "Broad Market"
 SCAN_MODE_ACTIONABLE = "Actionable Setups"
 SCAN_MODE_EMERGING = "Breakout Radar"
 SCAN_MODE_TRENDING = "Trending Coins"
 
 
+_MARKET_RADAR_DISCOVERY_LANES = {
+    "gainers_losers",
+    "trending",
+    "exchange_breakout",
+    "volume_anomaly",
+    "trace_feedback",
+    "memory",
+    "archive",
+}
+
+
+def _market_radar_scan_budget(requested_n: int) -> int:
+    requested = max(1, int(requested_n))
+    return min(48, max(requested + 14, requested * 2))
+
+
+def _market_radar_initial_batch_size(requested_n: int) -> int:
+    requested = max(1, int(requested_n))
+    return min(
+        _market_radar_scan_budget(requested),
+        max(requested + 8, int(math.ceil(requested * 1.6))),
+    )
+
+
 def _sortable_float(value: object) -> float:
     try:
-        return float(value or 0.0)
+        out = float(value) if value is not None else 0.0
+        return out if math.isfinite(out) else 0.0
     except Exception:
         return 0.0
 
@@ -36,13 +62,19 @@ def _signal_tracker_direction_key(value: object) -> str:
 
 def _normalize_scan_mode(value: object) -> str:
     raw = str(value or "").strip().lower()
+    if raw in {"", "default", "auto", "scanner", "market scanner"}:
+        return SCAN_MODE_RADAR
+    if raw in {SCAN_MODE_RADAR.lower(), "radar", "smart radar", "unified radar", "market setup radar"}:
+        return SCAN_MODE_RADAR
+    if raw in {SCAN_MODE_BROAD.lower(), "broad", "broad market"}:
+        return SCAN_MODE_BROAD
     if raw in {SCAN_MODE_ACTIONABLE.lower(), "setup hunter"}:
         return SCAN_MODE_ACTIONABLE
     if raw in {SCAN_MODE_EMERGING.lower(), "early momentum", "emerging", "emerging movers", "breakout radar"}:
         return SCAN_MODE_EMERGING
     if raw in {SCAN_MODE_TRENDING.lower(), "whale tracker", "whale flow", "attention radar", "volume radar"}:
         return SCAN_MODE_TRENDING
-    return SCAN_MODE_BROAD
+    return SCAN_MODE_RADAR
 
 
 def _valid_market_bases(market_rows: list[dict]) -> set[str]:
@@ -59,6 +91,118 @@ def _filter_scan_symbols(usdt_symbols: list[str], market_rows: list[dict]) -> li
     if not valid_bases:
         return list(usdt_symbols)
     return [pair for pair in usdt_symbols if _canonical_pair_base(pair) in valid_bases]
+
+
+def _market_radar_row_lane(row: dict) -> str:
+    source_kind = str((row or {}).get("_radar_source_kind") or (row or {}).get("radar_source_kind") or "").strip().lower()
+    if source_kind:
+        return source_kind
+    if _sortable_float((row or {}).get("_radar_trace_boost_score") or (row or {}).get("radar_trace_boost_score")) > 0:
+        return "trace_feedback"
+    if _sortable_float((row or {}).get("_radar_memory_score") or (row or {}).get("radar_memory_score")) > 0:
+        return "memory"
+    if abs(_sortable_float((row or {}).get("_radar_archive_edge_score") or (row or {}).get("radar_archive_edge_score"))) > 0:
+        return "archive"
+    return "liquidity"
+
+
+def _market_radar_universe_quality_snapshot(
+    *,
+    candidate_symbols: list[str],
+    market_rows: list[dict],
+    exchange_ready_symbols: list[str] | None = None,
+    requested_n: int,
+) -> dict[str, object]:
+    """Summarize candidate-universe health without changing the live ranking."""
+    requested = max(1, int(requested_n))
+    candidate_bases: list[str] = []
+    seen_candidates: set[str] = set()
+    for symbol in list(candidate_symbols or []):
+        base = _canonical_pair_base(symbol)
+        if not base or base in seen_candidates:
+            continue
+        seen_candidates.add(base)
+        candidate_bases.append(base)
+
+    exchange_ready_bases: set[str] = set()
+    for symbol in list(exchange_ready_symbols or []):
+        base = _canonical_pair_base(symbol)
+        if base:
+            exchange_ready_bases.add(base)
+
+    rows_by_base: dict[str, dict] = {}
+    row_lane_counts: dict[str, int] = {}
+    for row in list(market_rows or []):
+        if not isinstance(row, dict):
+            continue
+        base = canonical_base_symbol((row or {}).get("symbol") or (row or {}).get("Coin") or "")
+        if not base or base in rows_by_base:
+            continue
+        rows_by_base[base] = row
+        lane = _market_radar_row_lane(row)
+        row_lane_counts[lane] = int(row_lane_counts.get(lane, 0)) + 1
+
+    candidate_lane_counts: dict[str, int] = {}
+    for base in candidate_bases:
+        lane = _market_radar_row_lane(rows_by_base.get(base, {}))
+        candidate_lane_counts[lane] = int(candidate_lane_counts.get(lane, 0)) + 1
+
+    candidate_count = int(len(candidate_bases))
+    exchange_ready_count = int(
+        len([base for base in candidate_bases if not exchange_ready_bases or base in exchange_ready_bases])
+    )
+    discovery_lane_count = int(
+        sum(1 for lane in _MARKET_RADAR_DISCOVERY_LANES if int(candidate_lane_counts.get(lane, 0)) > 0)
+    )
+    discovery_candidate_count = int(
+        sum(int(candidate_lane_counts.get(lane, 0)) for lane in _MARKET_RADAR_DISCOVERY_LANES)
+    )
+
+    score = 0.0
+    if candidate_count >= requested * 4:
+        score += 34.0
+    elif candidate_count >= requested * 2:
+        score += 27.0
+    elif candidate_count >= requested:
+        score += 18.0
+    else:
+        score += 8.0 * (candidate_count / requested)
+
+    if exchange_ready_count >= requested * 2:
+        score += 26.0
+    elif exchange_ready_count >= requested:
+        score += 18.0
+    else:
+        score += 10.0 * (exchange_ready_count / requested)
+
+    if discovery_lane_count >= 4:
+        score += 26.0
+    elif discovery_lane_count >= 3:
+        score += 21.0
+    elif discovery_lane_count >= 2:
+        score += 15.0
+    elif discovery_lane_count == 1:
+        score += 8.0
+
+    discovery_share = discovery_candidate_count / max(1, candidate_count)
+    score += min(14.0, discovery_share * 14.0)
+
+    if row_lane_counts:
+        score += 6.0
+
+    tier = "strong" if score >= 78.0 else "healthy" if score >= 56.0 else "thin"
+    return {
+        "tier": tier,
+        "score": round(float(max(0.0, min(100.0, score))), 1),
+        "requested": requested,
+        "candidate_count": candidate_count,
+        "exchange_ready_count": exchange_ready_count,
+        "market_row_count": int(len(rows_by_base)),
+        "discovery_lane_count": discovery_lane_count,
+        "discovery_candidate_count": discovery_candidate_count,
+        "candidate_lane_counts": candidate_lane_counts,
+        "row_lane_counts": row_lane_counts,
+    }
 
 
 def _market_row_pct_change(row: dict) -> float:
@@ -222,6 +366,85 @@ def _emerging_universe_market_cap_score(market_cap: object) -> float:
     if mcap > 0:
         return 0.45
     return 0.25
+
+
+def _market_radar_universe_ordered_symbols(
+    usdt_symbols: list[str],
+    market_rows: list[dict],
+    *,
+    timeframe: str,
+    direction_filter: str,
+    classify_symbol_sector=None,
+) -> list[str]:
+    if not usdt_symbols or not market_rows:
+        return list(usdt_symbols)
+    ranked_rows = _dedupe_market_rows(market_rows)
+    if not ranked_rows:
+        return list(usdt_symbols)
+    sector_scores = _actionable_sector_bias_scores(
+        ranked_rows,
+        direction_filter=direction_filter,
+        classify_symbol_sector=classify_symbol_sector,
+    )
+    total = max(len(ranked_rows) - 1, 1)
+    score_map: dict[str, float] = {}
+    for idx, row in enumerate(ranked_rows):
+        base = canonical_base_symbol((row or {}).get("symbol") or "")
+        if not base:
+            continue
+        quote_volume = max(
+            _sortable_float((row or {}).get("_quote_volume_24h")),
+            _sortable_float((row or {}).get("total_volume")),
+            _sortable_float((row or {}).get("_volume_24h")),
+        )
+        if quote_volume > 0:
+            volume_score = max(0.0, min(1.0, (math.log10(max(quote_volume, 1.0)) - 5.0) / 3.4))
+        else:
+            volume_score = max(0.0, 1.0 - (idx / total))
+        broad_move_score = _actionable_universe_movement_score(
+            _market_row_pct_change(row),
+            timeframe=timeframe,
+            direction_filter=direction_filter,
+        )
+        breakout_move_score = _emerging_universe_movement_score(
+            _market_row_pct_change(row),
+            timeframe=timeframe,
+            direction_filter=direction_filter,
+        )
+        mcap_score = _emerging_universe_market_cap_score((row or {}).get("market_cap"))
+        sector = str(classify_symbol_sector(base) or "").strip() if callable(classify_symbol_sector) else ""
+        sector_score = _sortable_float(sector_scores.get(sector, 0.5 if sector_scores else 0.0))
+        radar_source_score = _sortable_float((row or {}).get("_radar_source_score", 0.0))
+        freshness_score = _sortable_float((row or {}).get("_radar_freshness_score", 0.0))
+        memory_score = _sortable_float((row or {}).get("_radar_memory_score", 0.0))
+        archive_edge_score = _sortable_float((row or {}).get("_radar_archive_edge_score", 0.0))
+        trace_boost_score = _sortable_float((row or {}).get("_radar_trace_boost_score", 0.0))
+        discovery_score = max(radar_source_score, freshness_score, memory_score, trace_boost_score)
+        quality_score = (
+            0.24 * volume_score
+            + 0.18 * broad_move_score
+            + 0.22 * breakout_move_score
+            + 0.12 * mcap_score
+            + 0.06 * sector_score
+            + 0.17 * radar_source_score
+            + 0.18 * freshness_score
+            + 0.14 * memory_score
+            + 0.10 * archive_edge_score
+            + 0.08 * trace_boost_score
+        )
+        # A small direct discovery lift keeps fast low-cap movers from being
+        # buried behind clean but quiet majors.
+        score_map[base] = quality_score + 0.10 * discovery_score
+
+    indexed_pairs = list(enumerate(usdt_symbols))
+    ordered_pairs = sorted(
+        indexed_pairs,
+        key=lambda item: (
+            -score_map.get(_canonical_pair_base(item[1]), -1.0),
+            item[0],
+        ),
+    )
+    return [pair for _idx, pair in ordered_pairs]
 
 
 def _breakout_late_chase_penalty(
@@ -397,7 +620,7 @@ def _build_breakout_archive_feedback_map(
     d = events_df.copy()
     if "scan_focus" in d.columns:
         focus_mode = d["scan_focus"].fillna("").astype(str).map(_normalize_scan_mode)
-        d = d[focus_mode.eq(SCAN_MODE_EMERGING)]
+        d = d[focus_mode.isin({SCAN_MODE_RADAR, SCAN_MODE_EMERGING})]
     if d.empty:
         return {}
     tf_key = str(timeframe or "").strip().lower()
@@ -490,6 +713,28 @@ def _scanner_trace_feedback_interest(row: dict) -> float:
     return max(0.0, min(1.0, float(score)))
 
 
+def _scanner_trace_candidate_interest(row: dict) -> float:
+    source_score = max(0.0, min(1.0, _sortable_float((row or {}).get("radar_source_score"))))
+    freshness_score = max(0.0, min(1.0, _sortable_float((row or {}).get("radar_freshness_score"))))
+    emerging_score = max(0.0, min(1.0, _sortable_float((row or {}).get("emerging_rank_score")) / 100.0))
+    move_score = max(0.0, min(1.0, abs(_sortable_float((row or {}).get("delta_pct"))) / 8.0))
+    discovery_score = max(source_score, freshness_score)
+    if discovery_score < 0.45 or move_score < 0.25:
+        return 0.0
+    candidate_rank = _sortable_float((row or {}).get("candidate_rank"))
+    rank_score = 0.0
+    if candidate_rank > 0:
+        rank_score = max(0.0, min(1.0, 1.0 - ((candidate_rank - 1.0) / 80.0)))
+    score = (
+        0.52 * discovery_score
+        + 0.24 * move_score
+        + 0.14 * rank_score
+        + 0.06 * emerging_score
+        + 0.04 * min(1.0, source_score + freshness_score)
+    )
+    return max(0.0, min(1.0, float(score)))
+
+
 def _trace_age_hours(value: object, *, now_ts: pd.Timestamp) -> float:
     ts = pd.to_datetime(value, utc=True, errors="coerce")
     if pd.isna(ts):
@@ -505,8 +750,10 @@ def _build_scanner_trace_feedback_map(
     trace_rows: object,
     *,
     min_interest_score: float = 0.28,
-    max_age_hours: int = 24,
+    min_candidate_interest_score: float = 0.46,
+    max_age_hours: int = 36,
     now: object | None = None,
+    archive_feedback_map: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, dict[str, float]]:
     rows = _scanner_trace_feedback_rows(trace_rows)
     if not rows:
@@ -521,7 +768,7 @@ def _build_scanner_trace_feedback_map(
         if not base:
             continue
         stage = str((row or {}).get("stage") or "").strip().lower()
-        if stage not in {"ranked_out", "shown"}:
+        if stage not in {"candidate", "ranked_out", "shown"}:
             continue
         age_hours = _trace_age_hours((row or {}).get("observed_at"), now_ts=now_ts)
         if age_hours > float(max_age_hours):
@@ -536,35 +783,104 @@ def _build_scanner_trace_feedback_map(
         ranked_out_rows = [
             row for row in base_rows if str(row.get("stage") or "").strip().lower() == "ranked_out"
         ]
-        if not ranked_out_rows:
-            continue
+        candidate_rows = [
+            row for row in base_rows if str(row.get("stage") or "").strip().lower() == "candidate"
+        ]
+        shown_rows = [
+            row for row in base_rows if str(row.get("stage") or "").strip().lower() == "shown"
+        ]
+        shown_count = len(shown_rows)
+        ranked_out_boost = 0.0
+        ranked_out_interest = 0.0
+        ranked_out_age = float("inf")
         interests = sorted(
             [_sortable_float(row.get("_trace_interest")) for row in ranked_out_rows],
             reverse=True,
         )
-        best_interest = float(interests[0]) if interests else 0.0
-        if best_interest < float(min_interest_score):
-            continue
-        avg_interest = sum(interests[:3]) / max(1, len(interests[:3]))
-        youngest_age = min(_sortable_float(row.get("_trace_age_hours")) for row in ranked_out_rows)
-        recency_score = max(0.0, min(1.0, 1.0 - (youngest_age / max(1.0, float(max_age_hours)))))
-        repeat_score = min(1.0, len(ranked_out_rows) / 3.0)
-        shown_count = sum(1 for row in base_rows if str(row.get("stage") or "").strip().lower() == "shown")
-        shown_penalty = 0.72 if shown_count > 0 else 1.0
-        boost = (
-            0.46 * best_interest
-            + 0.24 * avg_interest
-            + 0.18 * recency_score
-            + 0.12 * repeat_score
-        ) * shown_penalty
+        if interests:
+            ranked_out_interest = float(interests[0])
+            if ranked_out_interest >= float(min_interest_score):
+                avg_interest = sum(interests[:3]) / max(1, len(interests[:3]))
+                ranked_out_age = min(_sortable_float(row.get("_trace_age_hours")) for row in ranked_out_rows)
+                recency_score = max(0.0, min(1.0, 1.0 - (ranked_out_age / max(1.0, float(max_age_hours)))))
+                repeat_score = min(1.0, len(ranked_out_rows) / 3.0)
+                shown_penalty = 0.72 if shown_count > 0 else 1.0
+                ranked_out_boost = (
+                    0.46 * ranked_out_interest
+                    + 0.24 * avg_interest
+                    + 0.18 * recency_score
+                    + 0.12 * repeat_score
+                ) * shown_penalty
+
+        candidate_boost = 0.0
+        candidate_interest = 0.0
+        candidate_age = float("inf")
+        if candidate_rows:
+            for row in candidate_rows:
+                row["_candidate_interest"] = _scanner_trace_candidate_interest(row)
+            candidate_interests = sorted(
+                [_sortable_float(row.get("_candidate_interest")) for row in candidate_rows],
+                reverse=True,
+            )
+            candidate_interest = float(candidate_interests[0]) if candidate_interests else 0.0
+            if candidate_interest >= float(min_candidate_interest_score) and len(candidate_rows) >= 2:
+                avg_candidate_interest = sum(candidate_interests[:4]) / max(1, len(candidate_interests[:4]))
+                candidate_age = min(_sortable_float(row.get("_trace_age_hours")) for row in candidate_rows)
+                candidate_recency = max(0.0, min(1.0, 1.0 - (candidate_age / max(1.0, float(max_age_hours)))))
+                candidate_repeat = min(1.0, len(candidate_rows) / 4.0)
+                shown_penalty = 0.70 if shown_count > 0 else 1.0
+                candidate_boost = (
+                    0.34 * candidate_interest
+                    + 0.18 * avg_candidate_interest
+                    + 0.16 * candidate_recency
+                    + 0.18 * candidate_repeat
+                ) * shown_penalty
+                candidate_boost = min(0.48, candidate_boost)
+
+        shown_boost = 0.0
+        shown_interest = 0.0
+        shown_age = float("inf")
+        shown_interests = sorted(
+            [_sortable_float(row.get("_trace_interest")) for row in shown_rows],
+            reverse=True,
+        )
+        if shown_interests:
+            shown_interest = float(shown_interests[0])
+            if shown_interest >= float(min_interest_score):
+                avg_shown_interest = sum(shown_interests[:3]) / max(1, len(shown_interests[:3]))
+                shown_age = min(_sortable_float(row.get("_trace_age_hours")) for row in shown_rows)
+                shown_recency = max(0.0, min(1.0, 1.0 - (shown_age / max(1.0, float(max_age_hours)))))
+                shown_repeat = min(1.0, len(shown_rows) / 3.0)
+                shown_boost = (
+                    0.40 * shown_interest
+                    + 0.20 * avg_shown_interest
+                    + 0.26 * shown_recency
+                    + 0.14 * shown_repeat
+                )
+                shown_boost = min(0.52, shown_boost)
+
+        boost = max(ranked_out_boost, candidate_boost, shown_boost)
         boost = max(0.0, min(0.75, boost))
+        archive_feedback = (archive_feedback_map or {}).get(str(base), {})
+        archive_resolved = _sortable_float(archive_feedback.get("radar_archive_resolved"))
+        archive_edge = max(-1.0, min(1.0, _sortable_float(archive_feedback.get("radar_archive_edge_score"))))
+        if archive_resolved >= 3.0:
+            if archive_edge < -0.05:
+                boost *= max(0.25, 1.0 + 0.75 * archive_edge)
+            elif archive_edge > 0.10:
+                boost *= min(1.12, 1.0 + 0.12 * archive_edge)
+            boost = max(0.0, min(0.75, boost))
         if boost <= 0.08:
             continue
         out[str(base)] = {
             "radar_trace_boost_score": float(boost),
             "radar_trace_ranked_out_count": float(len(ranked_out_rows)),
-            "radar_trace_interest_score": float(best_interest),
-            "radar_trace_age_hours": float(youngest_age),
+            "radar_trace_shown_count": float(len(shown_rows)),
+            "radar_trace_shown_interest_score": float(shown_interest),
+            "radar_trace_interest_score": float(max(ranked_out_interest, candidate_interest, shown_interest)),
+            "radar_trace_age_hours": float(min(ranked_out_age, candidate_age, shown_age)),
+            "radar_trace_archive_edge_score": float(archive_edge if archive_resolved >= 3.0 else 0.0),
+            "radar_trace_archive_resolved": float(archive_resolved),
         }
     return out
 
@@ -1111,17 +1427,17 @@ def _actionable_direction_include(
     ):
         return True
     normalized_mode = _normalize_scan_mode(scan_mode)
-    if normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
+    if normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_RADAR, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
         return False
     signal_key = _signal_tracker_direction_key(signal_direction)
     emerging_key = _signal_tracker_direction_key(emerging_direction)
     if direction_filter == "Upside" and signal_key != "UPSIDE":
-        if normalized_mode not in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING} or emerging_key != "UPSIDE":
+        if normalized_mode not in {SCAN_MODE_RADAR, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING} or emerging_key != "UPSIDE":
             return False
     if direction_filter == "Downside" and signal_key != "DOWNSIDE":
-        if normalized_mode not in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING} or emerging_key != "DOWNSIDE":
+        if normalized_mode not in {SCAN_MODE_RADAR, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING} or emerging_key != "DOWNSIDE":
             return False
-    if normalized_mode in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
+    if normalized_mode in {SCAN_MODE_RADAR, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
         if direction_filter == "Upside" and emerging_key == "UPSIDE":
             return True
         if direction_filter == "Downside" and emerging_key == "DOWNSIDE":
@@ -1274,7 +1590,7 @@ def _candidate_scan_symbols(
     custom_bases_applied: list[str],
     timeframe: str = "1h",
     direction_filter: str = "Both",
-    scan_mode: str = SCAN_MODE_BROAD,
+    scan_mode: str = SCAN_MODE_RADAR,
     classify_symbol_sector=None,
 ) -> list[str]:
     if custom_bases_applied:
@@ -1284,6 +1600,14 @@ def _candidate_scan_symbols(
         normalized_mode = _normalize_scan_mode(scan_mode)
         if normalized_mode == SCAN_MODE_ACTIONABLE:
             candidates = _actionable_universe_ordered_symbols(
+                candidates,
+                market_rows,
+                timeframe=timeframe,
+                direction_filter=direction_filter,
+                classify_symbol_sector=classify_symbol_sector,
+            )
+        elif normalized_mode == SCAN_MODE_RADAR:
+            candidates = _market_radar_universe_ordered_symbols(
                 candidates,
                 market_rows,
                 timeframe=timeframe,
@@ -1302,7 +1626,7 @@ def _candidate_scan_symbols(
         candidates = [
             s
             for s in candidates
-            if "/" in s and not is_stable_base_symbol(s.split("/")[0].upper())
+            if "/" in s and not is_excluded_trading_base_symbol(s.split("/")[0].upper())
         ]
     return candidates
 
@@ -1311,7 +1635,7 @@ def _scan_candidate_pool_size(
     requested_n: int,
     *,
     custom_mode_active: bool,
-    scan_mode: str = SCAN_MODE_BROAD,
+    scan_mode: str = SCAN_MODE_RADAR,
     max_pool_n: int = 250,
 ) -> int:
     requested = max(1, int(requested_n))
@@ -1320,7 +1644,11 @@ def _scan_candidate_pool_size(
     normalized_mode = _normalize_scan_mode(scan_mode)
     if normalized_mode == SCAN_MODE_ACTIONABLE:
         extra = min(140, max(35, requested * 3))
-    elif normalized_mode in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
+    elif normalized_mode == SCAN_MODE_RADAR:
+        extra = min(120, max(40, requested * 4))
+    elif normalized_mode == SCAN_MODE_EMERGING:
+        extra = min(220, max(80, requested * 7))
+    elif normalized_mode == SCAN_MODE_TRENDING:
         extra = min(180, max(45, requested * 4))
     else:
         extra = min(25, max(10, requested // 2))
@@ -1334,7 +1662,7 @@ def _next_scan_pool_target(
     produced_n: int,
     custom_mode_active: bool,
     used_major_fallback: bool,
-    scan_mode: str = SCAN_MODE_BROAD,
+    scan_mode: str = SCAN_MODE_RADAR,
     max_pool_n: int = 250,
 ) -> int:
     if custom_mode_active or used_major_fallback:
@@ -1344,13 +1672,19 @@ def _next_scan_pool_target(
     if int(current_pool_n) >= int(max_pool_n):
         return int(current_pool_n)
     shortfall = max(1, int(requested_n) - int(produced_n))
+    normalized_mode = _normalize_scan_mode(scan_mode)
+    if normalized_mode == SCAN_MODE_RADAR:
+        return int(current_pool_n)
+    refill_step = (
+        80
+        if normalized_mode == SCAN_MODE_EMERGING
+        else 45 if normalized_mode == SCAN_MODE_TRENDING
+        else 40 if normalized_mode == SCAN_MODE_ACTIONABLE
+        else 25
+    )
     next_pool_n = max(
         int(current_pool_n * 1.5),
-        int(current_pool_n)
-        + max(
-            shortfall,
-            55 if _normalize_scan_mode(scan_mode) in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING} else 40 if _normalize_scan_mode(scan_mode) == SCAN_MODE_ACTIONABLE else 25,
-        ),
+        int(current_pool_n) + max(shortfall, refill_step),
     )
     return min(int(max_pool_n), int(next_pool_n))
 
@@ -1360,14 +1694,18 @@ def _initial_scan_batch_size(
     *,
     scan_pool_n: int,
     custom_mode_active: bool,
-    scan_mode: str = SCAN_MODE_BROAD,
+    scan_mode: str = SCAN_MODE_RADAR,
     max_initial_n: int = 80,
 ) -> int:
     requested = max(1, int(requested_n))
     normalized_mode = _normalize_scan_mode(scan_mode)
-    if custom_mode_active or normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
+    if custom_mode_active or normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_RADAR, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
         return requested
-    if normalized_mode in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
+    if normalized_mode == SCAN_MODE_RADAR:
+        return min(int(scan_pool_n), _market_radar_initial_batch_size(requested))
+    if normalized_mode == SCAN_MODE_EMERGING:
+        return min(int(scan_pool_n), max(int(max_initial_n), 96), max(requested + 24, requested * 3))
+    if normalized_mode == SCAN_MODE_TRENDING:
         return min(int(scan_pool_n), max(int(max_initial_n), 96), max(requested + 18, requested * 3))
     return min(int(scan_pool_n), int(max_initial_n), max(requested + 10, requested * 2))
 
@@ -1379,7 +1717,7 @@ def _initial_scan_symbols(
     requested_n: int,
     scan_pool_n: int,
     custom_mode_active: bool,
-    scan_mode: str = SCAN_MODE_BROAD,
+    scan_mode: str = SCAN_MODE_RADAR,
     timeframe: str = "1h",
 ) -> list[str]:
     initial_batch_n = _initial_scan_batch_size(
@@ -1389,12 +1727,12 @@ def _initial_scan_symbols(
         scan_mode=scan_mode,
     )
     normalized_mode = _normalize_scan_mode(scan_mode)
-    if custom_mode_active or normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
+    if custom_mode_active or normalized_mode not in {SCAN_MODE_ACTIONABLE, SCAN_MODE_RADAR, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
         return list(candidate_pool[:initial_batch_n])
     if initial_batch_n >= len(candidate_pool):
         return list(candidate_pool[:initial_batch_n])
 
-    if normalized_mode in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
+    if normalized_mode in {SCAN_MODE_RADAR, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
         exploration_ratio = _emerging_exploration_ratio(timeframe)
     else:
         exploration_ratio = _actionable_exploration_ratio(timeframe)
@@ -1408,8 +1746,9 @@ def _initial_scan_symbols(
         return list(candidate_pool[:initial_batch_n])
 
     protected_slice: list[str] = []
-    if normalized_mode in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING} and market_rows:
+    if normalized_mode in {SCAN_MODE_RADAR, SCAN_MODE_EMERGING, SCAN_MODE_TRENDING} and market_rows:
         radar_map: dict[str, float] = {}
+        radar_kind_map: dict[str, str] = {}
         for row in list(market_rows or []):
             if not isinstance(row, dict):
                 continue
@@ -1431,14 +1770,21 @@ def _initial_scan_symbols(
                 + 0.18 * max(0.0, _sortable_float((row or {}).get("_radar_archive_edge_score", 0.0)))
                 + 0.16 * _sortable_float((row or {}).get("_radar_trace_boost_score", 0.0))
             )
-            radar_map[base] = max(combined_signal, radar_map.get(base, 0.0))
+            if combined_signal > radar_map.get(base, 0.0):
+                radar_map[base] = combined_signal
+                radar_kind_map[base] = str((row or {}).get("_radar_source_kind") or "").strip().lower()
 
         if radar_map:
             remainder_order = {symbol: idx for idx, symbol in enumerate(remainder)}
-            protected_n = min(
-                max(2, int(round(initial_batch_n * 0.12))),
-                exploration_n,
-            )
+            if normalized_mode == SCAN_MODE_RADAR:
+                protected_n = min(max(4, int(round(initial_batch_n * 0.24))), exploration_n)
+                protected_floor = 0.40
+            else:
+                protected_n = min(
+                    max(2, int(round(initial_batch_n * 0.12))),
+                    exploration_n,
+                )
+                protected_floor = 0.58
             ranked_remainder = sorted(
                 remainder,
                 key=lambda symbol: (
@@ -1446,10 +1792,28 @@ def _initial_scan_symbols(
                     remainder_order.get(symbol, 0),
                 ),
             )
+
+            if normalized_mode == SCAN_MODE_RADAR:
+                for source_kind in ("trace_feedback", "trending", "volume_anomaly", "exchange_breakout", "gainers_losers"):
+                    if len(protected_slice) >= protected_n:
+                        break
+                    for symbol in ranked_remainder:
+                        if symbol in protected_slice:
+                            continue
+                        base = _canonical_pair_base(symbol)
+                        if radar_kind_map.get(base) != source_kind:
+                            continue
+                        if radar_map.get(base, 0.0) < protected_floor:
+                            continue
+                        protected_slice.append(symbol)
+                        break
+
             for symbol in ranked_remainder:
                 if len(protected_slice) >= protected_n:
                     break
-                if radar_map.get(_canonical_pair_base(symbol), 0.0) < 0.58:
+                if symbol in protected_slice:
+                    continue
+                if radar_map.get(_canonical_pair_base(symbol), 0.0) < protected_floor:
                     break
                 protected_slice.append(symbol)
 
@@ -1486,7 +1850,13 @@ def _actionable_analysis_batch_size(
     scan_mode: str,
 ) -> int:
     normalized_mode = _normalize_scan_mode(scan_mode)
-    if normalized_mode in {SCAN_MODE_EMERGING, SCAN_MODE_TRENDING}:
+    if normalized_mode == SCAN_MODE_RADAR:
+        target_n = _market_radar_scan_budget(requested_n)
+        return min(int(fetched_n), target_n)
+    if normalized_mode == SCAN_MODE_EMERGING:
+        target_n = max(int(requested_n) * 2, int(requested_n) + 20, 32)
+        return min(int(fetched_n), min(target_n, 64))
+    if normalized_mode == SCAN_MODE_TRENDING:
         target_n = max(int(requested_n) * 3, int(requested_n) + 24, 40)
         return min(int(fetched_n), min(target_n, 96))
     if normalized_mode != SCAN_MODE_ACTIONABLE:
@@ -1536,18 +1906,18 @@ def _emerging_candidate_score(
         or (focus_key == "DOWNSIDE" and emerging_key == "DOWNSIDE")
     )
     score = (
-        0.38 * _sortable_float(frame_hunt_score)
-        + 0.20 * _sortable_float(tactical_candidate_score)
-        + 0.10 * _sortable_float(execution_structure_quality)
-        + 0.08 * _sortable_float(execution_trend_quality)
-        + 0.06 * _sortable_float(execution_location_quality)
-        + 0.10 * _sortable_float(tech_confidence_score)
+        0.30 * _sortable_float(frame_hunt_score)
+        + 0.15 * _sortable_float(tactical_candidate_score)
+        + 0.08 * _sortable_float(execution_structure_quality)
+        + 0.06 * _sortable_float(execution_trend_quality)
+        + 0.05 * _sortable_float(execution_location_quality)
+        + 0.08 * _sortable_float(tech_confidence_score)
         + 0.04 * _sortable_float(ai_confidence_score)
-        + 5.0 * _emerging_universe_market_cap_score(market_cap)
-        + 9.0 * _sortable_float(radar_source_score)
-        + 11.0 * _sortable_float(radar_freshness_score)
-        + 10.0 * _sortable_float(radar_memory_score)
-        + 7.0 * _sortable_float(radar_archive_edge_score)
+        + 4.0 * _emerging_universe_market_cap_score(market_cap)
+        + 13.0 * _sortable_float(radar_source_score)
+        + 16.0 * _sortable_float(radar_freshness_score)
+        + 12.0 * _sortable_float(radar_memory_score)
+        + 8.0 * _sortable_float(radar_archive_edge_score)
         + 4.5 * _sortable_float(radar_trace_boost_score)
     )
     aligned_move = (
@@ -1571,12 +1941,49 @@ def _emerging_candidate_score(
         score += 5.0
     if _signal_tracker_direction_key(spot_direction) == "NEUTRAL":
         score += 4.0
-    score += 0.15 * _actionable_spike_adjustment(
+    score += 0.35 * _actionable_spike_adjustment(
         signal_direction=signal_direction,
         volume_spike=volume_spike,
         spike_dir=spike_dir,
     )
     return max(0.0, min(100.0, score))
+
+
+def _radar_quality_analysis_batch_size(
+    requested_n: int,
+    *,
+    fetched_n: int,
+    scan_mode: str,
+) -> int:
+    return _actionable_analysis_batch_size(
+        requested_n,
+        fetched_n=fetched_n,
+        scan_mode=scan_mode,
+    )
+
+
+def _radar_quality_context_score(**kwargs) -> float:
+    return _actionable_context_score(**kwargs)
+
+
+def _radar_quality_direction_include(**kwargs) -> bool:
+    return _actionable_direction_include(**kwargs)
+
+
+def _radar_quality_frame_hunt_score(**kwargs) -> float:
+    return _actionable_frame_hunt_score(**kwargs)
+
+
+def _radar_quality_setup_score(**kwargs) -> float:
+    return _actionable_setup_score(**kwargs)
+
+
+def _radar_quality_tactical_candidate_score(**kwargs) -> float:
+    return _actionable_tactical_candidate_score(**kwargs)
+
+
+def _radar_discovery_candidate_score(**kwargs) -> float:
+    return _emerging_candidate_score(**kwargs)
 
 
 def _next_refill_candidate_batch(
@@ -1587,15 +1994,27 @@ def _next_refill_candidate_batch(
     produced_n: int,
     custom_mode_active: bool,
     used_major_fallback: bool,
-    scan_mode: str = SCAN_MODE_BROAD,
+    scan_mode: str = SCAN_MODE_RADAR,
+    quality_refill: bool = False,
 ) -> list[str]:
     if custom_mode_active or used_major_fallback:
         return []
-    if int(produced_n) >= int(requested_n):
+    normalized_mode = _normalize_scan_mode(scan_mode)
+    quality_refill_allowed = bool(quality_refill) and normalized_mode == SCAN_MODE_RADAR
+    if int(produced_n) >= int(requested_n) and not quality_refill_allowed:
         return []
     remaining = [symbol for symbol in candidate_pool if symbol not in attempted_symbols]
     if not remaining:
         return []
+    if normalized_mode == SCAN_MODE_RADAR:
+        remaining_budget = max(0, _market_radar_scan_budget(requested_n) - len(attempted_symbols))
+        if remaining_budget <= 0:
+            return []
+        if int(produced_n) >= int(requested_n):
+            quality_batch_n = max(6, int(math.ceil(max(1, int(requested_n)) * 0.35)))
+            return remaining[: min(remaining_budget, quality_batch_n)]
+        shortfall = max(1, int(requested_n) - int(produced_n))
+        return remaining[: min(remaining_budget, max(4, shortfall * 2))]
     refill_target = _scan_candidate_pool_size(
         max(1, int(requested_n) - int(produced_n)),
         custom_mode_active=False,
